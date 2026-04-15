@@ -221,6 +221,7 @@ class Hub:
             from .. import meeting as _meeting_mod
             self.meeting_registry = _meeting_mod.MeetingRegistry(
                 persist_path=os.path.join(self._data_dir, "meetings.json"),
+                data_dir=self._data_dir,
             )
             self.standalone_task_registry = _meeting_mod.StandaloneTaskRegistry(
                 persist_path=os.path.join(self._data_dir, "standalone_tasks.json"),

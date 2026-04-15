@@ -21,13 +21,17 @@ memory and delegates persistence to a caller-supplied save callback.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import shutil
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Callable, Optional
+
+logger = logging.getLogger("tudouclaw.meeting")
 
 
 class MeetingStatus(str, Enum):
@@ -133,6 +137,7 @@ class Meeting:
     messages: list = field(default_factory=list)        # list[MeetingMessage]
     assignments: list = field(default_factory=list)     # list[MeetingAssignment]
     summary: str = ""                        # post-meeting summary
+    workspace_dir: str = ""                  # shared file directory for this meeting
     created_at: float = field(default_factory=time.time)
     started_at: float = 0.0
     ended_at: float = 0.0
@@ -214,6 +219,47 @@ class Meeting:
                     return a
         return None
 
+    # ── progress posting (called by agents to update task status) ──
+    def post_progress(self, agent_id: str, agent_name: str,
+                      assignment_id: str, status: str,
+                      detail: str = "") -> MeetingMessage:
+        """Agent posts a progress update for an assignment."""
+        # Update assignment status if valid
+        self.update_assignment(assignment_id, status=status)
+        # Build progress message
+        parts = [f"📋 任务进度更新"]
+        for a in self.assignments:
+            if a.id == assignment_id:
+                parts.append(f"任务: {a.title}")
+                break
+        parts.append(f"状态: {status}")
+        if detail:
+            parts.append(f"详情: {detail}")
+        content = "\n".join(parts)
+        return self.add_message(
+            sender=agent_id,
+            sender_name=agent_name,
+            role="system",
+            content=content,
+        )
+
+    # ── workspace file listing ──
+    def list_files(self) -> list[dict]:
+        """List files in the meeting workspace directory."""
+        if not self.workspace_dir or not os.path.isdir(self.workspace_dir):
+            return []
+        result = []
+        for entry in os.scandir(self.workspace_dir):
+            if entry.is_file():
+                stat = entry.stat()
+                result.append({
+                    "name": entry.name,
+                    "size": stat.st_size,
+                    "modified_at": stat.st_mtime,
+                })
+        result.sort(key=lambda x: x["modified_at"], reverse=True)
+        return result
+
     # ── serialization ──
     def to_dict(self) -> dict:
         status = (self.status.value
@@ -230,11 +276,13 @@ class Meeting:
             "messages": [m.to_dict() for m in self.messages],
             "assignments": [a.to_dict() for a in self.assignments],
             "summary": self.summary,
+            "workspace_dir": self.workspace_dir,
             "created_at": self.created_at,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
             "message_count": len(self.messages),
             "assignment_count": len(self.assignments),
+            "file_count": len(self.list_files()),
         }
 
     def to_summary_dict(self) -> dict:
@@ -256,6 +304,8 @@ class Meeting:
                 if (a.status if isinstance(a.status, AssignmentStatus) else AssignmentStatus(a.status))
                 in (AssignmentStatus.OPEN, AssignmentStatus.IN_PROGRESS)
             ),
+            "workspace_dir": self.workspace_dir,
+            "file_count": len(self.list_files()),
             "created_at": self.created_at,
             "ended_at": self.ended_at,
         }
@@ -275,6 +325,7 @@ class Meeting:
             project_id=d.get("project_id", ""),
             status=st,
             summary=d.get("summary", ""),
+            workspace_dir=d.get("workspace_dir", ""),
             created_at=d.get("created_at", time.time()),
             started_at=d.get("started_at", 0.0) or 0.0,
             ended_at=d.get("ended_at", 0.0) or 0.0,
@@ -292,8 +343,9 @@ class MeetingRegistry:
     avoids bringing in another SQLite table.
     """
 
-    def __init__(self, persist_path: str):
+    def __init__(self, persist_path: str, data_dir: str = ""):
         self.persist_path = persist_path
+        self._data_dir = data_dir or os.path.dirname(persist_path)
         self._meetings: dict[str, Meeting] = {}
         self._lock = threading.Lock()
         self.load()
@@ -313,6 +365,11 @@ class MeetingRegistry:
             for d in raw:
                 try:
                     m = Meeting.from_dict(d)
+                    # Ensure workspace dir exists (migration for old data)
+                    if not m.workspace_dir:
+                        ws = os.path.join(self._data_dir, "workspaces", "meetings", m.id)
+                        m.workspace_dir = ws
+                    os.makedirs(m.workspace_dir, exist_ok=True)
                     self._meetings[m.id] = m
                 except Exception:
                     continue
@@ -327,6 +384,13 @@ class MeetingRegistry:
         os.replace(tmp, self.persist_path)
 
     # ── CRUD ──
+    def _ensure_workspace(self, meeting: Meeting) -> None:
+        """Create the shared workspace directory for a meeting."""
+        ws = os.path.join(self._data_dir, "workspaces", "meetings", meeting.id)
+        os.makedirs(ws, exist_ok=True)
+        meeting.workspace_dir = ws
+        logger.debug("Meeting workspace: %s", ws)
+
     def create(self, title: str, host: str, participants: list[str],
                agenda: str = "", project_id: str = "") -> Meeting:
         m = Meeting(
@@ -334,6 +398,7 @@ class MeetingRegistry:
             participants=list(participants or []),
             project_id=project_id or "",
         )
+        self._ensure_workspace(m)
         with self._lock:
             self._meetings[m.id] = m
         self.save()
@@ -569,28 +634,64 @@ def _build_meeting_prompt(meeting: "Meeting", agent, user_msg: str,
     """
     role = getattr(agent, "role", "") or "participant"
     name = getattr(agent, "name", "") or "agent"
+    # Gather participant names for context
+    participant_names = []
+    for pid in (meeting.participants or []):
+        try:
+            # agent_lookup_fn not available here; use raw id
+            participant_names.append(pid)
+        except Exception:
+            pass
+
     lines = [
-        f"你现在参加一个多 Agent 临时会议（Meeting）。",
-        f"会议主题: {meeting.title or '(未命名)'}",
-        f"议程: {meeting.agenda or '(无)'}",
-        f"主持人: {meeting.host or 'user'}",
-        f"参与者人数: {len(meeting.participants)}",
-        "",
-        f"你的角色: {role} · {name}",
-        "请以该角色的专业立场简短发言（控制在 150 字以内，除非必须展开）。",
-        "若你认为需要派发行动项，请用明确的一句话建议，例如：",
-        "  \"行动项：@<agent_name> 完成 XX，截止 <时间>\"",
-        "若你认为应该结束会议，可以回复中包含「会议可结束」。",
-        "",
-        "── 最近的会议发言 ──",
+        f"你正在参加一个多 Agent 协作会议。",
+        f"",
+        f"## 会议信息",
+        f"- 主题: {meeting.title or '(未命名)'}",
+        f"- 议程: {meeting.agenda or '(无)'}",
+        f"- 主持人: {meeting.host or 'user'}",
+        f"- 参与者: {', '.join(participant_names) if participant_names else '(无)'}",
     ]
+    if meeting.workspace_dir:
+        lines.append(f"- 共享目录: {meeting.workspace_dir}")
+
+    # Show current assignments
+    if meeting.assignments:
+        lines.append("")
+        lines.append("## 当前任务")
+        for a in meeting.assignments:
+            st = a.status.value if hasattr(a.status, "value") else str(a.status)
+            lines.append(f"- [{st}] {a.title} → {a.assignee_agent_id or '待分配'}")
+
+    lines.extend([
+        "",
+        f"## 你的身份",
+        f"角色: {role}",
+        f"名字: {name}",
+        "",
+        "## 发言要求",
+        "1. 基于你的角色和专业领域，给出你的**独立洞察和个人观点**",
+        "2. 对当前议题表达你的**立场**（赞成/反对/有保留意见），并说明理由",
+        "3. 如果讨论涉及决策，请明确你的**投票选择**，格式如：",
+        "   「我投票选择 [选项X]，理由是...」",
+        "4. 如果你发现问题或风险，直接指出，不要回避",
+        "5. 如果讨论已经形成结论，可以建议总结行动项，格式如：",
+        "   「行动项：@<负责人> 完成 XX，截止 <时间>」",
+        "6. 发言控制在 200 字以内，除非涉及专业分析需要展开",
+        "7. 不要重复前面已经说过的观点，推进讨论向前",
+        "",
+        "── 会议讨论记录 ──",
+    ])
     msgs = list(meeting.messages or [])[-tail:]
     for m in msgs:
         sname = getattr(m, "sender_name", "") or getattr(m, "sender", "user")
         content = getattr(m, "content", "") or ""
-        lines.append(f"[{sname}] {content}")
+        mrole = getattr(m, "role", "")
+        tag = "[主持人]" if mrole == "user" else "[Agent]"
+        lines.append(f"{tag} {sname}: {content}")
     lines.append("")
-    lines.append(f"最新发言(需要你回应): {user_msg}")
+    lines.append(f"主持人最新发言: {user_msg}")
+    lines.append("请基于以上讨论记录，给出你的观点和洞察。注意不要重复已有的发言内容。")
     return "\n".join(lines)
 
 
@@ -600,7 +701,7 @@ def meeting_agent_reply(meeting: "Meeting",
                           agent_lookup_fn: Callable[[str], object],
                           user_msg: str,
                           target_agent_ids: Optional[list[str]] = None,
-                          max_participants: int = 4,
+                          max_participants: int = 10,
                           multimodal_parts: Optional[list[dict]] = None) -> None:
     """Trigger each participant agent to reply in the meeting.
 

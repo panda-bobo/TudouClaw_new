@@ -247,8 +247,10 @@ class AgentTask:
     priority: int = 0
     parent_id: str = ""        # for sub-tasks
     assigned_by: str = ""      # who/what created it (hub, user, another agent)
-    source: str = "admin"      # admin | agent | system | user
+    source: str = "admin"      # admin | agent | system | user | meeting
     source_agent_id: str = ""  # if source=agent, which agent created it
+    source_meeting_id: str = ""   # if spawned from a meeting assignment
+    source_assignment_id: str = ""  # the meeting assignment ID
     result: str = ""           # summary when done
     deadline: float = 0.0      # unix timestamp, 0 = no deadline
     created_at: float = field(default_factory=time.time)
@@ -289,6 +291,8 @@ class AgentTask:
             "assigned_by": self.assigned_by,
             "source": self.source,
             "source_agent_id": self.source_agent_id,
+            "source_meeting_id": self.source_meeting_id,
+            "source_assignment_id": self.source_assignment_id,
             "result": self.result,
             "deadline": self.deadline,
             "created_at": self.created_at,
@@ -318,6 +322,8 @@ class AgentTask:
             assigned_by=d.get("assigned_by", ""),
             source=d.get("source", "admin"),
             source_agent_id=d.get("source_agent_id", ""),
+            source_meeting_id=d.get("source_meeting_id", ""),
+            source_assignment_id=d.get("source_assignment_id", ""),
             result=d.get("result", ""),
             deadline=d.get("deadline", 0.0),
             created_at=d.get("created_at", 0),
@@ -6215,8 +6221,35 @@ Write only the summary body. Do not include any preamble or prefix."""
                 t.updated_at = time.time()
                 self._log("task", {"action": "updated", "task_id": task_id,
                                    "changes": list(kwargs.keys())})
+                # Auto-post progress to meeting if this task originated from one
+                self._sync_meeting_progress(t)
                 return t
         return None
+
+    def _sync_meeting_progress(self, task: AgentTask) -> None:
+        """If a task was spawned from a meeting assignment, post status back."""
+        if not task.source_meeting_id or not task.source_assignment_id:
+            return
+        try:
+            from .hub import get_hub as _get_hub
+            hub = _get_hub()
+            reg = getattr(hub, "meeting_registry", None) if hub else None
+            if reg is None:
+                return
+            m = reg.get(task.source_meeting_id)
+            if not m:
+                return
+            status_str = task.status.value if isinstance(task.status, TaskStatus) else str(task.status)
+            m.post_progress(
+                agent_id=self.id,
+                agent_name=self.name,
+                assignment_id=task.source_assignment_id,
+                status=status_str,
+                detail=task.result[:200] if task.result else "",
+            )
+            reg.save()
+        except Exception as e:
+            logger.debug("meeting progress sync failed: %s", e)
 
     def get_task(self, task_id: str) -> AgentTask | None:
         for t in self.tasks:
