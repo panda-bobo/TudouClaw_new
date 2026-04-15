@@ -4652,6 +4652,12 @@ Write only the summary body. Do not include any preamble or prefix."""
                     for name, result, call_id in results:
                         # Ensure result is always a string for safe operations
                         result_str = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+
+                        # ── Login page detection: when mcp_call (browser) hits a login page,
+                        #    inject a strong hint telling the LLM to use request_web_login
+                        #    instead of screenshotting or asking user to type in chat. ──
+                        if name == "mcp_call":
+                            result_str = self._inject_login_hint_if_needed(result_str)
                         evt = AgentEvent(time.time(), "tool_result",
                                          {"name": name, "result": result_str[:1000]})
                         self._log(evt.kind, evt.data)
@@ -5303,6 +5309,46 @@ Write only the summary body. Do not include any preamble or prefix."""
             "Do NOT attempt to decode or log the placeholders."
         )
         return json.dumps(result, ensure_ascii=False)
+
+    # ── Login page detection patterns ──
+    _LOGIN_URL_PATTERNS = (
+        "/login", "/signin", "/sign-in", "/sign_in",
+        "/auth", "/oauth", "/sso", "/passport",
+        "/account/login", "/user/login",
+    )
+    _LOGIN_CONTENT_KEYWORDS = (
+        "sign in", "log in", "login", "登录", "登陆",
+        "请输入密码", "请输入账号", "用户名", "password",
+        "forgot password", "忘记密码", "验证码",
+    )
+
+    def _inject_login_hint_if_needed(self, result_str: str) -> str:
+        """Detect if an mcp_call result indicates a login page; if so, append
+        a strong directive telling the LLM to call request_web_login next."""
+        try:
+            lower = result_str.lower()
+            is_login = False
+            # Check URL patterns in result
+            for pat in self._LOGIN_URL_PATTERNS:
+                if pat in lower:
+                    is_login = True
+                    break
+            # Check content keywords
+            if not is_login:
+                hits = sum(1 for kw in self._LOGIN_CONTENT_KEYWORDS if kw in lower)
+                if hits >= 2:  # need at least 2 keyword matches to reduce false positives
+                    is_login = True
+            if is_login:
+                hint = (
+                    "\n\n⚠️ [SYSTEM] LOGIN PAGE DETECTED — DO NOT screenshot or ask the user to type credentials in chat. "
+                    "You MUST call the request_web_login tool NOW with the login URL. "
+                    "This will show an interactive login card in the chat UI where the user can log in directly. "
+                    "After request_web_login returns, continue your task with the authenticated session."
+                )
+                return result_str + hint
+        except Exception:
+            pass
+        return result_str
 
     def _substitute_credentials(self, arguments: dict) -> dict:
         """Replace {{CRED_xxx}} placeholders in tool arguments with real values
