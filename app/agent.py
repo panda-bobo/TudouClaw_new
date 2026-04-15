@@ -766,6 +766,7 @@ class Agent:
     parent_id: str = ""  # If set, this is a sub-agent (hidden from UI by default)
     priority_level: int = 3  # 1=CXO (highest), 2=PM, 3=Team Member (default)
     role_title: str = ""  # e.g. "CXO", "PM", "Developer", etc.
+    department: str = ""  # Organizational unit: 研发/产品/运营/市场/... empty = 未分配
     authorized_workspaces: list[str] = field(default_factory=list)  # List of agent IDs whose workspaces this agent can access
     soul_md: str = ""  # SOUL.md personality/persona in markdown
     robot_avatar: str = ""  # Robot avatar ID e.g. "robot_ceo"
@@ -878,6 +879,7 @@ class Agent:
             "parent_id": self.parent_id,
             "priority_level": self.priority_level,
             "role_title": self.role_title,
+            "department": self.department,
             "authorized_workspaces": self.authorized_workspaces,
             "soul_md": self.soul_md,
             "robot_avatar": self.robot_avatar,
@@ -959,6 +961,7 @@ class Agent:
             parent_id=d.get("parent_id", ""),
             priority_level=d.get("priority_level", 3),
             role_title=d.get("role_title", ""),
+            department=d.get("department", "") or "",
             authorized_workspaces=d.get("authorized_workspaces", []),
             soul_md=d.get("soul_md", ""),
             robot_avatar=d.get("robot_avatar", ""),
@@ -1049,6 +1052,7 @@ class Agent:
             "parent_id": self.parent_id,
             "priority_level": self.priority_level,
             "role_title": self.role_title,
+            "department": self.department,
             "robot_avatar": self.robot_avatar,
             "created_at": self.created_at,
             "message_count": len(self.messages),
@@ -6364,6 +6368,27 @@ def _truncate_dict(d: dict, max_len: int = 200) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Default organizational departments — used by the portal UI's
+# department selector. Users can still enter a custom string.
+# ---------------------------------------------------------------------------
+
+DEFAULT_DEPARTMENTS: list[str] = [
+    "管理层",
+    "研发",
+    "产品",
+    "设计",
+    "运营",
+    "市场",
+    "销售",
+    "客服",
+    "数据",
+    "财务",
+    "人事",
+    "法务",
+]
+
+
+# ---------------------------------------------------------------------------
 # Role presets — now with rich profile defaults
 # ---------------------------------------------------------------------------
 
@@ -6469,6 +6494,7 @@ def create_agent(
     parent_id: str = "",
     priority_level: int = 3,
     role_title: str = "",
+    department: str = "",
 ) -> Agent:
     """Create a new agent from a role preset, with optional profile overrides.
 
@@ -6500,6 +6526,7 @@ def create_agent(
         parent_id=parent_id,
         priority_level=priority_level,
         role_title=role_title,
+        department=department,
     )
     # If no working_dir provided, default to the agent's own workspace folder.
     # This ensures generated reports/files land under agents/{id}/workspace/

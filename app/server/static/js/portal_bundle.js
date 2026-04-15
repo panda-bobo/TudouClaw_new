@@ -629,12 +629,14 @@ function _renderAgentCard(a) {
   var statusLabel = a.status === 'idle' ? 'Idle' : a.status === 'busy' ? 'Busy' : a.status === 'error' ? 'Error' : (a.status || 'Unknown');
   var modelShort = (a.model || 'default').split('/').pop().substring(0, 20);
   var roleBadge = a.role ? '<span style="padding:2px 6px;border-radius:4px;font-size:9px;font-weight:700;background:rgba(203,201,255,0.12);color:var(--primary);text-transform:uppercase;letter-spacing:0.3px">'+esc(a.role)+'</span>' : '';
+  var depBadge = a.department ? '<span onclick="event.stopPropagation();editAgentDepartment(\''+a.id+'\',\''+esc(a.department).replace(/\'/g,"\\'")+'\')" title="点击修改部门" style="padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;background:rgba(245,158,11,0.12);color:#f59e0b;cursor:pointer">'+esc(a.department)+'</span>' : '<span onclick="event.stopPropagation();editAgentDepartment(\''+a.id+'\',\'\')" title="点击分配部门" style="padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;background:var(--surface3);color:var(--text3);cursor:pointer;border:1px dashed var(--border-light)">+ 部门</span>';
   return '<div onclick="showAgentView(\''+a.id+'\')" style="background:var(--surface);border-radius:12px;padding:14px 16px;border:1px solid var(--border-light);cursor:pointer;transition:all 0.15s;display:flex;align-items:center;gap:14px" onmouseenter="this.style.borderColor=\'var(--primary)\';this.style.transform=\'translateY(-1px)\'" onmouseleave="this.style.borderColor=\'var(--border-light)\';this.style.transform=\'none\'">' +
     '<div style="width:40px;height:40px;border-radius:10px;background:var(--surface3);display:flex;align-items:center;justify-content:center;flex-shrink:0"><span class="material-symbols-outlined" style="font-size:22px;color:var(--primary)">smart_toy</span></div>' +
     '<div style="flex:1;min-width:0">' +
-      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px;flex-wrap:wrap">' +
         '<span style="font-size:13px;font-weight:700;color:var(--text);font-family:\'Plus Jakarta Sans\',sans-serif">'+esc(a.name)+'</span>' +
         roleBadge +
+        depBadge +
       '</div>' +
       '<div style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text3)">' +
         '<span style="display:flex;align-items:center;gap:3px"><span style="width:6px;height:6px;border-radius:50%;background:'+statusColor+';display:inline-block"></span>'+statusLabel+'</span>' +
@@ -643,6 +645,50 @@ function _renderAgentCard(a) {
       '</div>' +
     '</div>' +
     '<span class="material-symbols-outlined" style="font-size:18px;color:var(--text3)">chevron_right</span>' +
+  '</div>';
+}
+
+// Inline edit an agent's department from the list
+var _DEFAULT_DEPARTMENTS_CACHE = ['管理层','研发','产品','设计','运营','市场','销售','客服','数据','财务','人事','法务'];
+async function editAgentDepartment(agentId, current) {
+  var list = _DEFAULT_DEPARTMENTS_CACHE;
+  var lines = list.map(function(d,i){ return (i+1)+'. '+d + (d===current?' ✓':''); }).join('\n');
+  var hint = '选择部门 (输入编号)，或直接输入新部门名，留空=未分配：\n\n'+lines;
+  var input = prompt(hint, current||'');
+  if (input === null) return;
+  var val = input.trim();
+  var idx = parseInt(val, 10);
+  if (!isNaN(idx) && idx >= 1 && idx <= list.length && String(idx) === val) {
+    val = list[idx-1];
+  }
+  try {
+    await api('POST', '/api/portal/agent/'+agentId+'/department', {department: val});
+    await loadData();
+    renderAgentsList();
+  } catch(e) { alert('Error: '+e.message); }
+}
+
+// Group summary: agent count per department, rendered as a horizontal bar
+function _renderDepartmentSummary(agentList) {
+  var counts = {};
+  var unassigned = 0;
+  agentList.forEach(function(a){
+    var d = (a.department||'').trim();
+    if (!d) { unassigned++; return; }
+    counts[d] = (counts[d]||0) + 1;
+  });
+  var entries = Object.keys(counts).map(function(k){ return [k, counts[k]]; });
+  entries.sort(function(a,b){ return b[1]-a[1]; });
+  if (!entries.length && !unassigned) return '';
+  var chips = entries.map(function(e){
+    return '<span style="display:inline-flex;align-items:center;gap:5px;padding:5px 11px;border-radius:14px;font-size:11px;background:rgba(245,158,11,0.12);color:#f59e0b;font-weight:600"><span>'+esc(e[0])+'</span><span style="background:rgba(245,158,11,0.25);padding:1px 7px;border-radius:10px;font-weight:700">'+e[1]+'</span></span>';
+  }).join('');
+  if (unassigned) {
+    chips += '<span style="display:inline-flex;align-items:center;gap:5px;padding:5px 11px;border-radius:14px;font-size:11px;background:var(--surface2);color:var(--text3);font-weight:600"><span>未分配</span><span style="background:rgba(255,255,255,0.08);padding:1px 7px;border-radius:10px;font-weight:700">'+unassigned+'</span></span>';
+  }
+  return '<div style="background:var(--surface);border:1px solid var(--border-light);border-radius:12px;padding:14px 16px;margin-bottom:16px">' +
+    '<div style="display:flex;align-items:center;gap:6px;margin-bottom:10px"><span class="material-symbols-outlined" style="font-size:18px;color:#f59e0b">apartment</span><span style="font-size:12px;font-weight:700;color:var(--text);font-family:\'Plus Jakarta Sans\',sans-serif">按部门分布</span><span style="font-size:10px;color:var(--text3);margin-left:4px">'+entries.length+' 个部门 · 共 '+agentList.length+' 个 Agent</span></div>' +
+    '<div style="display:flex;flex-wrap:wrap;gap:8px">'+chips+'</div>' +
   '</div>';
 }
 
@@ -715,8 +761,11 @@ function renderAgentsList() {
 
   var sc = document.getElementById('agents-list-content');
 
+  // === Department summary (按部门分布) ===
+  var html = _renderDepartmentSummary(agents);
+
   // === Render 3 big category blocks (豆腐块) ===
-  var html = '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:28px">';
+  html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:28px">';
   ['advisor', 'enterprise', 'personal'].forEach(function(cls) {
     var meta = _AGENT_CLASSES[cls];
     var count = classTotals[cls];
@@ -8121,6 +8170,18 @@ async function createAgent() {
   const role = document.getElementById('ca-role').value;
   const priorityLevel = parseInt(document.getElementById('ca-priority-level').value) || 3;
   const roleTitle = document.getElementById('ca-role-title').value.trim();
+  // Department: either the select value, or the custom input if user picked "__custom__"
+  var _depSelEl = document.getElementById('ca-department');
+  var _depCustEl = document.getElementById('ca-department-custom');
+  var department = '';
+  if (_depSelEl) {
+    var sv = _depSelEl.value;
+    if (sv === '__custom__' || _depSelEl.style.display === 'none') {
+      department = (_depCustEl && _depCustEl.value.trim()) || '';
+    } else {
+      department = sv || '';
+    }
+  }
   const personaId = document.getElementById('ca-persona').value;
   const personality = document.getElementById('ca-personality').value;
   const style = document.getElementById('ca-style').value;
@@ -8144,7 +8205,7 @@ async function createAgent() {
       // Note: do NOT send `system_prompt` here — that would fully override
       // the persona's curated prompt. The textarea below is "Custom
       // Instructions" which gets appended via profile.custom_instructions.
-      priority_level: priorityLevel, role_title: roleTitle,
+      priority_level: priorityLevel, role_title: roleTitle, department: department,
       persona_id: personaId || '',
       robot_avatar: window._caSelectedAvatar || ('robot_' + role),
       profile: {
@@ -12330,6 +12391,7 @@ async function openMeetingDetail(mid) {
     // -- Status bar buttons --
     var statusBtns = '';
     if (m.status === 'scheduled') statusBtns += '<button class="btn btn-primary btn-sm" onclick="meetingAction(\''+mid+'\',\'start\')" style="gap:4px"><span class="material-symbols-outlined" style="font-size:16px">play_arrow</span> 开始会议</button>';
+    if (m.status === 'active') statusBtns += '<button class="btn btn-ghost btn-sm" onclick="meetingInterrupt(\''+mid+'\')" style="gap:4px;color:#f59e0b" title="停止当前 Agent 发言轮，等待下一指令"><span class="material-symbols-outlined" style="font-size:16px">pause_circle</span> 暂停发言</button>';
     if (m.status === 'active') statusBtns += '<button class="btn btn-ghost btn-sm" onclick="meetingCloseWithSummary(\''+mid+'\')" style="gap:4px"><span class="material-symbols-outlined" style="font-size:16px">stop</span> 结束</button>';
     if (m.status !== 'cancelled' && m.status !== 'closed') statusBtns += '<button class="btn btn-ghost btn-sm" style="color:var(--error);gap:4px" onclick="meetingAction(\''+mid+'\',\'cancel\')"><span class="material-symbols-outlined" style="font-size:16px">close</span> 取消</button>';
 
@@ -12339,6 +12401,7 @@ async function openMeetingDetail(mid) {
 
     // -- Participants panel --
     var _agList = window._cachedAgents||agents||[];
+    var _canEditParticipants = (m.status === 'active' || m.status === 'scheduled');
     var partHtml = (m.participants||[]).map(function(pid){
       var ag = _agList.find(function(a){return a.id===pid;});
       var name = ag ? ag.name : pid.substring(0,8);
@@ -12348,11 +12411,16 @@ async function openMeetingDetail(mid) {
       var colors = ['#6366f1','#22c55e','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#ec4899','#14b8a6'];
       var ci = (m.participants||[]).indexOf(pid) % colors.length;
       var bgColor = colors[ci];
-      return '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;transition:background 0.15s" onmouseover="this.style.background=\'rgba(255,255,255,0.04)\'" onmouseout="this.style.background=\'transparent\'">' +
+      var removeBtn = _canEditParticipants
+        ? '<span onclick="event.stopPropagation();meetingRemoveParticipant(\''+mid+'\',\''+pid+'\',\''+esc(name).replace(/\'/g,"\\'")+'\')" class="material-symbols-outlined mtg-rm-btn" title="移出会议" style="font-size:14px;color:var(--text3);cursor:pointer;opacity:0;transition:opacity 0.15s;flex-shrink:0">close</span>'
+        : '';
+      return '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;transition:background 0.15s" onmouseover="this.style.background=\'rgba(255,255,255,0.04)\';var x=this.querySelector(\'.mtg-rm-btn\');if(x)x.style.opacity=1" onmouseout="this.style.background=\'transparent\';var x=this.querySelector(\'.mtg-rm-btn\');if(x)x.style.opacity=0">' +
         '<div style="width:32px;height:32px;border-radius:50%;background:'+bgColor+';color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0">'+esc(initial)+'</div>' +
-        '<div style="min-width:0"><div style="font-size:12px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(name)+'</div>' +
+        '<div style="flex:1;min-width:0"><div style="font-size:12px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(name)+'</div>' +
         (role ? '<div style="font-size:10px;color:var(--text3)">'+esc(role)+'</div>' : '') +
-        '</div></div>';
+        '</div>' +
+        removeBtn +
+        '</div>';
     }).join('');
     // Add host as first entry
     var hostDisplay = '主持人';
@@ -12433,6 +12501,13 @@ async function openMeetingDetail(mid) {
       '</div>';
     }
 
+    // -- Preserve user's in-flight draft across re-renders (poll, etc.) --
+    var _prevDraftEl = document.getElementById('mtg-msg-input');
+    var _prevDraft = _prevDraftEl ? _prevDraftEl.value : '';
+    var _prevFocus = _prevDraftEl && (document.activeElement === _prevDraftEl);
+    var _prevSelStart = _prevDraftEl ? _prevDraftEl.selectionStart : 0;
+    var _prevSelEnd = _prevDraftEl ? _prevDraftEl.selectionEnd : 0;
+
     // -- FULL LAYOUT --
     c.innerHTML =
       '<div style="display:flex;flex-direction:column;height:calc(100vh - 60px)">' +
@@ -12457,7 +12532,10 @@ async function openMeetingDetail(mid) {
         '<div style="display:flex;flex:1;min-height:0;overflow:hidden">' +
           // == Left: Participants ==
           '<div style="width:180px;flex-shrink:0;border-right:1px solid rgba(255,255,255,0.06);overflow-y:auto;padding:12px 8px">' +
-            '<div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;padding:0 10px 8px">参会者 ('+(m.participants||[]).length+')</div>' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;padding:0 10px 8px">' +
+              '<div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase">参会者 ('+(m.participants||[]).length+')</div>' +
+              (_canEditParticipants ? '<button class="btn btn-ghost btn-xs" onclick="meetingInviteParticipant(\''+mid+'\')" title="邀请 Agent 加入会议" style="padding:2px 6px;font-size:11px">+ 邀请</button>' : '') +
+            '</div>' +
             partHtml +
             filesHtml +
           '</div>' +
@@ -12494,6 +12572,17 @@ async function openMeetingDetail(mid) {
       '</div>' +
       '<style>@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}</style>';
 
+    // -- Post-render: restore user's draft if there was one --
+    if (_prevDraft) {
+      var _newDraftEl = document.getElementById('mtg-msg-input');
+      if (_newDraftEl) {
+        _newDraftEl.value = _prevDraft;
+        if (_prevFocus) {
+          try { _newDraftEl.focus(); _newDraftEl.setSelectionRange(_prevSelStart, _prevSelEnd); } catch(_e) {}
+        }
+      }
+    }
+
     // -- Post-render: scroll to bottom --
     var chatScroll = document.getElementById('mtg-chat-scroll');
     if (chatScroll) chatScroll.scrollTop = chatScroll.scrollHeight;
@@ -12526,14 +12615,27 @@ async function openMeetingDetail(mid) {
 // Light refresh: only update messages + assignments without full re-render
 var _mtgLastMsgCount = 0;
 async function _refreshMeetingMessages(mid) {
+  // -- Guard: if the user has navigated away from the meeting detail view,
+  //    stop polling. Otherwise the timer would keep firing and re-rendering
+  //    #content, yanking the user back to this meeting from whatever page
+  //    they moved to. Detect via the presence of the chat scroll container. --
+  if (!document.getElementById('mtg-chat-scroll')) {
+    if (_mtgPollTimer) { clearInterval(_mtgPollTimer); _mtgPollTimer = null; }
+    return;
+  }
   try {
     var m = await api('GET', '/api/portal/meetings/'+mid);
     var newCount = (m.messages||[]).length;
     var newAsgCount = (m.assignments||[]).length;
+    // Re-check after the await: user may have navigated away during the fetch
+    if (!document.getElementById('mtg-chat-scroll')) {
+      if (_mtgPollTimer) { clearInterval(_mtgPollTimer); _mtgPollTimer = null; }
+      return;
+    }
     // Only re-render if something changed
     if (newCount !== _mtgLastMsgCount || newAsgCount !== (m._prevAsgCount||0)) {
       _mtgLastMsgCount = newCount;
-      openMeetingDetail(mid);
+      openMeetingDetail(mid);  // draft preservation handled inside openMeetingDetail
     }
   } catch(e) {
     // Silently ignore poll errors
@@ -12568,6 +12670,38 @@ async function _loadMeetingFiles(mid) {
 async function meetingAction(mid, action) {
   try {
     await api('POST', '/api/portal/meetings/'+mid+'/'+action, {});
+    openMeetingDetail(mid);
+  } catch(e) { alert('Error: '+e.message); }
+}
+
+async function meetingInterrupt(mid) {
+  try {
+    await api('POST', '/api/portal/meetings/'+mid+'/interrupt', {});
+    openMeetingDetail(mid);
+  } catch(e) { alert('Error: '+e.message); }
+}
+
+async function meetingInviteParticipant(mid) {
+  try {
+    var meeting = await api('GET', '/api/portal/meetings/'+mid);
+    var present = new Set(meeting.participants||[]);
+    var agList = (window._cachedAgents||agents||[]).filter(function(a){ return !present.has(a.id); });
+    if (!agList.length) { alert('已没有可邀请的 Agent'); return; }
+    var lines = agList.map(function(a, i){ return (i+1)+'. '+(a.name||a.id)+(a.role?' · '+a.role:''); }).join('\n');
+    var pick = prompt('选择要邀请的 Agent (输入编号):\n\n'+lines);
+    if (!pick) return;
+    var idx = parseInt(pick, 10) - 1;
+    if (isNaN(idx) || idx < 0 || idx >= agList.length) { alert('无效编号'); return; }
+    var target = agList[idx];
+    await api('POST', '/api/portal/meetings/'+mid+'/participants', {agent_id: target.id});
+    openMeetingDetail(mid);
+  } catch(e) { alert('Error: '+e.message); }
+}
+
+async function meetingRemoveParticipant(mid, agentId, agentName) {
+  if (!confirm('确定将 '+(agentName||agentId)+' 移出会议？')) return;
+  try {
+    await api('DELETE', '/api/portal/meetings/'+mid+'/participants/'+encodeURIComponent(agentId));
     openMeetingDetail(mid);
   } catch(e) { alert('Error: '+e.message); }
 }

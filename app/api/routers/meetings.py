@@ -228,6 +228,122 @@ async def meeting_cancel(
         raise HTTPException(500, detail=str(e))
 
 
+@router.post("/meetings/{meeting_id}/participants")
+async def meeting_add_participant(
+    meeting_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Invite a new agent into the meeting."""
+    try:
+        reg, m = _get_meeting(hub, meeting_id)
+        agent_id = (body.get("agent_id") or "").strip()
+        if not agent_id:
+            raise HTTPException(400, detail="agent_id required")
+        added = m.add_participant(agent_id)
+        if added:
+            # Look up agent name for a nicer system message
+            name = agent_id
+            try:
+                pce = getattr(hub, "project_chat_engine", None)
+                if pce is not None:
+                    ag = pce._lookup(agent_id)
+                    if ag is not None:
+                        name = getattr(ag, "name", "") or agent_id
+            except Exception:
+                pass
+            try:
+                m.add_message(
+                    sender="system", sender_name="系统", role="system",
+                    content=f"👥 {name} 加入了会议",
+                )
+            except Exception:
+                pass
+        reg.save()
+        return {"ok": True, "added": added, "meeting": m.to_dict()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, detail=str(e))
+
+
+@router.delete("/meetings/{meeting_id}/participants/{agent_id}")
+async def meeting_remove_participant(
+    meeting_id: str,
+    agent_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Remove an agent from the meeting."""
+    try:
+        reg, m = _get_meeting(hub, meeting_id)
+        removed = m.remove_participant(agent_id)
+        if removed:
+            # Cancel any in-flight reply sequence so the removed agent
+            # doesn't still land a message after leaving.
+            try:
+                from ...meeting import bump_meeting_reply_gen
+                bump_meeting_reply_gen(m.id)
+            except Exception:
+                pass
+            name = agent_id
+            try:
+                pce = getattr(hub, "project_chat_engine", None)
+                if pce is not None:
+                    ag = pce._lookup(agent_id)
+                    if ag is not None:
+                        name = getattr(ag, "name", "") or agent_id
+            except Exception:
+                pass
+            try:
+                m.add_message(
+                    sender="system", sender_name="系统", role="system",
+                    content=f"👋 {name} 已被移出会议",
+                )
+            except Exception:
+                pass
+        reg.save()
+        return {"ok": True, "removed": removed, "meeting": m.to_dict()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, detail=str(e))
+
+
+@router.post("/meetings/{meeting_id}/interrupt")
+async def meeting_interrupt(
+    meeting_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Stop any in-flight agent reply sequence for this meeting.
+
+    Does not post a message; purely cancels the running round so the
+    host regains the floor immediately.
+    """
+    try:
+        reg, m = _get_meeting(hub, meeting_id)
+        from ...meeting import bump_meeting_reply_gen
+        new_gen = bump_meeting_reply_gen(m.id)
+        # Also append a system note so the transcript shows the interrupt
+        try:
+            m.add_message(
+                sender="system",
+                sender_name="系统",
+                role="system",
+                content="⏸ 主持人已暂停 Agent 发言，等待下一指令",
+            )
+            reg.save()
+        except Exception:
+            pass
+        return {"ok": True, "gen": new_gen}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, detail=str(e))
+
+
 @router.post("/meetings/{meeting_id}/messages")
 async def meeting_post_message(
     meeting_id: str,
@@ -251,33 +367,41 @@ async def meeting_post_message(
         reg.save()
 
         # ── Agent auto-reply: when a user posts to an ACTIVE meeting,
-        #    each participant agent replies in sequence (daemon thread). ──
+        #    each participant agent replies in sequence (daemon thread).
+        #    Stop-commands ("暂停"/"停止"/...) only interrupt in-flight
+        #    replies — they do NOT trigger a new round. ──
+        interrupted = False
         try:
-            from ...meeting import MeetingStatus, spawn_meeting_reply
+            from ...meeting import (
+                MeetingStatus, spawn_meeting_reply,
+                is_stop_command, bump_meeting_reply_gen,
+            )
             _status_val = m.status.value if hasattr(m.status, 'value') else str(m.status)
-            logger.info("meeting msg posted: role=%s, status=%s, participants=%s",
-                        msg.role, _status_val, m.participants)
             if msg.role == "user" and _status_val == "active":
-                pce = getattr(hub, "project_chat_engine", None)
-                logger.info("pce=%s, participants=%d", pce, len(m.participants or []))
-                if pce is not None and m.participants:
-                    logger.info("spawning meeting reply for %d participants", len(m.participants))
-                    spawn_meeting_reply(
-                        meeting=m,
-                        registry=reg,
-                        agent_chat_fn=pce._chat,
-                        agent_lookup_fn=pce._lookup,
-                        user_msg=msg.content,
-                        target_agent_ids=body.get("target_agents") or None,
-                    )
+                if is_stop_command(msg.content or ""):
+                    # User wants to halt — bump gen so running sequence aborts,
+                    # but do not spawn a new reply round.
+                    bump_meeting_reply_gen(m.id)
+                    interrupted = True
+                    logger.info("meeting %s: stop-command detected, aborting in-flight replies", m.id)
                 else:
-                    logger.warning("meeting reply skipped: pce=%s, participants=%s", pce, m.participants)
-            else:
-                logger.info("meeting reply not triggered: role=%s, status=%s", msg.role, _status_val)
+                    pce = getattr(hub, "project_chat_engine", None)
+                    if pce is not None and m.participants:
+                        logger.info("spawning meeting reply for %d participants", len(m.participants))
+                        spawn_meeting_reply(
+                            meeting=m,
+                            registry=reg,
+                            agent_chat_fn=pce._chat,
+                            agent_lookup_fn=pce._lookup,
+                            user_msg=msg.content,
+                            target_agent_ids=body.get("target_agents") or None,
+                        )
+                    else:
+                        logger.warning("meeting reply skipped: pce=%s, participants=%s", pce, m.participants)
         except Exception as _e:
             logger.warning("meeting agent reply spawn failed: %s", _e, exc_info=True)
 
-        return {"ok": True, "message": msg.to_dict()}
+        return {"ok": True, "message": msg.to_dict(), "interrupted": interrupted}
     except HTTPException:
         raise
     except Exception as e:

@@ -1060,6 +1060,27 @@ body {
     </div>
 
     <div class="form-group">
+      <label>部门 Department</label>
+      <select id="ca-department" onchange="if(this.value==='__custom__'){this.style.display='none';document.getElementById('ca-department-custom').style.display='block';document.getElementById('ca-department-custom').focus();}">
+        <option value="">— 未分配 —</option>
+        <option value="管理层">管理层</option>
+        <option value="研发">研发</option>
+        <option value="产品">产品</option>
+        <option value="设计">设计</option>
+        <option value="运营">运营</option>
+        <option value="市场">市场</option>
+        <option value="销售">销售</option>
+        <option value="客服">客服</option>
+        <option value="数据">数据</option>
+        <option value="财务">财务</option>
+        <option value="人事">人事</option>
+        <option value="法务">法务</option>
+        <option value="__custom__">＋ 自定义部门…</option>
+      </select>
+      <input id="ca-department-custom" placeholder="输入自定义部门名称" style="display:none;margin-top:6px">
+    </div>
+
+    <div class="form-group">
       <label>人设模板 Persona Template (可选，选中后会覆盖性格/沟通风格等)</label>
       <select id="ca-persona" onchange="applyPersonaPreview()">
         <option value="">— 不使用模板 —</option>

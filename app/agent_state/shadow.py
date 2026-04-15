@@ -444,6 +444,15 @@ class ShadowRecorder:
                 pending_ids: List[str] = []
                 turn_buckets: dict = {}  # int -> List[str]
                 turn_idx = -1
+                # Once an artifact has been attributed to a turn, it must
+                # NEVER be re-attributed to a later one. Without this set,
+                # if a later tool_result (e.g. a knowledge query or file
+                # search) mentions the same path, ingest_into_store with
+                # return_existing=True hands back the previously-stored
+                # artifact — and appending its id to pending_ids again
+                # would glue the same file card onto every following
+                # assistant bubble. Track first-seen ids here and skip.
+                claimed_ids: set = set()
                 aid_self = getattr(self.agent, "id", "") or ""
                 base_dir = getattr(self.state.env, "deliverable_dir", "") or ""
 
@@ -484,6 +493,12 @@ class ShadowRecorder:
                                     return_existing=True,
                                 )
                                 for a in new_arts:
+                                    # Only the FIRST tool_result that
+                                    # produces a given artifact gets to
+                                    # attach it to the current turn.
+                                    if a.id in claimed_ids:
+                                        continue
+                                    claimed_ids.add(a.id)
                                     pending_ids.append(a.id)
                         except Exception as e:
                             logger.debug("shadow: replay tool_result failed: %s", e)

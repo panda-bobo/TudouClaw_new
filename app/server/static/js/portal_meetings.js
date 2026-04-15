@@ -120,6 +120,7 @@ async function openMeetingDetail(mid) {
     // -- Status bar buttons --
     var statusBtns = '';
     if (m.status === 'scheduled') statusBtns += '<button class="btn btn-primary btn-sm" onclick="meetingAction(\''+mid+'\',\'start\')" style="gap:4px"><span class="material-symbols-outlined" style="font-size:16px">play_arrow</span> 开始会议</button>';
+    if (m.status === 'active') statusBtns += '<button class="btn btn-ghost btn-sm" onclick="meetingInterrupt(\''+mid+'\')" style="gap:4px;color:#f59e0b" title="停止当前 Agent 发言轮，等待下一指令"><span class="material-symbols-outlined" style="font-size:16px">pause_circle</span> 暂停发言</button>';
     if (m.status === 'active') statusBtns += '<button class="btn btn-ghost btn-sm" onclick="meetingCloseWithSummary(\''+mid+'\')" style="gap:4px"><span class="material-symbols-outlined" style="font-size:16px">stop</span> 结束</button>';
     if (m.status !== 'cancelled' && m.status !== 'closed') statusBtns += '<button class="btn btn-ghost btn-sm" style="color:var(--error);gap:4px" onclick="meetingAction(\''+mid+'\',\'cancel\')"><span class="material-symbols-outlined" style="font-size:16px">close</span> 取消</button>';
 
@@ -129,6 +130,7 @@ async function openMeetingDetail(mid) {
 
     // -- Participants panel --
     var _agList = window._cachedAgents||agents||[];
+    var _canEditParticipants = (m.status === 'active' || m.status === 'scheduled');
     var partHtml = (m.participants||[]).map(function(pid){
       var ag = _agList.find(function(a){return a.id===pid;});
       var name = ag ? ag.name : pid.substring(0,8);
@@ -138,11 +140,16 @@ async function openMeetingDetail(mid) {
       var colors = ['#6366f1','#22c55e','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#ec4899','#14b8a6'];
       var ci = (m.participants||[]).indexOf(pid) % colors.length;
       var bgColor = colors[ci];
-      return '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;transition:background 0.15s" onmouseover="this.style.background=\'rgba(255,255,255,0.04)\'" onmouseout="this.style.background=\'transparent\'">' +
+      var removeBtn = _canEditParticipants
+        ? '<span onclick="event.stopPropagation();meetingRemoveParticipant(\''+mid+'\',\''+pid+'\',\''+esc(name).replace(/\'/g,"\\'")+'\')" class="material-symbols-outlined" title="移出会议" style="font-size:14px;color:var(--text3);cursor:pointer;opacity:0;transition:opacity 0.15s;flex-shrink:0">close</span>'
+        : '';
+      return '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;transition:background 0.15s" onmouseover="this.style.background=\'rgba(255,255,255,0.04)\';var x=this.querySelector(\'.mtg-rm-btn\');if(x)x.style.opacity=1" onmouseout="this.style.background=\'transparent\';var x=this.querySelector(\'.mtg-rm-btn\');if(x)x.style.opacity=0">' +
         '<div style="width:32px;height:32px;border-radius:50%;background:'+bgColor+';color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0">'+esc(initial)+'</div>' +
-        '<div style="min-width:0"><div style="font-size:12px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(name)+'</div>' +
+        '<div style="flex:1;min-width:0"><div style="font-size:12px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(name)+'</div>' +
         (role ? '<div style="font-size:10px;color:var(--text3)">'+esc(role)+'</div>' : '') +
-        '</div></div>';
+        '</div>' +
+        (removeBtn ? removeBtn.replace('class="material-symbols-outlined"', 'class="material-symbols-outlined mtg-rm-btn"') : '') +
+        '</div>';
     }).join('');
     // Add host as first entry
     var hostDisplay = '主持人';
@@ -223,6 +230,13 @@ async function openMeetingDetail(mid) {
       '</div>';
     }
 
+    // -- Preserve user's in-flight draft across re-renders (poll, etc.) --
+    var _prevDraftEl = document.getElementById('mtg-msg-input');
+    var _prevDraft = _prevDraftEl ? _prevDraftEl.value : '';
+    var _prevFocus = _prevDraftEl && (document.activeElement === _prevDraftEl);
+    var _prevSelStart = _prevDraftEl ? _prevDraftEl.selectionStart : 0;
+    var _prevSelEnd = _prevDraftEl ? _prevDraftEl.selectionEnd : 0;
+
     // -- FULL LAYOUT --
     c.innerHTML =
       '<div style="display:flex;flex-direction:column;height:calc(100vh - 60px)">' +
@@ -247,7 +261,10 @@ async function openMeetingDetail(mid) {
         '<div style="display:flex;flex:1;min-height:0;overflow:hidden">' +
           // == Left: Participants ==
           '<div style="width:180px;flex-shrink:0;border-right:1px solid rgba(255,255,255,0.06);overflow-y:auto;padding:12px 8px">' +
-            '<div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;padding:0 10px 8px">参会者 ('+(m.participants||[]).length+')</div>' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;padding:0 10px 8px">' +
+              '<div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase">参会者 ('+(m.participants||[]).length+')</div>' +
+              (_canEditParticipants ? '<button class="btn btn-ghost btn-xs" onclick="meetingInviteParticipant(\''+mid+'\')" title="邀请 Agent 加入会议" style="padding:2px 6px;font-size:11px">+ 邀请</button>' : '') +
+            '</div>' +
             partHtml +
             filesHtml +
           '</div>' +
@@ -284,6 +301,17 @@ async function openMeetingDetail(mid) {
       '</div>' +
       '<style>@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}</style>';
 
+    // -- Post-render: restore user's draft if there was one --
+    if (_prevDraft) {
+      var _newDraftEl = document.getElementById('mtg-msg-input');
+      if (_newDraftEl) {
+        _newDraftEl.value = _prevDraft;
+        if (_prevFocus) {
+          try { _newDraftEl.focus(); _newDraftEl.setSelectionRange(_prevSelStart, _prevSelEnd); } catch(_e) {}
+        }
+      }
+    }
+
     // -- Post-render: scroll to bottom --
     var chatScroll = document.getElementById('mtg-chat-scroll');
     if (chatScroll) chatScroll.scrollTop = chatScroll.scrollHeight;
@@ -316,14 +344,27 @@ async function openMeetingDetail(mid) {
 // Light refresh: only update messages + assignments without full re-render
 var _mtgLastMsgCount = 0;
 async function _refreshMeetingMessages(mid) {
+  // -- Guard: if the user has navigated away from the meeting detail view,
+  //    stop polling. Otherwise the timer would keep firing and re-rendering
+  //    #content, yanking the user back to this meeting from whatever page
+  //    they moved to. Detect via the presence of the chat scroll container. --
+  if (!document.getElementById('mtg-chat-scroll')) {
+    if (_mtgPollTimer) { clearInterval(_mtgPollTimer); _mtgPollTimer = null; }
+    return;
+  }
   try {
     var m = await api('GET', '/api/portal/meetings/'+mid);
     var newCount = (m.messages||[]).length;
     var newAsgCount = (m.assignments||[]).length;
+    // Re-check after the await: user may have navigated away during the fetch
+    if (!document.getElementById('mtg-chat-scroll')) {
+      if (_mtgPollTimer) { clearInterval(_mtgPollTimer); _mtgPollTimer = null; }
+      return;
+    }
     // Only re-render if something changed
     if (newCount !== _mtgLastMsgCount || newAsgCount !== (m._prevAsgCount||0)) {
       _mtgLastMsgCount = newCount;
-      openMeetingDetail(mid);
+      openMeetingDetail(mid);  // draft preservation handled inside openMeetingDetail
     }
   } catch(e) {
     // Silently ignore poll errors
@@ -358,6 +399,39 @@ async function _loadMeetingFiles(mid) {
 async function meetingAction(mid, action) {
   try {
     await api('POST', '/api/portal/meetings/'+mid+'/'+action, {});
+    openMeetingDetail(mid);
+  } catch(e) { alert('Error: '+e.message); }
+}
+
+async function meetingInterrupt(mid) {
+  try {
+    await api('POST', '/api/portal/meetings/'+mid+'/interrupt', {});
+    openMeetingDetail(mid);
+  } catch(e) { alert('Error: '+e.message); }
+}
+
+async function meetingInviteParticipant(mid) {
+  try {
+    // Build a picker from the cached agent list, excluding already-present ones
+    var meeting = await api('GET', '/api/portal/meetings/'+mid);
+    var present = new Set(meeting.participants||[]);
+    var agList = (window._cachedAgents||agents||[]).filter(function(a){ return !present.has(a.id); });
+    if (!agList.length) { alert('已没有可邀请的 Agent'); return; }
+    var lines = agList.map(function(a, i){ return (i+1)+'. '+(a.name||a.id)+(a.role?' · '+a.role:''); }).join('\n');
+    var pick = prompt('选择要邀请的 Agent (输入编号):\n\n'+lines);
+    if (!pick) return;
+    var idx = parseInt(pick, 10) - 1;
+    if (isNaN(idx) || idx < 0 || idx >= agList.length) { alert('无效编号'); return; }
+    var target = agList[idx];
+    await api('POST', '/api/portal/meetings/'+mid+'/participants', {agent_id: target.id});
+    openMeetingDetail(mid);
+  } catch(e) { alert('Error: '+e.message); }
+}
+
+async function meetingRemoveParticipant(mid, agentId, agentName) {
+  if (!confirm('确定将 '+(agentName||agentId)+' 移出会议？')) return;
+  try {
+    await api('DELETE', '/api/portal/meetings/'+mid+'/participants/'+encodeURIComponent(agentId));
     openMeetingDetail(mid);
   } catch(e) { alert('Error: '+e.message); }
 }

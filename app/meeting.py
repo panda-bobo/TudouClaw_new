@@ -669,16 +669,13 @@ def _build_meeting_prompt(meeting: "Meeting", agent, user_msg: str,
         f"角色: {role}",
         f"名字: {name}",
         "",
-        "## 发言要求",
-        "1. 基于你的角色和专业领域，给出你的**独立洞察和个人观点**",
-        "2. 对当前议题表达你的**立场**（赞成/反对/有保留意见），并说明理由",
-        "3. 如果讨论涉及决策，请明确你的**投票选择**，格式如：",
-        "   「我投票选择 [选项X]，理由是...」",
-        "4. 如果你发现问题或风险，直接指出，不要回避",
-        "5. 如果讨论已经形成结论，可以建议总结行动项，格式如：",
-        "   「行动项：@<负责人> 完成 XX，截止 <时间>」",
-        "6. 发言控制在 200 字以内，除非涉及专业分析需要展开",
-        "7. 不要重复前面已经说过的观点，推进讨论向前",
+        "## 发言要求（严格遵守，否则被视为无效发言）",
+        "1. **聚焦当前话题**：只针对主持人最新发言涉及的那一个话题回应，不要主动展开其他话题",
+        "2. **立场表态只说一次**：若你之前已在本会议中就这个议题表过态，**不要重复立场**。只补充全新的视角/数据/风险；如果没有新东西可补充，请直接说「我与之前发言一致，无补充」",
+        "3. **禁止复述他人观点**：前面的发言（无论主持人还是其他 Agent）中已出现的论点，不得再次写出",
+        "4. **简短为先**：默认控制在 120 字内。只有在提出全新专业分析时可到 250 字",
+        "5. **响应主持人的指令**：若主持人要求某件具体事情（做洞察、出方案、暂停等），直接照做，不要把它当成新议题再讨论",
+        "6. 投票/行动项只在主持人明确要求投票/分派任务时写，不要每次发言都附带",
         "",
         "── 会议讨论记录 ──",
     ])
@@ -695,6 +692,60 @@ def _build_meeting_prompt(meeting: "Meeting", agent, user_msg: str,
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Reply sequence generation tracking — lets the user interrupt a running
+# agent reply sequence by posting a new message. Each meeting has a
+# monotonically increasing generation counter; each spawned reply sequence
+# captures the current generation at start and bails out between agents if
+# it no longer matches (meaning a newer user message / interrupt landed).
+# ---------------------------------------------------------------------------
+
+_meeting_reply_gen: dict[str, int] = {}
+_meeting_reply_gen_lock = threading.Lock()
+
+
+# Keywords that mean "stop talking, don't trigger another agent round".
+# Kept narrow on purpose: must be a short meta-command, not a substantive message.
+_STOP_KEYWORDS = (
+    "暂停", "停止", "停一下", "先停", "先暂停", "大家停", "大家先停",
+    "别说了", "先别说", "闭嘴", "安静", "等一下", "等等",
+    "stop", "pause", "wait", "hold on", "quiet",
+)
+
+
+def is_stop_command(msg: str) -> bool:
+    """Return True if the message is a meta-command to halt the discussion
+    rather than a substantive utterance that should trigger a new reply
+    round. The heuristic is deliberately conservative: message must be
+    short (<= 20 chars after strip) AND contain one of the stop keywords.
+    """
+    if not msg:
+        return False
+    s = msg.strip()
+    if not s or len(s) > 20:
+        return False
+    low = s.lower()
+    for kw in _STOP_KEYWORDS:
+        if kw in low:
+            return True
+    return False
+
+
+def bump_meeting_reply_gen(meeting_id: str) -> int:
+    """Advance the meeting's reply generation. Any in-flight sequence for
+    this meeting will see the mismatch and abort at its next iteration.
+    Returns the new generation value.
+    """
+    with _meeting_reply_gen_lock:
+        _meeting_reply_gen[meeting_id] = _meeting_reply_gen.get(meeting_id, 0) + 1
+        return _meeting_reply_gen[meeting_id]
+
+
+def current_meeting_reply_gen(meeting_id: str) -> int:
+    with _meeting_reply_gen_lock:
+        return _meeting_reply_gen.get(meeting_id, 0)
+
+
 def meeting_agent_reply(meeting: "Meeting",
                           registry: "MeetingRegistry",
                           agent_chat_fn: Callable[[str, str], str],
@@ -702,11 +753,16 @@ def meeting_agent_reply(meeting: "Meeting",
                           user_msg: str,
                           target_agent_ids: Optional[list[str]] = None,
                           max_participants: int = 10,
-                          multimodal_parts: Optional[list[dict]] = None) -> None:
+                          multimodal_parts: Optional[list[dict]] = None,
+                          gen: Optional[int] = None) -> None:
     """Trigger each participant agent to reply in the meeting.
 
     Runs synchronously — callers that want non-blocking should wrap this
     in a daemon thread.
+
+    If ``gen`` is provided, the sequence is cancellable: between each agent
+    it verifies the meeting's current generation still equals ``gen``, and
+    bails out if not (meaning the user posted a new message / interrupted).
     """
     if meeting.status in (MeetingStatus.CLOSED, MeetingStatus.CANCELLED):
         return
@@ -723,6 +779,15 @@ def meeting_agent_reply(meeting: "Meeting",
             break
 
     for aid in chosen:
+        # -- User-priority interrupt check --
+        if gen is not None and current_meeting_reply_gen(meeting.id) != gen:
+            logger.info(
+                "meeting %s reply sequence aborted (gen=%s, current=%s) — user interrupt",
+                meeting.id, gen, current_meeting_reply_gen(meeting.id),
+            )
+            return
+        if meeting.status in (MeetingStatus.CLOSED, MeetingStatus.CANCELLED):
+            return
         ag = None
         try:
             ag = agent_lookup_fn(aid)
@@ -740,6 +805,14 @@ def meeting_agent_reply(meeting: "Meeting",
             reply = agent_chat_fn(aid, chat_msg)
         except Exception as e:
             reply = f"❌ 回复失败: {e}"
+        # -- Post-LLM interrupt check: if user interrupted while this agent
+        #    was talking, drop its stale reply instead of polluting the log --
+        if gen is not None and current_meeting_reply_gen(meeting.id) != gen:
+            logger.info(
+                "meeting %s dropping stale reply from %s — user interrupt landed mid-call",
+                meeting.id, aid,
+            )
+            return
         try:
             role = getattr(ag, "role", "") or "agent"
             aname = getattr(ag, "name", "") or aid
@@ -757,12 +830,19 @@ def meeting_agent_reply(meeting: "Meeting",
 def spawn_meeting_reply(meeting, registry, agent_chat_fn, agent_lookup_fn,
                          user_msg, target_agent_ids=None,
                          multimodal_parts=None):
-    """Fire-and-forget daemon thread wrapper for meeting_agent_reply."""
+    """Fire-and-forget daemon thread wrapper for meeting_agent_reply.
+
+    Bumps the meeting's reply generation so that any previously-running
+    sequence for this meeting aborts at its next iteration — giving the
+    user priority to interrupt the discussion.
+    """
+    gen = bump_meeting_reply_gen(meeting.id)
     t = threading.Thread(
         target=meeting_agent_reply,
         args=(meeting, registry, agent_chat_fn, agent_lookup_fn, user_msg),
         kwargs={"target_agent_ids": target_agent_ids,
-                "multimodal_parts": multimodal_parts},
+                "multimodal_parts": multimodal_parts,
+                "gen": gen},
         daemon=True,
     )
     t.start()

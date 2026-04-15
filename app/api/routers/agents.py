@@ -244,6 +244,65 @@ async def update_agent_soul(
     return {"ok": True, "agent_id": agent_id}
 
 
+@router.get("/departments")
+async def list_departments(
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Return the default department list plus any custom departments
+    that currently have agents assigned to them, with agent counts."""
+    try:
+        from ...agent import DEFAULT_DEPARTMENTS
+    except Exception:
+        DEFAULT_DEPARTMENTS = []
+    counts: dict[str, int] = {}
+    unassigned = 0
+    try:
+        for a in hub.agents.values():
+            dep = (getattr(a, "department", "") or "").strip()
+            if not dep:
+                unassigned += 1
+                continue
+            counts[dep] = counts.get(dep, 0) + 1
+    except Exception:
+        pass
+    # Merge: defaults first (even with count 0), then any custom ones
+    departments = []
+    seen: set = set()
+    for name in DEFAULT_DEPARTMENTS:
+        departments.append({"name": name, "count": counts.get(name, 0), "is_default": True})
+        seen.add(name)
+    for name, cnt in counts.items():
+        if name in seen:
+            continue
+        departments.append({"name": name, "count": cnt, "is_default": False})
+    return {
+        "departments": departments,
+        "defaults": list(DEFAULT_DEPARTMENTS),
+        "unassigned": unassigned,
+    }
+
+
+@router.post("/agent/{agent_id}/department")
+async def update_agent_department(
+    agent_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Set an agent's department affiliation. Empty string = unassigned."""
+    agent = hub.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    new_dep = (body.get("department") or "").strip()
+    agent.department = new_dep
+    try:
+        hub._save_agents()
+    except Exception:
+        pass
+    return {"ok": True, "department": agent.department}
+
+
 @router.post("/agent/{agent_id}/model")
 async def update_agent_model(
     agent_id: str,
@@ -695,6 +754,7 @@ async def create_agent(
             system_prompt=body.get("system_prompt", ""),
             priority_level=int(body.get("priority_level", 3)),
             role_title=body.get("role_title", ""),
+            department=body.get("department", "") or "",
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
