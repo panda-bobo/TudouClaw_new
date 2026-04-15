@@ -2192,6 +2192,9 @@ function addLoginRequestBubble(agentId, evt) {
   div.className = 'chat-msg login-request';
   var reqId = evt.request_id || '';
   div.dataset.requestId = reqId;
+  div.dataset.loginUrl = evt.login_url || evt.url || '';
+  div.dataset.siteName = evt.site_name || 'Website';
+  div.dataset.agentId = agentId;
   var siteName = esc(evt.site_name||'Website');
   var url = esc(evt.url||'');
   var loginUrl = esc(evt.login_url || evt.url || '');
@@ -2368,9 +2371,49 @@ async function _skipLoginRequest(agentId, btn) {
       request_id: reqId, username: '', password: '', cookies: '', token: ''
     });
   } catch(e) {}
+  _showLoginRetryState(card, '已跳过登录');
+}
+
+function _showLoginRetryState(card, reason) {
+  var aid = card.dataset.agentId || '';
+  var loginUrl = card.dataset.loginUrl || '';
+  var siteName = card.dataset.siteName || '';
   card.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:4px 0">' +
     '<span class="material-symbols-outlined" style="color:var(--text3)">skip_next</span>' +
-    '<span style="color:var(--text3);font-size:13px">已跳过登录请求</span></div>';
+    '<span style="color:var(--text3);font-size:13px">' + esc(reason) + '</span>' +
+    '<button class="btn btn-sm" onclick="_retryLogin(this)" ' +
+      'data-agent-id="' + aid + '" data-url="' + esc(loginUrl) + '" data-site="' + esc(siteName) + '" ' +
+      'style="margin-left:auto;font-size:11px;padding:4px 10px;color:#3b82f6;border:1px solid #3b82f6;border-radius:6px;background:none">' +
+      '<span class="material-symbols-outlined" style="font-size:14px">refresh</span> 重试登录</button>' +
+    '</div>';
+}
+
+async function _retryLogin(btn) {
+  var agentId = btn.dataset.agentId || '';
+  var url = btn.dataset.url || '';
+  var siteName = btn.dataset.site || '';
+  if (!agentId || !url) return;
+  btn.disabled = true;
+  btn.textContent = '重置中...';
+  try {
+    var r = await api('POST', '/api/portal/reset-login', {
+      agent_id: agentId, url: url
+    });
+    if (r && r.ok) {
+      var card = btn.closest('.chat-msg');
+      if (card) {
+        card.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:4px 0">' +
+          '<span class="material-symbols-outlined" style="color:#3b82f6">lock_open</span>' +
+          '<span style="color:#3b82f6;font-size:13px">已重置 ' + esc(siteName || url) + ' 的登录限制，请重新指示 Agent 执行任务</span></div>';
+      }
+    } else {
+      btn.textContent = '重试失败';
+      btn.disabled = false;
+    }
+  } catch(e) {
+    btn.textContent = '重试失败';
+    btn.disabled = false;
+  }
 }
 
 async function chatApprovalAction(agentId, action, btnEl) {

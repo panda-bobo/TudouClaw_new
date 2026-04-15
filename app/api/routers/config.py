@@ -195,6 +195,32 @@ async def submit_web_login(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/reset-login")
+async def reset_login_guard(
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Reset LoginGuard dedup for a domain so the user can retry login."""
+    agent_id = body.get("agent_id", "")
+    url = body.get("url", "")
+    if not agent_id or not url:
+        raise HTTPException(400, "agent_id and url required")
+    try:
+        agent = hub.agents.get(agent_id)
+        if not agent:
+            raise HTTPException(404, "Agent not found")
+        guard = agent._get_login_guard()
+        domain = guard._domain_key(url)
+        if domain in guard._attempted:
+            del guard._attempted[domain]
+        return {"ok": True, "domain": domain}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ---------------------------------------------------------------------------
 # Roles and permissions
 # ---------------------------------------------------------------------------
