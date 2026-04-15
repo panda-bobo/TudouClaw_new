@@ -2373,6 +2373,28 @@ class Agent:
             "</file_display>"
         )
 
+        # Web login guidance — tells agent when to use request_web_login
+        parts.append("")
+        parts.append(
+            "<web_login_protocol>\n"
+            "When you need to access a website that requires login/authentication:\n"
+            "  1. Do NOT take a screenshot of the login page and ask the user to type credentials in chat.\n"
+            "  2. Do NOT navigate to the login page and wait — the user cannot interact with your browser.\n"
+            "  3. ALWAYS use the request_web_login tool. It shows an interactive login card in the chat UI\n"
+            "     where the user can: (a) log in directly via an embedded iframe, (b) enter username/password,\n"
+            "     or (c) paste cookies/token.\n"
+            "  4. After calling request_web_login, WAIT for the result. It will return either:\n"
+            "     - login_method='browser_session': the user logged in via iframe, the browser session is\n"
+            "       now authenticated. Continue browsing the target URL directly.\n"
+            "     - login_method='credentials': username + masked password placeholders ({{CRED_xxx}}).\n"
+            "       Use these in subsequent tool calls — they are auto-substituted at execution time.\n"
+            "  5. Signs that you need request_web_login: login page, 401/403 response, 'please sign in' text,\n"
+            "     redirect to /login or /signin URL, CAPTCHA after authentication wall.\n"
+            "中文说明:当你需要访问需要登录的网站时,务必调用 request_web_login 工具,不要截图让用户\n"
+            "在聊天框里打字输入密码。该工具会在聊天界面弹出一个交互式登录卡片(含iframe/表单/Cookie三种方式)。\n"
+            "</web_login_protocol>"
+        )
+
         # Project context files (change rarely — only when files are edited)
         for name in ("TUDOU_CLAW.md", "CLAW.md", "README.md"):
             ctx_file = wd / name
