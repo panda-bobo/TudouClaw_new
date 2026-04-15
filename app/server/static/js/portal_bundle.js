@@ -2226,32 +2226,48 @@ async function chatApprovalAction(agentId, action, btnEl) {
   }
 
   if (!approvalId) {
-    alert('No pending approval found. It may have timed out.');
+    if (card) {
+      var _noIdMsg = document.createElement('div');
+      _noIdMsg.style.cssText = 'margin-top:8px;font-size:11px;color:var(--warning);';
+      _noIdMsg.textContent = '⚠ No pending approval found. It may have timed out.';
+      card.querySelector('div:last-child').appendChild(_noIdMsg);
+    }
     return;
   }
 
-  // Disable buttons
+  // Immediately update card UI (optimistic) — then call API
   if (card) {
-    card.querySelectorAll('button').forEach(function(b){ b.disabled = true; b.style.opacity = '0.5'; });
+    if (action === 'deny') {
+      card.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:4px 0"><span class="material-symbols-outlined" style="color:var(--error)">block</span><span style="color:var(--error);font-weight:600;font-size:13px">Denied</span></div>';
+    } else if (action === 'approve') {
+      card.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:4px 0"><span class="material-symbols-outlined" style="color:var(--success)">check_circle</span><span style="color:var(--success);font-weight:600;font-size:13px">✓ Approved</span></div>';
+    } else if (action === 'approve_session') {
+      card.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:4px 0"><span class="material-symbols-outlined" style="color:var(--primary)">verified</span><span style="color:var(--primary);font-weight:600;font-size:13px">✓ Approved (session)</span></div>';
+    }
   }
 
   try {
-    if (action === 'deny') {
-      await api('POST', '/api/portal/approve', {approval_id: approvalId, action: 'deny'});
-      if (card) card.innerHTML = '<div style="display:flex;align-items:center;gap:8px"><span class="material-symbols-outlined" style="color:var(--error)">block</span><span style="color:var(--error);font-weight:600;font-size:13px">Denied</span></div>';
-    } else if (action === 'approve') {
-      await api('POST', '/api/portal/approve', {approval_id: approvalId, action: 'approve'});
-      if (card) card.innerHTML = '<div style="display:flex;align-items:center;gap:8px"><span class="material-symbols-outlined" style="color:var(--success)">check_circle</span><span style="color:var(--success);font-weight:600;font-size:13px">Approved (this action)</span></div>';
-    } else if (action === 'approve_session') {
-      await api('POST', '/api/portal/approve', {approval_id: approvalId, action: 'approve', scope: 'session'});
-      if (card) card.innerHTML = '<div style="display:flex;align-items:center;gap:8px"><span class="material-symbols-outlined" style="color:var(--primary)">verified</span><span style="color:var(--primary);font-weight:600;font-size:13px">Approved (session)</span></div>';
+    var apiAction = (action === 'approve_session') ? 'approve' : action;
+    var apiBody = {approval_id: approvalId, action: apiAction};
+    if (action === 'approve_session') apiBody.scope = 'session';
+    var result = await api('POST', '/api/portal/approve', apiBody);
+    if (result && result.error) {
+      if (card) {
+        var errSpan = document.createElement('div');
+        errSpan.style.cssText = 'font-size:11px;color:var(--warning);margin-top:4px;';
+        errSpan.textContent = '⚠ ' + result.error;
+        card.appendChild(errSpan);
+      }
     }
-    // Sync global approval panel so it reflects the decision
-    await refresh();
+    refreshSidebar();
   } catch(e) {
     console.error('Approval action failed:', e);
-    if (card) card.querySelectorAll('button').forEach(function(b){ b.disabled = false; b.style.opacity = '1'; });
-    alert('Approval action failed: ' + e.message);
+    if (card) {
+      var errDiv = document.createElement('div');
+      errDiv.style.cssText = 'font-size:11px;color:var(--error);margin-top:4px;';
+      errDiv.textContent = '⚠ ' + (e.message || 'Request failed');
+      card.appendChild(errDiv);
+    }
   }
 }
 
