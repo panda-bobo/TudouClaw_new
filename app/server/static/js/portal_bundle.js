@@ -2185,6 +2185,194 @@ function addApprovalBubble(agentId, evt) {
   return div;
 }
 
+function addLoginRequestBubble(agentId, evt) {
+  const el = document.getElementById('chat-msgs-'+agentId);
+  if(!el) return;
+  const div = document.createElement('div');
+  div.className = 'chat-msg login-request';
+  var reqId = evt.request_id || '';
+  div.dataset.requestId = reqId;
+  var siteName = esc(evt.site_name||'Website');
+  var url = esc(evt.url||'');
+  var loginUrl = esc(evt.login_url || evt.url || '');
+  var reason = esc(evt.reason||'Agent needs authenticated access');
+  var iframeId = 'login-iframe-' + reqId.slice(0,8);
+  div.innerHTML = '' +
+    '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">' +
+      '<span class="material-symbols-outlined" style="font-size:22px;color:#3b82f6">login</span>' +
+      '<span style="font-weight:700;font-size:14px;color:#3b82f6">Login Required · 需要登录</span>' +
+    '</div>' +
+    '<div style="font-size:13px;margin-bottom:4px"><strong>' + siteName + '</strong></div>' +
+    '<div style="font-size:11px;color:var(--text3);margin-bottom:8px">' + reason + '</div>' +
+    '<div style="display:flex;gap:0;margin-bottom:8px;border-bottom:1px solid var(--border)">' +
+      '<button class="login-tab active" data-tab="iframe" onclick="_switchLoginTab(this,\'iframe\')" style="padding:6px 14px;font-size:11px;border:none;background:none;color:var(--text);cursor:pointer;border-bottom:2px solid #3b82f6;font-weight:600">🌐 网页登录</button>' +
+      '<button class="login-tab" data-tab="cred" onclick="_switchLoginTab(this,\'cred\')" style="padding:6px 14px;font-size:11px;border:none;background:none;color:var(--text3);cursor:pointer;border-bottom:2px solid transparent">🔑 账号密码</button>' +
+      '<button class="login-tab" data-tab="cookie" onclick="_switchLoginTab(this,\'cookie\')" style="padding:6px 14px;font-size:11px;border:none;background:none;color:var(--text3);cursor:pointer;border-bottom:2px solid transparent">🍪 Cookie / Token</button>' +
+    '</div>' +
+    '<div class="login-panel" data-panel="iframe">' +
+      '<div class="login-iframe-wrap">' +
+        '<iframe id="' + iframeId + '" src="' + loginUrl + '" sandbox="allow-scripts allow-same-origin allow-forms allow-popups" referrerpolicy="no-referrer"></iframe>' +
+        '<div class="login-iframe-blocked">' +
+          '<span class="material-symbols-outlined">block</span>' +
+          '该网站禁止在 iframe 中加载<br>' +
+          '<a href="' + loginUrl + '" target="_blank" rel="noopener" style="color:#3b82f6;text-decoration:underline;font-size:13px;display:inline-block;margin-top:8px">↗ 在新标签页中打开登录</a><br>' +
+          '<span style="font-size:11px;color:var(--text3);margin-top:6px;display:inline-block">登录完成后，回到此页面点击下方「✓ 已登录完成」</span>' +
+        '</div>' +
+      '</div>' +
+      '<div style="display:flex;gap:8px;align-items:center;margin-top:6px">' +
+        '<button class="btn btn-sm btn-primary" onclick="_confirmIframeLogin(\'' + agentId + '\',this)" style="font-size:12px;padding:6px 16px"><span class="material-symbols-outlined" style="font-size:14px">check_circle</span> 已登录完成</button>' +
+        '<a href="' + loginUrl + '" target="_blank" rel="noopener" style="font-size:11px;color:#3b82f6;text-decoration:none">↗ 新标签页打开</a>' +
+        '<span class="login-status" style="font-size:11px;color:var(--text3)"></span>' +
+      '</div>' +
+    '</div>' +
+    '<div class="login-panel" data-panel="cred" style="display:none">' +
+      '<div style="margin-bottom:8px"><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:3px">Username / 用户名</label>' +
+      '<input type="text" class="login-username" placeholder="username / email / phone"></div>' +
+      '<div style="margin-bottom:10px"><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:3px">Password / 密码</label>' +
+      '<input type="password" class="login-password" placeholder="password"></div>' +
+      '<div style="display:flex;gap:8px;align-items:center">' +
+        '<button class="btn btn-sm btn-primary" onclick="_submitLoginCredentials(\'' + agentId + '\',this)" style="font-size:12px;padding:6px 16px"><span class="material-symbols-outlined" style="font-size:14px">send</span> 提交</button>' +
+        '<span class="login-status" style="font-size:11px;color:var(--text3)"></span>' +
+      '</div>' +
+    '</div>' +
+    '<div class="login-panel" data-panel="cookie" style="display:none">' +
+      '<div style="margin-bottom:8px"><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:3px">Cookies (从浏览器复制)</label>' +
+      '<textarea class="login-cookies" rows="3" placeholder="name=value; name2=value2; ..."></textarea></div>' +
+      '<div style="margin-bottom:10px"><label style="font-size:11px;color:var(--text2);display:block;margin-bottom:3px">Token (Bearer / API Key)</label>' +
+      '<input type="text" class="login-token" placeholder="Bearer xxx 或 API key"></div>' +
+      '<div style="display:flex;gap:8px;align-items:center">' +
+        '<button class="btn btn-sm btn-primary" onclick="_submitLoginCredentials(\'' + agentId + '\',this)" style="font-size:12px;padding:6px 16px"><span class="material-symbols-outlined" style="font-size:14px">send</span> 提交</button>' +
+        '<span class="login-status" style="font-size:11px;color:var(--text3)"></span>' +
+      '</div>' +
+    '</div>' +
+    '<div style="margin-top:8px;text-align:right">' +
+      '<button class="btn btn-sm" onclick="_skipLoginRequest(\'' + agentId + '\',this)" style="font-size:11px;padding:4px 12px;color:var(--text3)">跳过登录</button>' +
+    '</div>';
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+  _detectIframeBlock(div, iframeId);
+  return div;
+}
+
+function _detectIframeBlock(card, iframeId) {
+  var iframe = document.getElementById(iframeId);
+  if (!iframe) return;
+  var wrap = iframe.closest('.login-iframe-wrap');
+  if (!wrap) return;
+  var blocked = wrap.querySelector('.login-iframe-blocked');
+
+  function showBlocked() {
+    if (iframe) iframe.style.display = 'none';
+    if (blocked) blocked.style.display = 'block';
+  }
+
+  iframe.onerror = showBlocked;
+  setTimeout(function() {
+    try {
+      var doc = iframe.contentDocument || iframe.contentWindow.document;
+      if (!doc || !doc.body || doc.body.innerHTML === '') showBlocked();
+    } catch(e) {
+      // Cross-origin = loaded OK, user can interact
+    }
+  }, 4000);
+}
+
+function _switchLoginTab(btn, tab) {
+  var card = btn.closest('.chat-msg');
+  if (!card) return;
+  card.querySelectorAll('.login-tab').forEach(function(t){
+    t.style.borderBottomColor = 'transparent';
+    t.style.color = 'var(--text3)';
+    t.style.fontWeight = '400';
+  });
+  btn.style.borderBottomColor = '#3b82f6';
+  btn.style.color = 'var(--text)';
+  btn.style.fontWeight = '600';
+  card.querySelectorAll('.login-panel').forEach(function(p){
+    p.style.display = p.dataset.panel === tab ? '' : 'none';
+  });
+}
+
+async function _confirmIframeLogin(agentId, btn) {
+  var card = btn.closest('.chat-msg');
+  if (!card) return;
+  var reqId = card.dataset.requestId || '';
+  var status = card.querySelector('.login-status');
+  btn.disabled = true;
+  if (status) status.textContent = '通知 Agent 获取会话...';
+  try {
+    var r = await api('POST', '/api/portal/submit-login', {
+      request_id: reqId,
+      username: '', password: '',
+      cookies: '__BROWSER_SESSION__',
+      token: ''
+    });
+    if (r && r.ok) {
+      card.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:4px 0">' +
+        '<span class="material-symbols-outlined" style="color:#10b981">check_circle</span>' +
+        '<span style="color:#10b981;font-weight:600;font-size:13px">✓ 已确认登录，Agent 正在获取会话继续执行...</span></div>';
+    } else {
+      if (status) status.textContent = '⚠ ' + ((r && r.error) || '提交失败');
+      btn.disabled = false;
+    }
+  } catch(e) {
+    if (status) status.textContent = '⚠ ' + (e.message || '请求失败');
+    btn.disabled = false;
+  }
+}
+
+async function _submitLoginCredentials(agentId, btn) {
+  var card = btn.closest('.chat-msg');
+  if (!card) return;
+  var reqId = card.dataset.requestId || '';
+  var status = btn.closest('.login-panel').querySelector('.login-status');
+
+  var username = (card.querySelector('.login-username') || {}).value || '';
+  var password = (card.querySelector('.login-password') || {}).value || '';
+  var cookies = (card.querySelector('.login-cookies') || {}).value || '';
+  var token = (card.querySelector('.login-token') || {}).value || '';
+
+  if (!username && !cookies && !token) {
+    if (status) status.textContent = '⚠ 请填写账号密码或 Cookie/Token';
+    return;
+  }
+
+  btn.disabled = true;
+  if (status) status.textContent = '提交中...';
+
+  try {
+    var r = await api('POST', '/api/portal/submit-login', {
+      request_id: reqId, username: username, password: password,
+      cookies: cookies, token: token
+    });
+    if (r && r.ok) {
+      card.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:4px 0">' +
+        '<span class="material-symbols-outlined" style="color:#10b981">check_circle</span>' +
+        '<span style="color:#10b981;font-weight:600;font-size:13px">✓ 登录信息已提交，Agent 继续执行中...</span></div>';
+    } else {
+      if (status) status.textContent = '⚠ ' + ((r && r.error) || '提交失败');
+      btn.disabled = false;
+    }
+  } catch(e) {
+    if (status) status.textContent = '⚠ ' + (e.message || '请求失败');
+    btn.disabled = false;
+  }
+}
+
+async function _skipLoginRequest(agentId, btn) {
+  var card = btn.closest('.chat-msg');
+  if (!card) return;
+  var reqId = card.dataset.requestId || '';
+  try {
+    await api('POST', '/api/portal/submit-login', {
+      request_id: reqId, username: '', password: '', cookies: '', token: ''
+    });
+  } catch(e) {}
+  card.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:4px 0">' +
+    '<span class="material-symbols-outlined" style="color:var(--text3)">skip_next</span>' +
+    '<span style="color:var(--text3);font-size:13px">已跳过登录请求</span></div>';
+}
+
 async function chatApprovalAction(agentId, action, btnEl) {
   // 1. Primary: get approval_id directly from the DOM card (most reliable)
   var card = btnEl.closest('.chat-msg');
@@ -2621,6 +2809,9 @@ async function _streamTaskEvents(agentId, taskId, thinkDiv, progressBar) {
             } else if(evt.type==='approval_request') {
               if (thinkDiv.parentNode) thinkDiv.remove();
               addApprovalBubble(agentId, evt);
+            } else if(evt.type==='login_request') {
+              if (thinkDiv.parentNode) thinkDiv.remove();
+              addLoginRequestBubble(agentId, evt);
             } else if(evt.type==='plan_update') {
               // Real-time execution steps update
               renderExecutionSteps(agentId, evt.plan);

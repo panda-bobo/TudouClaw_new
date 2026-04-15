@@ -835,6 +835,10 @@ class Agent:
     _current_task: AgentTask | None = field(default=None, repr=False)
     # --- Self-growth scheduling ---
     _last_growth_tick: float = field(default=0.0, repr=False)
+    # --- Credential vault: runtime-only, never serialized or sent to LLM ---
+    # Maps placeholder key (e.g. "CRED_abc123") → real credential value.
+    # Used by request_web_login to keep passwords out of LLM context.
+    _credential_vault: dict = field(default_factory=dict, repr=False)
 
     # ---- persistence serialisation ----
 
@@ -3930,6 +3934,10 @@ Write only the summary body. Do not include any preamble or prefix."""
         # Resolve alias (e.g. "exec" → "bash") BEFORE permission check
         tool_name = tools._TOOL_ALIASES.get(tool_name, tool_name)
 
+        # Substitute credential placeholders ({{CRED_xxx}}) with real values
+        # so sensitive data stays out of LLM context but reaches the tool.
+        arguments = self._substitute_credentials(arguments)
+
         # Inject agent context for tools that need RAG routing
         if tool_name in ("knowledge_lookup",):
             arguments = dict(arguments)
@@ -4560,6 +4568,9 @@ Write only the summary body. Do not include any preamble or prefix."""
                             # Execute
                             if name == "plan_update":
                                 return name, self._handle_plan_update(arguments), call_id
+                            elif name == "request_web_login":
+                                return name, self._handle_web_login_request(
+                                    arguments, on_event=on_event), call_id
                             else:
                                 return name, self._execute_tool_with_policy(
                                     name, arguments, on_event=on_event), call_id
@@ -4603,6 +4614,9 @@ Write only the summary body. Do not include any preamble or prefix."""
                                 result = self._handle_plan_update(arguments)
                                 _emit(AgentEvent(time.time(), "plan_update",
                                                  {"plan": self.get_current_plan()}))
+                            elif name == "request_web_login":
+                                result = self._handle_web_login_request(
+                                    arguments, on_event=on_event)
                             else:
                                 result = self._execute_tool_with_policy(
                                     name, arguments, on_event=on_event)
@@ -4870,6 +4884,19 @@ Write only the summary body. Do not include any preamble or prefix."""
                                 "type": "approval_" + status,
                                 "tool": evt.data.get("tool", ""),
                             })
+                    elif evt.kind == "login_request":
+                        task.set_status(ChatTaskStatus.WAITING_APPROVAL,
+                                        "Waiting for login credentials...", -1)
+                        task.push_event({
+                            "type": "login_request",
+                            "request_id": evt.data.get("request_id", ""),
+                            "url": evt.data.get("url", ""),
+                            "site_name": evt.data.get("site_name", ""),
+                            "login_url": evt.data.get("login_url", ""),
+                            "reason": evt.data.get("reason", ""),
+                            "agent_id": self.id,
+                            "agent_name": self.name,
+                        })
                     elif evt.kind == "plan_update":
                         task.push_event({
                             "type": "plan_update",
@@ -5174,6 +5201,104 @@ Write only the summary body. Do not include any preamble or prefix."""
             return {"error": str(e)}
 
     # ---- Execution Plan: tool handler ----
+
+    def _handle_web_login_request(self, arguments: dict, on_event=None) -> str:
+        """Handle request_web_login: pause agent, show login form, wait for credentials."""
+        from .auth import create_login_request, wait_for_login
+        url = arguments.get("url", "")
+        site_name = arguments.get("site_name", "")
+        reason = arguments.get("reason", "")
+        login_url = arguments.get("login_url", "")
+        if not url:
+            return json.dumps({"error": "url is required"})
+
+        req = create_login_request(
+            agent_id=self.id, agent_name=self.name,
+            url=url, site_name=site_name, reason=reason, login_url=login_url,
+        )
+
+        # Emit SSE event so chat UI shows login form
+        prev_status = self.status
+        self.status = AgentStatus.WAITING_APPROVAL
+        evt = AgentEvent(time.time(), "login_request", {
+            "request_id": req.request_id,
+            "url": url,
+            "site_name": site_name,
+            "login_url": login_url or url,
+            "reason": reason,
+            "agent_id": self.id,
+            "agent_name": self.name,
+        })
+        self._log(evt.kind, evt.data)
+        if on_event:
+            on_event(evt)
+
+        # Block until user submits credentials or timeout
+        credentials = wait_for_login(req, timeout=300)
+        self.status = prev_status if prev_status != AgentStatus.WAITING_APPROVAL else AgentStatus.BUSY
+
+        if not credentials:
+            return json.dumps({"error": "Login request expired — no credentials provided within 5 minutes"})
+
+        # ── __BROWSER_SESSION__ signal: user logged in via iframe/new tab,
+        #    agent should capture cookies from its own browser instance. ──
+        if credentials.get("cookies") == "__BROWSER_SESSION__":
+            return json.dumps({
+                "ok": True,
+                "site_name": site_name,
+                "url": url,
+                "login_method": "browser_session",
+                "note": (
+                    "User has completed login in their browser. "
+                    "The browser session is now authenticated. "
+                    "Use browser_get_cookies or continue browsing the target URL directly — "
+                    "the session cookies are already active in the browser context."
+                ),
+            }, ensure_ascii=False)
+
+        # ── Sensitive-data masking: store real values in runtime vault,
+        #    return placeholder variables to LLM context so passwords/tokens
+        #    never appear in conversation history or logs. ──
+        vault_prefix = f"CRED_{req.request_id[:8]}"
+        result = {"ok": True, "site_name": site_name, "url": url, "login_method": "credentials"}
+        _cred_fields = [("username", False), ("password", True),
+                        ("cookies", True), ("token", True)]
+        for field_name, is_secret in _cred_fields:
+            val = credentials.get(field_name, "")
+            if not val:
+                continue
+            if is_secret:
+                # Store in vault, give LLM a placeholder
+                key = f"{vault_prefix}_{field_name.upper()}"
+                self._credential_vault[key] = val
+                result[field_name] = "{{" + key + "}}"
+            else:
+                # Non-secret (username) can go to LLM directly
+                result[field_name] = val
+        result["note"] = (
+            "Credentials received. Secret fields are masked as {{CRED_xxx}} placeholders. "
+            "Pass them as-is when calling tools — they will be auto-substituted at execution time. "
+            "Do NOT attempt to decode or log the placeholders."
+        )
+        return json.dumps(result, ensure_ascii=False)
+
+    def _substitute_credentials(self, arguments: dict) -> dict:
+        """Replace {{CRED_xxx}} placeholders in tool arguments with real values
+        from the runtime credential vault. This ensures sensitive data never
+        appears in LLM conversation history but is available at execution time."""
+        if not self._credential_vault:
+            return arguments
+        import re
+        _CRED_RE = re.compile(r"\{\{(CRED_[A-Za-z0-9_]+)\}\}")
+        substituted = {}
+        for k, v in arguments.items():
+            if isinstance(v, str) and "{{CRED_" in v:
+                def _repl(m):
+                    return self._credential_vault.get(m.group(1), m.group(0))
+                substituted[k] = _CRED_RE.sub(_repl, v)
+            else:
+                substituted[k] = v
+        return substituted
 
     def _handle_plan_update(self, arguments: dict) -> str:
         """Handle the plan_update tool call internally."""

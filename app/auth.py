@@ -414,6 +414,87 @@ class PendingApproval:
         }
 
 
+@dataclass
+class PendingLoginRequest:
+    """A web login request waiting for user to provide credentials."""
+    request_id: str = field(default_factory=lambda: "login_" + uuid.uuid4().hex[:10])
+    agent_id: str = ""
+    agent_name: str = ""
+    url: str = ""
+    site_name: str = ""
+    login_url: str = ""
+    reason: str = ""
+    created_at: float = field(default_factory=time.time)
+    status: str = "pending"     # pending / submitted / expired
+    credentials: dict = field(default_factory=dict)  # filled when user submits
+    _event: threading.Event = field(default_factory=threading.Event, repr=False)
+
+    def to_dict(self) -> dict:
+        return {
+            "request_id": self.request_id,
+            "agent_id": self.agent_id,
+            "agent_name": self.agent_name,
+            "url": self.url,
+            "site_name": self.site_name,
+            "login_url": self.login_url,
+            "reason": self.reason,
+            "created_at": self.created_at,
+            "status": self.status,
+        }
+
+
+# Module-level login request store
+_login_requests: dict[str, PendingLoginRequest] = {}
+_login_lock = threading.Lock()
+
+
+def create_login_request(agent_id: str, agent_name: str, url: str,
+                         site_name: str, reason: str,
+                         login_url: str = "") -> PendingLoginRequest:
+    req = PendingLoginRequest(
+        agent_id=agent_id, agent_name=agent_name,
+        url=url, site_name=site_name, login_url=login_url, reason=reason,
+    )
+    with _login_lock:
+        _login_requests[req.request_id] = req
+    return req
+
+
+def wait_for_login(req: PendingLoginRequest, timeout: float = 300) -> dict:
+    """Block until user submits credentials or timeout. Returns credentials dict."""
+    decided = req._event.wait(timeout=timeout)
+    with _login_lock:
+        _login_requests.pop(req.request_id, None)
+    if not decided:
+        req.status = "expired"
+        return {}
+    return req.credentials
+
+
+def submit_login(request_id: str, credentials: dict) -> bool:
+    with _login_lock:
+        req = _login_requests.get(request_id)
+        if not req or req.status != "pending":
+            return False
+        req.status = "submitted"
+        req.credentials = credentials
+    req._event.set()
+    return True
+
+
+def list_pending_logins() -> list[dict]:
+    with _login_lock:
+        now = time.time()
+        expired = [k for k, v in _login_requests.items()
+                   if now - v.created_at > 300]
+        for k in expired:
+            r = _login_requests.pop(k)
+            r.status = "expired"
+            r._event.set()
+        return [v.to_dict() for v in _login_requests.values()
+                if v.status == "pending"]
+
+
 class ToolPolicy:
     """Manages tool execution permissions and the approval queue.
 

@@ -968,6 +968,42 @@ TOOL_DEFINITIONS: list[dict] = [
             },
         },
     },
+    # ---- Web login request (human-in-the-loop) ----
+    {
+        "type": "function",
+        "function": {
+            "name": "request_web_login",
+            "description": (
+                "Request the human user to log into a website that requires authentication. "
+                "Use this when you encounter a login wall or need authenticated access to a URL. "
+                "The user will see a login form in the chat UI, enter their credentials, and "
+                "the session information (cookies/token) will be returned to you. "
+                "You can then use these credentials for subsequent HTTP requests or browser actions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The URL that requires login",
+                    },
+                    "site_name": {
+                        "type": "string",
+                        "description": "Human-readable site name, e.g. 'GitHub', 'Jira', '企业微信'",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Why you need access — what task requires this login",
+                    },
+                    "login_url": {
+                        "type": "string",
+                        "description": "Optional: the specific login page URL if different from the target URL",
+                    },
+                },
+                "required": ["url", "site_name", "reason"],
+            },
+        },
+    },
     # ---- Package management tool ----
     {
         "type": "function",
@@ -3367,6 +3403,8 @@ _TOOL_FUNCS: dict[str, callable] = {
     "knowledge_lookup": _tool_knowledge_lookup,
     "share_knowledge": _tool_share_knowledge,
     "learn_from_peers": _tool_learn_from_peers,
+    # Human-in-the-loop tools (handled specially by agent, not dispatched here)
+    "request_web_login": lambda **kw: "ERROR: request_web_login must be handled by agent directly",
     # System and productivity tools
     "pip_install": _tool_pip_install,
     "create_pptx": _tool_create_pptx,
@@ -3483,6 +3521,8 @@ def _init_registry() -> ToolRegistry:
         "share_knowledge": "coordination",
         "learn_from_peers": "coordination",
 
+        # Human-in-the-loop
+        "request_web_login": "coordination",
         # System and productivity tools
         "pip_install": "system",
         "create_pptx": "productivity",

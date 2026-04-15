@@ -165,6 +165,37 @@ async def approve_or_deny_tool_request(
 
 
 # ---------------------------------------------------------------------------
+# Web login request — human-in-the-loop credential submission
+# ---------------------------------------------------------------------------
+
+@router.post("/submit-login")
+async def submit_web_login(
+    body: dict = Body(...),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Submit credentials for a pending web login request from an agent."""
+    try:
+        from ...auth import submit_login
+        request_id = body.get("request_id", "")
+        if not request_id:
+            raise HTTPException(400, "request_id required")
+        credentials = {
+            "username": body.get("username", ""),
+            "password": body.get("password", ""),
+            "cookies": body.get("cookies", ""),
+            "token": body.get("token", ""),
+        }
+        ok = submit_login(request_id, credentials)
+        if not ok:
+            raise HTTPException(404, "Login request not found or already submitted")
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
 # Roles and permissions
 # ---------------------------------------------------------------------------
 
