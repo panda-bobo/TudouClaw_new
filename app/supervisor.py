@@ -90,13 +90,46 @@ class AgentSupervisor:
             return self._pool
 
     def _build_boot_config(self, agent) -> Dict[str, Any]:
-        """Build the boot_config dict for spawning a full_agent worker."""
+        """Build the boot_config dict for spawning a full_agent worker.
+
+        Phase 2: includes UID allocation and shared directory setup for
+        OS-level isolation.
+        """
         work_dir = getattr(agent, "working_dir", "") or os.path.join(
             self._data_dir, "workspaces", "agents", agent.id, "workspace"
         )
         os.makedirs(work_dir, exist_ok=True)
 
         shared_ws = getattr(agent, "shared_workspace", None) or ""
+        project_id = getattr(agent, "project_id", "") or ""
+
+        # Phase 2: UID isolation setup
+        uid_isolation = os.environ.get("TUDOU_UID_ISOLATION", "0") == "1"
+        boot_uid = 0
+        boot_gids: list[int] = []
+
+        if uid_isolation:
+            try:
+                from .isolation.uid_manager import get_uid_manager
+                uid_mgr = get_uid_manager(self._data_dir)
+                boot_uid = uid_mgr.allocate_uid(agent.id)
+
+                # Setup private workspace permissions
+                uid_mgr.setup_private_workspace(work_dir, agent.id)
+
+                # Setup shared directory group membership
+                if project_id and shared_ws:
+                    group_name = f"proj_{project_id}"
+                    uid_mgr.allocate_project_gid(project_id)
+                    uid_mgr.add_to_group(agent.id, group_name)
+                    uid_mgr.setup_shared_directory(shared_ws, group_name)
+                    boot_gids = uid_mgr.get_agent_gids(agent.id)
+            except Exception as e:
+                logger.warning("UID isolation setup failed for %s: %s "
+                              "(falling back to permissive)",
+                              agent.id[:8], e)
+                uid_isolation = False
+
         return {
             "agent_id": agent.id,
             "agent_name": agent.name,
@@ -107,6 +140,11 @@ class AgentSupervisor:
             "sandbox_mode": "permissive",  # full_agent needs broad access
             "shared_workspace": shared_ws,
             "authorized_workspaces": [work_dir],
+            "project_id": project_id,
+            # Phase 2 fields
+            "uid_isolation": uid_isolation,
+            "uid": boot_uid,
+            "gids": boot_gids,
         }
 
     def _get_or_spawn_worker(self, agent_id: str):
@@ -131,10 +169,31 @@ class AgentSupervisor:
                 self._bridge_chat_event(frame.payload)
 
         def _gate_handler(frame):
-            """Handle GATE frames from worker (cross-boundary operations)."""
+            """Handle GATE frames from worker (cross-boundary operations).
+
+            Phase 2: routes shared directory writes through SharedFileRouter
+            for concurrent safety (locking + atomic writes + audit).
+            """
             from .isolation.protocol import Frame
-            # For now, approve all gate requests in full_agent mode
-            return Frame.gate_resp_ok(frame.id or "", {"approved": True})
+            action = frame.method or ""
+            params = frame.params or {}
+            req_id = frame.id or ""
+
+            if action == "shared_write":
+                return self._gate_shared_write(req_id, params)
+            elif action == "shared_append":
+                return self._gate_shared_append(req_id, params)
+            elif action == "shared_read":
+                return self._gate_shared_read(req_id, params)
+            elif action == "shared_mkdir":
+                return self._gate_shared_mkdir(req_id, params)
+            elif action == "shared_delete":
+                return self._gate_shared_delete(req_id, params)
+            elif action == "shared_list":
+                return self._gate_shared_list(req_id, params)
+
+            # Default: approve (forward compatibility)
+            return Frame.gate_resp_ok(req_id, {"approved": True})
 
         try:
             w = pool.get_or_spawn(
@@ -205,6 +264,88 @@ class AgentSupervisor:
                                  "content": data.get("error", "")})
         except Exception as e:
             logger.debug("bridge_chat_event failed: %s", e)
+
+    # ── Gate handlers for shared directory operations ──
+
+    def _get_router(self):
+        from .isolation.shared_file_router import get_shared_file_router
+        return get_shared_file_router(self._data_dir)
+
+    def _gate_shared_write(self, req_id: str, params: Dict[str, Any]):
+        from .isolation.protocol import Frame
+        try:
+            router = self._get_router()
+            path = params.get("path", "")
+            content = params.get("content", "")
+            agent_id = params.get("agent_id", "")
+            is_bytes = params.get("is_bytes", False)
+            if is_bytes:
+                import base64
+                data = base64.b64decode(content)
+                n = router.write_bytes(path, data, agent_id=agent_id)
+            else:
+                n = router.write(path, content, agent_id=agent_id)
+            return Frame.gate_resp_ok(req_id, {"written": n, "path": path})
+        except Exception as e:
+            return Frame.gate_resp_err(req_id, "shared_write_failed", str(e))
+
+    def _gate_shared_append(self, req_id: str, params: Dict[str, Any]):
+        from .isolation.protocol import Frame
+        try:
+            router = self._get_router()
+            n = router.append(
+                params.get("path", ""),
+                params.get("content", ""),
+                agent_id=params.get("agent_id", ""),
+            )
+            return Frame.gate_resp_ok(req_id, {"appended": n})
+        except Exception as e:
+            return Frame.gate_resp_err(req_id, "shared_append_failed", str(e))
+
+    def _gate_shared_read(self, req_id: str, params: Dict[str, Any]):
+        from .isolation.protocol import Frame
+        try:
+            router = self._get_router()
+            content = router.read(params.get("path", ""))
+            return Frame.gate_resp_ok(req_id, {"content": content})
+        except Exception as e:
+            return Frame.gate_resp_err(req_id, "shared_read_failed", str(e))
+
+    def _gate_shared_mkdir(self, req_id: str, params: Dict[str, Any]):
+        from .isolation.protocol import Frame
+        try:
+            router = self._get_router()
+            resolved = router.mkdir(
+                params.get("path", ""),
+                agent_id=params.get("agent_id", ""),
+            )
+            return Frame.gate_resp_ok(req_id, {"path": resolved})
+        except Exception as e:
+            return Frame.gate_resp_err(req_id, "shared_mkdir_failed", str(e))
+
+    def _gate_shared_delete(self, req_id: str, params: Dict[str, Any]):
+        from .isolation.protocol import Frame
+        try:
+            router = self._get_router()
+            deleted = router.delete(
+                params.get("path", ""),
+                agent_id=params.get("agent_id", ""),
+            )
+            return Frame.gate_resp_ok(req_id, {"deleted": deleted})
+        except Exception as e:
+            return Frame.gate_resp_err(req_id, "shared_delete_failed", str(e))
+
+    def _gate_shared_list(self, req_id: str, params: Dict[str, Any]):
+        from .isolation.protocol import Frame
+        try:
+            router = self._get_router()
+            files = router.list_dir(
+                params.get("path", ""),
+                recursive=params.get("recursive", False),
+            )
+            return Frame.gate_resp_ok(req_id, {"files": files})
+        except Exception as e:
+            return Frame.gate_resp_err(req_id, "shared_list_failed", str(e))
 
     # ── Public API ──
 

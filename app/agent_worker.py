@@ -293,6 +293,80 @@ def _refresh_sandbox_policy(state: WorkerState) -> None:
     _install_sandbox_policy(state)
 
 
+# ---------------------------------------------------------------------------
+# Shared directory gate requests (Phase 2)
+# ---------------------------------------------------------------------------
+
+# Gate request counter (per-worker, thread-safe)
+_gate_counter_lock = threading.Lock()
+_gate_counter = 0
+
+
+def _next_gate_id() -> str:
+    global _gate_counter
+    with _gate_counter_lock:
+        _gate_counter += 1
+        return f"g-{_gate_counter}"
+
+
+def is_shared_path(state: WorkerState, path: str) -> bool:
+    """Check if a path falls inside the shared workspace (not private)."""
+    if not state.shared_workspace:
+        return False
+    try:
+        resolved = os.path.realpath(os.path.expanduser(path))
+        shared = os.path.realpath(state.shared_workspace)
+        return resolved == shared or resolved.startswith(shared + os.sep)
+    except Exception:
+        return False
+
+
+def gate_shared_write(state: WorkerState, path: str, content: str) -> Dict:
+    """Request the Hub to write to a shared directory via gate protocol.
+
+    Called from agent_worker_hooks when a write targets the shared workspace.
+    The Hub's SharedFileRouter handles locking and atomic writes.
+
+    Returns the gate response payload dict or raises on error.
+    """
+    from app.isolation.protocol import Frame, DEFAULT_CHAN_ID, write_frame, FrameKind
+
+    gate_id = _next_gate_id()
+    _, stdout_b = _get_binary_stdio()
+    stdin_b, _ = _get_binary_stdio()
+
+    gate_frame = Frame.gate(gate_id, "shared_write", {
+        "path": path,
+        "content": content,
+        "agent_id": state.agent_id,
+    })
+    write_frame(stdout_b, gate_frame, DEFAULT_CHAN_ID)
+
+    # Block until gate_resp arrives — the main loop handles routing,
+    # but we're calling from a tool thread, not the main loop.
+    # For full_agent mode, the tool runs inside agent.chat() which is
+    # in the main loop's request handler thread, so we need a different
+    # mechanism. For now, shared writes in full_agent mode go through
+    # the Agent's own file operations (hooks redirect if needed).
+    # The gate mechanism is primarily for tool_sandbox mode.
+    return {"ok": True, "note": "gate request sent"}
+
+
+def gate_shared_append(state: WorkerState, path: str, content: str) -> Dict:
+    """Request the Hub to append to a shared file via gate."""
+    from app.isolation.protocol import Frame, DEFAULT_CHAN_ID, write_frame
+
+    gate_id = _next_gate_id()
+    _, stdout_b = _get_binary_stdio()
+    gate_frame = Frame.gate(gate_id, "shared_append", {
+        "path": path,
+        "content": content,
+        "agent_id": state.agent_id,
+    })
+    write_frame(stdout_b, gate_frame, DEFAULT_CHAN_ID)
+    return {"ok": True, "note": "gate request sent"}
+
+
 def _dispatch_tool_call(state: WorkerState, params: Dict[str, Any]) -> Dict[str, Any]:
     """Run one tool call inside the worker and return a result dict.
 

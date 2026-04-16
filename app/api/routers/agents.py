@@ -250,7 +250,35 @@ async def supervisor_status(
     user: CurrentUser = Depends(get_current_user),
 ):
     """Return process isolation supervisor status (worker health, uptime)."""
-    return hub.supervisor.get_status()
+    result = hub.supervisor.get_status()
+    # Phase 2: include UID manager and shared file router status
+    try:
+        from ...isolation.uid_manager import get_uid_manager
+        result["uid_manager"] = get_uid_manager(hub._data_dir).get_status()
+    except Exception:
+        result["uid_manager"] = {"error": "not initialized"}
+    try:
+        from ...isolation.shared_file_router import get_shared_file_router
+        result["shared_file_router"] = get_shared_file_router(hub._data_dir).get_status()
+    except Exception:
+        result["shared_file_router"] = {"error": "not initialized"}
+    return result
+
+
+@router.get("/supervisor/audit")
+async def supervisor_audit(
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+    agent_id: str = "",
+    limit: int = 50,
+):
+    """Return shared file operation audit trail."""
+    try:
+        from ...isolation.shared_file_router import get_shared_file_router
+        router = get_shared_file_router(hub._data_dir)
+        return {"audit": router.get_audit(last_n=limit, agent_id=agent_id)}
+    except Exception as e:
+        return {"audit": [], "error": str(e)}
 
 
 @router.get("/departments")

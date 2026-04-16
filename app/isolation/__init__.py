@@ -40,4 +40,16 @@ __all__ = [
     "encode_frame",
     "read_frame",
     "write_frame",
+    # Phase 2: uid isolation + shared file routing
+    "get_uid_manager",
+    "get_shared_file_router",
 ]
+
+# Lazy imports for Phase 2 components (avoid circular deps at startup)
+def get_uid_manager(data_dir: str = ""):
+    from .uid_manager import get_uid_manager as _get
+    return _get(data_dir)
+
+def get_shared_file_router(data_dir: str = ""):
+    from .shared_file_router import get_shared_file_router as _get
+    return _get(data_dir)

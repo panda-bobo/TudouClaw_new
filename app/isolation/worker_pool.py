@@ -348,10 +348,33 @@ class LocalWorkerLauncher:
         # the ambient process env is not forwarded.
         from ..runtime_paths import build_subprocess_env
         env = build_subprocess_env()
-        for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY",
-                  "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
-                  "GITHUB_TOKEN", "GH_TOKEN"):
-            env.pop(k, None)
+
+        # Phase 2: in full_agent mode, keep LLM API keys (agent needs
+        # them for LLM calls); only scrub in tool_sandbox mode.
+        if boot_config.get("mode") != "full_agent":
+            for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+                      "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+                      "GITHUB_TOKEN", "GH_TOKEN"):
+                env.pop(k, None)
+
+        # Phase 2: build preexec_fn for UID namespace isolation
+        preexec_fn = None
+        if boot_config.get("uid_isolation"):
+            try:
+                from .uid_manager import get_uid_manager
+                uid_mgr = get_uid_manager()
+                shared_dirs = []
+                if boot_config.get("shared_workspace"):
+                    shared_dirs.append(boot_config["shared_workspace"])
+                preexec_fn = uid_mgr.build_preexec_fn(
+                    agent_id=agent_id,
+                    work_dir=boot_config.get("work_dir", ""),
+                    shared_dirs=shared_dirs,
+                )
+                if preexec_fn:
+                    self._log(f"[launcher:{agent_id}] UID namespace isolation enabled")
+            except Exception as e:
+                self._log(f"[launcher:{agent_id}] UID isolation setup failed: {e}")
 
         cmd = [
             self._python, "-u",
@@ -368,6 +391,7 @@ class LocalWorkerLauncher:
                 stderr=subprocess.PIPE,
                 env=env,
                 cwd=boot_config.get("work_dir") or None,
+                preexec_fn=preexec_fn,
                 bufsize=0,
                 close_fds=(os.name != "nt"),
             )

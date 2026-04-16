@@ -110,11 +110,35 @@ def _audit(op: str, path: str, allowed: bool) -> None:
         _audit_log[:] = _audit_log[-500:]
 
 
+def _is_shared_path(path_str: str) -> bool:
+    """Check if a path is inside the shared workspace (Phase 2).
+
+    Writes to shared paths are allowed but audited at a higher level.
+    When full uid isolation is active, shared writes may be routed
+    through the Hub's SharedFileRouter via gate requests.
+    """
+    if _state is None:
+        return False
+    shared = getattr(_state, "shared_workspace", None)
+    if not shared:
+        return False
+    try:
+        resolved = Path(path_str).expanduser().resolve(strict=False)
+        shared_resolved = Path(shared).resolve()
+        return (str(resolved) == str(shared_resolved)
+                or str(resolved).startswith(str(shared_resolved) + os.sep))
+    except Exception:
+        return False
+
+
 def _check_write(op: str, path: str | Path) -> None:
     """Raise PermissionError if path escapes the jail.
 
     Fail-open on internal errors: if is_inside_jail itself raises,
     we log a warning but allow the operation.
+
+    Phase 2: writes to shared workspace paths are allowed but
+    audited with a "SHARED_WRITE" tag for tracking.
     """
     path_str = str(path)
     try:
@@ -124,6 +148,13 @@ def _check_write(op: str, path: str | Path) -> None:
         logger.warning("agent_worker_hooks: check failed for %s: %s (allowing)", op, exc)
         _audit(op, path_str, True)
         return
+
+    # Phase 2: tag shared workspace writes for audit
+    if allowed and _is_shared_path(path_str):
+        agent_id = getattr(_state, "agent_id", "?") if _state else "?"
+        _audit(f"SHARED:{op}", path_str, True)
+        logger.debug("[SHARED_WRITE] agent=%s op=%s path=%s",
+                    agent_id[:8] if agent_id else "?", op, path_str)
 
     _audit(op, path_str, allowed)
     if not allowed:
