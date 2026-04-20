@@ -631,6 +631,11 @@ def init_prompt_pack_registry(data_dir: str = "", extra_scan_dirs: list[str] | N
         default_dirs.append(os.path.join(data_dir, "skills"))
     home = os.path.expanduser("~")
     default_dirs.append(os.path.join(home, ".tudou_claw", "skills"))
+    # Shipped builtin packs (sibling of this file: app/skills/builtin/)
+    _this_dir = os.path.dirname(os.path.abspath(__file__))
+    _builtin_dir = os.path.join(_this_dir, "builtin")
+    if os.path.isdir(_builtin_dir):
+        default_dirs.append(_builtin_dir)
     # Current project's .claw/skills
     cwd = os.getcwd()
     default_dirs.append(os.path.join(cwd, ".claw", "skills"))

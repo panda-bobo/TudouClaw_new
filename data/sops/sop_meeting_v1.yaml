@@ -1,0 +1,81 @@
+# Meeting Assistant SOP — v1
+# 中等严格度：stage 顺序推进 + exit 条件 + 允许回退
+
+sop_id: sop_meeting_v1
+display_name: 会议助理标准流程
+version: 1
+
+stages:
+  - id: intake
+    display_name: 信息接收
+    goal: |
+      理解用户提供的会议材料（transcript / 录音 / 日历邀请 / 会议标题），
+      识别会议类型、参会人、核心议题。
+    guidance: |
+      这一步你需要：
+      1. 识别会议基本信息：时间、主题、参会人
+      2. 判断输入材料完整度（有无 transcript、有无明确议题）
+      3. 如果缺关键信息，主动询问用户（但不要重复问已有的）
+    exit_condition:
+      type: contains_section
+      # stage 完成条件：已给出清晰的"会议信息确认"或"已收到所有材料"的回复
+      spec:
+        heading_patterns: ["会议信息", "Meeting Info", "会议概要"]
+        min_content_length: 50
+    allow_rollback: false
+    next: summarize
+
+  - id: summarize
+    display_name: 内容总结
+    goal: |
+      基于 transcript / 录音转写，产出结构化会议纪要。
+      必须包含：议题讨论要点、达成的决策、待解决问题。
+    guidance: |
+      纪要应按议题分段，每段简洁概括：
+      - 讨论了什么（要点，不要流水账）
+      - 得出什么结论或决策
+      - 有哪些悬而未决的问题
+      语言精炼专业，避免冗长。
+    exit_condition:
+      type: contains_section
+      spec:
+        heading_patterns: ["## 决策", "## Decisions", "决策内容", "会议纪要"]
+    allow_rollback: true   # 如发现材料不足可退回 intake
+    rollback_to: intake
+    next: extract_actions
+
+  - id: extract_actions
+    display_name: Action Items 提取
+    goal: |
+      从会议讨论中提取所有待办行动项，每项必须明确：
+      负责人(owner) + 截止日期(deadline) + 行动描述(text)。
+    guidance: |
+      扫描 transcript 全文（尤其是末尾的收尾阶段），不要遗漏隐性的承诺。
+      - 如果某 action 缺 owner/deadline，主动追问用户
+      - 输出用 JSON 代码块格式，每项含 {owner, deadline, text}
+      - deadline 必须是 ISO 8601 格式（YYYY-MM-DD）
+    exit_condition:
+      type: regex
+      spec:
+        pattern: '"owner"\s*:\s*".+"'   # 检测 JSON 格式的 action items
+        in_field: content
+    allow_rollback: true
+    rollback_to: summarize
+    next: verify
+
+  - id: verify
+    display_name: 自我校验
+    goal: |
+      自我检查纪要是否完整、action items 是否齐全、
+      有无与已知组织信息/历史会议的冲突。
+    guidance: |
+      简要复核：
+      1. 所有参会人是否被涉及
+      2. 决策是否无歧义
+      3. action items 是否覆盖所有"待办"类讨论
+      4. 如发现问题，主动提示用户
+    exit_condition:
+      type: any   # 这个 stage 由 agent 自主判断完成
+    allow_rollback: true
+    rollback_to: extract_actions
+    next: null    # 结束

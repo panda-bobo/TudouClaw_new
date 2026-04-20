@@ -47,6 +47,17 @@ import copy
 logger = logging.getLogger("tudou.llm")
 token_logger = logging.getLogger("tudou.tokens")
 
+# HTTP timeouts for chat/completions requests. Default read timeout is 15 min
+# (big enough for large local models like MLX-served Qwen3.6-35B to finish
+# decoding long outputs). Override via env var `TUDOU_LLM_READ_TIMEOUT`
+# (seconds) for slower or faster setups.
+_CONNECT_TIMEOUT = 15.0
+try:
+    _READ_TIMEOUT = float(os.environ.get("TUDOU_LLM_READ_TIMEOUT", "900"))
+except ValueError:
+    _READ_TIMEOUT = 900.0
+_REQUEST_TIMEOUT: tuple[float, float] = (_CONNECT_TIMEOUT, _READ_TIMEOUT)
+
 # Set by Hub.__init__ so token logger can route per-agent stats.
 _active_hub = None
 
@@ -613,6 +624,28 @@ class LLMConnectionPool:
         self._queue_waiters: dict[str, int] = {}
         self._queue_lock = threading.Lock()
 
+        # ── Circuit breaker ──────────────────────────────────────────
+        # If a (provider_id, model) pair has failed repeatedly in a short
+        # window, stop hammering it. The classic case is mlx-lm's
+        # tool-parser bug: malformed XML tool calls crash the server
+        # mid-stream, client sees connection-reset, retries 5x, same
+        # 14k-token prompt re-processed each time. With max_iters=20 in
+        # the agent loop, a single "hung" turn could run 100 retries
+        # and 30+ minutes before giving up.
+        #
+        # Breaker semantics:
+        #   OPEN   → next call raises immediately for `cooldown_s` seconds
+        #   CLOSED → normal retry path
+        # Transition:
+        #   CLOSED → OPEN when N consecutive failures within `window_s`
+        #   OPEN   → CLOSED after cooldown elapses (next call tries once)
+        self._cb_fails: dict[str, list[float]] = {}   # key → [ts, ts, ...]
+        self._cb_open_until: dict[str, float] = {}    # key → unix ts
+        self._cb_lock = threading.Lock()
+        self.cb_threshold = 2          # consecutive fails to trip
+        self.cb_window_s = 120.0       # fails must land within this window
+        self.cb_cooldown_s = 180.0     # how long the breaker stays open
+
     def get_session(self, provider_id: str) -> requests.Session:
         """获取或创建 provider 的长连接 Session。"""
         if provider_id in self._sessions:
@@ -767,13 +800,62 @@ class LLMConnectionPool:
         lock = self._get_model_lock(key, provider_id, model)
         lock.release()
 
+    # ── Circuit-breaker helpers ───────────────────────────────────────
+    def _cb_key(self, provider_id: str, model: str) -> str:
+        return f"{provider_id}:{model or ''}"
+
+    def _cb_check(self, key: str) -> None:
+        """If breaker is OPEN for this key, raise an informative error.
+        Otherwise no-op."""
+        now = time.time()
+        with self._cb_lock:
+            open_until = self._cb_open_until.get(key, 0.0)
+            if open_until > now:
+                remaining = int(open_until - now)
+                raise RuntimeError(
+                    f"LLM_CIRCUIT_OPEN: provider={key} is in cooldown "
+                    f"for {remaining}s after {self.cb_threshold} "
+                    f"consecutive failures. Common cause: local server "
+                    f"(mlx-lm / Ollama) crashed parsing a bad tool call. "
+                    f"Check server logs; restart the model if needed."
+                )
+            if open_until and open_until <= now:
+                # Cooldown elapsed — reset so a single probe can try
+                self._cb_open_until.pop(key, None)
+                self._cb_fails.pop(key, None)
+
+    def _cb_record_failure(self, key: str) -> None:
+        now = time.time()
+        with self._cb_lock:
+            fails = self._cb_fails.setdefault(key, [])
+            fails.append(now)
+            # trim window
+            cutoff = now - self.cb_window_s
+            fails[:] = [t for t in fails if t >= cutoff]
+            if len(fails) >= self.cb_threshold:
+                self._cb_open_until[key] = now + self.cb_cooldown_s
+                logger.error(
+                    "Circuit breaker OPEN for '%s' — %d failures in "
+                    "last %.0fs; next attempts will fail fast for %.0fs.",
+                    key, len(fails), self.cb_window_s, self.cb_cooldown_s,
+                )
+
+    def _cb_record_success(self, key: str) -> None:
+        with self._cb_lock:
+            self._cb_fails.pop(key, None)
+            self._cb_open_until.pop(key, None)
+
     def request_with_retry(self, provider_id: str, method: str, url: str,
                            model: str = "", **kwargs) -> requests.Response:
         """
-        带连接池 + per-model 串行队列 + 手动退避重试的 HTTP 请求。
+        带连接池 + per-model 串行队列 + 手动退避重试 + 熔断 的 HTTP 请求。
 
         同一个 provider+model 排队串行，不同 provider/model 可并行。
+        短期连续失败会跳闸，让后续调用立即失败，避免 mlx-lm / Ollama
+        崩溃时把 14k prompt 反复重新推理。
         """
+        cb_key = self._cb_key(provider_id, model)
+        self._cb_check(cb_key)           # may raise if breaker is OPEN
         session = self.get_session(provider_id)
         last_exc = None
 
@@ -813,8 +895,20 @@ class LLMConnectionPool:
                     time.sleep(wait_time)
                     continue
 
+                self._cb_record_success(cb_key)
                 return resp
 
+            except requests.exceptions.ChunkedEncodingError as e:
+                # Server crashed MID-response (e.g. mlx-lm tool parser
+                # JSONDecodeError). Retrying sends the same 14k prompt
+                # again — model will produce the same garbage → same
+                # crash. Bail immediately and trip the breaker.
+                last_exc = e
+                logger.error(
+                    "Provider '%s' dropped mid-response (server likely "
+                    "crashed parsing output): %s. NOT retrying.",
+                    provider_id, str(e)[:120])
+                break  # breaker recorded in the outer finally
             except requests.Timeout as e:
                 # Read timeouts should NOT be retried for local providers
                 # (Ollama, LM Studio) — if inference took >5min, retrying
@@ -825,9 +919,20 @@ class LLMConnectionPool:
                     "— not retrying (increase timeout or use a smaller model)",
                     provider_id, attempt + 1, self.max_retries + 1,
                     str(e)[:100])
-                break  # Don't retry timeouts
+                break  # breaker recorded in the outer finally  # Don't retry timeouts
             except requests.ConnectionError as e:
                 last_exc = e
+                # Connection-reset mid-response looks like ConnectionError
+                # to some versions of requests. Same signal: don't retry.
+                msg = str(e).lower()
+                if ("connection aborted" in msg or "remote end closed" in msg
+                        or "broken pipe" in msg):
+                    logger.error(
+                        "Provider '%s' connection dropped mid-response: %s. "
+                        "NOT retrying (likely server-side crash).",
+                        provider_id, str(e)[:120])
+                    self._cb_record_failure(cb_key)
+                    break
                 wait_time = self.backoff_factor * (2 ** attempt)
                 logger.warning(
                     "Provider '%s' connection error (attempt %d/%d): %s, "
@@ -842,8 +947,11 @@ class LLMConnectionPool:
             finally:
                 self.release_slot(provider_id, model)
 
-        # 所有重试都失败了
+        # 所有重试都失败了 — 记录熔断计数
         if last_exc:
+            # Only record if we haven't already recorded above (chunk /
+            # connection-drop / timeout branches already called it).
+            self._cb_record_failure(cb_key)
             raise last_exc
         # 返回最后一次响应（可能是 429/5xx）
         resp.raise_for_status()
@@ -990,7 +1098,8 @@ class ProviderEntry:
                  "created_at", "models_cache", "models_cache_ts", "manual_models",
                  "scope", "max_concurrent", "model_concurrency", "priority",
                  "schedule_strategy", "rate_limit_rpm", "cost_per_1k_tokens",
-                 "fallback_providers", "context_length")
+                 "fallback_providers", "context_length", "tier_models",
+                 "supports_multimodal")
 
     def __init__(self, *, id: str = "", name: str = "", kind: str = "openai",
                  base_url: str = "", api_key: str = "", enabled: bool = True,
@@ -1003,7 +1112,9 @@ class ProviderEntry:
                  rate_limit_rpm: int = 0,
                  cost_per_1k_tokens: float = 0.0,
                  fallback_providers: list[str] | None = None,
-                 context_length: int = 0):
+                 context_length: int = 0,
+                 tier_models: dict[str, str] | None = None,
+                 supports_multimodal: bool = False):
         self.id = id or uuid.uuid4().hex[:10]
         self.name = name or id
         self.kind = kind          # "ollama" | "openai" | "claude"
@@ -1030,6 +1141,18 @@ class ProviderEntry:
         # ── Context Length ──
         self.context_length = context_length  # 0 = auto-detect from model name
 
+        # ── V2 tier → model binding ──
+        # Maps a capability tier name (e.g. "coding_strong") to the
+        # concrete model this provider serves for that tier. Edited via
+        # V2 Providers UI; consulted by V2 through pick_for_tier().
+        self.tier_models: dict[str, str] = dict(tier_models or {})
+
+        # ── Multimodal capability flag ──
+        # True iff this provider's model(s) accept image/audio parts.
+        # Consulted at V2 Intake: a task with attachments but no
+        # multimodal provider fails fast with a user-visible clarification.
+        self.supports_multimodal = bool(supports_multimodal)
+
     def get_model_concurrency(self, model: str) -> int:
         """Get concurrency limit for a specific model. Falls back to provider max."""
         return self.model_concurrency.get(model, self.max_concurrent)
@@ -1054,6 +1177,8 @@ class ProviderEntry:
             "cost_per_1k_tokens": self.cost_per_1k_tokens,
             "fallback_providers": self.fallback_providers,
             "context_length": self.context_length,
+            "tier_models": dict(self.tier_models),
+            "supports_multimodal": self.supports_multimodal,
         }
 
     @staticmethod
@@ -1076,6 +1201,8 @@ class ProviderEntry:
             cost_per_1k_tokens=d.get("cost_per_1k_tokens", 0.0),
             fallback_providers=d.get("fallback_providers", []),
             context_length=d.get("context_length", 0),
+            tier_models=d.get("tier_models", {}),
+            supports_multimodal=d.get("supports_multimodal", False),
         )
         p.models_cache = d.get("models_cache", [])
         return p
@@ -1236,10 +1363,55 @@ class ProviderRegistry:
             if not p:
                 return None
             for k, v in kwargs.items():
-                if k in ("name", "kind", "base_url", "api_key", "enabled", "manual_models", "scope", "fallback_providers"):
+                if k in ("name", "kind", "base_url", "api_key", "enabled",
+                        "manual_models", "scope", "fallback_providers",
+                        "tier_models", "priority", "max_concurrent",
+                        "schedule_strategy", "rate_limit_rpm",
+                        "cost_per_1k_tokens", "context_length",
+                        "supports_multimodal"):
                     setattr(p, k, v)
             self._save()
             return p
+
+    # ---- V2 tier resolution (legacy tier_models on ProviderEntry) ----
+    # Note: the richer tier system lives in app.llm_tier_routing. This
+    # method is kept so V2 can fall back to per-provider tier_models dicts
+    # for anyone who configured providers before the new router existed.
+
+    def pick_for_tier(self, tier: str) -> tuple[ProviderEntry, str] | None:
+        """Find the best provider+model serving a V2 capability tier.
+
+        Scans enabled providers; the one with the lowest ``priority`` value
+        whose ``tier_models`` contains ``tier`` wins. Returns
+        ``(provider_entry, model_name)`` or ``None`` if no provider is
+        configured for this tier via the legacy path.
+        """
+        if not tier:
+            return None
+        candidates: list[tuple[int, ProviderEntry, str]] = []
+        with self._lock:
+            providers = list(self._providers.values())
+        for p in providers:
+            if not p.enabled:
+                continue
+            model = (p.tier_models or {}).get(tier)
+            if model:
+                candidates.append((p.priority, p, model))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda t: t[0])
+        _, entry, model = candidates[0]
+        return entry, model
+
+    def provider_supports_multimodal(self, provider_id: str) -> bool:
+        """True iff the provider has ``supports_multimodal=True``.
+
+        Used by V2 Intake to decide whether to accept attachments on a
+        task. Unknown / disabled provider → False (fail-closed)."""
+        if not provider_id:
+            return False
+        p = self.get(provider_id)
+        return bool(p and p.enabled and p.supports_multimodal)
 
     def remove(self, provider_id: str) -> bool:
         with self._lock:
@@ -1582,7 +1754,8 @@ def _proxy_chat(base_url: str, api_key: str,
 def _ollama_chat(base_url: str, api_key: str,
                  messages: list[dict], tools: list[dict] | None = None,
                  stream: bool = False, model: str = "",
-                 _provider_id: str = "ollama") -> dict | Generator:
+                 _provider_id: str = "ollama",
+                 tool_choice: dict | str | None = None) -> dict | Generator:
     """Ollama — 直接走 OpenAI 兼容端点 /v1/chat/completions。
 
     不维护独立的协议处理。Ollama 本身实现了完整的 OpenAI 兼容 API，
@@ -1592,6 +1765,7 @@ def _ollama_chat(base_url: str, api_key: str,
         base_url, api_key or "ollama",
         messages, tools=tools, stream=stream,
         model=model, _provider_id=_provider_id,
+        tool_choice=tool_choice,
     )
 
 
@@ -1629,7 +1803,8 @@ def _apply_model_directives(messages: list[dict], model: str) -> list[dict]:
 def _openai_chat(base_url: str, api_key: str,
                  messages: list[dict], tools: list[dict] | None = None,
                  stream: bool = False, model: str = "",
-                 _provider_id: str = "openai") -> dict | Generator:
+                 _provider_id: str = "openai",
+                 tool_choice: dict | str | None = None) -> dict | Generator:
     url = base_url.rstrip("/")
     if not url.endswith("/chat/completions"):
         # Append /v1 only if no version path already present (e.g. /v1, /v3, /api/v3)
@@ -1642,7 +1817,7 @@ def _openai_chat(base_url: str, api_key: str,
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key or 'no-key'}",
     }
-    _TIMEOUT = (15, 180)  # 15s connect, 180s read
+    _TIMEOUT = _REQUEST_TIMEOUT
 
     # Apply model-specific directives (e.g. Qwen3 /no_think)
     messages = _apply_model_directives(messages, model)
@@ -1678,6 +1853,13 @@ def _openai_chat(base_url: str, api_key: str,
         # providers default to 1024–2048 tokens which causes truncation
         # (finish_reason=length) and empty arguments.
         payload.setdefault("max_tokens", 16384)
+        # Plan D: forced tool_choice — when caller detects a handoff
+        # trigger, lock the model to the handoff_request tool so it
+        # cannot fabricate a fake result in plain text.
+        # OpenAI spec accepts: "none" | "auto" | "required" |
+        #   {"type":"function","function":{"name":"..."}}
+        if tool_choice:
+            payload["tool_choice"] = tool_choice
 
     if not stream:
         resp = pool.request_with_retry(
@@ -1710,10 +1892,25 @@ def _openai_chat(base_url: str, api_key: str,
         except Exception as _te:
             logger.debug("token usage log failed: %s", _te)
         choice = data["choices"][0]
-        finish_reason = choice.get("finish_reason", "")
+        finish_reason = choice.get("finish_reason", "") or ""
         msg = choice["message"]
+        # Normalize finish_reason → canonical stop_reason.  Canonical set:
+        #   end_turn       — model finished normally
+        #   tool_use       — model wants to call tools (tool_calls populated)
+        #   length         — output truncated (max_tokens / context window)
+        #   stop_sequence  — hit a configured stop string
+        #   content_filter — provider-side safety block
+        _OPENAI_STOP_MAP = {
+            "stop": "end_turn",
+            "length": "length",
+            "tool_calls": "tool_use",
+            "function_call": "tool_use",
+            "content_filter": "content_filter",
+        }
+        stop_reason = _OPENAI_STOP_MAP.get(finish_reason, finish_reason or "end_turn")
         result: dict = {"message": {"role": "assistant",
-                                     "content": msg.get("content", "") or ""}}
+                                     "content": msg.get("content", "") or ""},
+                         "stop_reason": stop_reason}
         # Detect truncation: finish_reason "length" means output was cut off
         if finish_reason == "length" and msg.get("tool_calls"):
             logger.warning(
@@ -1814,10 +2011,303 @@ def _openai_chat(base_url: str, api_key: str,
         return _gen()
 
 
+# ---------------------------------------------------------------------------
+# Stream-events parsers — yield provider-agnostic event dicts with tool_use
+# support. Event schema (see chat_stream_events() for full contract):
+#   {"type": "text_delta",          "text": "..."}
+#   {"type": "tool_use_start",      "id": "...", "name": "..."}
+#   {"type": "tool_input_delta",    "id": "...", "partial_json": "..."}
+#   {"type": "tool_use_complete",   "id": "...", "name": "...", "input": {}}
+#   {"type": "usage",               "input_tokens": N, "output_tokens": M}
+#   {"type": "stop",                "reason": "end_turn"|"tool_use"|"length"}
+#   {"type": "error",               "message": "..."}
+# ---------------------------------------------------------------------------
+
+def _openai_stream_events(base_url: str, api_key: str,
+                          messages: list[dict],
+                          tools: list[dict] | None = None,
+                          model: str = "",
+                          _provider_id: str = "openai"
+                          ) -> Generator[dict, None, None]:
+    """OpenAI-compat streaming with tool_calls delta support.
+
+    Covers OpenAI, Ollama, MLX, Unsloth/vLLM, LM Studio — any provider that
+    speaks the /v1/chat/completions protocol. Yields event dicts (see schema
+    above) rather than raw text chunks, preserving tool_use decisions.
+
+    Defensive quirks:
+      - Some local servers (MLX, certain Ollama builds) emit tool_calls all
+        at once at stream end rather than incrementally; this parser handles
+        both patterns by finalising any still-open tool_call state when the
+        stream ends.
+      - `stream_options.include_usage` is requested but providers that
+        ignore or reject it just get no usage event (non-fatal).
+    """
+    url = base_url.rstrip("/")
+    if not url.endswith("/chat/completions"):
+        if not re.search(r'/v\d+', url):
+            url += "/v1"
+        url += "/chat/completions"
+
+    pool = get_connection_pool()
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key or 'no-key'}",
+    }
+
+    messages = _apply_model_directives(messages, model)
+    safe_messages = _sanitize_messages_for_openai(messages)
+    valid_tools = _validate_tools(tools)
+
+    payload: dict = {
+        "model": model,
+        "messages": safe_messages,
+        "stream": True,
+        # Request final-chunk usage. Providers that don't support it just
+        # omit the field; we won't emit a usage event in that case.
+        "stream_options": {"include_usage": True},
+    }
+    if valid_tools:
+        payload["tools"] = valid_tools
+        # Give tool args enough room — write_file/edit_file produce large JSON.
+        payload.setdefault("max_tokens", 16384)
+
+    session = pool.get_session(_provider_id)
+    max_retries = pool.max_retries
+
+    for attempt in range(max_retries + 1):
+        pool.acquire_slot(_provider_id, model)
+        released = False
+        # Per-attempt state (must reset on retry to avoid duplicate yields)
+        tool_states: dict[int, dict] = {}
+        finish_reason: str | None = None
+        input_tokens = 0
+        output_tokens = 0
+        first_event_yielded = False
+
+        try:
+            with session.post(url, headers=headers, json=payload,
+                              stream=True, timeout=_REQUEST_TIMEOUT) as resp:
+                if resp.status_code == 429 and not first_event_yielded:
+                    retry_after = resp.headers.get("Retry-After")
+                    wait = float(retry_after) if retry_after else (
+                        pool.backoff_factor * (2 ** attempt))
+                    wait = min(wait, 60)
+                    logger.warning(
+                        "OpenAI stream_events 429 (attempt %d/%d), "
+                        "retrying in %.1fs...",
+                        attempt + 1, max_retries + 1, wait)
+                    pool.release_slot(_provider_id, model)
+                    released = True
+                    time.sleep(wait)
+                    continue
+                resp.raise_for_status()
+
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    text = line.decode("utf-8", errors="replace")
+                    if text.startswith("data: "):
+                        text = text[6:]
+                    if text.strip() == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(text)
+                    except json.JSONDecodeError:
+                        continue
+
+                    choices = chunk.get("choices") or []
+                    if choices:
+                        choice = choices[0]
+                        delta = choice.get("delta") or {}
+
+                        # Text content
+                        content = delta.get("content")
+                        if content:
+                            yield {"type": "text_delta", "text": content}
+                            first_event_yielded = True
+
+                        # Tool calls (incremental)
+                        for tc in (delta.get("tool_calls") or []):
+                            idx = tc.get("index", 0)
+                            state = tool_states.get(idx)
+                            if state is None:
+                                state = {
+                                    "id": tc.get("id") or
+                                        f"call_{uuid.uuid4().hex[:8]}",
+                                    "name": "",
+                                    "args_buf": [],
+                                    "started": False,
+                                }
+                                tool_states[idx] = state
+                            else:
+                                # Later chunks may carry a real id; upgrade.
+                                real_id = tc.get("id")
+                                if real_id and state["id"].startswith("call_"):
+                                    state["id"] = real_id
+
+                            func = tc.get("function") or {}
+                            name = func.get("name") or ""
+                            args_part = func.get("arguments") or ""
+
+                            if name:
+                                state["name"] = name
+
+                            if not state["started"] and (name or args_part):
+                                state["started"] = True
+                                yield {
+                                    "type": "tool_use_start",
+                                    "id": state["id"],
+                                    "name": state["name"],
+                                }
+                                first_event_yielded = True
+
+                            if args_part:
+                                state["args_buf"].append(args_part)
+                                yield {
+                                    "type": "tool_input_delta",
+                                    "id": state["id"],
+                                    "partial_json": args_part,
+                                }
+                                first_event_yielded = True
+
+                        fr = choice.get("finish_reason")
+                        if fr:
+                            finish_reason = fr
+
+                    # Usage chunk (final, only if include_usage honored)
+                    usage = chunk.get("usage") or {}
+                    if usage:
+                        input_tokens = usage.get(
+                            "prompt_tokens", input_tokens) or input_tokens
+                        output_tokens = usage.get(
+                            "completion_tokens",
+                            output_tokens) or output_tokens
+
+                # Stream ended — finalise any accumulated tool_calls
+                for idx in sorted(tool_states.keys()):
+                    state = tool_states[idx]
+                    # Providers that don't do incremental args (MLX/Qwen
+                    # sometimes) may not have emitted a start. Emit one now.
+                    if not state["started"]:
+                        yield {
+                            "type": "tool_use_start",
+                            "id": state["id"],
+                            "name": state["name"],
+                        }
+                        first_event_yielded = True
+                    full_args = "".join(state["args_buf"])
+                    try:
+                        inp = json.loads(full_args) if full_args else {}
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            "tool_input JSON parse failed (id=%s, name=%s, "
+                            "len=%d) — falling back to raw",
+                            state["id"], state["name"], len(full_args))
+                        inp = {"_raw": full_args}
+                    yield {
+                        "type": "tool_use_complete",
+                        "id": state["id"],
+                        "name": state["name"],
+                        "input": inp if isinstance(inp, dict) else {"_raw": full_args},
+                    }
+
+                if input_tokens or output_tokens:
+                    yield {
+                        "type": "usage",
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                    }
+                    try:
+                        _log_token_usage(
+                            provider=_provider_id or "openai",
+                            model=model,
+                            prompt_tokens=input_tokens,
+                            completion_tokens=output_tokens,
+                            stream=True,
+                        )
+                    except Exception as _te:
+                        logger.debug("token usage log failed: %s", _te)
+
+                yield {
+                    "type": "stop",
+                    "reason": finish_reason or "end_turn",
+                }
+                return
+
+        except (requests.ConnectionError, requests.Timeout) as e:
+            if not first_event_yielded and attempt < max_retries:
+                logger.warning(
+                    "OpenAI stream_events connection error "
+                    "(attempt %d/%d): %s",
+                    attempt + 1, max_retries + 1, str(e)[:100])
+                pool.release_slot(_provider_id, model)
+                released = True
+                wait = pool.backoff_factor * (2 ** attempt)
+                time.sleep(wait)
+                continue
+            # Either we already started streaming (can't retry) or out of
+            # retries. Yield an error event + stop, then re-raise so the
+            # caller can decide.
+            yield {"type": "error", "message": str(e)[:200]}
+            raise
+        finally:
+            if not released:
+                pool.release_slot(_provider_id, model)
+
+
+def _apply_anthropic_prompt_cache(payload: dict) -> None:
+    """Mark the payload's ``system`` prefix and ``tools`` suffix as cacheable.
+
+    Anthropic prompt caching (GA, Oct-2024) lets you mark specific content
+    blocks with ``cache_control: {"type": "ephemeral"}``.  On a cache hit the
+    marked prefix costs ~10% of normal input tokens; on a cache write it
+    costs ~125% (amortized after one hit).  TTL is 5 minutes.
+
+    Strategy — use 2 of the 4 available breakpoints:
+      • system  → convert string to [{text, cache_control}]  (prefix boundary)
+      • tools   → cache_control on LAST tool                  (suffix boundary)
+
+    We leave the other 2 breakpoints for future message-prefix caching.
+
+    Environment toggle: ``TUDOU_ANTHROPIC_CACHE=0`` disables entirely
+    (useful for debugging or if the account is not on a cache-eligible tier).
+
+    No-op when prompts are too short — Anthropic silently ignores markers on
+    prefixes below the min-cacheable-tokens threshold (1024 Haiku / 2048
+    Sonnet/Opus), so over-marking is safe.
+    """
+    import os as _os
+    if _os.environ.get("TUDOU_ANTHROPIC_CACHE", "1") == "0":
+        return
+
+    # ── system: string → block list with cache_control ──
+    sys_val = payload.get("system")
+    if isinstance(sys_val, str) and sys_val.strip():
+        payload["system"] = [{
+            "type": "text",
+            "text": sys_val,
+            "cache_control": {"type": "ephemeral"},
+        }]
+    elif isinstance(sys_val, list) and sys_val:
+        # Already block list — mark the LAST text block if unmarked.
+        last = sys_val[-1]
+        if isinstance(last, dict) and "cache_control" not in last:
+            last["cache_control"] = {"type": "ephemeral"}
+
+    # ── tools: mark last tool as cache boundary ──
+    tools = payload.get("tools")
+    if isinstance(tools, list) and tools:
+        last_tool = tools[-1]
+        if isinstance(last_tool, dict) and "cache_control" not in last_tool:
+            last_tool["cache_control"] = {"type": "ephemeral"}
+
+
 def _claude_chat(base_url: str, api_key: str,
                  messages: list[dict], tools: list[dict] | None = None,
                  stream: bool = False, model: str = "",
-                 _provider_id: str = "claude") -> dict | Generator:
+                 _provider_id: str = "claude",
+                 tool_choice: dict | str | None = None) -> dict | Generator:
     url = base_url.rstrip("/") + "/v1/messages"
     pool = get_connection_pool()
 
@@ -1899,12 +2389,29 @@ def _claude_chat(base_url: str, api_key: str,
         "max_tokens": 8192,
         "messages": api_messages,
     }
-    _TIMEOUT = (15, 180)  # 15s connect, 180s read
+    _TIMEOUT = _REQUEST_TIMEOUT
 
     if system_text.strip():
         payload["system"] = system_text.strip()
     if claude_tools:
         payload["tools"] = claude_tools
+        # Plan D: translate OpenAI-style tool_choice to Anthropic format.
+        #   OpenAI:    {"type":"function","function":{"name":"X"}} | "auto" | "required"
+        #   Anthropic: {"type":"tool","name":"X"} | {"type":"auto"} | {"type":"any"}
+        if tool_choice:
+            _tc = tool_choice
+            if isinstance(_tc, dict) and _tc.get("type") == "function":
+                _fn_name = (_tc.get("function") or {}).get("name")
+                if _fn_name:
+                    payload["tool_choice"] = {"type": "tool", "name": _fn_name}
+            elif _tc == "required":
+                payload["tool_choice"] = {"type": "any"}
+            elif _tc == "auto":
+                payload["tool_choice"] = {"type": "auto"}
+            elif isinstance(_tc, dict) and _tc.get("type") in ("tool", "auto", "any"):
+                # Already Anthropic-native
+                payload["tool_choice"] = _tc
+    _apply_anthropic_prompt_cache(payload)
 
     if not stream:
         resp = pool.request_with_retry(
@@ -1912,7 +2419,19 @@ def _claude_chat(base_url: str, api_key: str,
             json=payload, timeout=_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
-        result: dict = {"message": {"role": "assistant", "content": ""}}
+        # Anthropic returns stop_reason at top level:
+        #   end_turn | tool_use | max_tokens | stop_sequence
+        # Normalize to canonical set used throughout Tudou.
+        _CLAUDE_STOP_MAP = {
+            "end_turn": "end_turn",
+            "tool_use": "tool_use",
+            "max_tokens": "length",
+            "stop_sequence": "stop_sequence",
+        }
+        _raw_sr = data.get("stop_reason") or "end_turn"
+        stop_reason = _CLAUDE_STOP_MAP.get(_raw_sr, _raw_sr)
+        result: dict = {"message": {"role": "assistant", "content": ""},
+                        "stop_reason": stop_reason}
         tool_calls = []
         for block in data.get("content", []):
             if block["type"] == "text":
@@ -1936,6 +2455,18 @@ def _claude_chat(base_url: str, api_key: str,
                 completion_tokens=_u.get("output_tokens", 0),
                 stream=False,
             )
+            # Cache observability — surface hit/miss + savings so users can
+            # tell whether TUDOU_ANTHROPIC_CACHE is actually working.
+            _cr = _u.get("cache_read_input_tokens", 0) or 0
+            _cw = _u.get("cache_creation_input_tokens", 0) or 0
+            if _cr or _cw:
+                # Cache read costs ~10% of normal; cache write ~125%.
+                # Rough saved-tokens estimate: read * 0.9 - write * 0.25
+                _saved = int(_cr * 0.9 - _cw * 0.25)
+                logger.info(
+                    "[cache] model=%s read=%d write=%d (≈saved %d in-tokens)",
+                    model, _cr, _cw, _saved,
+                )
         except Exception as _te:
             logger.debug("token usage log failed: %s", _te)
         return result
@@ -1997,6 +2528,297 @@ def _claude_chat(base_url: str, api_key: str,
         return _gen()
 
 
+def _claude_stream_events(base_url: str, api_key: str,
+                          messages: list[dict],
+                          tools: list[dict] | None = None,
+                          model: str = "",
+                          _provider_id: str = "claude"
+                          ) -> Generator[dict, None, None]:
+    """Anthropic streaming with full tool_use event support.
+
+    Parses the complete SSE event grammar:
+      message_start        → initial usage.input_tokens
+      content_block_start  → text or tool_use block begin (emit tool_use_start)
+      content_block_delta  → text_delta or input_json_delta (emit text_delta /
+                             tool_input_delta)
+      content_block_stop   → finalise tool_use (emit tool_use_complete)
+      message_delta        → incremental usage.output_tokens, stop_reason
+      message_stop         → end (emit usage + stop)
+    """
+    url = base_url.rstrip("/") + "/v1/messages"
+    pool = get_connection_pool()
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+    }
+
+    # Mirror _claude_chat's message transformation (system flattening,
+    # multimodal conversion, tool_result wrapping). To avoid code
+    # duplication we reuse the same pre-processing pattern locally.
+    system_text = ""
+    api_messages: list[dict] = []
+    for m in messages:
+        if m["role"] == "system":
+            c = m.get("content", "")
+            system_text += (_ensure_str(c) if not isinstance(c, str) else c) + "\n"
+        elif m["role"] == "tool":
+            api_messages.append({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": m.get("tool_use_id", "tool_0"),
+                    "content": m["content"],
+                }],
+            })
+        else:
+            content = m.get("content", "")
+            if isinstance(content, list) and m["role"] == "user":
+                claude_parts = []
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    ptype = part.get("type", "")
+                    if ptype == "text":
+                        claude_parts.append(
+                            {"type": "text", "text": part.get("text", "")})
+                    elif ptype == "image_url":
+                        _url = (part.get("image_url") or {}).get("url", "")
+                        if _url.startswith("data:"):
+                            header, _, b64data = _url.partition(",")
+                            media_type = header.split(
+                                "data:", 1)[-1].split(";")[0]
+                            claude_parts.append({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type or "image/png",
+                                    "data": b64data,
+                                },
+                            })
+                        else:
+                            claude_parts.append({
+                                "type": "image",
+                                "source": {"type": "url", "url": _url},
+                            })
+                    elif ptype in ("image", "input_image"):
+                        claude_parts.append(part)
+                content = claude_parts if claude_parts else _ensure_str(content)
+            elif not isinstance(content, str):
+                content = _ensure_str(content)
+            api_messages.append({"role": m["role"], "content": content})
+
+    claude_tools = None
+    valid_tools = _validate_tools(tools)
+    if valid_tools:
+        claude_tools = []
+        for t in valid_tools:
+            func = t["function"]
+            claude_tools.append({
+                "name": func["name"],
+                "description": func.get("description", ""),
+                "input_schema": func.get(
+                    "parameters", {"type": "object", "properties": {}}),
+            })
+
+    payload: dict = {
+        "model": model,
+        "max_tokens": 8192,
+        "messages": api_messages,
+        "stream": True,
+    }
+    if system_text.strip():
+        payload["system"] = system_text.strip()
+    if claude_tools:
+        payload["tools"] = claude_tools
+        # Plan D: translate OpenAI-style tool_choice to Anthropic format.
+        #   OpenAI:    {"type":"function","function":{"name":"X"}} | "auto" | "required"
+        #   Anthropic: {"type":"tool","name":"X"} | {"type":"auto"} | {"type":"any"}
+        if tool_choice:
+            _tc = tool_choice
+            if isinstance(_tc, dict) and _tc.get("type") == "function":
+                _fn_name = (_tc.get("function") or {}).get("name")
+                if _fn_name:
+                    payload["tool_choice"] = {"type": "tool", "name": _fn_name}
+            elif _tc == "required":
+                payload["tool_choice"] = {"type": "any"}
+            elif _tc == "auto":
+                payload["tool_choice"] = {"type": "auto"}
+            elif isinstance(_tc, dict) and _tc.get("type") in ("tool", "auto", "any"):
+                # Already Anthropic-native
+                payload["tool_choice"] = _tc
+    _apply_anthropic_prompt_cache(payload)
+
+    session = pool.get_session(_provider_id)
+    max_retries = pool.max_retries
+
+    for attempt in range(max_retries + 1):
+        pool.acquire_slot(_provider_id, model)
+        released = False
+        # Per-attempt state
+        current_block_type: str | None = None
+        current_tool_id: str | None = None
+        current_tool_name: str | None = None
+        current_tool_buf: list[str] = []
+        input_tokens = 0
+        output_tokens = 0
+        stop_reason: str | None = None
+        first_event_yielded = False
+
+        try:
+            with session.post(url, headers=headers, json=payload,
+                              stream=True, timeout=_REQUEST_TIMEOUT) as resp:
+                if resp.status_code == 429 and not first_event_yielded:
+                    retry_after = resp.headers.get("Retry-After")
+                    wait = float(retry_after) if retry_after else (
+                        pool.backoff_factor * (2 ** attempt))
+                    wait = min(wait, 60)
+                    logger.warning(
+                        "Claude stream_events 429 (attempt %d/%d), "
+                        "retrying in %.1fs...",
+                        attempt + 1, max_retries + 1, wait)
+                    pool.release_slot(_provider_id, model)
+                    released = True
+                    time.sleep(wait)
+                    continue
+                resp.raise_for_status()
+
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    text = line.decode("utf-8", errors="replace")
+                    if text.startswith("data: "):
+                        text = text[6:]
+                    # Claude also emits lines like "event: message_start" which
+                    # we ignore (redundant with the type field in data).
+                    if not text.startswith("{"):
+                        continue
+                    try:
+                        event = json.loads(text)
+                    except json.JSONDecodeError:
+                        continue
+
+                    etype = event.get("type")
+
+                    if etype == "message_start":
+                        msg = event.get("message") or {}
+                        usage = msg.get("usage") or {}
+                        input_tokens = usage.get(
+                            "input_tokens", 0) or input_tokens
+
+                    elif etype == "content_block_start":
+                        block = event.get("content_block") or {}
+                        current_block_type = block.get("type")
+                        if current_block_type == "tool_use":
+                            current_tool_id = block.get("id") or \
+                                f"toolu_{uuid.uuid4().hex[:8]}"
+                            current_tool_name = block.get("name") or ""
+                            current_tool_buf = []
+                            yield {
+                                "type": "tool_use_start",
+                                "id": current_tool_id,
+                                "name": current_tool_name,
+                            }
+                            first_event_yielded = True
+
+                    elif etype == "content_block_delta":
+                        delta = event.get("delta") or {}
+                        dtype = delta.get("type")
+                        if dtype == "text_delta":
+                            t = delta.get("text", "")
+                            if t:
+                                yield {"type": "text_delta", "text": t}
+                                first_event_yielded = True
+                        elif dtype == "input_json_delta":
+                            partial = delta.get("partial_json", "")
+                            if partial:
+                                current_tool_buf.append(partial)
+                                yield {
+                                    "type": "tool_input_delta",
+                                    "id": current_tool_id,
+                                    "partial_json": partial,
+                                }
+                                first_event_yielded = True
+
+                    elif etype == "content_block_stop":
+                        if current_block_type == "tool_use" and current_tool_id:
+                            full_json = "".join(current_tool_buf)
+                            try:
+                                inp = json.loads(full_json) if full_json else {}
+                            except json.JSONDecodeError:
+                                logger.warning(
+                                    "claude tool_input JSON parse failed "
+                                    "(id=%s, name=%s, len=%d) — falling back "
+                                    "to raw",
+                                    current_tool_id, current_tool_name,
+                                    len(full_json))
+                                inp = {"_raw": full_json}
+                            yield {
+                                "type": "tool_use_complete",
+                                "id": current_tool_id,
+                                "name": current_tool_name,
+                                "input": inp if isinstance(inp, dict)
+                                    else {"_raw": full_json},
+                            }
+                        current_block_type = None
+                        current_tool_id = None
+                        current_tool_name = None
+                        current_tool_buf = []
+
+                    elif etype == "message_delta":
+                        usage = event.get("usage") or {}
+                        if usage:
+                            output_tokens = usage.get(
+                                "output_tokens", output_tokens) or output_tokens
+                        d = event.get("delta") or {}
+                        if d.get("stop_reason"):
+                            stop_reason = d.get("stop_reason")
+
+                    elif etype == "message_stop":
+                        break
+
+                # Emit final usage + stop
+                if input_tokens or output_tokens:
+                    yield {
+                        "type": "usage",
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                    }
+                    try:
+                        _log_token_usage(
+                            provider=_provider_id or "claude",
+                            model=model,
+                            prompt_tokens=input_tokens,
+                            completion_tokens=output_tokens,
+                            stream=True,
+                        )
+                    except Exception as _te:
+                        logger.debug("token usage log failed: %s", _te)
+
+                yield {
+                    "type": "stop",
+                    "reason": stop_reason or "end_turn",
+                }
+                return
+
+        except (requests.ConnectionError, requests.Timeout) as e:
+            if not first_event_yielded and attempt < max_retries:
+                logger.warning(
+                    "Claude stream_events connection error "
+                    "(attempt %d/%d): %s",
+                    attempt + 1, max_retries + 1, str(e)[:100])
+                pool.release_slot(_provider_id, model)
+                released = True
+                wait = pool.backoff_factor * (2 ** attempt)
+                time.sleep(wait)
+                continue
+            yield {"type": "error", "message": str(e)[:200]}
+            raise
+        finally:
+            if not released:
+                pool.release_slot(_provider_id, model)
+
+
 # Protocol dispatch
 _PROTOCOL_HANDLERS = {
     "ollama": _ollama_chat,
@@ -2039,7 +2861,8 @@ def _resolve_provider(provider_id: str) -> ProviderEntry | None:
 
 def _chat_with_fallback(messages: list[dict], tools: list[dict] | None = None,
                         stream: bool = False, model: str = "",
-                        provider_chain: list[ProviderEntry] | None = None
+                        provider_chain: list[ProviderEntry] | None = None,
+                        tool_choice: dict | str | None = None
                         ) -> dict | Generator[str, None, None]:
     """
     Internal function that tries providers in a fallback chain.
@@ -2085,7 +2908,7 @@ def _chat_with_fallback(messages: list[dict], tools: list[dict] | None = None,
 
             return handler(entry.base_url, entry.api_key,
                            msgs_to_send, tools=tools, stream=stream, model=model,
-                           _provider_id=entry.id)
+                           _provider_id=entry.id, tool_choice=tool_choice)
 
         except (requests.ConnectionError, requests.Timeout) as e:
             last_error = e
@@ -2119,7 +2942,8 @@ def _chat_with_fallback(messages: list[dict], tools: list[dict] | None = None,
 
 def chat(messages: list[dict], tools: list[dict] | None = None,
          stream: bool = False,
-         provider: str = "", model: str = "") -> dict | Generator[str, None, None]:
+         provider: str = "", model: str = "",
+         tool_choice: dict | str | None = None) -> dict | Generator[str, None, None]:
     """
     Send a chat request to an LLM backend with automatic fallback chain support.
 
@@ -2135,9 +2959,22 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
     Returns normalised Ollama-format dict (non-stream) or text-chunk generator.
     Raises: ValueError if provider not found, or last exception if all providers in chain fail.
     """
+    # Caller MUST pass an explicit provider + model. Global config is
+    # NOT a fallback source — agents without a bound LLM are expected to
+    # fail fast here so the UI can prompt for selection.
     cfg = get_config()
     prov_id = provider or cfg["provider"]
     mdl = model or cfg["model"]
+
+    # Safety net: if BOTH the caller AND global config are empty there's
+    # nothing to call. Agent-chat has a STRICT gate earlier (REST layer
+    # returns 409 NO_LLM_CONFIGURED before reaching chat()). Standalone
+    # tools (REPL, web.py) keep the global-config fallback.
+    if not prov_id or not mdl:
+        raise ValueError(
+            "NO_LLM_CONFIGURED: no LLM provider/model resolved. "
+            "Bind an LLM to this agent or set a global default."
+        )
 
     entry = _resolve_provider(prov_id)
     if entry is None:
@@ -2156,13 +2993,140 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
         provider_chain = [entry]
 
     return _chat_with_fallback(messages, tools=tools, stream=stream,
-                                model=mdl, provider_chain=provider_chain)
+                                model=mdl, provider_chain=provider_chain,
+                                tool_choice=tool_choice)
 
 
 def chat_no_stream(messages: list[dict], tools: list[dict] | None = None,
-                   provider: str = "", model: str = "") -> dict:
+                   provider: str = "", model: str = "",
+                   tool_choice: dict | str | None = None) -> dict:
     """Convenience: always returns a dict (no streaming)."""
     result = chat(messages, tools=tools, stream=False,
-                  provider=provider, model=model)
+                  provider=provider, model=model,
+                  tool_choice=tool_choice)
     assert isinstance(result, dict)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Provider-agnostic streaming with tool_use support
+# ---------------------------------------------------------------------------
+# The legacy chat(stream=True) yields plain text chunks (Generator[str]),
+# which can't carry tool_use decisions. chat_stream_events() is the
+# replacement for callers that want true streaming *and* tool-use events.
+#
+# Event schema (stable contract):
+#   {"type": "text_delta",        "text": "..."}
+#   {"type": "tool_use_start",    "id": "...", "name": "..."}
+#   {"type": "tool_input_delta",  "id": "...", "partial_json": "..."}
+#   {"type": "tool_use_complete", "id": "...", "name": "...", "input": {...}}
+#   {"type": "usage",             "input_tokens": N, "output_tokens": M}
+#   {"type": "stop",              "reason": "end_turn"|"tool_use"|"length"|...}
+#   {"type": "error",             "message": "..."}
+#
+# Fallback-chain semantics: if the primary provider fails *before* yielding
+# the first event (connection refused, 429, etc.), the next provider in the
+# chain is tried. Once the first event has been yielded we are committed to
+# that provider — fallback is best-effort, not transactional.
+# ---------------------------------------------------------------------------
+
+def _dispatch_stream_events(entry: "ProviderEntry",
+                            messages: list[dict],
+                            tools: list[dict] | None,
+                            model: str
+                            ) -> Generator[dict, None, None]:
+    """Route to the right provider-specific stream parser based on kind."""
+    kind = entry.kind
+    if kind == "claude":
+        return _claude_stream_events(
+            entry.base_url, entry.api_key,
+            messages, tools=tools, model=model,
+            _provider_id=entry.id,
+        )
+    # ollama / openai / unsloth / any other OpenAI-compat server
+    return _openai_stream_events(
+        entry.base_url, entry.api_key,
+        messages, tools=tools, model=model,
+        _provider_id=entry.id,
+    )
+
+
+def chat_stream_events(messages: list[dict],
+                       tools: list[dict] | None = None,
+                       provider: str = "",
+                       model: str = ""
+                       ) -> Generator[dict, None, None]:
+    """Unified streaming entry yielding provider-agnostic event dicts.
+
+    This is the tool-aware replacement for `chat(messages, stream=True)`.
+    The older function is preserved for backward compatibility (it yields
+    plain text strings and drops tool decisions).
+
+    Args:
+        provider: Provider ID from registry. Empty = global config default.
+        model:    Model name. Empty = global config default.
+
+    Yields:
+        dict events per the schema documented at the top of this section.
+
+    Raises:
+        ValueError if provider not found.
+        Last encountered exception if all providers in the fallback chain
+        fail before producing any event.
+    """
+    # Caller MUST pass an explicit provider + model. Global config is
+    # NOT a fallback source — agents without a bound LLM are expected to
+    # fail fast here so the UI can prompt for selection.
+    cfg = get_config()
+    prov_id = provider or cfg["provider"]
+    mdl = model or cfg["model"]
+
+    # Safety net: if BOTH the caller AND global config are empty there's
+    # nothing to call. Agent-chat has a STRICT gate earlier (REST layer
+    # returns 409 NO_LLM_CONFIGURED before reaching chat()). Standalone
+    # tools (REPL, web.py) keep the global-config fallback.
+    if not prov_id or not mdl:
+        raise ValueError(
+            "NO_LLM_CONFIGURED: no LLM provider/model resolved. "
+            "Bind an LLM to this agent or set a global default."
+        )
+
+    entry = _resolve_provider(prov_id)
+    if entry is None:
+        raise ValueError(
+            f"Unknown provider: {prov_id!r}. "
+            f"Available: {list_providers()}"
+        )
+
+    reg = get_registry()
+    provider_chain = reg.get_fallback_chain(entry.id)
+    if not provider_chain:
+        provider_chain = [entry]
+
+    last_error: Exception | None = None
+    for idx, pentry in enumerate(provider_chain):
+        try:
+            gen_iter = iter(_dispatch_stream_events(
+                pentry, messages, tools, mdl))
+            # Pull the first event here so we can fall over to the next
+            # provider on a pre-stream error (connection refused, 429, DNS).
+            try:
+                first = next(gen_iter)
+            except StopIteration:
+                return  # empty stream — shouldn't happen, but treat as success
+            yield first
+            for ev in gen_iter:
+                yield ev
+            return
+        except (requests.ConnectionError, requests.Timeout,
+                requests.HTTPError) as e:
+            last_error = e
+            if idx < len(provider_chain) - 1:
+                logger.warning(
+                    "stream_events provider %s failed (%s); trying next",
+                    pentry.id, str(e)[:120])
+                continue
+            raise
+
+    if last_error:
+        raise last_error

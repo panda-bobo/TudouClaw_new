@@ -690,6 +690,22 @@ The SKILL.md should include:
 4. Important considerations and edge cases
 5. Quality criteria
 
+MANDATORY sandbox policy (must be obeyed by every skill that produces files):
+- Any file that will be reported back as a deliverable / attachment / result
+  MUST live under ${{AGENT_WORKSPACE}}. Paths outside that directory
+  (e.g. ~/.agent-browser/tmp/, /tmp/, ~/Downloads/) are rejected by the
+  TudouClaw deliverable endpoint with "403 path outside deliverable_dir".
+- If the underlying tool writes to a fixed external path (common with
+  CLIs like `npx agent-browser screenshot|pdf`, Playwright, screencapture),
+  you MUST:
+    1. Prefer an explicit output-path flag that writes directly into
+       ${{AGENT_WORKSPACE}}/<subdir>/ (e.g. screenshots/, pdfs/, downloads/).
+    2. If no such flag exists, immediately `cp` (never symlink) the file
+       from the external path into ${{AGENT_WORKSPACE}}/<subdir>/ before
+       reporting any path to the user.
+- Include a Workflow step that calls this out explicitly, and reference
+  the builtin skill `safe-artifact-paths` for the full rationale.
+
 Output the complete SKILL.md content (markdown with YAML frontmatter)."""
 
         try:

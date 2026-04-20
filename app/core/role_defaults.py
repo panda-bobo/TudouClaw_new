@@ -51,7 +51,14 @@ ROLE_DEFAULTS: dict[str, RoleDefaults] = {
             "take_screenshot",
             "send_email",
         ],
-        prompt_pack_names=[],
+        # safe-artifact-paths: enforces that every file reported as a
+        # deliverable lives under $AGENT_WORKSPACE (avoids the
+        # 403 "path outside deliverable_dir" sandbox rejection).
+        # action-first: enforces "act, don't announce" — the single biggest
+        # source of wasted turns is the agent saying "Let me fix it:" and
+        # then stopping without calling a tool. Hard rules + decision ladder.
+        # Both bound at the 'general' baseline so ALL roles inherit.
+        prompt_pack_names=["safe-artifact-paths", "action-first"],
     ),
 
     # Product / leadership
@@ -65,25 +72,58 @@ ROLE_DEFAULTS: dict[str, RoleDefaults] = {
     ),
     "pm": RoleDefaults(
         skill_names=["send_email", "take_screenshot"],
-        prompt_pack_names=[],
+        # brainstorming: general ideation skill vendored from obra/superpowers
+        prompt_pack_names=["brainstorming"],
     ),
 
     # Engineering
+    # ── Superpowers auto-binding (vendored from obra/superpowers) ──
+    # 8 core engineering skills are bound to 'coder' by default; three roles
+    # (reviewer / architect / tester) receive targeted subsets; 'pm' gets the
+    # general ideation skill 'brainstorming'. Catalog-only (disabled by
+    # default): using-git-worktrees, using-superpowers, writing-skills,
+    # dispatching-parallel-agents, subagent-driven-development.
+    # See app/skills/builtin/superpowers/README.md for rationale.
     "coder": RoleDefaults(
         skill_names=["take_screenshot"],
-        prompt_pack_names=["code-review-guide"],
+        prompt_pack_names=[
+            "code-review-guide",
+            "test-driven-development",
+            "systematic-debugging",
+            "verification-before-completion",
+            "writing-plans",
+            "executing-plans",
+            "requesting-code-review",
+            "receiving-code-review",
+            "finishing-a-development-branch",
+        ],
     ),
     "reviewer": RoleDefaults(
         skill_names=[],
-        prompt_pack_names=["code-review-guide"],
+        prompt_pack_names=[
+            "code-review-guide",
+            "receiving-code-review",
+            "requesting-code-review",
+            "verification-before-completion",
+        ],
     ),
     "architect": RoleDefaults(
         skill_names=["take_screenshot"],
-        prompt_pack_names=["code-review-guide"],
+        prompt_pack_names=[
+            "code-review-guide",
+            "writing-plans",
+            "executing-plans",
+            "systematic-debugging",
+        ],
     ),
     "tester": RoleDefaults(
         skill_names=["take_screenshot"],
-        prompt_pack_names=[],
+        prompt_pack_names=[
+            "test-driven-development",
+            "verification-before-completion",
+            # web-automator: end-to-end browser testing via `npx agent-browser`
+            "web-automator",
+        ],
     ),
     "devops": RoleDefaults(
         skill_names=["take_screenshot", "send_email"],
@@ -97,7 +137,10 @@ ROLE_DEFAULTS: dict[str, RoleDefaults] = {
     ),
     "researcher": RoleDefaults(
         skill_names=["take_screenshot"],
-        prompt_pack_names=[],
+        prompt_pack_names=[
+            # web-automator: scrape / snapshot / PDF-capture pages during research
+            "web-automator",
+        ],
     ),
     "data": RoleDefaults(
         skill_names=["take_screenshot"],

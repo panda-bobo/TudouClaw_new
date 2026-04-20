@@ -21,6 +21,8 @@ def _get_workflow_or_404(hub, workflow_id: str):
         if not workflow:
             raise HTTPException(status_code=404, detail=f"Workflow '{workflow_id}' not found")
         return workflow
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -39,6 +41,8 @@ async def list_workflows(
         workflows = hub.list_workflows() if hasattr(hub, "list_workflows") else []
         workflows_list = [w.to_dict() if hasattr(w, "to_dict") else w for w in workflows]
         return {"workflows": workflows_list}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -125,6 +129,8 @@ async def manage_workflows(
             return {"ok": True}
         else:
             raise HTTPException(400, f"Unknown action: {action}")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

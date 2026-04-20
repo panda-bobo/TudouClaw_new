@@ -30,6 +30,8 @@ async def list_channels(
         return {"channels": [ch.to_dict(mask_secrets=True) for ch in channels]}
     except ImportError:
         return {"channels": []}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -48,6 +50,8 @@ async def get_channel_events(
         return {"events": events}
     except ImportError:
         return {"events": []}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -70,6 +74,8 @@ async def get_channel(
         raise
     except ImportError:
         raise HTTPException(501, "Channel module not available")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -101,6 +107,8 @@ async def create_channel(
         return ch.to_dict(mask_secrets=True)
     except ImportError:
         raise HTTPException(501, "Channel module not available")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -132,6 +140,8 @@ async def update_channel(
         raise
     except ImportError:
         raise HTTPException(501, "Channel module not available")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -150,6 +160,8 @@ async def delete_channel(
         return {"ok": ok}
     except ImportError:
         raise HTTPException(501, "Channel module not available")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -173,6 +185,8 @@ async def channel_webhook(
         return result
     except ImportError:
         raise HTTPException(501, "Channel module not available")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -226,5 +240,7 @@ async def test_channel(
         return resp
     except ImportError:
         raise HTTPException(501, "Channel module not available")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

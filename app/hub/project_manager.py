@@ -39,18 +39,39 @@ class ProjectManager(ManagerBase):
                        workflow_id: str = "",
                        step_assignments: list[dict] | None = None) -> Project:
         from ..project import Project
+        from ..agent import Agent
+        import os as _os
 
         proj = Project(name=name, description=description,
                        working_directory=working_directory, node_id=node_id)
+
+        # Canonical project working directory = shared workspace, derived from
+        # the generated project id. If the caller didn't provide one, use the
+        # shared path so the UI (project detail, chat header, etc.) always has
+        # a concrete value every member can see.
+        if not proj.working_directory:
+            proj.working_directory = Agent.get_shared_workspace_path(proj.id)
+
+        # Materialize the shared directory on disk — agents will drop
+        # deliverables here; the deliverables API scans it.
+        try:
+            shared_dir = Agent.get_shared_workspace_path(proj.id)
+            _os.makedirs(shared_dir, exist_ok=True)
+        except OSError:
+            pass
+
         if member_configs:
             for mc in member_configs:
                 agent_id = mc.get("agent_id", "")
                 proj.add_member(agent_id,
                                 mc.get("responsibility", ""))
-                # Sync project working_directory to member agent
-                if working_directory and agent_id:
+                # Every member must have its shared_workspace hooked up at
+                # creation time — previously this only happened when the user
+                # typed a working_directory, so members created without one had
+                # to wait for the next server restart to be synced.
+                if agent_id:
                     self._sync_agent_to_project_dir(
-                        agent_id, working_directory,
+                        agent_id, proj.working_directory,
                         project_id=proj.id, project_name=proj.name)
 
         # Workflow 绑定
@@ -61,8 +82,8 @@ class ProjectManager(ManagerBase):
         with self._lock:
             self._hub.projects[proj.id] = proj
         self._hub._save_projects()
-        if working_directory:
-            self._hub._save_agents()
+        # shared_workspace changed on every member → persist agents unconditionally
+        self._hub._save_agents()
         return proj
 
     def get_project(self, project_id: str) -> Project | None:
@@ -70,11 +91,27 @@ class ProjectManager(ManagerBase):
 
     def remove_project(self, project_id: str) -> bool:
         with self._lock:
-            if project_id in self._hub.projects:
-                del self._hub.projects[project_id]
-                self._hub._save_projects()
-                return True
-        return False
+            if project_id not in self._hub.projects:
+                return False
+            del self._hub.projects[project_id]
+            self._hub._save_projects()
+
+            # ``_save_projects`` now does sync-delete, but call the DB
+            # delete explicitly as a belt-and-braces guarantee.
+            try:
+                db = getattr(self, "_db", None) or getattr(self._hub, "_db", None)
+            except Exception:
+                db = None
+            if db is not None:
+                try:
+                    if hasattr(db, "delete_project"):
+                        db.delete_project(project_id)
+                    else:
+                        db.delete("projects", "project_id", project_id)
+                except Exception as e:
+                    logger.warning(
+                        "remove_project: DB row delete failed: %s", e)
+        return True
 
     def list_projects(self) -> list[dict]:
         return [p.to_dict() for p in self._hub.projects.values()]
@@ -224,6 +261,10 @@ class ProjectManager(ManagerBase):
             agent.project_id = project_id
         if project_name:
             agent.project_name = project_name
+        # Mark routing context: all deliverables must go to shared_dir.
+        # (Set unconditionally when binding to a project — overrides any
+        # stale "solo" value from when the agent was created standalone.)
+        agent.context_type = "project"
         # Ensure the shared directory exists (skip if path is invalid)
         try:
             os.makedirs(shared_dir, exist_ok=True)

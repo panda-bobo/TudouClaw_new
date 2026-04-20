@@ -1559,6 +1559,62 @@ function _removeProgressBar(agentId) {
   if(bar && bar.parentNode) bar.remove();
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Handoff handshake badge — 3-state inline bubble that tracks A → B handoff.
+// Anchored by handoff_id so subsequent events (acked/completed/failed)
+// update the SAME DOM node in place.
+// ─────────────────────────────────────────────────────────────────────────
+function _renderHandoffBadge(agentId, handoffId, info) {
+  if (!handoffId) return;
+  var host = document.getElementById('chat-msgs-' + agentId);
+  if (!host) return;
+  var badgeId = 'handoff-badge-' + agentId + '-' + handoffId;
+  var el = document.getElementById(badgeId);
+  if (!el) {
+    el = document.createElement('div');
+    el.id = badgeId;
+    el.className = 'chat-msg handoff-badge';
+    el.style.cssText = [
+      'margin:6px 0', 'padding:8px 12px',
+      'border-radius:10px', 'border:1px solid var(--border,rgba(255,255,255,0.08))',
+      'background:var(--surface2,rgba(255,255,255,0.04))',
+      'font-size:13px', 'display:flex', 'flex-direction:column', 'gap:4px',
+    ].join(';');
+    host.appendChild(el);
+  }
+  var state = (info && info.state) || 'pending';
+  var to = esc((info && info.to) || '?');
+  var icon, stateLabel, color;
+  if (state === 'pending') {
+    icon = '⏳'; stateLabel = '等待签收'; color = 'var(--warning,#e0a84e)';
+  } else if (state === 'acked') {
+    icon = '✅'; stateLabel = '已签收·处理中'; color = 'var(--primary,#7c6cf1)';
+  } else if (state === 'completed') {
+    icon = '✔️'; stateLabel = '已完成'; color = 'var(--success,#4caf50)';
+  } else if (state === 'failed') {
+    icon = '✗'; stateLabel = '失败'; color = 'var(--error,#ef5350)';
+  } else {
+    icon = '•'; stateLabel = state; color = 'var(--text3,#888)';
+  }
+  var topLine =
+    '<div style="display:flex;align-items:center;gap:8px">' +
+      '<span style="font-size:16px">' + icon + '</span>' +
+      '<span style="color:' + color + ';font-weight:600">' + esc(stateLabel) + '</span>' +
+      '<span style="color:var(--text3,#888)">→</span>' +
+      '<span style="font-weight:500">@' + to + '</span>' +
+      '<span style="color:var(--text3,#888);font-size:11px;margin-left:auto">handoff·' + esc(handoffId) + '</span>' +
+    '</div>';
+  var subLine = '';
+  if (state === 'pending' && info && info.task) {
+    subLine = '<div style="color:var(--text2,#aaa);font-size:12px">' + esc((info.task||'').slice(0,140)) + '</div>';
+  } else if (state === 'completed' && info && info.preview) {
+    subLine = '<div style="color:var(--text2,#aaa);font-size:12px">↳ ' + esc(info.preview.slice(0,180)) + '</div>';
+  } else if (state === 'failed' && info && info.error) {
+    subLine = '<div style="color:var(--error,#ef5350);font-size:12px">' + esc(info.error.slice(0,180)) + '</div>';
+  }
+  el.innerHTML = topLine + subLine;
+}
+
 async function _abortTask(agentId) {
   var stream = _activeTaskStreams[agentId];
   if (!stream) return;
@@ -1751,6 +1807,35 @@ async function _streamTaskEvents(agentId, taskId, thinkDiv, progressBar) {
               if (!msgDiv) { msgDiv = addChatBubble(agentId, 'assistant', ''); }
               msgDiv.textContent = '✗ '+evt.content;
               msgDiv.style.color='var(--error)';
+            } else if(evt.type==='handoff_sent') {
+              // 3-state handoff handshake: render inline badge bubble
+              if (thinkDiv.parentNode) thinkDiv.remove();
+              _renderHandoffBadge(agentId, evt.handoff_id, {
+                state: 'pending',
+                to: evt.to_agent_name || evt.to_agent_id || '?',
+                task: evt.task || '',
+              });
+              _updateProgress(agentId, 0, '⏳ Handoff → ' + esc(evt.to_agent_name||'?'));
+            } else if(evt.type==='handoff_acked') {
+              _renderHandoffBadge(agentId, evt.handoff_id, {
+                state: 'acked',
+                to: evt.to_agent_name || '?',
+              });
+              _updateProgress(agentId, 0, '✅ ' + esc(evt.to_agent_name||'?') + ' working...');
+            } else if(evt.type==='handoff_completed') {
+              _renderHandoffBadge(agentId, evt.handoff_id, {
+                state: 'completed',
+                to: evt.to_agent_name || '?',
+                preview: evt.result_preview || '',
+              });
+              _updateProgress(agentId, 0, 'Thinking...');
+            } else if(evt.type==='handoff_failed') {
+              _renderHandoffBadge(agentId, evt.handoff_id, {
+                state: 'failed',
+                to: evt.to_agent_name || '?',
+                error: evt.error || '',
+              });
+              _updateProgress(agentId, 0, 'Thinking...');
             } else if(evt.type==='done') {
               taskDone = true;
               // Backfill: scan deliverable_dir + match against bubbles

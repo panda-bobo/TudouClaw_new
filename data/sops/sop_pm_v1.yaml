@@ -1,0 +1,72 @@
+# Product Manager SOP — v1
+# 4 stages: intake → prioritize → draft_prd → validate
+
+sop_id: sop_pm_v1
+display_name: 产品经理标准流程
+version: 1
+
+stages:
+  - id: intake
+    display_name: 需求采集
+    goal: |
+      收集并理解业务诉求：来源（用户/运营/业务方）、场景、痛点、期望结果。
+    guidance: |
+      1. 确认诉求来源和原始语境
+      2. 使用 5W（Why/Who/What/When/Where）结构化归纳
+      3. 如关键字段缺失，显式列出待补充项
+    exit_condition:
+      type: contains_section
+      spec:
+        heading_patterns: ["## 需求概述", "## Background", "## 背景"]
+        min_content_length: 80
+    allow_rollback: false
+    next: prioritize
+
+  - id: prioritize
+    display_name: 优先级评估
+    goal: |
+      基于 RICE 或 P0/P1/P2 框架给出优先级，并说明依据。
+    guidance: |
+      - 若采用 RICE：给出 Reach、Impact、Confidence、Effort 各维度的取值
+      - 若采用 P0/P1/P2：说明影响面与紧迫度
+      - 输出一张简洁的优先级矩阵或表格
+    exit_condition:
+      type: regex
+      spec:
+        pattern: "(RICE|P[0-3]|优先级)"
+    allow_rollback: true
+    rollback_to: intake
+    next: draft_prd
+
+  - id: draft_prd
+    display_name: 撰写 PRD
+    goal: |
+      输出 PRD 主体：用户故事、验收标准、关键度量、非功能约束。
+    guidance: |
+      - 用户故事：作为 X，我希望 Y，以便 Z
+      - 每个故事配 AC（Given/When/Then）
+      - 说明成功指标（Metric / North Star）
+      - 附 JSON 表达的 user_stories 便于工具下游消费
+    exit_condition:
+      type: contains_section
+      spec:
+        heading_patterns: ["## 用户故事", "## User Stor", "## 验收标准"]
+    allow_rollback: true
+    rollback_to: prioritize
+    next: validate
+
+  - id: validate
+    display_name: 自我校验
+    goal: |
+      检查 PRD 是否覆盖所有利益相关方、指标是否可度量、AC 是否可测试。
+    guidance: |
+      快速自检：
+      1. 有无遗漏的角色 / 场景
+      2. 指标是否 SMART
+      3. AC 是否每条都可观测
+      4. 风险和依赖是否列出
+    exit_condition:
+      type: any
+    allow_rollback: true
+    rollback_to: draft_prd
+    next: null

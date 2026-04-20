@@ -193,6 +193,8 @@ async def list_mcp_sources(
         return {"items": items}
     except ImportError:
         return {"items": []}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -232,6 +234,8 @@ async def get_mcp_source(
         raise
     except ImportError:
         raise HTTPException(404, "MCP catalog not available")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -301,6 +305,8 @@ async def save_mcp_source(
         raise
     except ImportError:
         raise HTTPException(404, "MCP catalog not available")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -135,9 +135,9 @@ class AgentGrowthMixin:
         """Trigger a retrospective analysis."""
         from .experience_library import SelfImprovementEngine
         if not self.self_improvement:
+            # Don't auto-enable background growth on a one-shot call.
             self.self_improvement = SelfImprovementEngine(
                 agent=self, role=self.role)
-            self.self_improvement.enable()
 
         # Build prompt and run through LLM
         prompt = self.self_improvement.build_retrospective_prompt(
@@ -180,9 +180,9 @@ class AgentGrowthMixin:
 
         from .experience_library import SelfImprovementEngine
         if not self.self_improvement:
+            # One-shot call — don't permanently enable background growth.
             self.self_improvement = SelfImprovementEngine(
                 agent=self, role=self.role)
-            self.self_improvement.enable()
 
         # Priority check: if agent has pending tasks/projects, queue instead of executing
         if self.self_improvement.should_pause_for_tasks():

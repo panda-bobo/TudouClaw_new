@@ -291,6 +291,32 @@ def run_portal(port: int = PORTAL_PORT, node_name: str = "",
     except Exception as e:
         logger.warning("Skill registry init failed: %s", e)
 
+    # Initialize RolePresetV2 registry
+    try:
+        from ..role_preset_registry import init_registry as _init_rp_registry
+        from ..agent import ROLE_PRESETS as _RP
+        _rp_reg = _init_rp_registry()
+        _rp_reg.merge_into_legacy(_RP)
+        logger.info("RolePresetV2 registry initialized")
+    except Exception as _rp_err:
+        logger.warning("RolePresetV2 registry init failed: %s", _rp_err)
+
+    # Initialize LLM Tier Router
+    try:
+        from ..llm_tier_routing import init_router as _init_tier_router
+        _init_tier_router(data_dir=data_dir, autofill=True)
+        logger.info("LLMTierRouter initialized")
+    except Exception as _tr_err:
+        logger.warning("LLMTierRouter init failed: %s", _tr_err)
+
+    # Initialize Role SOP Registry
+    try:
+        from ..role_sop import init_sop as _init_sop
+        _init_sop()
+        logger.info("RoleSOP registry initialized")
+    except Exception as _sop_err:
+        logger.warning("RoleSOP init failed: %s", _sop_err)
+
     # Initialize MCP manager
     mcp_mgr = init_mcp_manager(data_dir=data_dir)
 

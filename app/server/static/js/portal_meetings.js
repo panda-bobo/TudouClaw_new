@@ -54,12 +54,40 @@ async function renderMeetingsTab() {
               '<span>📌 '+m.open_assignments+'/'+m.assignment_count+'</span>' +
             '</div>' +
           '</div>' +
-          '<div style="display:flex;align-items:center;padding-left:6px">'+partAvatars+'</div>' +
+          '<div style="display:flex;align-items:center;padding-left:6px;gap:6px">'+partAvatars +
+            '<button onclick="event.stopPropagation(); deleteMeeting(\''+m.id+'\', \''+esc(m.title||'').replace(/"/g,\'&quot;\')+'\')" title="删除会议" style="background:none;border:none;color:var(--text3);cursor:pointer;padding:4px;border-radius:4px" onmouseover="this.style.color=\'#ef4444\';this.style.background=\'rgba(239,68,68,0.1)\'" onmouseout="this.style.color=\'var(--text3)\';this.style.background=\'none\'"><span class="material-symbols-outlined" style="font-size:18px">delete</span></button>' +
+          '</div>' +
         '</div>' +
       '</div>';
     }).join('');
   } catch(e) {
     document.getElementById('meetings-list-area').innerHTML = '<div style="color:var(--error)">Error: '+esc(e.message)+'</div>';
+  }
+}
+
+// ---------- Delete Meeting ----------
+async function deleteMeeting(mid, title) {
+  // Two-step confirmation for destructive op: list what will be removed
+  // before asking for final consent.
+  if (!confirm(
+    '删除会议 "' + (title || mid) + '"？\n\n' +
+    '将移除：\n' +
+    '• 会议记录（标题/议程/参与者）\n' +
+    '• 全部聊天消息\n' +
+    '• 任务分派记录\n' +
+    '• 会议工作目录（workspaces/meetings/' + mid + '/）\n\n' +
+    '此操作不可撤销。'
+  )) return;
+  try {
+    var r = await api('DELETE', '/api/portal/meetings/' + encodeURIComponent(mid));
+    if (r && r.ok) {
+      try { toast && toast('会议已删除'); } catch(_) {}
+      renderMeetingsTab();
+    } else {
+      alert('删除失败');
+    }
+  } catch(e) {
+    alert('删除失败：' + (e && e.message ? e.message : e));
   }
 }
 
@@ -115,6 +143,7 @@ async function openMeetingDetail(mid) {
 
   try {
     var m = await api('GET', '/api/portal/meetings/'+mid);
+    window._currentMeeting = m;  // cached for @mention dropdown
     var c = document.getElementById('content');
 
     // -- Status bar buttons --
@@ -279,10 +308,11 @@ async function openMeetingDetail(mid) {
             (m.status !== 'closed' && m.status !== 'cancelled' ?
               '<div style="padding:10px 18px;border-top:1px solid rgba(255,255,255,0.06);flex-shrink:0">' +
                 '<div id="mtg-attach-preview-'+mid+'" style="display:none;flex-wrap:wrap;gap:6px;margin-bottom:6px"></div>' +
-                '<div style="display:flex;gap:8px;align-items:flex-end">' +
+                '<div style="display:flex;gap:8px;align-items:flex-end;position:relative">' +
+                  '<div id="mtg-mention-dropdown" class="mention-dropdown"></div>' +
                   '<input type="file" id="mtg-file-input-'+mid+'" multiple accept="image/*,.pdf,.doc,.docx,.txt,.csv,.json,.yaml,.yml,.md" style="display:none" onchange="handleMtgAttach(\''+mid+'\',this)">' +
                   '<button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'mtg-file-input-'+mid+'\').click()" title="上传文件" style="flex-shrink:0;padding:6px"><span class="material-symbols-outlined" style="font-size:18px">attach_file</span></button>' +
-                  '<textarea id="mtg-msg-input" placeholder="'+(m.status==='active'?'发送消息，所有参会 Agent 将按顺序回复...':'会议未开始，请先点击「开始会议」')+'" style="flex:1;padding:10px 14px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:10px;color:var(--text);font-size:13px;min-height:42px;max-height:120px;resize:none;line-height:1.4" onkeydown="if(event.key===\'Enter\'&&!event.shiftKey){event.preventDefault();meetingPostMessage(\''+mid+'\')}"'+(m.status!=='active'?' disabled':'')+'></textarea>' +
+                  '<textarea id="mtg-msg-input" placeholder="'+(m.status==='active'?'发送消息 · @ 选择参会者（@所有人 = 全员回复；无 @ = 只发言不回复）':'会议未开始，请先点击「开始会议」')+'" style="flex:1;padding:10px 14px;background:var(--surface);border:1px solid rgba(255,255,255,0.1);border-radius:10px;color:var(--text);font-size:13px;min-height:42px;max-height:120px;resize:none;line-height:1.4" oninput="_mtgInputChange(\''+mid+'\')" onkeydown="_mtgInputKeydown(event,\''+mid+'\')"'+(m.status!=='active'?' disabled':'')+'></textarea>' +
                   '<button class="btn btn-primary btn-sm" onclick="meetingPostMessage(\''+mid+'\')" style="flex-shrink:0;padding:8px 16px;border-radius:10px"'+(m.status!=='active'?' disabled':'')+'>发送</button>' +
                 '</div>' +
               '</div>'
@@ -495,10 +525,58 @@ async function meetingPostMessage(mid) {
   var attachments = _mtgAttachList(mid).slice();
   if (!v && !attachments.length) return;
 
+  // -- Parse @ mentions --
+  // @all / @ALL / @全员 / @所有人  -> null (backend default: all reply)
+  // @<name> [@<name>...]           -> list of agent ids
+  // no @                           -> [] (explicit: nobody replies)
+  var mentionedIds = [];
+  var hasAll = false;
+  var unknownMentions = [];
+  var rx = /@([^\s@]+)/g;
+  var mm;
+  var participants = _getMeetingParticipants(mid);  // includes virtual "所有人"
+  while ((mm = rx.exec(v)) !== null) {
+    var name = mm[1];
+    if (/^(all|ALL|全员|所有人)$/.test(name)) { hasAll = true; continue; }
+    // Longest-prefix match against participant display names to handle
+    // no-space boundary in Chinese (e.g. "@王工再补充" → "王工")
+    var match = null;
+    for (var i=0;i<participants.length;i++) {
+      var p = participants[i];
+      if (p.id === '__ALL__') continue;
+      if (name.indexOf(p.name) === 0 || name === p.display || name === p.id) {
+        if (!match || p.name.length > match.name.length) match = p;
+      }
+    }
+    if (match) {
+      if (mentionedIds.indexOf(match.id) < 0) mentionedIds.push(match.id);
+    } else {
+      unknownMentions.push(name);
+    }
+  }
+  if (unknownMentions.length && window._toast) {
+    window._toast('未找到 @' + unknownMentions.join(', @'), 'warning');
+  }
+
+  // Build target_agents field
+  var targetAgents;  // undefined → omit
+  var willReply;
+  if (hasAll) {
+    // omit → backend sees null → all reply
+    willReply = true;
+  } else if (mentionedIds.length > 0) {
+    targetAgents = mentionedIds;
+    willReply = true;
+  } else {
+    targetAgents = [];  // explicit empty → nobody replies
+    willReply = false;
+  }
+
   // Disable input while sending
   if (el) { el.disabled = true; el.value = ''; }
 
   var msgBody = {content: v || '(attached files)', role: 'user'};
+  if (typeof targetAgents !== 'undefined') msgBody.target_agents = targetAgents;
   if (attachments.length) {
     msgBody.attachments = attachments.map(function(a) {
       return { name: a.name, mime: a.mime, data_base64: a.data_base64 };
@@ -508,16 +586,21 @@ async function meetingPostMessage(mid) {
   }
   try {
     await api('POST', '/api/portal/meetings/'+mid+'/messages', msgBody);
-    // Show "Agent 正在思考..." indicator
-    var chatScroll = document.getElementById('mtg-chat-scroll');
-    if (chatScroll) {
-      chatScroll.insertAdjacentHTML('beforeend',
-        '<div id="mtg-thinking-indicator" style="text-align:center;padding:12px;color:var(--text3);font-size:12px">' +
-          '<span style="display:inline-block;animation:pulse 1.5s infinite">💭 Agent 正在按顺序发言中...</span>' +
-        '</div>');
-      chatScroll.scrollTop = chatScroll.scrollHeight;
+    // Show "Agent 正在思考..." indicator only when replies are expected
+    if (willReply) {
+      var chatScroll = document.getElementById('mtg-chat-scroll');
+      if (chatScroll) {
+        var label = hasAll
+          ? '💭 全员 Agent 正在按顺序发言中...'
+          : '💭 ' + mentionedIds.length + ' 位 Agent 正在回复...';
+        chatScroll.insertAdjacentHTML('beforeend',
+          '<div id="mtg-thinking-indicator" style="text-align:center;padding:12px;color:var(--text3);font-size:12px">' +
+            '<span style="display:inline-block;animation:pulse 1.5s infinite">'+label+'</span>' +
+          '</div>');
+        chatScroll.scrollTop = chatScroll.scrollHeight;
+      }
     }
-    // Start polling for agent replies
+    // Start polling for agent replies (or just the user's message refresh)
     _mtgLastMsgCount = 0; // force refresh
   } catch(e) {
     alert('Error: '+e.message);
@@ -564,4 +647,118 @@ async function updateMeetingAssignment(mid, aid, status) {
     await api('POST', '/api/portal/meetings/'+mid+'/assignments/'+aid+'/update', {status: status});
     openMeetingDetail(mid);
   } catch(e) { alert('Error: '+e.message); }
+}
+
+// ============ @mention autocomplete for meetings ============
+var _mtgMentionActiveIdx = -1;
+var _mtgMentionMid = '';
+
+function _getMeetingParticipants(mid) {
+  var m = window._currentMeeting;
+  var agList = window._cachedAgents || (typeof agents !== 'undefined' ? agents : []);
+  var out = [
+    { id: '__ALL__', name: '所有人', role: '全员集体思考', display: '所有人' }
+  ];
+  if (m && m.participants) {
+    m.participants.forEach(function(pid) {
+      var a = agList.find(function(x){ return x.id === pid; });
+      if (a) out.push({ id: a.id, name: a.name, role: a.role || 'general', display: a.name });
+    });
+  }
+  return out;
+}
+
+function _mtgInputChange(mid) {
+  var input = document.getElementById('mtg-msg-input');
+  if (!input) return;
+  var val = input.value;
+  var cursorPos = input.selectionStart;
+  var textBefore = val.slice(0, cursorPos);
+  var atIdx = textBefore.lastIndexOf('@');
+  // Must be start-of-text or preceded by whitespace
+  if (atIdx === -1 || (atIdx > 0 && textBefore[atIdx-1] !== ' ' && textBefore[atIdx-1] !== '\n')) {
+    _hideMtgMentionDropdown();
+    return;
+  }
+  var query = textBefore.slice(atIdx + 1).toLowerCase();
+  // Abort if the "query" already contains whitespace — user has moved past the @
+  if (/\s/.test(query)) { _hideMtgMentionDropdown(); return; }
+  var members = _getMeetingParticipants(mid);
+  var filtered = members.filter(function(m) {
+    if (!query) return true;
+    return m.name.toLowerCase().indexOf(query) !== -1 ||
+           (m.role||'').toLowerCase().indexOf(query) !== -1 ||
+           m.display.toLowerCase().indexOf(query) !== -1;
+  });
+  if (filtered.length === 0) { _hideMtgMentionDropdown(); return; }
+  _mtgMentionMid = mid;
+  _mtgMentionActiveIdx = 0;
+  _showMtgMentionDropdown(filtered, atIdx);
+}
+
+function _showMtgMentionDropdown(members, atIdx) {
+  var dd = document.getElementById('mtg-mention-dropdown');
+  if (!dd) return;
+  dd.innerHTML = members.map(function(m, i) {
+    var icon = m.id === '__ALL__' ? 'groups' : 'smart_toy';
+    var color = m.id === '__ALL__' ? '#22c55e' : 'var(--primary)';
+    return '<div class="mention-item'+(i===0?' active':'')+'" data-name="'+esc(m.display)+'" data-at-idx="'+atIdx+'" onclick="_selectMtgMention(\''+esc(m.display)+'\','+atIdx+')">' +
+      '<span class="material-symbols-outlined" style="font-size:18px;color:'+color+'">'+icon+'</span>' +
+      '<div><span class="mention-name">'+esc(m.display)+'</span><br><span class="mention-role">'+esc(m.role||'')+'</span></div>' +
+    '</div>';
+  }).join('');
+  dd.classList.add('show');
+}
+
+function _hideMtgMentionDropdown() {
+  var dd = document.getElementById('mtg-mention-dropdown');
+  if (dd) { dd.classList.remove('show'); dd.innerHTML = ''; }
+  _mtgMentionActiveIdx = -1;
+}
+
+function _selectMtgMention(name, atIdx) {
+  var input = document.getElementById('mtg-msg-input');
+  if (!input) return;
+  var val = input.value;
+  var cursorPos = input.selectionStart;
+  var before = val.slice(0, atIdx);
+  var after = val.slice(cursorPos);
+  input.value = before + '@' + name + ' ' + after;
+  input.focus();
+  var newPos = before.length + 1 + name.length + 1;
+  input.setSelectionRange(newPos, newPos);
+  _hideMtgMentionDropdown();
+}
+
+function _mtgInputKeydown(e, mid) {
+  var dd = document.getElementById('mtg-mention-dropdown');
+  if (dd && dd.classList.contains('show')) {
+    var items = dd.querySelectorAll('.mention-item');
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      _mtgMentionActiveIdx = Math.min(_mtgMentionActiveIdx + 1, items.length - 1);
+      items.forEach(function(el,i){ el.classList.toggle('active', i===_mtgMentionActiveIdx); });
+      return;
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      _mtgMentionActiveIdx = Math.max(_mtgMentionActiveIdx - 1, 0);
+      items.forEach(function(el,i){ el.classList.toggle('active', i===_mtgMentionActiveIdx); });
+      return;
+    } else if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault();
+      if (_mtgMentionActiveIdx >= 0 && _mtgMentionActiveIdx < items.length) {
+        var item = items[_mtgMentionActiveIdx];
+        _selectMtgMention(item.getAttribute('data-name'), parseInt(item.getAttribute('data-at-idx')));
+      }
+      return;
+    } else if (e.key === 'Escape') {
+      _hideMtgMentionDropdown();
+      return;
+    }
+  }
+  // Default: Enter sends message (but skip during IME composition)
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    meetingPostMessage(mid);
+  }
 }

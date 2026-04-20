@@ -650,11 +650,24 @@ def generate_layout(layout_spec: dict, theme: dict) -> list[dict]:
     layout_spec:
       {"type": "process", "title": "实施流程", "page_num": 3,
        "items": [{"title": "调研", "detail": "..."}, ...]}
+
+    F2: unknown ``type`` values fall back to ``layout_cards`` instead of
+    returning an empty list. Previously an unregistered type (e.g. an LLM
+    invention like "overview" or "analysis") silently produced a blank
+    slide. ``layout_cards`` handles any ``items`` list (including empty →
+    just renders the header), so fallback is safe and never blank.
     """
     layout_type = layout_spec.get("type", "")
     fn = LAYOUT_REGISTRY.get(layout_type)
     if fn is None:
-        return []
+        import logging
+        logging.getLogger(__name__).warning(
+            "pptx_layouts: unknown layout type %r (known: %s) — "
+            "falling back to 'cards'. Update the LLM prompt or schema "
+            "to restrict to supported types.",
+            layout_type, sorted(LAYOUT_REGISTRY.keys()),
+        )
+        return layout_cards(layout_spec, theme)
     return fn(layout_spec, theme)
 
 

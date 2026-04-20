@@ -635,7 +635,7 @@ class AgentLLMMixin:
     # adding/editing a system-wide section like <file_display>.
     # This guarantees cache freshness even when no profile field
     # changed between two code versions running in the same process.
-    _STATIC_PROMPT_BUILD_VERSION = "v3-global_system_prompt"
+    _STATIC_PROMPT_BUILD_VERSION = "v4-project_context_freshness"
 
     def _get_global_system_prompt(self) -> str:
         """Legacy compat — returns empty if global_system_prompt migrated to scene_prompts."""
@@ -717,6 +717,28 @@ class AgentLLMMixin:
             self._get_global_system_prompt(),
             self._get_scene_prompts_text(),
         ]
+        # ── Project-context freshness ───────────────────────────────
+        # Include mtime of PROJECT_CONTEXT.md (and legacy siblings) from
+        # every searched directory so edits invalidate the cached prompt
+        # WITHOUT requiring an agent restart.  Cheap stat() calls, no read.
+        try:
+            from pathlib import Path as _HPath
+            _hdirs: list[str] = []
+            if self.working_dir:
+                _hdirs.append(self.working_dir)
+            if self.shared_workspace and self.shared_workspace != self.working_dir:
+                _hdirs.append(self.shared_workspace)
+            for _d in _hdirs:
+                for _n in ("PROJECT_CONTEXT.md", "TUDOU_CLAW.md",
+                           "CLAW.md", "README.md"):
+                    try:
+                        _f = _HPath(_d) / _n
+                        if _f.exists():
+                            parts.append(f"{_n}@{_d}:{_f.stat().st_mtime_ns}")
+                    except OSError:
+                        continue
+        except Exception:
+            pass
         return hashlib.md5("|".join(parts).encode()).hexdigest()
 
     def _build_static_system_prompt(self) -> str:
@@ -897,17 +919,50 @@ class AgentLLMMixin:
             "</file_display>"
         )
 
-        # Project context files (change rarely — only when files are edited)
-        for name in ("TUDOU_CLAW.md", "CLAW.md", "README.md"):
-            ctx_file = wd / name
-            if ctx_file.exists():
+        # Project context files — persistent project knowledge pinned into
+        # every turn.  Modeled after Claude Code's CLAUDE.md convention:
+        # drop a PROJECT_CONTEXT.md at the project root and its contents
+        # automatically prime every agent that touches the directory.
+        #
+        # Search order:
+        #   • working_dir (private)   + shared_workspace (team)
+        #   • filename priority per dir: PROJECT_CONTEXT.md (canonical) >
+        #     TUDOU_CLAW.md > CLAW.md > README.md  (first match per dir)
+        #
+        # Cost: lives in the STATIC system prompt, so it's captured by both
+        # local KV-cache prefixes and Anthropic prompt-caching (2.2.5) —
+        # after first turn it's effectively free tokens.
+        from pathlib import Path as _PCPath
+        _ctx_dirs: list[_PCPath] = [wd]
+        if getattr(self, "shared_workspace", None):
+            try:
+                _sw = _PCPath(self.shared_workspace)
+                if _sw.resolve() != wd.resolve():
+                    _ctx_dirs.append(_sw)
+            except (OSError, ValueError):
+                pass
+        _seen_paths: set[str] = set()
+        for _dir in _ctx_dirs:
+            for name in ("PROJECT_CONTEXT.md", "TUDOU_CLAW.md",
+                         "CLAW.md", "README.md"):
+                ctx_file = _dir / name
                 try:
-                    content = ctx_file.read_text(encoding="utf-8", errors="replace")[:4000]
+                    if not ctx_file.exists():
+                        continue
+                    _rp = str(ctx_file.resolve())
+                    if _rp in _seen_paths:
+                        continue
+                    _seen_paths.add(_rp)
+                    content = ctx_file.read_text(
+                        encoding="utf-8", errors="replace")[:4000]
                     parts.append(
-                        f"\n<project_context file=\"{name}\">\n{content}\n</project_context>"
+                        f"\n<project_context file=\"{name}\" "
+                        f"dir=\"{_dir.name}\">\n{content}\n"
+                        f"</project_context>"
                     )
+                    break  # one file per directory (priority order)
                 except OSError:
-                    pass
+                    continue
 
         # Model-specific tool use guidance (depends on model, rarely changes)
         guidance = security.get_model_tool_guidance(self.model or "")
@@ -1079,6 +1134,30 @@ class AgentLLMMixin:
                     slot_info = "; ".join(f"{k}={v}" for k, v in _extracted.items())
                     hint += f"\n提取参数: {slot_info}"
                 _try_add(f"<intent_hint>\n{hint}\n</intent_hint>")
+
+        # 0.5 RolePresetV2 Playbook injection —— 岗位做事逻辑 + 场景筛选规则
+        # 只要 agent 的 V2 preset 有 playbook 就注入；Phase 2 核心行为改造点。
+        try:
+            from .role_preset_registry import get_registry as _get_role_reg
+            from .playbook_runtime import build_playbook_context
+            from .scope_detector import detect_scopes
+            _role_id = getattr(self.profile, "role_preset_id", "") or ""
+            if _role_id:
+                _preset = _get_role_reg().get(_role_id)
+                if _preset is not None and not _preset.playbook.is_empty():
+                    _scopes = detect_scopes(current_query or "")
+                    # 缓存供 Post-hook 复用
+                    self._playbook_active_scopes = _scopes
+                    self._playbook_active_preset_id = _role_id
+                    _pb_ctx = build_playbook_context(_preset, _scopes)
+                    if _pb_ctx:
+                        _try_add(f"<playbook scope=\"{','.join(_scopes)}\">\n{_pb_ctx}\n</playbook>")
+        except Exception as _e:
+            # playbook 故障不应阻断聊天
+            try:
+                logger.debug("playbook injection skipped: %s", _e)
+            except Exception:
+                pass
 
         # 1. Shared Knowledge Wiki (lightweight title list)
         try:
@@ -1657,30 +1736,53 @@ class AgentLLMMixin:
     def _build_checkpoint_context(self) -> str:
         """构建任务恢复上下文，注入到系统提示中。
 
-        当 agent_phase 为 EXECUTING 或 PLANNING 时调用，
-        让 Agent 知道之前做到哪了，避免重头开始。
+        [F1] 过期过滤：若所有信号都早于 TUDOU_CHECKPOINT_STALE_HOURS
+        （默认 24h），返回空串，避免复活老任务。
         """
+        import os as _os
+        import time as _time
+        try:
+            stale_hours = float(_os.environ.get("TUDOU_CHECKPOINT_STALE_HOURS", "24"))
+        except (TypeError, ValueError):
+            stale_hours = 24.0
+        stale_cutoff = _time.time() - stale_hours * 3600
+
         mm = self._get_memory_manager()
         parts = []
 
-        # 1. 活跃计划的进度
-        plan_summary = self._format_active_plan_summary()
-        if plan_summary:
-            parts.append(plan_summary)
+        def _plan_latest_ts(p):
+            ts = p.created_at
+            for s in p.steps:
+                if getattr(s, "completed_at", 0) and s.completed_at > ts:
+                    ts = s.completed_at
+                if getattr(s, "started_at", 0) and s.started_at > ts:
+                    ts = s.started_at
+            return ts
 
-        # 2. 从 L3 获取最近的 action_done (已完成的操作)
+        fresh_active = any(
+            p.status == "active" and _plan_latest_ts(p) >= stale_cutoff
+            for p in self.execution_plans
+        )
+        if fresh_active:
+            plan_summary = self._format_active_plan_summary()
+            if plan_summary:
+                parts.append(plan_summary)
+
         if mm:
             recent_done = mm.get_recent_facts(self.id, limit=10, category="action_done")
-            if recent_done:
+            fresh_done = [f for f in recent_done
+                          if getattr(f, "updated_at", 0) >= stale_cutoff]
+            if fresh_done:
                 parts.append("\n**最近完成的操作:**")
-                for f in recent_done[:10]:
+                for f in fresh_done[:10]:
                     parts.append(f"- {f.content}")
 
-            # 3. 获取待办事项
-            plans = mm.get_recent_facts(self.id, limit=5, category="action_plan")
-            if plans:
+            plans_facts = mm.get_recent_facts(self.id, limit=5, category="action_plan")
+            fresh_plans = [f for f in plans_facts
+                           if getattr(f, "updated_at", 0) >= stale_cutoff]
+            if fresh_plans:
                 parts.append("\n**待办事项:**")
-                for f in plans[:5]:
+                for f in fresh_plans[:5]:
                     parts.append(f"- {f.content}")
 
         if not parts:
@@ -2493,6 +2595,39 @@ Write only the summary body. Do not include any preamble or prefix."""
                 prov, mdl = cd_prov, cd_mdl
         except Exception as _cd_err:
             logger.debug("coding routing skipped: %s", _cd_err)
+        # RolePresetV2 LLM Tier routing: when no explicit provider resolved yet
+        # but agent.profile.llm_tier is set, resolve via LLMTierRouter.
+        # Priority: per-task override > extra_llm slot > auto_route > multimodal
+        #         > coding > explicit agent.provider > **llm_tier** > global default
+        try:
+            if not prov and getattr(self.profile, "llm_tier", ""):
+                from .llm_tier_routing import get_router as _get_tier_router
+                tier_router = _get_tier_router()
+                # Context-specific tier override (e.g. coding task uses coding tier)
+                active_tier = self.profile.llm_tier
+                tier_overrides = getattr(self.profile, "llm_tier_overrides", {}) or {}
+                try:
+                    if self._is_coding_context() and "coding" in tier_overrides:
+                        active_tier = tier_overrides["coding"]
+                    elif tier_overrides.get("multimodal") and user_message:
+                        # Simple multimodal detection: message contains file attachments
+                        from .agent_types import _message_has_visual  # type: ignore
+                        try:
+                            if _message_has_visual(user_message):
+                                active_tier = tier_overrides["multimodal"]
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                tier_prov, tier_mdl = tier_router.resolve(active_tier)
+                if tier_prov and tier_mdl:
+                    logger.info(
+                        "Agent %s: llm_tier=%s → routing to %s/%s",
+                        self.id[:8], active_tier, tier_prov, tier_mdl,
+                    )
+                    prov, mdl = tier_prov, tier_mdl
+        except Exception as _tier_err:
+            logger.debug("llm_tier routing skipped: %s", _tier_err)
         try:
             cfg = llm.get_config()
             if not prov:

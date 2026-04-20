@@ -33,6 +33,8 @@ async def list_jobs(
         scheduler = _get_scheduler()
         jobs = scheduler.list_jobs(agent_id=agent_id or None)
         return {"jobs": [j.to_dict() for j in jobs]}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -67,6 +69,8 @@ async def get_job_history(
         scheduler = _get_scheduler()
         history = scheduler.get_execution_history(job_id, limit=30)
         return {"history": [r.to_dict() for r in history]}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

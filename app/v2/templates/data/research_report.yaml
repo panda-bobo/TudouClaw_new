@@ -1,0 +1,48 @@
+id: research_report
+display_name: 研究报告任务
+version: 1
+description: 给定主题，产出研究报告并可选交付 PPTX + 邮件。
+
+required_slots:
+  - name: topic
+    description: 报告主题
+    examples: ["VMware 中东市场", "自动驾驶芯片竞品"]
+  - name: region
+    description: 地区（可选）
+    optional: true
+  - name: delivery
+    description: 交付方式
+    default: "email"
+
+plan_prompt: |
+  你要做一份关于 {topic} 的研究报告并 {delivery}。
+  请产出 3-6 个 step，每个 step 必须指定需要的工具和 exit_check。
+  常见步骤：调研 → 数据整理 → 撰写摘要 → 产出 PPTX → 发送邮件。
+
+allowed_tools:
+  - web_search
+  - rag_query
+  - create_pptx
+  - send_email
+
+verify_rules:
+  - id: has_executive_summary
+    kind: contains_section
+    spec: { section: "## Summary" }
+  - id: min_data_points
+    kind: json_schema
+    spec: { path: "artifacts[*].summary", min_words: 200 }
+  - id: email_sent_when_requested
+    kind: tool_used
+    spec: { tool: "send_email", when: "filled_slots.delivery == 'email'" }
+
+expected_artifacts:
+  - kind: file
+    pattern: "*.pptx"
+    min_count: 1
+
+report_template: |
+  ✅ 研究报告已完成
+  - 主题：{topic}
+  - 产出：{artifact_count} 份文件
+  - 交付：{delivery}

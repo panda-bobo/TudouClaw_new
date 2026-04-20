@@ -1,4 +1,12 @@
 """
+
+
+╔════════════════════════════════════════════════════════════════════════╗
+║  ⚠️  DEPRECATED — LEGACY stdlib handler (extracted from                ║
+║     portal_routes_post.py). Active only when TUDOU_USE_STDLIB=1 is     ║
+║     set at launch. FastAPI (app/api/routers/*) is authoritative.       ║
+║     Do NOT add new routes here.                                        ║
+╚════════════════════════════════════════════════════════════════════════╝
 agents — handler implementations for agent-management POST endpoints.
 
 Extracted from portal_routes_post.py (Phase 2).  Handles:
@@ -648,6 +656,15 @@ def _handle_profile(handler, path, hub, body, auth, actor_name, user_role) -> bo
                 exec_policy=body.get("exec_policy", agent.profile.exec_policy),
                 exec_blacklist=body.get("exec_blacklist", agent.profile.exec_blacklist),
                 exec_whitelist=body.get("exec_whitelist", agent.profile.exec_whitelist),
+                # RolePresetV2 — 由前端传入或保留旧值（避免被 profile 重建时清空）
+                role_preset_id=body.get("role_preset_id", getattr(agent.profile, "role_preset_id", "")),
+                role_preset_version=body.get("role_preset_version", getattr(agent.profile, "role_preset_version", 1)),
+                llm_tier=body.get("llm_tier", getattr(agent.profile, "llm_tier", "")),
+                sop_template_id=body.get("sop_template_id", getattr(agent.profile, "sop_template_id", "")),
+                quality_rules=body.get("quality_rules", getattr(agent.profile, "quality_rules", [])),
+                output_contract=body.get("output_contract", getattr(agent.profile, "output_contract", {})),
+                input_contract=body.get("input_contract", getattr(agent.profile, "input_contract", {})),
+                kpi_definitions=body.get("kpi_definitions", getattr(agent.profile, "kpi_definitions", [])),
             )
             hub._save_agents()
             auth.audit("update_agent_profile", actor=actor_name, role=user_role,

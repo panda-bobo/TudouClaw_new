@@ -21,6 +21,8 @@ def _get_node_or_404(hub, node_id: str):
         if not node:
             raise HTTPException(status_code=404, detail=f"Node '{node_id}' not found")
         return node
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -81,6 +83,8 @@ async def list_nodes(
                 n.update(_count_for_node(nid))
 
         return {"nodes": [local_node] + nodes_list}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -95,6 +99,8 @@ async def list_node_configs(
     try:
         do_mask = mask != "0"
         return {"configs": hub.list_all_node_configs(mask=do_mask)}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -114,6 +120,8 @@ async def get_node_config(
     try:
         do_mask = mask != "0"
         return hub.get_node_config(node_id, mask=do_mask)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -149,6 +157,8 @@ async def get_node_config_status(
     try:
         status = hub.get_node_config_status(node_id) if hasattr(hub, "get_node_config_status") else {}
         return status if isinstance(status, dict) else {"status": status}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

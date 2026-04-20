@@ -46,6 +46,7 @@ class PersistenceManager(ManagerBase):
                     agent = Agent.from_persist_dict(d)
                     self.agents[agent.id] = agent
                 logger.info("Loaded %d agents from SQLite", len(self.agents))
+                self._auto_migrate_role_defaults()
                 return
             except Exception as e:
                 logger.warning("SQLite agent load failed, trying JSON: %s", e)
@@ -62,16 +63,123 @@ class PersistenceManager(ManagerBase):
         except Exception as e:
             import traceback
             traceback.print_exc()
+        self._auto_migrate_role_defaults()
+
+    def _auto_migrate_role_defaults(self) -> None:
+        """Back-fill role_defaults on existing agents at load time.
+
+        When a new prompt pack is added to ``ROLE_DEFAULTS`` (e.g.
+        ``action-first``), agents that were created BEFORE the addition
+        won't have it in their ``bound_prompt_packs`` — ``create_agent``
+        only resolves role defaults at creation time, not retroactively.
+
+        This method does a union merge: for every loaded agent, resolve
+        what its role SHOULD have today and append any missing IDs.
+        User customizations (extras they added) are preserved; we never
+        REMOVE anything that's already bound.
+
+        Runs once per server start, after all agents are loaded.
+        Failures are non-fatal (just logged).
+        """
+        try:
+            from ..core.role_defaults import resolve_role_default_ids
+            from ..core.prompt_enhancer import get_prompt_pack_registry
+        except Exception as _imp:
+            logger.debug("role-defaults auto-migrate: imports failed: %s", _imp)
+            return
+
+        try:
+            pp_reg = get_prompt_pack_registry()
+        except Exception:
+            pp_reg = None
+        skill_registry = getattr(self._hub, "skill_registry", None)
+
+        changed = 0
+        added_skills_total = 0
+        added_packs_total = 0
+        for agent in list(self.agents.values()):
+            try:
+                want_skills, want_packs = resolve_role_default_ids(
+                    agent.role or "", skill_registry, pp_reg)
+            except Exception as _re:
+                logger.debug("resolve role_defaults failed for %s: %s",
+                             agent.name, _re)
+                continue
+
+            # Union merge — preserve order, append only what's missing.
+            added_here = False
+            cur_skills = list(getattr(agent, "granted_skills", []) or [])
+            for sid in want_skills:
+                if sid not in cur_skills:
+                    cur_skills.append(sid)
+                    added_skills_total += 1
+                    added_here = True
+                    # Also grant at registry level so the skill is accessible
+                    if skill_registry is not None:
+                        try:
+                            skill_registry.grant(sid, agent.id)
+                        except Exception:
+                            pass
+            if added_here:
+                agent.granted_skills = cur_skills
+
+            cur_packs = list(getattr(agent, "bound_prompt_packs", []) or [])
+            packs_changed = False
+            for pid in want_packs:
+                if pid not in cur_packs:
+                    cur_packs.append(pid)
+                    added_packs_total += 1
+                    packs_changed = True
+            if packs_changed:
+                agent.bound_prompt_packs = cur_packs
+                added_here = True
+
+            if added_here:
+                changed += 1
+
+        if changed:
+            logger.info(
+                "Role-defaults auto-migrate: updated %d agents "
+                "(+%d skills, +%d packs)",
+                changed, added_skills_total, added_packs_total,
+            )
+            # Persist so the next restart doesn't redo the work
+            try:
+                self._hub._save_agents()
+            except Exception as _se:
+                logger.debug("auto-migrate save failed: %s", _se)
 
     def _save_agents(self):
-        """Persist agents to SQLite (primary) + JSON (backup) + workspace."""
+        """Persist agents to SQLite (primary) + JSON (backup) + workspace.
+
+        SQLite write is a **sync**: upsert all in-memory rows, then DELETE
+        rows whose agent_id is NOT in the in-memory set. Belt-and-braces:
+        ``remove_agent`` already calls ``db.delete_agent`` explicitly, but
+        this catches any future code path that pops from ``self.agents``
+        without going through the manager.
+        """
         os.makedirs(self._data_dir, exist_ok=True)
 
-        # SQLite — 逐个 upsert
+        # SQLite — upsert-all + delete-missing
         if self._db:
             try:
+                live_ids = set(self.agents.keys())
                 for a in self.agents.values():
                     self._db.save_agent(a.to_persist_dict())
+                try:
+                    existing = {
+                        (r.get("agent_id") or r.get("id") or "")
+                        for r in self._db.load_agents()
+                    }
+                    for stale in existing - live_ids:
+                        if not stale:
+                            continue
+                        if hasattr(self._db, "delete_agent"):
+                            self._db.delete_agent(stale)
+                        else:
+                            self._db.delete("agents", "agent_id", stale)
+                except Exception as e:
+                    logger.warning("agent sync-delete failed: %s", e)
             except Exception as e:
                 logger.warning("SQLite agent save failed: %s", e)
 
@@ -333,16 +441,36 @@ class PersistenceManager(ManagerBase):
             traceback.print_exc()
 
     def _save_projects(self):
-        """Persist projects to SQLite (primary) + JSON (backup) + Markdown."""
+        """Persist projects to SQLite (primary) + JSON (backup) + Markdown.
+
+        SQLite write is a **sync**: upsert all in-memory rows, then DELETE
+        any DB rows whose project_id is NOT in the current in-memory set.
+        Without this, ``remove_project`` leaves orphan rows in the DB and
+        they get resurrected on next ``_load_projects``.
+        """
         from ..project import Project
 
         os.makedirs(self._data_dir, exist_ok=True)
 
-        # SQLite primary
+        # SQLite primary — upsert-all + delete-missing
         if self._db:
             try:
+                live_ids = set(self._hub.projects.keys())
                 for p in self._hub.projects.values():
                     self._db.save_project(p.to_persist_dict())
+                try:
+                    existing = {
+                        r.get("project_id")
+                        for r in self._db.load_projects()
+                    }
+                    existing.discard(None)
+                    for stale in existing - live_ids:
+                        if hasattr(self._db, "delete_project"):
+                            self._db.delete_project(stale)
+                        else:
+                            self._db.delete("projects", "project_id", stale)
+                except Exception as e:
+                    logger.warning("project sync-delete failed: %s", e)
             except Exception as e:
                 logger.warning("SQLite project save failed: %s", e)
 

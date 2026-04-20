@@ -75,22 +75,38 @@ async function loadTasks(agentId) {
   const el = document.getElementById('tasks-list-' + agentId);
   if (!el) return;
   const tasks = data.tasks || [];
+
+  // Upsert: only touch V1 rows. Leave V2 rows ([data-v2-row]) untouched
+  // so loadV2TasksIntoQueue() doesn't flicker between "Queued" and
+  // "Analyzing". Also preserve any empty-state placeholder so we don't
+  // re-render when content didn't actually change.
+  el.querySelectorAll('[data-v1-row]').forEach(function(n) { n.remove(); });
+  el.querySelectorAll('[data-v1-empty]').forEach(function(n) { n.remove(); });
   if (tasks.length === 0) {
-    el.innerHTML = '<div style="color:var(--text3);padding:8px">No tasks yet</div>';
+    // Only show "No tasks yet" if there are ALSO no V2 rows. Otherwise
+    // the placeholder fights with the V2 separator for space.
+    var hasV2 = el.querySelector('[data-v2-row]');
+    if (!hasV2) {
+      var ph = document.createElement('div');
+      ph.setAttribute('data-v1-empty', '1');
+      ph.style.cssText = 'color:var(--text3);padding:8px';
+      ph.textContent = 'No tasks yet';
+      el.insertBefore(ph, el.firstChild);
+    }
     return;
   }
   const statusIcon = {todo:'⬜', in_progress:'🔄', done:'✅', blocked:'🚫', cancelled:'❌'};
   const priLabel = {0:'', 1:'🔶', 2:'🔴'};
   const sourceIcon = {admin:'👤', agent:'🤖', system:'⚙️', user:'👤'};
   const sourceColor = {admin:'var(--warning)', agent:'var(--primary)', system:'var(--text3)', user:'var(--success)'};
-  el.innerHTML = tasks.map(t => {
+  var v1Html = tasks.map(t => {
     const dlTime = t.deadline ? new Date(t.deadline*1000) : null;
     const dlStr = dlTime ? dlTime.toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '';
     const isOverdue = dlTime && dlTime < new Date() && t.status !== 'done' && t.status !== 'cancelled';
     const src = t.source || 'admin';
     const srcAgent = t.source_agent_id ? ` (${esc(t.source_agent_id.slice(0,8))})` : '';
     return `
-    <div style="padding:8px;border-bottom:1px solid var(--border);cursor:pointer${isOverdue?';background:rgba(255,80,80,0.08)':''}"
+    <div data-v1-row="1" data-task-id="${t.id}" style="padding:8px;border-bottom:1px solid var(--border);cursor:pointer${isOverdue?';background:rgba(255,80,80,0.08)':''}"
          onclick="toggleTaskStatus('${agentId}','${t.id}','${t.status}')">
       <div style="display:flex;align-items:center;gap:6px">
         <span>${statusIcon[t.status]||'⬜'}</span>
@@ -109,6 +125,14 @@ async function loadTasks(agentId) {
       </div>
     </div>`;
   }).join('');
+  // Insert V1 rows BEFORE any V2 rows — V1 Task Queue on top, 🚀 V2 below.
+  var firstV2 = el.querySelector('[data-v2-row]');
+  var tmp = document.createElement('div');
+  tmp.innerHTML = v1Html;
+  var frag = document.createDocumentFragment();
+  while (tmp.firstChild) frag.appendChild(tmp.firstChild);
+  if (firstV2) el.insertBefore(frag, firstV2);
+  else el.appendChild(frag);
 }
 
 async function toggleTaskStatus(agentId, taskId, currentStatus) {

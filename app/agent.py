@@ -130,6 +130,91 @@ def _strip_old_images(messages: list[dict]) -> list[dict]:
     return result
 
 
+# ── Narrator-stall detection (weak-model nudge) ────────────────────────────
+# Weak / quantized / open-source models frequently reply with phrases like
+# "Let me fix the errors:" or "让我检查一下：" and then end the turn *without*
+# calling a tool.  The chat loop sees an empty tool_calls list and breaks,
+# leaving the user staring at a promise that was never kept.
+#
+# This helper spots that pattern so the outer loop can inject a one-shot
+# nudge ("you promised — now call the tool") and re-prompt once, instead of
+# silently stalling.  Guarded by env var TUDOU_NUDGE_WEAK_MODELS (default on;
+# set to "0" to disable globally).
+_NARRATOR_STALL_PATTERNS = (
+    # English
+    "let me ", "let's ", "i'll ", "i will ", "i am going to",
+    "i'm going to", "now let me", "first, let me", "first let me",
+    "next, i'll", "next i'll", "i am about to", "i'm about to",
+    # Chinese
+    "让我", "我来", "我将", "我会", "我要", "接下来", "马上", "现在我",
+    "下面我", "我准备",
+)
+
+
+def _looks_like_narrator_stall(text: str) -> bool:
+    """True if `text` looks like a promise-without-action ("Let me X:" style).
+
+    Heuristic:
+      1. Non-empty text that ends with ``:`` or ``：`` (the "commitment colon")
+      2. The trailing line contains an intent phrase ("let me", "让我" …)
+
+    Both conditions must hold — this keeps false positives low (e.g. a
+    genuine answer that happens to end with a colon before a code block
+    won't match unless it also announces future work).
+    """
+    if not text:
+        return False
+    t = text.strip()
+    if not t:
+        return False
+    if not (t.endswith(":") or t.endswith("：")):
+        return False
+    last_line = t.rsplit("\n", 1)[-1].lower()
+    return any(p in last_line for p in _NARRATOR_STALL_PATTERNS)
+
+
+# ---------------------------------------------------------------------------
+# Plan D: handoff-trigger detection
+# ---------------------------------------------------------------------------
+# Weak models (esp. 4-bit quantized Qwen/MLX) routinely hallucinate a peer
+# agent's response when told to hand off work ("交接给X"/"让Y审核") — they
+# skip calling handoff_request entirely and fabricate the result in plain
+# text.  When we detect a handoff trigger in the user message, we pass
+# tool_choice=handoff_request to the LLM so it *cannot* return free text on
+# that first iteration — it must call the tool or the server rejects it.
+#
+# Guarded by env var TUDOU_FORCE_HANDOFF (default on; "0" disables).
+# Applied only on iteration 0 — subsequent iterations process tool results
+# normally so the agent can reply to the user after the handoff completes.
+import re as _re_handoff
+
+_HANDOFF_TRIGGER_RE = _re_handoff.compile(
+    # Chinese verb list — covers the full review/verify/test/check family
+    # so "让他验收" / "让她测试" / "让大卫检查" all trigger, not just "审核".
+    r"(交接给|移交给|转给|派给|"
+    r"让\S{1,20}("
+    r"审核|复核|评审|review|"
+    r"验收|验证|verify|"
+    r"检查|核对|check|"
+    r"测试|test|"
+    r"把关|过目|"
+    r"做|完成|处理"
+    r")|"
+    # English: "hand off to X" / "ask X to (review|do|handle|check|verify|test)" / "pass it to X"
+    r"hand\s*off\s+to\s|"
+    r"ask\s+\S+\s+to\s+(review|do|handle|check|verify|test|accept)|"
+    r"pass\s+(it|this|the\s+task)\s+to\s)",
+    _re_handoff.IGNORECASE,
+)
+
+
+def _user_msg_triggers_handoff(text: str) -> bool:
+    """True if the user message looks like it's asking for a work handoff."""
+    if not text:
+        return False
+    return bool(_HANDOFF_TRIGGER_RE.search(text))
+
+
 # Three-layer memory
 try:
     from .memory import get_memory_manager, MemoryManager, MemoryConfig
@@ -630,6 +715,33 @@ class AgentProfile:
     # Permanently granted skill capabilities, e.g. ["pdf:rw", "docx:rw"]
     # Populated automatically when a skill is granted to the agent.
 
+    # ══════════════════════════════════════════════════════════════════════
+    # RolePresetV2 — 7-dimensional role enhancement (all fields optional, V1 agents keep defaults)
+    # ══════════════════════════════════════════════════════════════════════
+    role_preset_id: str = ""
+    # References a RolePresetV2 loaded from data/roles/*.yaml.
+    # Empty = legacy behavior (V1 compatibility).
+    role_preset_version: int = 1
+    # 1 = legacy V1 preset (prompt-only), 2 = V2 (7-dim enhanced).
+    llm_tier: str = ""
+    # LLM capability tier: "reasoning_strong" | "coding_strong" | "writing_strong"
+    # | "fast_cheap" | "multimodal" | "domain_specific" | "" (use agent.provider/model)
+    # Resolved by LLMTierRouter at runtime to a concrete provider/model.
+    llm_tier_overrides: dict = field(default_factory=dict)
+    # Per-context tier overrides, e.g. {"multimodal": "multimodal", "coding": "coding_strong"}
+    sop_template_id: str = ""
+    # References a WorkflowTemplate used as this role's SOP (state machine).
+    # Empty = no SOP (free-form execution).
+    quality_rules: list = field(default_factory=list)
+    # List of QualityCheckRule dicts (see app/quality_gate.py).
+    # Empty = no quality gate.
+    output_contract: dict = field(default_factory=dict)
+    # What this role produces: {"produces": [...], "schema": {...}}
+    input_contract: dict = field(default_factory=dict)
+    # What this role accepts: {"accepts": [...], "requires_fields": [...]}
+    kpi_definitions: list = field(default_factory=list)
+    # List of KPIDefinition dicts for this role.
+
     def to_dict(self) -> dict:
         return {
             "agent_class": self.agent_class,
@@ -656,6 +768,16 @@ class AgentProfile:
             "sandbox_mode": self.sandbox_mode,
             "sandbox_allow_commands": self.sandbox_allow_commands,
             "skill_capabilities": self.skill_capabilities,
+            # RolePresetV2 fields (all optional)
+            "role_preset_id": self.role_preset_id,
+            "role_preset_version": self.role_preset_version,
+            "llm_tier": self.llm_tier,
+            "llm_tier_overrides": self.llm_tier_overrides,
+            "sop_template_id": self.sop_template_id,
+            "quality_rules": self.quality_rules,
+            "output_contract": self.output_contract,
+            "input_contract": self.input_contract,
+            "kpi_definitions": self.kpi_definitions,
         }
 
     @staticmethod
@@ -690,6 +812,16 @@ class AgentProfile:
             sandbox_mode=d.get("sandbox_mode", ""),
             sandbox_allow_commands=d.get("sandbox_allow_commands", []),
             skill_capabilities=d.get("skill_capabilities", []),
+            # RolePresetV2 fields (all with safe defaults → V1 agents compatible)
+            role_preset_id=d.get("role_preset_id", ""),
+            role_preset_version=int(d.get("role_preset_version", 1)),
+            llm_tier=d.get("llm_tier", ""),
+            llm_tier_overrides=d.get("llm_tier_overrides") or {},
+            sop_template_id=d.get("sop_template_id", ""),
+            quality_rules=d.get("quality_rules") or [],
+            output_contract=d.get("output_contract") or {},
+            input_contract=d.get("input_contract") or {},
+            kpi_definitions=d.get("kpi_definitions") or [],
         )
 
 
@@ -763,6 +895,14 @@ class Agent:
     shared_workspace: str = ""  # Shared project workspace directory (if part of a project)
     project_id: str = ""  # Project ID if agent belongs to a project
     project_name: str = ""  # Project name for prompt context
+    context_type: str = "solo"  # "solo" | "project" | "meeting"
+    # Determines where produced files go:
+    #   solo    → agent's private workspace (working_dir)
+    #   project → project shared_workspace (no per-file decision)
+    #   meeting → meeting shared_workspace (no per-file decision)
+    # See prompt builder in _build_system_prompt(); callers should set this
+    # at create-time based on whether a project_id / source_meeting_id is
+    # present. Default "solo" keeps legacy single-agent behavior.
     parent_id: str = ""  # If set, this is a sub-agent (hidden from UI by default)
     priority_level: int = 3  # 1=CXO (highest), 2=PM, 3=Team Member (default)
     role_title: str = ""  # e.g. "CXO", "PM", "Developer", etc.
@@ -876,6 +1016,7 @@ class Agent:
             "shared_workspace": self.shared_workspace,
             "project_id": self.project_id,
             "project_name": self.project_name,
+            "context_type": self.context_type,
             "parent_id": self.parent_id,
             "priority_level": self.priority_level,
             "role_title": self.role_title,
@@ -958,6 +1099,7 @@ class Agent:
             shared_workspace=d.get("shared_workspace", ""),
             project_id=d.get("project_id", ""),
             project_name=d.get("project_name", ""),
+            context_type=d.get("context_type", "solo"),
             parent_id=d.get("parent_id", ""),
             priority_level=d.get("priority_level", 3),
             role_title=d.get("role_title", ""),
@@ -1034,8 +1176,11 @@ class Agent:
             "id": self.id,
             "name": self.name,
             "role": self.role,
-            "model": self.model or llm.get_config().get("model", ""),
-            "provider": self.provider or llm.get_config().get("provider", ""),
+            # Return the agent's OWN model/provider — no fallback to the
+            # global config. Empty strings signal "not configured" so the
+            # UI can disable the chat input and prompt for selection.
+            "model": self.model or "",
+            "provider": self.provider or "",
             # --- Additional LLM slots for 方案甲(learning+multimodal) + 乙(extra_llms) ---
             "learning_provider": self.learning_provider,
             "learning_model": self.learning_model,
@@ -1114,6 +1259,7 @@ class Agent:
             "shared_workspace": self.shared_workspace,
             "project_id": self.project_id,
             "project_name": self.project_name,
+            "context_type": self.context_type,
             # --- Evolution goals ---
             "evolution_goals": self.evolution_goals,
         }
@@ -2124,7 +2270,7 @@ class Agent:
     # adding/editing a system-wide section like <file_display>.
     # This guarantees cache freshness even when no profile field
     # changed between two code versions running in the same process.
-    _STATIC_PROMPT_BUILD_VERSION = "v3-global_system_prompt"
+    _STATIC_PROMPT_BUILD_VERSION = "v4-project_context_freshness"
 
     def _get_global_system_prompt(self) -> str:
         """Legacy compat — returns empty if global_system_prompt migrated to scene_prompts."""
@@ -2209,6 +2355,28 @@ class Agent:
             self._get_global_system_prompt(),
             self._get_scene_prompts_text(),
         ]
+        # ── Project-context freshness ───────────────────────────────
+        # mtime-nanoseconds of PROJECT_CONTEXT.md (and legacy siblings)
+        # so edits invalidate the cached prompt at next chat(), without
+        # requiring an agent restart.  Cheap stat() — no file read.
+        try:
+            from pathlib import Path as _HPath
+            _hdirs: list[str] = []
+            if self.working_dir:
+                _hdirs.append(self.working_dir)
+            if self.shared_workspace and self.shared_workspace != self.working_dir:
+                _hdirs.append(self.shared_workspace)
+            for _d in _hdirs:
+                for _n in ("PROJECT_CONTEXT.md", "TUDOU_CLAW.md",
+                           "CLAW.md", "README.md"):
+                    try:
+                        _f = _HPath(_d) / _n
+                        if _f.exists():
+                            parts.append(f"{_n}@{_d}:{_f.stat().st_mtime_ns}")
+                    except OSError:
+                        continue
+        except Exception:
+            pass
         return hashlib.md5("|".join(parts).encode()).hexdigest()
 
     def _build_static_system_prompt(self) -> str:
@@ -2385,17 +2553,50 @@ class Agent:
             "</file_display>"
         )
 
-        # Project context files (change rarely — only when files are edited)
-        for name in ("TUDOU_CLAW.md", "CLAW.md", "README.md"):
-            ctx_file = wd / name
-            if ctx_file.exists():
+        # Project context files — persistent project knowledge pinned into
+        # every turn.  Modeled after Claude Code's CLAUDE.md convention:
+        # drop a PROJECT_CONTEXT.md at the project root and its contents
+        # automatically prime every agent that touches the directory.
+        #
+        # Search order:
+        #   • working_dir (private)   + shared_workspace (team)
+        #   • filename priority per dir: PROJECT_CONTEXT.md (canonical) >
+        #     TUDOU_CLAW.md > CLAW.md > README.md  (first match per dir)
+        #
+        # Cost: lives in the STATIC system prompt, so it's captured by both
+        # local KV-cache prefixes and Anthropic prompt-caching (2.2.5) —
+        # after first turn it's effectively free tokens.
+        from pathlib import Path as _PCPath
+        _ctx_dirs: list[_PCPath] = [wd]
+        if getattr(self, "shared_workspace", None):
+            try:
+                _sw = _PCPath(self.shared_workspace)
+                if _sw.resolve() != wd.resolve():
+                    _ctx_dirs.append(_sw)
+            except (OSError, ValueError):
+                pass
+        _seen_paths: set[str] = set()
+        for _dir in _ctx_dirs:
+            for name in ("PROJECT_CONTEXT.md", "TUDOU_CLAW.md",
+                         "CLAW.md", "README.md"):
+                ctx_file = _dir / name
                 try:
-                    content = ctx_file.read_text(encoding="utf-8", errors="replace")[:4000]
+                    if not ctx_file.exists():
+                        continue
+                    _rp = str(ctx_file.resolve())
+                    if _rp in _seen_paths:
+                        continue
+                    _seen_paths.add(_rp)
+                    content = ctx_file.read_text(
+                        encoding="utf-8", errors="replace")[:4000]
                     parts.append(
-                        f"\n<project_context file=\"{name}\">\n{content}\n</project_context>"
+                        f"\n<project_context file=\"{name}\" "
+                        f"dir=\"{_dir.name}\">\n{content}\n"
+                        f"</project_context>"
                     )
+                    break  # one file per directory (priority order)
                 except OSError:
-                    pass
+                    continue
 
         # Model-specific tool use guidance (depends on model, rarely changes)
         guidance = security.get_model_tool_guidance(self.model or "")
@@ -2404,53 +2605,126 @@ class Agent:
 
         is_zh = (self.system_prompt and len(self.system_prompt) > 200)
         # --- Workspace awareness: tell the Agent exactly where to write files ---
+        #
+        # Routing rule (driven by Agent.context_type; see dataclass docstring):
+        #   solo     → all produced files go to private working_dir
+        #   project  → ALL produced files go to project shared_workspace
+        #              (agent does NOT decide per-file; shared is the one place)
+        #   meeting  → ALL produced files go to meeting shared_workspace
+        #              (same contract as project, different origin)
+        #
+        # This replaces the old "agent decides whether peers need this file"
+        # heuristic, which produced confusing save locations (e.g. a PPTX
+        # ending up in shared even when user expected private workspace).
         ws_lines = []
-        # Detect Chinese: use zh mode if system_prompt is rich CJK, or language is zh-CN
         use_zh = is_zh or (p.language and p.language.startswith("zh"))
-        has_project = bool(self.shared_workspace and self.project_name)
+        ctx_type = (self.context_type or "solo").lower()
+        # Guard: only honor project/meeting routing if shared_workspace is
+        # actually set. Otherwise degrade to solo to avoid pointing the
+        # agent at an empty path.
+        if ctx_type in ("project", "meeting") and not self.shared_workspace:
+            ctx_type = "solo"
         if use_zh:
             ws_lines.append("\n<workspace_context>")
-            ws_lines.append(f"私有工作目录 (你自己的空间): {wd}")
-            if has_project:
-                ws_lines.append(f"项目共享目录 (团队共享): {self.shared_workspace}")
-                ws_lines.append(f"所属项目: {self.project_name} (ID: {self.project_id})")
-            ws_lines.append("")
-            ws_lines.append("⚠️ 文件写入规则 (必须遵守):")
-            if has_project:
-                ws_lines.append(f"• 项目相关的代码/文件 → 写入项目共享目录: {self.shared_workspace}")
-                ws_lines.append("  （其他 Agent 需要访问的文件必须放这里）")
-                ws_lines.append(f"• 个人临时文件/草稿/日志 → 写入私有目录: {wd}")
-                ws_lines.append("  （只有你自己会用到的文件放这里）")
-                ws_lines.append("• 判断标准：这个文件是否需要被项目中其他 Agent 看到？")
-                ws_lines.append("  - 需要 → 项目共享目录")
-                ws_lines.append("  - 不需要 → 私有目录")
-            else:
-                ws_lines.append(f"• 所有文件操作在工作目录下进行: {wd}")
+            if ctx_type == "solo":
+                ws_lines.append(f"工作目录 (你自己的空间): {wd}")
+                ws_lines.append("")
+                ws_lines.append("⚠️ 文件写入规则 (必须遵守):")
+                ws_lines.append(f"• 所有产出文件写入工作目录: {wd}")
+            elif ctx_type == "project":
+                ws_lines.append(f"私有工作目录 (scratch/日志用): {wd}")
+                ws_lines.append(f"项目共享目录 (所有产出必须写这里): {self.shared_workspace}")
+                if self.project_name:
+                    ws_lines.append(f"所属项目: {self.project_name} (ID: {self.project_id})")
+                ws_lines.append("")
+                ws_lines.append("⚠️ 文件写入规则 (必须遵守):")
+                ws_lines.append(f"• 所有交付物 / 产出文件 → 必须写入项目共享目录: {self.shared_workspace}")
+                ws_lines.append("  （PPT、文档、报告、代码、图片等，一律放这里，不要自行判断"
+                                "是否只有你会用到）")
+                ws_lines.append(f"• 仅供你自己临时使用的 scratch / 日志 → 可写入私有目录: {wd}")
+            else:  # meeting
+                ws_lines.append(f"私有工作目录 (scratch/日志用): {wd}")
+                ws_lines.append(f"会议共享目录 (所有产出必须写这里): {self.shared_workspace}")
+                ws_lines.append("")
+                ws_lines.append("⚠️ 文件写入规则 (必须遵守):")
+                ws_lines.append(f"• 所有交付物 / 产出文件 → 必须写入会议共享目录: {self.shared_workspace}")
+                ws_lines.append("  （会议纪要、行动项、附件等，一律放这里）")
+                ws_lines.append(f"• 仅供你自己临时使用的 scratch / 日志 → 可写入私有目录: {wd}")
             ws_lines.append("• 使用相对路径（如 src/main.py）而非绝对路径。")
             ws_lines.append("• 创建子Agent (team_create) 时不要指定 working_dir，自动继承。")
             ws_lines.append("</workspace_context>")
         else:
             ws_lines.append("\n<workspace_context>")
-            ws_lines.append(f"Private workspace (your own): {wd}")
-            if has_project:
-                ws_lines.append(f"Project shared directory (team): {self.shared_workspace}")
-                ws_lines.append(f"Project: {self.project_name} (ID: {self.project_id})")
-            ws_lines.append("")
-            ws_lines.append("⚠️ File write rules (MUST follow):")
-            if has_project:
-                ws_lines.append(f"• Project code/files → write to shared dir: {self.shared_workspace}")
-                ws_lines.append("  (Files other agents need access to MUST go here)")
-                ws_lines.append(f"• Personal temp files/drafts/logs → write to private dir: {wd}")
-                ws_lines.append("  (Files only you will use go here)")
-                ws_lines.append("• Decision rule: Will other agents in this project need this file?")
-                ws_lines.append("  - Yes → project shared directory")
-                ws_lines.append("  - No  → private workspace")
-            else:
-                ws_lines.append(f"• All file operations within: {wd}")
+            if ctx_type == "solo":
+                ws_lines.append(f"Workspace (your own): {wd}")
+                ws_lines.append("")
+                ws_lines.append("⚠️ File write rules (MUST follow):")
+                ws_lines.append(f"• All produced files go to your workspace: {wd}")
+            elif ctx_type == "project":
+                ws_lines.append(f"Private workspace (scratch/logs only): {wd}")
+                ws_lines.append(f"Project shared directory (ALL deliverables go here): {self.shared_workspace}")
+                if self.project_name:
+                    ws_lines.append(f"Project: {self.project_name} (ID: {self.project_id})")
+                ws_lines.append("")
+                ws_lines.append("⚠️ File write rules (MUST follow):")
+                ws_lines.append(f"• ALL deliverables / produced files → MUST go to shared dir: {self.shared_workspace}")
+                ws_lines.append("  (PPTs, docs, reports, code, images — all go here. Do NOT second-guess "
+                                "whether peers need the file.)")
+                ws_lines.append(f"• Your own scratch / logs only → may go to private dir: {wd}")
+            else:  # meeting
+                ws_lines.append(f"Private workspace (scratch/logs only): {wd}")
+                ws_lines.append(f"Meeting shared directory (ALL deliverables go here): {self.shared_workspace}")
+                ws_lines.append("")
+                ws_lines.append("⚠️ File write rules (MUST follow):")
+                ws_lines.append(f"• ALL deliverables / produced files → MUST go to meeting shared dir: {self.shared_workspace}")
+                ws_lines.append("  (Meeting notes, action items, attachments — all go here.)")
+                ws_lines.append(f"• Your own scratch / logs only → may go to private dir: {wd}")
             ws_lines.append("• Use relative paths (e.g., src/main.py), not absolute paths.")
             ws_lines.append("• When spawning sub-agents (team_create), do NOT set working_dir.")
             ws_lines.append("</workspace_context>")
         parts.append("\n".join(ws_lines))
+
+        # --- Attachment contract: reminds the agent to actually attach
+        # files when calling send_* tools.  Failure mode this prevents:
+        # agent produces a file, then calls send_email/send_message but
+        # only mentions the filename in the email body — recipient gets
+        # no attachment.  The tool description alone is not enough; the
+        # behavior drifts without an explicit system-level contract.
+        if use_zh:
+            parts.append(
+                "\n<attachment_contract>\n"
+                "当你调用发送类工具（send_email / send_message / 类似的 IM "
+                "发送工具）且本轮对话中你刚产出了文件（PPT、文档、报告、图片等）"
+                "或用户明确要求发送某个文件时，必须：\n"
+                "  1. 把文件的完整路径放进工具调用的 `attachments` 参数"
+                "（数组）。\n"
+                "  2. 不要只在邮件/消息正文里写文件名 —— 收件人不会因为正文"
+                "提到文件名就自动收到附件。\n"
+                "  3. 如果工具有多个附件参数名（如 attachments / files / "
+                "attach_paths），任选一个支持的即可，但不能留空。\n"
+                "  4. 如果不确定文件是否需要作为附件发送，先问用户；不要"
+                "静默省略。\n"
+                "</attachment_contract>"
+            )
+        else:
+            parts.append(
+                "\n<attachment_contract>\n"
+                "When you call a send-type tool (send_email / send_message / "
+                "any IM send tool) AND you produced a file in this turn "
+                "(PPT, doc, report, image, etc.) OR the user explicitly asked "
+                "you to send a file, you MUST:\n"
+                "  1. Put the file's full path into the tool call's "
+                "`attachments` parameter (an array).\n"
+                "  2. Do NOT rely on mentioning the filename in the email/"
+                "message body — recipients will not get the file just "
+                "because you named it in prose.\n"
+                "  3. If the tool exposes multiple attachment-like "
+                "parameters (attachments / files / attach_paths), pick any "
+                "supported one, but it must not be empty.\n"
+                "  4. If unsure whether a file should be attached, ask the "
+                "user — don't silently omit it.\n"
+                "</attachment_contract>"
+            )
 
         # --- Inline image display: tell the agent how to surface images ---
         # Portal chat renders markdown `![alt](path)` as an inline <img> by
@@ -3085,28 +3359,56 @@ class Agent:
 
         当 agent_phase 为 EXECUTING 或 PLANNING 时调用，
         让 Agent 知道之前做到哪了，避免重头开始。
+
+        [F1] 过期过滤：若所有信号（active plan / action_done / action_plan）
+        都早于 TUDOU_CHECKPOINT_STALE_HOURS（默认 24h），则返回空串，
+        避免把一周前的任务当作"正在进行"反复复活。
         """
+        import os as _os
+        try:
+            stale_hours = float(_os.environ.get("TUDOU_CHECKPOINT_STALE_HOURS", "24"))
+        except (TypeError, ValueError):
+            stale_hours = 24.0
+        stale_cutoff = time.time() - stale_hours * 3600
+
         mm = self._get_memory_manager()
         parts = []
 
-        # 1. 活跃计划的进度
-        plan_summary = self._format_active_plan_summary()
-        if plan_summary:
-            parts.append(plan_summary)
+        # 1. 活跃计划的进度（仅当近期有活动）
+        def _plan_latest_ts(p):
+            ts = p.created_at
+            for s in p.steps:
+                if getattr(s, "completed_at", 0) and s.completed_at > ts:
+                    ts = s.completed_at
+                if getattr(s, "started_at", 0) and s.started_at > ts:
+                    ts = s.started_at
+            return ts
 
-        # 2. 从 L3 获取最近的 action_done (已完成的操作)
+        fresh_active = any(
+            p.status == "active" and _plan_latest_ts(p) >= stale_cutoff
+            for p in self.execution_plans
+        )
+        if fresh_active:
+            plan_summary = self._format_active_plan_summary()
+            if plan_summary:
+                parts.append(plan_summary)
+
+        # 2/3. L3 facts — 只纳入 updated_at 在 cutoff 之后的条目
         if mm:
             recent_done = mm.get_recent_facts(self.id, limit=10, category="action_done")
-            if recent_done:
+            fresh_done = [f for f in recent_done
+                          if getattr(f, "updated_at", 0) >= stale_cutoff]
+            if fresh_done:
                 parts.append("\n**最近完成的操作:**")
-                for f in recent_done[:10]:
+                for f in fresh_done[:10]:
                     parts.append(f"- {f.content}")
 
-            # 3. 获取待办事项
-            plans = mm.get_recent_facts(self.id, limit=5, category="action_plan")
-            if plans:
+            plans_facts = mm.get_recent_facts(self.id, limit=5, category="action_plan")
+            fresh_plans = [f for f in plans_facts
+                           if getattr(f, "updated_at", 0) >= stale_cutoff]
+            if fresh_plans:
                 parts.append("\n**待办事项:**")
-                for f in plans[:5]:
+                for f in fresh_plans[:5]:
                     parts.append(f"- {f.content}")
 
         if not parts:
@@ -3120,6 +3422,49 @@ class Agent:
             + "\n".join(parts)
             + "\n</task_checkpoint>\n"
         )
+
+    def _auto_stale_active_plans(self):
+        """[F3] 自动把长时间无活动的 active plan 标记为 stale。
+
+        防止 agent_phase 永久停留在 EXECUTING 导致每次启动/唤醒
+        都触发 task_checkpoint 注入、让 LLM 反复重放同一段老任务。
+
+        超过 TUDOU_PLAN_STALE_HOURS（默认 6h）无活动的 active plan
+        → status="stale"，并联动调用 _update_agent_phase() 让阶段回落。
+        """
+        import os as _os
+        try:
+            stale_hours = float(_os.environ.get("TUDOU_PLAN_STALE_HOURS", "6"))
+        except (TypeError, ValueError):
+            stale_hours = 6.0
+        cutoff = time.time() - stale_hours * 3600
+
+        changed = False
+        for p in self.execution_plans:
+            if p.status != "active":
+                continue
+            latest_ts = p.created_at
+            for s in p.steps:
+                if getattr(s, "completed_at", 0) and s.completed_at > latest_ts:
+                    latest_ts = s.completed_at
+                if getattr(s, "started_at", 0) and s.started_at > latest_ts:
+                    latest_ts = s.started_at
+            if latest_ts < cutoff:
+                p.status = "stale"
+                changed = True
+                try:
+                    self._log("plan_auto_stale", {
+                        "plan_id": p.id,
+                        "task": (p.task_summary or "")[:80],
+                        "age_hours": round((time.time() - latest_ts) / 3600, 2),
+                    })
+                except Exception:
+                    pass
+        if changed:
+            try:
+                self._update_agent_phase()
+            except Exception:
+                pass
 
     def _write_plan_to_memory(self, plan: "ExecutionPlan"):
         """将 ExecutionPlan 的里程碑/步骤写入 L3 记忆。
@@ -4282,6 +4627,33 @@ Write only the summary body. Do not include any preamble or prefix."""
             except Exception:
                 pass  # template library is optional
 
+            # ── RolePresetV2 Pre-hook: SOP stage injection ──
+            # Runs ONLY for V2 agents with sop_template_id configured.
+            self._active_sop_instance = None
+            try:
+                sop_tpl_id = getattr(self.profile, "sop_template_id", "") or ""
+                role_preset_version = getattr(self.profile, "role_preset_version", 1)
+                if sop_tpl_id and role_preset_version == 2:
+                    from .role_sop import get_sop_manager
+                    sop_mgr = get_sop_manager()
+                    sop_session = f"chat_{int(time.time())}"
+                    inst = sop_mgr.get_or_start(self.id, sop_session, sop_tpl_id)
+                    if inst is not None:
+                        stage_prompt = sop_mgr.current_stage_prompt(inst)
+                        if stage_prompt:
+                            self.messages.append({
+                                "role": "system",
+                                "content": stage_prompt,
+                            })
+                        self._active_sop_instance = inst
+                        self._log("sop_stage_enter", {
+                            "sop_id": inst.sop_id,
+                            "stage_id": inst.current_stage,
+                            "instance_id": inst.instance_id,
+                        })
+            except Exception as _sop_err:
+                logger.debug("SOP pre-hook skipped: %s", _sop_err)
+
             # --- Skill System: auto-match and inject skills ---
             self._active_skill_ids = []
             self._chat_start_time = time.time()
@@ -4291,6 +4663,34 @@ Write only the summary body. Do not include any preamble or prefix."""
                     matched_skills = registry.match_skills(
                         _user_text, top_k=3,
                         agent_skills=self.bound_prompt_packs or None)
+                    # Filter: if the skill's name / skill_id / content references
+                    # a tool currently in the global denylist, drop it. This
+                    # prevents revoked skills (e.g. pptx_advanced after
+                    # create_pptx_advanced is globally disabled) from still
+                    # being injected into the system prompt.
+                    try:
+                        from app.auth import get_auth as _get_auth
+                        _denied = set(_get_auth().tool_policy.list_global_denylist())
+                    except Exception:
+                        _denied = set()
+                    if matched_skills and _denied:
+                        def _refs_denied(pack) -> bool:
+                            n = (pack.name or "").lower()
+                            sid = (pack.skill_id or "").lower()
+                            body = (pack.content or "").lower()
+                            for tool in _denied:
+                                t = tool.lower()
+                                if not t:
+                                    continue
+                                # name/id contains the denied tool stub
+                                if t in n or t in sid:
+                                    return True
+                                # content invokes the denied tool by name
+                                if t in body:
+                                    return True
+                            return False
+                        matched_skills = [p for p in matched_skills
+                                          if not _refs_denied(p)]
                     if matched_skills:
                         skill_ids = [s.skill_id for s in matched_skills]
                         context_text = registry.build_context_injection(
@@ -4321,9 +4721,24 @@ Write only the summary body. Do not include any preamble or prefix."""
             except Exception:
                 routed = []
 
+            # Dedup guard — the tool-calling loop sometimes emits the same
+            # assistant text multiple times (once per iteration when the LLM
+            # keeps repeating a bridge sentence between tool calls, and once
+            # as the final consolidated output). The user sees 4 identical
+            # "好的，我已经收集到..." bubbles. Squash consecutive duplicates.
+            _last_emitted_text_ref = [None]
             def _emit(evt: AgentEvent):
                 if on_event:
                     try:
+                        # Only dedupe assistant-message events; everything
+                        # else (tool_call / tool_result / text_delta / …)
+                        # flows through untouched.
+                        if (evt.kind == "message"
+                                and evt.data.get("role") == "assistant"):
+                            c = (evt.data.get("content") or "").strip()
+                            if c and c == _last_emitted_text_ref[0]:
+                                return  # suppress exact repeat
+                            _last_emitted_text_ref[0] = c
                         on_event(evt)
                     except Exception:
                         pass
@@ -4398,17 +4813,21 @@ Write only the summary body. Do not include any preamble or prefix."""
                 max_iters = 20
 
                 # ── Task Checkpoint Injection: 任务恢复上下文 ──
-                # 当 agent 处于 EXECUTING/PLANNING 阶段时，注入断点信息
+                # [F3] 先老化 stale active plan，防止 phase 卡死
+                try:
+                    self._auto_stale_active_plans()
+                except Exception as _stale_err:
+                    logger.debug("auto_stale_active_plans failed: %s", _stale_err)
+
+                # [F2] checkpoint 改为瞬态注入
+                _checkpoint_ctx = ""
                 if self.agent_phase in (AgentPhase.EXECUTING, AgentPhase.PLANNING):
-                    checkpoint_ctx = self._build_checkpoint_context()
-                    if checkpoint_ctx:
-                        self.messages.append({
-                            "role": "system",
-                            "content": checkpoint_ctx,
-                        })
+                    _checkpoint_ctx = self._build_checkpoint_context()
+                    if _checkpoint_ctx:
                         self._log("checkpoint_inject", {
                             "phase": self.agent_phase.value,
-                            "chars": len(checkpoint_ctx),
+                            "chars": len(_checkpoint_ctx),
+                            "transient": True,
                         })
                         self.history_log.add("checkpoint",
                                               f"[Checkpoint] 注入任务恢复上下文 phase={self.agent_phase.value}")
@@ -4418,6 +4837,23 @@ Write only the summary body. Do not include any preamble or prefix."""
                 # This preserves LM Studio / Ollama KV cache across turns.
                 _msgs_to_send = self._inject_dynamic_context(
                     self.messages, current_query=_user_text)
+
+                # [F2] 瞬态插入 checkpoint（不污染 self.messages）
+                if _checkpoint_ctx:
+                    _last_user_idx = None
+                    for _i in range(len(_msgs_to_send) - 1, -1, -1):
+                        if _msgs_to_send[_i].get("role") == "user":
+                            _last_user_idx = _i
+                            break
+                    _ctx_msg = {
+                        "role": "system",
+                        "content": _checkpoint_ctx,
+                        "_dynamic": True,
+                    }
+                    if _last_user_idx is not None and _last_user_idx > 0:
+                        _msgs_to_send.insert(_last_user_idx, _ctx_msg)
+                    else:
+                        _msgs_to_send.append(_ctx_msg)
 
                 # ── Strip base64 images from older messages ──
                 # Only the LAST user message (current turn) keeps its images.
@@ -4462,6 +4898,36 @@ Write only the summary body. Do not include any preamble or prefix."""
                         and not self.multimodal_supports_tools):
                     _effective_tools = None
 
+                # Narrator-stall nudge: at most one corrective injection per
+                # turn, so a persistently-broken model can't pin us in a loop.
+                _nudged_this_turn = False
+
+                # Plan D: handoff-trigger force. Only active on iteration 0,
+                # only when handoff_request is actually in the tool list, and
+                # only when the user message matches the trigger pattern.
+                # Bypass with TUDOU_FORCE_HANDOFF=0.
+                _forced_tool_choice = None
+                try:
+                    if (os.getenv("TUDOU_FORCE_HANDOFF", "1") != "0"
+                            and _effective_tools
+                            and _user_msg_triggers_handoff(_user_text)
+                            and any(t.get("function", {}).get("name")
+                                    == "handoff_request"
+                                    for t in _effective_tools)):
+                        _forced_tool_choice = {
+                            "type": "function",
+                            "function": {"name": "handoff_request"},
+                        }
+                        try:
+                            self._log("handoff_force", {
+                                "trigger_matched": True,
+                                "user_text_preview": (_user_text or "")[:120],
+                            })
+                        except Exception:
+                            pass
+                except Exception:
+                    _forced_tool_choice = None
+
                 for iteration in range(max_iters):
                     if _is_aborted():
                         final_content = final_content or "[Aborted]"
@@ -4480,7 +4946,12 @@ Write only the summary body. Do not include any preamble or prefix."""
                     # streaming WITHOUT tools to get fast text output.
                     # If the model wants to call a tool, we retry with tools.
 
-                    if on_event and not _effective_tools:
+                    # Plan D: if we're forcing a tool call this iteration,
+                    # the streaming-no-tools preflight is useless (it'd strip
+                    # tools and free-text hallucinate). Skip straight to the
+                    # non-stream tool-enabled path below.
+                    _force_this_iter = (iteration == 0 and _forced_tool_choice)
+                    if on_event and not _effective_tools and not _force_this_iter:
                         # Pure stream, no tools at all
                         try:
                             gen = llm.chat(
@@ -4518,6 +4989,8 @@ Write only the summary body. Do not include any preamble or prefix."""
                         response = llm.chat_no_stream(
                             _msgs_to_send, tools=_effective_tools,
                             provider=_eff_provider, model=_eff_model,
+                            tool_choice=(_forced_tool_choice
+                                         if iteration == 0 else None),
                         )
                     except (ConnectionError, OSError) as conn_err:
                         # Provider unreachable — stop retrying immediately
@@ -4536,6 +5009,9 @@ Write only the summary body. Do not include any preamble or prefix."""
                     msg = response.get("message", {})
                     content = _ensure_str_content(msg.get("content"))
                     tool_calls = msg.get("tool_calls", [])
+                    # Canonical stop_reason plumbed from llm.py:
+                    # end_turn | tool_use | length | stop_sequence | content_filter
+                    stop_reason = response.get("stop_reason") or ""
 
                     if content:
                         final_content = content
@@ -4545,12 +5021,97 @@ Write only the summary body. Do not include any preamble or prefix."""
                         self._log(evt.kind, evt.data)
                         _emit(evt)
 
+                    # ── Surface truncation / filter issues ──────────────
+                    # Distinct from "empty tool_calls" — these tell the user
+                    # WHY the turn ended even when there's no visible error.
+                    if stop_reason == "length":
+                        try:
+                            _emit(AgentEvent(time.time(), "llm_truncated",
+                                             {"reason": "length",
+                                              "model": _eff_model,
+                                              "hint": "Output hit max_tokens. "
+                                                      "Increase max_tokens or "
+                                                      "ask the model to be "
+                                                      "more concise."}))
+                        except Exception:
+                            pass
+                    elif stop_reason == "content_filter":
+                        try:
+                            _emit(AgentEvent(time.time(), "llm_filtered",
+                                             {"reason": "content_filter",
+                                              "model": _eff_model}))
+                        except Exception:
+                            pass
+
                     # NOTE: text-to-tool-call extraction (for models that
                     # output JSON as text instead of tool_calls) is handled
                     # in llm.py's _normalize_response_tool_calls(), so
                     # tool_calls here is already normalised.
 
                     if not tool_calls:
+                        # ── Narrator-stall nudge ──────────────────────────
+                        # The model replied with a promise ("Let me fix it:")
+                        # but didn't call any tool.  If it still has tools
+                        # available AND we haven't nudged yet AND we have
+                        # budget for another iteration, inject a correction
+                        # instead of breaking.
+                        #
+                        # Gate: skip nudge when stop_reason is "length" —
+                        # that's truncation, not a stall (the model WANTED
+                        # to keep going; injecting "call the tool" would
+                        # just waste tokens on a truncated continuation).
+                        if (_effective_tools
+                                and not _nudged_this_turn
+                                and iteration < max_iters - 1
+                                and stop_reason != "length"
+                                and stop_reason != "content_filter"
+                                and os.environ.get(
+                                    "TUDOU_NUDGE_WEAK_MODELS", "1") != "0"
+                                and _looks_like_narrator_stall(content)):
+                            # Persist the stall reply so the next LLM call
+                            # sees its own words — makes the correction feel
+                            # like a direct continuation instead of a reset.
+                            self.messages.append({
+                                "role": "assistant",
+                                "content": content,
+                                "_source": "llm",
+                            })
+                            self._log("message",
+                                      {"role": "assistant",
+                                       "content": content,
+                                       "source": "llm"})
+                            # Inject a user-role correction.  User-role (not
+                            # system) because mid-turn system insertions
+                            # confuse some providers; user-role corrections
+                            # are the pattern OpenAI's Cookbook recommends
+                            # for self-repair loops.
+                            nudge = (
+                                "[system nudge] 你上一条消息以 \"让我…：\" / "
+                                "\"Let me …:\" 结尾，但没有调用任何工具。"
+                                "请立即调用相应工具完成你承诺的动作 —— "
+                                "不要重复宣告意图。Call the tool now; "
+                                "do not re-narrate."
+                            )
+                            self.messages.append({
+                                "role": "user",
+                                "content": nudge,
+                                "_source": "system_nudge",
+                            })
+                            _nudged_this_turn = True
+                            # Rebuild the outbound message list so the next
+                            # iteration picks up the two new messages.
+                            _msgs_to_send = _strip_old_images(
+                                self._inject_dynamic_context(
+                                    self.messages, current_query=_user_text))
+                            # Log for observability
+                            try:
+                                _emit(AgentEvent(time.time(), "nudge",
+                                                 {"reason": "narrator_stall",
+                                                  "iteration": iteration}))
+                            except Exception:
+                                pass
+                            continue
+
                         # Final response — ensure we always emit something
                         if not content and final_content:
                             # LLM returned empty final response but we had
@@ -4603,13 +5164,28 @@ Write only the summary body. Do not include any preamble or prefix."""
                             name, arguments, call_id = name_args_id
                             # Inject caller agent ID
                             if name in ("team_create", "send_message", "task_update",
-                                        "mcp_call", "bash", "write_file", "edit_file"):
+                                        "mcp_call", "bash", "write_file", "edit_file",
+                                        "submit_deliverable", "create_goal",
+                                        "update_goal_progress", "create_milestone",
+                                        "update_milestone_status"):
                                 arguments["_caller_agent_id"] = self.id
+                                try:
+                                    from .tools import _get_current_scope
+                                    _scope = _get_current_scope()
+                                    if _scope.get("project_id"):
+                                        arguments["_project_id"] = _scope["project_id"]
+                                    if _scope.get("meeting_id"):
+                                        arguments["_meeting_id"] = _scope["meeting_id"]
+                                except Exception:
+                                    pass
                             # Execute
                             if name == "plan_update":
                                 return name, self._handle_plan_update(arguments), call_id
                             elif name == "request_web_login":
                                 return name, self._handle_web_login_request(
+                                    arguments, on_event=on_event), call_id
+                            elif name == "handoff_request":
+                                return name, self._handle_handoff_request(
                                     arguments, on_event=on_event), call_id
                             else:
                                 return name, self._execute_tool_with_policy(
@@ -4656,6 +5232,9 @@ Write only the summary body. Do not include any preamble or prefix."""
                                                  {"plan": self.get_current_plan()}))
                             elif name == "request_web_login":
                                 result = self._handle_web_login_request(
+                                    arguments, on_event=on_event)
+                            elif name == "handoff_request":
+                                result = self._handle_handoff_request(
                                     arguments, on_event=on_event)
                             else:
                                 result = self._execute_tool_with_policy(
@@ -4755,6 +5334,42 @@ Write only the summary body. Do not include any preamble or prefix."""
                                     task_completed=analysis.task_completed)
                     except Exception:
                         pass  # auto-analysis is optional
+
+                    # ── RolePresetV2 Post-hook: QualityGate + SOP evaluate + KPI ──
+                    try:
+                        v2_version = getattr(self.profile, "role_preset_version", 1)
+                        if v2_version == 2 and final_content:
+                            _tools_used_list = [
+                                e.data.get("name", "") for e in self.events[-50:]
+                                if e.kind == "tool_call"
+                            ]
+                            final_content = self._run_quality_gate_with_retry(
+                                final_content, _user_text, _tools_used_list,
+                                _emit=_emit,
+                            )
+                            # SOP post-hook: evaluate exit and advance
+                            if getattr(self, "_active_sop_instance", None):
+                                try:
+                                    from .role_sop import get_sop_manager
+                                    sop_mgr = get_sop_manager()
+                                    inst = self._active_sop_instance
+                                    status = sop_mgr.evaluate_exit(inst, final_content)
+                                    self._log("sop_stage_eval", {
+                                        "sop_id": inst.sop_id,
+                                        "stage_id": inst.current_stage,
+                                        "status": status,
+                                        "instance_id": inst.instance_id,
+                                    })
+                                except Exception as _sop_post_err:
+                                    logger.debug("SOP post-hook skipped: %s", _sop_post_err)
+                            try:
+                                self._record_kpis_and_experience(
+                                    final_content, _user_text, _tools_used_list,
+                                )
+                            except Exception as _kpi_err:
+                                logger.debug("KPI recording skipped: %s", _kpi_err)
+                    except Exception as _v2_err:
+                        logger.debug("RolePresetV2 post-hook skipped: %s", _v2_err)
 
                     # --- Three-layer memory: post-response write-back ---
                     self._memory_write_back(_user_text, final_content)
@@ -5005,38 +5620,109 @@ Write only the summary body. Do not include any preamble or prefix."""
                     logger.debug("post-chat persist failed: %s", _persist_err)
 
                 # Drain pending chat queue: if the user typed more messages
-                # while we were busy, run the next one now (sequentially).
+                # while we were busy, merge them into ONE follow-up turn
+                # (soft-queue + merge — 等效于 Claude Code 的"下一轮一起想"语义)。
+                # 环境变量 TUDOU_MERGE_PENDING=0 可退回到逐条运行。
                 try:
-                    next_item = None
+                    drained = []
                     lock = getattr(self, "_pending_chat_lock", None)
                     if lock is not None:
                         with lock:
                             q = getattr(self, "_pending_chat_queue", None) or []
                             if q:
-                                next_item = q.pop(0)
-                                # Refresh queue-position events for remaining
-                                for _i, (_t, _, _) in enumerate(q):
-                                    try:
-                                        _t.push_event({
-                                            "type": "queued",
-                                            "content": f"⏳ 排队中 ({_i+1})",
-                                            "queue_position": _i + 1,
-                                        })
-                                    except Exception:
-                                        pass
-                    if next_item is not None:
-                        nxt_task, nxt_msg, nxt_src = next_item
-                        logger.info(
-                            "Agent %s draining pending chat task %s",
-                            self.id[:8], nxt_task.id)
-                        # Re-enter the same _run closure (with rebind via
-                        # default parameters) on a fresh worker thread so we
-                        # don't grow the call stack.
-                        _runner = _run  # local name capture
-                        threading.Thread(
-                            target=lambda: _runner(nxt_task, nxt_msg, nxt_src),
-                            daemon=True,
-                        ).start()
+                                drained = list(q)
+                                q.clear()
+
+                    if drained:
+                        import os as _os_pm
+                        _merge_enabled = _os_pm.environ.get(
+                            "TUDOU_MERGE_PENDING", "1"
+                        ).strip().lower() not in ("0", "false", "no")
+                        # 任一条是多模态 list/dict —— 不合并，避免破坏结构
+                        _has_multimodal = any(
+                            isinstance(m, (list, dict))
+                            for _t, m, _s in drained
+                        )
+
+                        _runner = _run  # closure capture
+
+                        if (len(drained) == 1 or _has_multimodal
+                                or not _merge_enabled):
+                            # ── 单条 / 多模态 / 禁用合并：串行运行 ──
+                            first_task, first_msg, first_src = drained[0]
+                            rest = drained[1:]
+                            if rest and lock is not None:
+                                with lock:
+                                    # 把剩余的放回队首，保留到达顺序
+                                    self._pending_chat_queue[:0] = rest
+                                    for _i, (_t, _, _) in enumerate(
+                                            self._pending_chat_queue):
+                                        try:
+                                            _t.push_event({
+                                                "type": "queued",
+                                                "content": f"⏳ 排队中 ({_i+1})",
+                                                "queue_position": _i + 1,
+                                            })
+                                        except Exception:
+                                            pass
+                            logger.info(
+                                "Agent %s draining pending chat task %s",
+                                self.id[:8], first_task.id)
+                            threading.Thread(
+                                target=lambda: _runner(
+                                    first_task, first_msg, first_src),
+                                daemon=True,
+                            ).start()
+                        else:
+                            # ── N ≥ 2 纯文本消息：合并为一个追加轮 ──
+                            primary_task, _first_msg, primary_src = drained[0]
+                            _parts = [
+                                "（以下内容在你上一轮回复过程中陆续到达，"
+                                "请结合刚才的输出一起考虑；"
+                                "如需修正或补充请明确说明。）"
+                            ]
+                            for _idx, (_t, _m, _s) in enumerate(
+                                    drained, start=1):
+                                _parts.append(
+                                    f"【追加 {_idx}】{str(_m or '').strip()}")
+                            merged_text = "\n\n".join(_parts)
+
+                            # 把被合并的 task 标记为已完成，避免 UI 永远卡在排队
+                            for merged_task, _m, _s in drained[1:]:
+                                try:
+                                    merged_task.push_event({
+                                        "type": "text",
+                                        "content": ("（与同时到达的其他消息"
+                                                    "合并处理，统一回复见关联"
+                                                    f"任务 {primary_task.id[:8]}）"),
+                                    })
+                                    merged_task.set_status(
+                                        ChatTaskStatus.COMPLETED,
+                                        "已合并", 100)
+                                    merged_task.push_event({
+                                        "type": "done",
+                                        "source": "merged",
+                                        "merged_into": primary_task.id,
+                                    })
+                                except Exception:
+                                    pass
+
+                            logger.info(
+                                "Agent %s merging %d pending msgs into "
+                                "task %s",
+                                self.id[:8], len(drained), primary_task.id)
+
+                            # 更新 primary_task 显示文本为合并后内容
+                            try:
+                                primary_task.user_message = merged_text[:500]
+                            except Exception:
+                                pass
+
+                            threading.Thread(
+                                target=lambda: _runner(
+                                    primary_task, merged_text, primary_src),
+                                daemon=True,
+                            ).start()
                 except Exception as _drain_err:
                     logger.debug("pending chat drain failed: %s", _drain_err)
 
@@ -5159,9 +5845,14 @@ Write only the summary body. Do not include any preamble or prefix."""
         """Trigger a retrospective analysis."""
         from .experience_library import SelfImprovementEngine
         if not self.self_improvement:
+            # Create the engine so this one-shot call can run, but DO
+            # NOT flip the background opt-in switch. tick_growth gates
+            # on ``self_improvement.enabled``; we don't want a single
+            # on-demand retrospective to permanently enable background
+            # growth ticks that keep spawning tasks the user never
+            # asked for.
             self.self_improvement = SelfImprovementEngine(
                 agent=self, role=self.role)
-            self.self_improvement.enable()
 
         # Build prompt and run through LLM
         prompt = self.self_improvement.build_retrospective_prompt(
@@ -5242,6 +5933,205 @@ Write only the summary body. Do not include any preamble or prefix."""
             return {"error": str(e)}
 
     # ---- Execution Plan: tool handler ----
+
+    def _handle_handoff_request(self, arguments: dict, on_event=None) -> str:
+        """Handle handoff_request: synchronous task transfer to a peer agent with
+        a visible 3-state handshake (sent → acked → completed/failed).
+
+        Unlike send_message (fire-and-forget), this blocks until the receiver
+        produces a result or fails, and emits AgentEvent("handoff_*") at each
+        state transition so the UI can render a badge.
+        """
+        import threading as _threading
+        import uuid as _uuid
+
+        to_agent_ref = (arguments.get("to_agent") or "").strip()
+        task_text = (arguments.get("task") or "").strip()
+        expected_output = (arguments.get("expected_output") or "").strip()
+        context_text = (arguments.get("context") or "").strip()
+        try:
+            timeout_seconds = int(arguments.get("timeout_seconds") or 600)
+        except (TypeError, ValueError):
+            timeout_seconds = 600
+        # Clamp to a sane range — don't let an LLM set timeout=0 or days
+        timeout_seconds = max(10, min(timeout_seconds, 3600))
+
+        if not to_agent_ref or not task_text:
+            return json.dumps({
+                "ok": False,
+                "error": "handoff_request requires both 'to_agent' and 'task'.",
+            }, ensure_ascii=False)
+
+        # Resolve target agent (by ID or name, mirroring _tool_send_message)
+        try:
+            from .hub import get_hub as _get_hub
+            hub = _get_hub()
+        except Exception as e:
+            return json.dumps({
+                "ok": False, "error": f"hub unavailable: {e}",
+            }, ensure_ascii=False)
+
+        target = hub.get_agent(to_agent_ref)
+        if target is None:
+            for a in hub.agents.values():
+                if a.name.lower() == to_agent_ref.lower():
+                    target = a
+                    break
+        if target is None:
+            available = [f"{a.name} ({a.id})" for a in hub.agents.values()]
+            return json.dumps({
+                "ok": False,
+                "error": (
+                    f"Agent '{to_agent_ref}' not found. "
+                    f"Available: {', '.join(available) or 'none'}"
+                ),
+            }, ensure_ascii=False)
+
+        if target.id == self.id:
+            return json.dumps({
+                "ok": False,
+                "error": (
+                    "Cannot hand off to yourself. If you are reporting status, "
+                    "just write it in your response — do NOT call handoff_request."
+                ),
+            }, ensure_ascii=False)
+
+        handoff_id = _uuid.uuid4().hex[:10]
+        from_name = f"{self.role}-{self.name}" if self.name else self.id
+        to_name = f"{target.role}-{target.name}" if target.name else target.id
+
+        # ── Emit "sent" event — UI shows ⏳ pending ──
+        if on_event:
+            on_event(AgentEvent(time.time(), "handoff_sent", {
+                "handoff_id": handoff_id,
+                "from_agent_id": self.id,
+                "from_agent_name": from_name,
+                "to_agent_id": target.id,
+                "to_agent_name": to_name,
+                "task": task_text[:300],
+                "expected_output": expected_output[:200],
+            }))
+        self._log("handoff_sent", {
+            "handoff_id": handoff_id,
+            "to_agent_id": target.id,
+            "to_agent_name": to_name,
+            "task_preview": task_text[:200],
+        })
+
+        # Audit: cross-agent structured handoff
+        try:
+            from .auth import get_auth as _get_auth
+            _auth = _get_auth()
+            if _auth is not None:
+                _auth.audit(
+                    action="agent_handoff",
+                    actor=self.id or "system",
+                    target=target.id,
+                    detail=f"[handoff:{handoff_id}] {task_text[:300]}",
+                )
+        except Exception:
+            pass
+
+        # Build the prompt B will see
+        prompt_parts = [f"## Delegated Task\n{task_text}"]
+        if expected_output:
+            prompt_parts.append(f"## Expected Output\n{expected_output}")
+        if context_text:
+            prompt_parts.append(f"## Context\n{context_text}")
+        prompt_parts.append(
+            f"_(Handoff {handoff_id} from {from_name}. "
+            f"Return a complete answer — your reply is the handoff result.)_"
+        )
+        prompt = "\n\n".join(prompt_parts)
+
+        # ── Emit "acked" event right before B starts working.
+        #    The ack is SYSTEM-GENERATED — not B's free-form reply.
+        #    UI flips the badge ⏳ → ✅ the moment we hand control to B.
+        if on_event:
+            on_event(AgentEvent(time.time(), "handoff_acked", {
+                "handoff_id": handoff_id,
+                "to_agent_id": target.id,
+                "to_agent_name": to_name,
+            }))
+        self._log("handoff_acked", {
+            "handoff_id": handoff_id, "to_agent_id": target.id,
+        })
+
+        # ── Execute on B with a timeout guard ──
+        result_box: dict = {"result": "", "error": ""}
+
+        def _run():
+            try:
+                result_box["result"] = target.chat(prompt) or ""
+            except Exception as exc:
+                result_box["error"] = f"{type(exc).__name__}: {exc}"
+
+        t = _threading.Thread(target=_run, daemon=True,
+                              name=f"handoff-{handoff_id}")
+        t.start()
+        t.join(timeout=timeout_seconds)
+
+        if t.is_alive():
+            # Timed out — thread keeps running but we stop waiting
+            if on_event:
+                on_event(AgentEvent(time.time(), "handoff_failed", {
+                    "handoff_id": handoff_id,
+                    "to_agent_name": to_name,
+                    "error": f"Timed out after {timeout_seconds}s",
+                }))
+            self._log("handoff_failed", {
+                "handoff_id": handoff_id, "error": "timeout",
+            })
+            return json.dumps({
+                "ok": False,
+                "handoff_id": handoff_id,
+                "state": "timeout",
+                "to_agent": to_name,
+                "error": (
+                    f"Handoff to {to_name} timed out after {timeout_seconds}s. "
+                    "The receiver may still be working; check back later."
+                ),
+            }, ensure_ascii=False)
+
+        if result_box["error"]:
+            if on_event:
+                on_event(AgentEvent(time.time(), "handoff_failed", {
+                    "handoff_id": handoff_id,
+                    "to_agent_name": to_name,
+                    "error": result_box["error"],
+                }))
+            self._log("handoff_failed", {
+                "handoff_id": handoff_id, "error": result_box["error"],
+            })
+            return json.dumps({
+                "ok": False,
+                "handoff_id": handoff_id,
+                "state": "failed",
+                "to_agent": to_name,
+                "error": result_box["error"],
+            }, ensure_ascii=False)
+
+        result_text = result_box["result"]
+        if on_event:
+            on_event(AgentEvent(time.time(), "handoff_completed", {
+                "handoff_id": handoff_id,
+                "to_agent_id": target.id,
+                "to_agent_name": to_name,
+                "result_preview": result_text[:300],
+            }))
+        self._log("handoff_completed", {
+            "handoff_id": handoff_id,
+            "to_agent_id": target.id,
+            "result_preview": result_text[:200],
+        })
+
+        return json.dumps({
+            "ok": True,
+            "handoff_id": handoff_id,
+            "state": "completed",
+            "to_agent": to_name,
+            "result": result_text,
+        }, ensure_ascii=False)
 
     def _handle_web_login_request(self, arguments: dict, on_event=None) -> str:
         """Handle request_web_login: pause agent, show login form, wait for credentials."""
@@ -6145,7 +7035,17 @@ Write only the summary body. Do not include any preamble or prefix."""
         Idle = no higher-priority pending tasks AND no active chat. Throttled
         by ``min_interval`` seconds between runs per agent. Returns the task's
         result dict on success, or None if nothing happened.
+
+        Opt-in gate: does nothing when the agent's self-improvement engine
+        hasn't been explicitly enabled. Previously ``_derive_growth_gap``
+        could synthesize a background task even on agents the admin never
+        opted-in, which surprised users (they'd see unexpected
+        ``growth_done`` log lines with no knob they turned on).
         """
+        si = getattr(self, "self_improvement", None)
+        if si is None or not getattr(si, "enabled", False):
+            return None
+
         now = time.time()
         if (now - self._last_growth_tick) < min_interval:
             return None
@@ -6273,6 +7173,192 @@ Write only the summary body. Do not include any preamble or prefix."""
                 self._log("task", {"action": "removed", "task_id": task_id})
                 return True
         return False
+
+    # ══════════════════════════════════════════════════════════════════
+    # RolePresetV2 — QualityGate retry & KPI/Experience recording
+    # (Phase C.1 + C.2)
+    # ══════════════════════════════════════════════════════════════════
+
+    def _run_quality_gate_with_retry(
+        self,
+        output_text: str,
+        user_text: str,
+        tools_used: list[str],
+        _emit: Any = None,
+    ) -> str:
+        """Phase C.1: hard-retry ≤3 times with feedback, then soft-warning fallback.
+
+        Returns the (possibly improved) output text. Never raises.
+        """
+        from .quality_gate import get_quality_gate
+        rules = list(getattr(self.profile, "quality_rules", []) or [])
+        if not rules:
+            return output_text
+
+        hard_retries = 3
+        soft_fallback = True
+        try:
+            from .role_preset_registry import get_registry as _get_reg
+            preset = _get_reg().get(getattr(self.profile, "role_preset_id", ""))
+            if preset is not None:
+                hard_retries = int(getattr(preset, "quality_hard_retries", 3) or 3)
+                soft_fallback = bool(getattr(preset, "quality_soft_fallback", True))
+        except Exception:
+            pass
+
+        gate = get_quality_gate()
+        current = output_text
+        ctx = {"tools_used": tools_used or [], "user_text": user_text or ""}
+        failed_rule_counts: dict[str, int] = {}
+        exhausted_rule_ids: set[str] = set()
+        result = None
+
+        for attempt in range(hard_retries + 1):
+            result = gate.check(current, rules, context=ctx)
+            self._log("quality_check", {
+                "attempt": attempt,
+                "passed": result.passed,
+                "failing_rules": result.failing_rules,
+            })
+            if result.passed:
+                return current
+            if attempt >= hard_retries:
+                break
+
+            for rid in result.failing_rules:
+                failed_rule_counts[rid] = failed_rule_counts.get(rid, 0) + 1
+                if failed_rule_counts[rid] >= 2:
+                    exhausted_rule_ids.add(rid)
+
+            feedback = gate.build_feedback_prompt(
+                result, current, rules,
+                prior_feedback_ids=exhausted_rule_ids,
+            )
+            self._log("quality_retry", {
+                "attempt": attempt + 1,
+                "feedback_len": len(feedback),
+            })
+
+            try:
+                _prov, _mdl = self._resolve_effective_provider_model()
+                retry_messages = [
+                    {"role": "system", "content": "你需要严格按反馈改进上一轮回答，并输出完整的最终答案。"},
+                    {"role": "user", "content": user_text or ""},
+                    {"role": "assistant", "content": current},
+                    {"role": "user", "content": feedback},
+                ]
+                resp = llm.chat_no_stream(
+                    retry_messages, tools=None,
+                    provider=_prov, model=_mdl,
+                )
+                new_content = (resp or {}).get("message", {}).get("content", "") or ""
+                if new_content.strip():
+                    current = new_content
+            except Exception as e:
+                logger.debug("QualityGate retry LLM call failed: %s", e)
+                break
+
+        # Exhausted retries → soft fallback
+        if soft_fallback and result is not None and not result.passed:
+            try:
+                evt = AgentEvent(time.time(), "quality_warning", {
+                    "failing_rules": result.failing_rules,
+                    "message": "质量检查未通过，已达重试上限，返回最后一版输出（软提示兜底）",
+                })
+                self._log(evt.kind, evt.data)
+                if _emit is not None:
+                    try:
+                        _emit(evt)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        return current
+
+    def _record_kpis_and_experience(
+        self,
+        output_text: str,
+        user_text: str,
+        tools_used: list[str],
+    ) -> None:
+        """Phase C.2: record KPI values to SQLite + turn failures into Experience.
+
+        All failures are swallowed — KPI/learning is best-effort.
+        """
+        try:
+            from .kpi_recorder import get_kpi_recorder
+        except Exception as e:
+            logger.debug("kpi_recorder unavailable: %s", e)
+            return
+
+        role_id = getattr(self.profile, "role_preset_id", "") or self.profile.role
+        kpi_defs = list(getattr(self.profile, "kpi_definitions", []) or [])
+
+        qc_events = [e for e in self.events[-20:] if e.kind == "quality_check"]
+        retry_events = [e for e in self.events[-20:] if e.kind == "quality_retry"]
+        last_qc = qc_events[-1] if qc_events else None
+        first_qc = qc_events[0] if qc_events else None
+        passed = bool(last_qc.data.get("passed", True)) if last_qc else True
+        retries_used = len(retry_events)
+        first_pass = (
+            1.0 if (first_qc and first_qc.data.get("passed")) else 0.0
+        ) if first_qc else 1.0
+
+        recorder = get_kpi_recorder()
+        for kpi in kpi_defs:
+            try:
+                if isinstance(kpi, dict):
+                    kpi_name = kpi.get("key") or kpi.get("name") or ""
+                else:
+                    kpi_name = getattr(kpi, "key", "") or getattr(kpi, "name", "")
+                if not kpi_name:
+                    continue
+                if kpi_name in ("first_pass_rate", "first_pass"):
+                    value = first_pass
+                elif kpi_name in ("retries_used", "retry_count"):
+                    value = float(retries_used)
+                elif kpi_name in ("summary_completeness", "completeness", "prd_completeness", "design_completeness"):
+                    value = 1.0 if passed else 0.6
+                elif kpi_name in ("action_extraction_rate", "action_items"):
+                    value = 1.0 if (passed and ("action" in output_text.lower() or "待办" in output_text)) else 0.5
+                else:
+                    value = 1.0 if passed else 0.0
+                recorder.record(
+                    role=role_id,
+                    agent_id=self.id,
+                    key=kpi_name,
+                    value=value,
+                    meta={"retries": retries_used, "passed": passed},
+                )
+            except Exception as e:
+                logger.debug("KPI record skipped (%s): %s", kpi, e)
+
+        try:
+            if not passed and last_qc is not None:
+                from .experience_library import get_experience_library, Experience
+                lib = get_experience_library()
+                failing = last_qc.data.get("failing_rules", []) or []
+                exp = Experience(
+                    exp_type="retrospective",
+                    source="quality_gate",
+                    scene=f"用户请求类似：{(user_text or '')[:80]}",
+                    core_knowledge=f"质量检查失败：{', '.join(failing) or '未知规则'}",
+                    action_rules=[
+                        f"针对规则 '{r}'，在初次输出前主动满足其要求"
+                        for r in failing[:3]
+                    ] or ["初次输出前对照本角色 quality_rules 逐条自检"],
+                    taboo_rules=["不要在不满足硬性规则的情况下直接提交输出"],
+                    priority="high",
+                    tags=list(failing) + ["quality_failure"],
+                )
+                lib.add_experience(role=role_id, exp=exp)
+                self._log("experience_added", {
+                    "role": role_id,
+                    "priority": "high",
+                    "tags": list(failing),
+                })
+        except Exception as e:
+            logger.debug("Experience add skipped: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -6508,6 +7594,46 @@ def create_agent(
         **preset.get("profile", AgentProfile()).to_dict()
     ) if isinstance(preset.get("profile"), AgentProfile) else AgentProfile()
 
+    # ── RolePresetV2 application ───────────────────────────────────────
+    # If preset carries a _v2_preset marker, populate V2-specific fields on
+    # the profile. This runs BEFORE profile_overrides so callers can still
+    # override individual fields.
+    v2_preset = preset.get("_v2_preset")
+    if v2_preset is not None:
+        try:
+            profile.role_preset_id = v2_preset.role_id
+            profile.role_preset_version = 2
+            profile.llm_tier = v2_preset.llm_tier or ""
+            profile.llm_tier_overrides = dict(v2_preset.llm_tier_overrides or {})
+            profile.sop_template_id = v2_preset.sop_template_id or ""
+            profile.quality_rules = [
+                r.to_dict() if hasattr(r, "to_dict") else dict(r)
+                for r in (v2_preset.quality_rules or [])
+            ]
+            profile.output_contract = dict(v2_preset.output_contract or {})
+            profile.input_contract = dict(v2_preset.input_contract or {})
+            profile.kpi_definitions = [
+                k.to_dict() if hasattr(k, "to_dict") else dict(k)
+                for k in (v2_preset.kpi_definitions or [])
+            ]
+            # Tool lists from V2 override profile defaults (role-level policy)
+            if v2_preset.allowed_tools:
+                profile.allowed_tools = list(v2_preset.allowed_tools)
+            if v2_preset.denied_tools:
+                profile.denied_tools = list(v2_preset.denied_tools)
+            if v2_preset.auto_approve_tools:
+                profile.auto_approve_tools = list(v2_preset.auto_approve_tools)
+            # RAG namespaces merged into rag_collection_ids
+            if v2_preset.rag_namespaces:
+                existing_rag = set(profile.rag_collection_ids or [])
+                for ns in v2_preset.rag_namespaces:
+                    if ns not in existing_rag:
+                        profile.rag_collection_ids.append(ns)
+            logger.info("RolePresetV2 applied to new agent: role=%s tier=%s sop=%s",
+                        v2_preset.role_id, v2_preset.llm_tier, v2_preset.sop_template_id)
+        except Exception as _v2err:
+            logger.warning("RolePresetV2 apply failed for role %s: %s", role, _v2err)
+
     # Apply overrides
     if profile_overrides:
         for k, v in profile_overrides.items():
@@ -6543,6 +7669,57 @@ def create_agent(
             agent._ensure_workspace_layout()
         except Exception:
             pass
+
+    # ── RolePresetV2 Knowledge binding (Phase B.2) ──────────────────────
+    # Bind few-shot skills to agent.bound_prompt_packs so they auto-inject
+    # into the chat context via PromptPackRegistry.
+    if v2_preset is not None and getattr(v2_preset, "few_shot_skill_ids", None):
+        try:
+            existing = set(agent.bound_prompt_packs or [])
+            for sid in v2_preset.few_shot_skill_ids:
+                if sid and sid not in existing:
+                    agent.bound_prompt_packs.append(sid)
+                    existing.add(sid)
+            logger.info("RolePresetV2 bound %d few-shot skills to agent %s",
+                        len(v2_preset.few_shot_skill_ids), agent.id[:8])
+        except Exception as _sk_err:
+            logger.warning("RolePresetV2 skill binding failed: %s", _sk_err)
+
+    # ── RolePresetV2 MCP binding (Phase B.1) ────────────────────────────
+    # If this role has default_mcp_bindings declared in YAML, auto-bind
+    # each MCP to this agent via MCPManager.bind_mcp_to_agent. Unknown
+    # MCP IDs are logged as warnings but don't block agent creation.
+    if v2_preset is not None and getattr(v2_preset, "default_mcp_bindings", None):
+        try:
+            from .mcp.manager import get_mcp_manager as _get_mcp_manager
+            mcp_mgr = _get_mcp_manager()
+            globals_mcps = mcp_mgr.list_global_mcps()
+            node_mcps = mcp_mgr.get_node_mcp_config(agent.node_id).available_mcps
+            bound, skipped = [], []
+            for mcp_id in v2_preset.default_mcp_bindings:
+                if mcp_id not in globals_mcps and mcp_id not in node_mcps:
+                    skipped.append(mcp_id)
+                    continue
+                ok = mcp_mgr.bind_mcp_to_agent(agent.node_id, agent.id, mcp_id)
+                if ok:
+                    bound.append(mcp_id)
+                else:
+                    skipped.append(mcp_id)
+            # Sync bindings into agent.profile.mcp_servers so tools.py can see them
+            try:
+                mcp_mgr.sync_agent_mcps(agent)
+            except Exception as _sync_err:
+                logger.debug("sync_agent_mcps skipped: %s", _sync_err)
+            if bound:
+                logger.info("RolePresetV2 MCP auto-bind [%s]: %d bound (%s), %d skipped (%s)",
+                            agent.id[:8], len(bound), ",".join(bound),
+                            len(skipped), ",".join(skipped) if skipped else "-")
+            elif skipped:
+                logger.warning("RolePresetV2 MCP auto-bind [%s]: no MCPs bound; %d skipped (%s) — "
+                               "check MCP install status", agent.id[:8], len(skipped), ",".join(skipped))
+        except Exception as _mcp_err:
+            logger.warning("RolePresetV2 MCP auto-bind failed: %s", _mcp_err)
+
     logger.info("create_agent OK: id=%s name=%s node=%s workspace=%s",
                 agent.id, agent.name, agent.node_id, agent.working_dir)
     return agent

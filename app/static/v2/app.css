@@ -1,0 +1,267 @@
+/* TudouClaw V2 — minimal three-column layout */
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC",
+               "Helvetica Neue", Arial, sans-serif;
+  font-size: 13px;
+  color: #1a1a1a;
+  background: #f7f8fa;
+}
+
+#v2-header {
+  display: flex;
+  align-items: stretch;
+  padding: 0 18px;
+  background: #1e293b;
+  color: #e2e8f0;
+  border-bottom: 1px solid #0f172a;
+  height: 46px;
+}
+#v2-header .brand {
+  font-weight: 600;
+  font-size: 15px;
+  display: flex;
+  align-items: center;
+  margin-right: 24px;
+}
+#v2-header .brand em {
+  font-style: normal;
+  font-size: 10px;
+  padding: 2px 6px;
+  margin-left: 6px;
+  background: #f97316;
+  border-radius: 3px;
+}
+
+/* ── Tabs ───────────────────────────────────────────────────────── */
+#v2-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  flex: 1;
+}
+#v2-tabs .tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 16px;
+  color: #94a3b8;
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 500;
+  position: relative;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+#v2-tabs .tab:hover {
+  color: #e2e8f0;
+  background: rgba(255, 255, 255, 0.04);
+}
+#v2-tabs .tab.active {
+  color: #fff;
+  border-bottom-color: #f97316;
+  background: rgba(249, 115, 22, 0.08);
+}
+#v2-tabs .tab.active .tab-icon { filter: none; }
+#v2-tabs .tab-icon { font-size: 14px; filter: grayscale(0.3); }
+
+#v2-exit {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 14px;
+  color: #94a3b8;
+  text-decoration: none;
+  font-size: 12px;
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  transition: color 0.15s;
+}
+#v2-exit:hover { color: #e2e8f0; }
+
+#v2-main {
+  display: grid;
+  grid-template-columns: 260px 1fr 340px;
+  gap: 1px;
+  height: calc(100vh - 46px);
+  background: #e5e7eb;
+}
+
+#task-board, #task-timeline, #task-console {
+  background: #fff;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.panel-head h3 { margin: 0; font-size: 14px; }
+
+#agent-filter, #console-agent, #console-template {
+  font-size: 12px;
+  padding: 3px 6px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background: #fff;
+}
+
+/* TaskBoard */
+.task-group { margin-bottom: 16px; }
+.task-group h4 {
+  margin: 8px 0 6px;
+  font-size: 12px;
+  color: #475569;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.task-group .count {
+  float: right;
+  background: #e2e8f0;
+  border-radius: 10px;
+  padding: 1px 7px;
+  font-size: 10px;
+  color: #334155;
+}
+.task-group ul { list-style: none; padding: 0; margin: 0; }
+.task-group li {
+  padding: 6px 8px;
+  margin-bottom: 3px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  color: #1e293b;
+}
+.task-group li:hover { background: #f1f5f9; }
+.task-group li.active { background: #dbeafe; }
+.task-group li .intent {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.task-group li .meta {
+  display: block;
+  font-size: 10px;
+  color: #64748b;
+}
+
+/* Timeline */
+#task-timeline { padding-left: 18px; padding-right: 18px; }
+#timeline-head { padding-bottom: 8px; border-bottom: 1px solid #e5e7eb; }
+#timeline-title { font-size: 15px; }
+#timeline-meta { font-size: 11px; color: #64748b; }
+
+#timeline-phases {
+  margin: 14px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.phase-row {
+  display: flex;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: #f8fafc;
+  font-size: 12px;
+}
+.phase-row.active { background: #fef3c7; }
+.phase-row.done { background: #dcfce7; }
+.phase-row.failed { background: #fee2e2; }
+.phase-row .phase-name { flex: 1; font-weight: 500; }
+.phase-row .phase-sub { color: #64748b; font-size: 11px; }
+
+#timeline-events {
+  border-top: 1px solid #e5e7eb;
+  padding-top: 10px;
+  font-family: "SF Mono", "Menlo", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.event-line { padding: 2px 0; }
+.event-line .ts { color: #94a3b8; margin-right: 8px; }
+.event-line .type { display: inline-block; min-width: 140px;
+                    color: #0f766e; font-weight: 600; }
+.event-line .type.err { color: #dc2626; }
+.event-line pre {
+  display: inline;
+  white-space: pre-wrap;
+  color: #334155;
+  margin: 0;
+}
+
+/* Console */
+#task-console section {
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  padding: 10px;
+  margin-bottom: 12px;
+}
+#task-console h3 { margin: 0 0 8px; font-size: 13px; }
+#task-console textarea {
+  width: 100%;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  padding: 6px;
+  font-size: 12px;
+  font-family: inherit;
+  resize: vertical;
+}
+#task-console button {
+  background: #2563eb;
+  color: #fff;
+  border: 0;
+  padding: 6px 14px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+#task-console button:hover { background: #1d4ed8; }
+#task-console button:disabled { background: #94a3b8; cursor: not-allowed; }
+#task-console select {
+  width: 100%;
+  margin-bottom: 6px;
+}
+
+#actions-panel button {
+  background: #64748b;
+  margin-right: 4px;
+}
+#actions-panel button[data-action="cancel"] { background: #dc2626; }
+
+#artifacts-list, #lessons-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  max-height: 180px;
+  overflow-y: auto;
+}
+#artifacts-list li, #lessons-list li {
+  font-size: 11px;
+  padding: 4px 0;
+  border-bottom: 1px dotted #e5e7eb;
+  color: #334155;
+}
+#artifacts-list li:last-child, #lessons-list li:last-child {
+  border: 0;
+}
+
+.toast {
+  position: fixed;
+  top: 60px;
+  right: 20px;
+  background: #1e293b;
+  color: #fff;
+  padding: 10px 16px;
+  border-radius: 4px;
+  font-size: 12px;
+  z-index: 1000;
+  animation: fade-in 0.2s;
+}
+.toast.error { background: #dc2626; }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }

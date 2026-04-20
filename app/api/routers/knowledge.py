@@ -123,6 +123,8 @@ async def delete_knowledge_entry(
             ok = True
 
         return {"ok": ok}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -169,6 +171,8 @@ async def register_rag_provider(
         return entry.to_dict() if hasattr(entry, "to_dict") else {"ok": True, "entry": entry}
     except ImportError:
         raise HTTPException(501, "RAG provider module not available")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -193,6 +197,8 @@ async def update_rag_provider(
         raise
     except ImportError:
         raise HTTPException(501, "RAG provider module not available")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -211,6 +217,8 @@ async def delete_rag_provider(
         return {"ok": ok}
     except ImportError:
         raise HTTPException(501, "RAG provider module not available")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -246,6 +254,8 @@ async def rebuild_rag_provider(
         raise
     except ImportError:
         raise HTTPException(501, "RAG provider module not available")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -276,6 +286,8 @@ async def rag_index(
         raise
     except ImportError:
         raise HTTPException(501, "RAG provider module not available")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -304,6 +316,8 @@ async def search_rag(
             return {"results": results}
 
         return {"results": []}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -326,6 +340,8 @@ async def ingest_rag_documents(
             return {"ok": True, "result": result}
 
         return {"ok": True}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -345,6 +361,8 @@ async def list_domain_knowledge_bases(
         kbs = hub.list_domain_knowledge_bases() if hasattr(hub, "list_domain_knowledge_bases") else []
         kbs_list = [k.to_dict() if hasattr(k, "to_dict") else k for k in kbs]
         return {"knowledge_bases": kbs_list}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -366,6 +384,8 @@ async def create_domain_knowledge_base(
             return {"ok": True, "knowledge_base": kb}
 
         return {"ok": True}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -394,6 +414,8 @@ async def search_domain_knowledge_base(
         raise
     except ImportError:
         return {"results": []}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -422,6 +444,8 @@ async def update_domain_knowledge_base(
         raise
     except ImportError:
         raise HTTPException(501, "RAG provider module not available")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -441,6 +465,8 @@ async def delete_domain_knowledge_base(
         return {"ok": ok}
     except ImportError:
         raise HTTPException(501, "RAG provider module not available")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -499,6 +525,8 @@ async def import_domain_knowledge(
         raise
     except ImportError:
         raise HTTPException(501, "RAG provider module not available")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -521,6 +549,8 @@ async def list_rag_collections(
         return {"collections": [c.to_dict() for c in colls]}
     except ImportError:
         raise HTTPException(501, "RAG provider module not available")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -542,6 +572,8 @@ async def create_rag_collection(
         return coll.to_dict()
     except ImportError:
         raise HTTPException(501, "RAG provider module not available")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -684,6 +716,8 @@ async def import_rag_content(
         raise
     except ImportError:
         raise HTTPException(501, "RAG provider module not available")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -718,5 +752,7 @@ async def manage_vector_memory(
         raise
     except ImportError:
         raise HTTPException(501, "Memory manager not available")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

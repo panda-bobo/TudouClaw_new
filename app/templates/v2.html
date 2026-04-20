@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TudouClaw V2 Tasks</title>
+  <link rel="stylesheet" href="/static/v2/app.css" />
+</head>
+<body>
+  <header id="v2-header">
+    <span class="brand">🥔 TudouClaw V2 <em>Beta</em></span>
+    <nav id="v2-tabs" role="tablist">
+      <a class="tab" data-tab="tasks" href="#/v2">
+        <span class="tab-icon">📋</span> Tasks
+      </a>
+      <a class="tab" data-tab="agents" href="#/v2/agents">
+        <span class="tab-icon">🤖</span> Agents
+      </a>
+      <a class="tab" data-tab="templates" href="#/v2/templates">
+        <span class="tab-icon">📚</span> Templates
+      </a>
+      <a class="tab" data-tab="providers" href="#/v2/providers">
+        <span class="tab-icon">🔌</span> Providers
+      </a>
+    </nav>
+    <a id="v2-exit" href="/" title="返回 V1">← V1 Classic</a>
+  </header>
+
+  <main id="v2-main">
+    <!-- Left column: TaskBoard -->
+    <aside id="task-board">
+      <div class="panel-head">
+        <h3>Tasks</h3>
+        <select id="agent-filter" title="Filter by agent"></select>
+      </div>
+      <section class="task-group">
+        <h4>🔄 Running <span class="count" data-count="running">0</span></h4>
+        <ul data-list="running"></ul>
+      </section>
+      <section class="task-group">
+        <h4>⏸ Paused <span class="count" data-count="paused">0</span></h4>
+        <ul data-list="paused"></ul>
+      </section>
+      <section class="task-group">
+        <h4>✅ Done <span class="count" data-count="done">0</span></h4>
+        <ul data-list="done"></ul>
+      </section>
+    </aside>
+
+    <!-- Middle column: TaskTimeline -->
+    <section id="task-timeline">
+      <div class="panel-head" id="timeline-head">
+        <h3 id="timeline-title">← 选择一个任务</h3>
+        <div id="timeline-meta"></div>
+      </div>
+      <div id="timeline-phases"></div>
+      <div id="timeline-events"></div>
+    </section>
+
+    <!-- Right column: TaskConsole -->
+    <aside id="task-console">
+      <section id="submit-panel">
+        <h3>提交新任务</h3>
+        <select id="console-agent"></select>
+        <select id="console-template"></select>
+        <textarea id="console-intent" placeholder="描述你要完成的事情..." rows="4"></textarea>
+        <div id="attachment-bar" style="font-size:11px;margin:4px 0">
+          <label style="cursor:pointer;color:#2563eb">
+            📎 添加附件
+            <input type="file" id="attachment-input" multiple
+                   accept="image/*,audio/*" style="display:none" />
+          </label>
+          <ul id="attachment-list" style="list-style:none;padding:0;margin:4px 0"></ul>
+        </div>
+        <button id="console-submit">Submit</button>
+        <div style="margin-top:6px;font-size:11px">
+          <a href="#" id="open-agent-detail">查看该 agent 的任务队列 →</a>
+        </div>
+      </section>
+
+      <section id="clarify-panel" hidden>
+        <h3>📝 等待澄清</h3>
+        <p id="clarify-question"></p>
+        <textarea id="clarify-answer" rows="3"></textarea>
+        <button id="clarify-send">回答</button>
+      </section>
+
+      <section id="artifacts-panel">
+        <h3>Artifacts</h3>
+        <ul id="artifacts-list"></ul>
+      </section>
+
+      <section id="lessons-panel">
+        <h3>Lessons</h3>
+        <ul id="lessons-list"></ul>
+      </section>
+
+      <section id="actions-panel">
+        <h3>Actions</h3>
+        <button data-action="pause">暂停</button>
+        <button data-action="resume">恢复</button>
+        <button data-action="cancel">取消</button>
+      </section>
+    </aside>
+  </main>
+
+  <script type="module" src="/static/v2/app.js"></script>
+</body>
+</html>

@@ -266,6 +266,17 @@ class AgentManager(ManagerBase):
                         logger.info("Removed workspace: %s", ws_dir)
                 except Exception as e:
                     logger.warning("workspace cleanup failed: %s", e)
+                # ── 级联清理依赖数据 ──
+                # purge_agent 处理: memory (episodic/semantic/config),
+                # file_manifests, approvals, agent_messages (from/to),
+                # delegations, MCP agent_bindings, skill grants, V2 tasks,
+                # v2/agents/<id> 目录等。每个子系统 best-effort，失败不阻塞。
+                try:
+                    from ..cleanup import purge_agent as _purge
+                    report = _purge(agent_id)
+                    logger.info("agent %s cascade purge: %s", agent_id, report)
+                except Exception as e:
+                    logger.warning("cascade purge failed: %s", e)
                 return True
 
         # Try remote agent: proxy DELETE to hosting node

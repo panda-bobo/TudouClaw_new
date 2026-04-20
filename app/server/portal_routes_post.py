@@ -1,6 +1,23 @@
 """
 Portal POST and DELETE route handlers.
 
+╔════════════════════════════════════════════════════════════════════════╗
+║  ⚠️  DEPRECATED — LEGACY stdlib HTTP handler                          ║
+║                                                                        ║
+║  FastAPI (app/api/routers/*) is now the authoritative production       ║
+║  path. This file is kept ONLY as an emergency rollback and is bypassed ║
+║  unless the env var TUDOU_USE_STDLIB=1 is set before launch.           ║
+║                                                                        ║
+║  Do NOT add new routes here. All new work goes into                    ║
+║  app/api/routers/<domain>.py with @router decorators.                  ║
+║                                                                        ║
+║  Drift fixes are applied FastAPI-first; this file intentionally may    ║
+║  fall behind current behavior.                                         ║
+║                                                                        ║
+║  Scheduled for deletion: after one full release cycle of stable        ║
+║  FastAPI operation (≥30 days without rollback).                        ║
+╚════════════════════════════════════════════════════════════════════════╝
+
 Extracted from portal.py to separate POST and DELETE request handling.
 
 Domain-specific handlers have been extracted to app/server/handlers/:
@@ -163,8 +180,18 @@ def _bridge_standalone_to_agent(hub, st_task, st_reg) -> bool:
 
 
 def handle_post(handler):
-    """Main POST dispatcher."""
+    """Main POST dispatcher.
+
+    DEPRECATED: this stdlib path runs only when TUDOU_USE_STDLIB=1 was
+    set at launch. The authoritative production path is FastAPI.
+    See the file-level deprecation block.
+    """
     path = urlparse(handler.path).path
+    # Loud warning — you're inside the stdlib fallback. Every POST that
+    # reaches here is evidence the FastAPI path is being bypassed.
+    logger.warning(
+        "[stdlib-fallback] POST %s hitting legacy handler "
+        "(TUDOU_USE_STDLIB=1 is active). Migrate to FastAPI.", path)
     try:
         _do_post_inner(handler, path)
     except Exception as e:
@@ -452,6 +479,20 @@ def _do_post_inner(handler, path: str):
             else:
                 handler._json({"error": "Agent not found (local or remote)"}, 404)
             return
+
+        # Hard-gate: agent with no LLM → 409 NO_LLM_CONFIGURED.
+        # The frontend detects this code and disables the chat input.
+        if not (agent.provider or "").strip() or not (agent.model or "").strip():
+            handler._json({
+                "error": "NO_LLM_CONFIGURED",
+                "code": "NO_LLM_CONFIGURED",
+                "message": "该 Agent 还没有配置 LLM，请先在 Agent 设置里选择 provider 和 model。",
+                "agent_id": agent.id,
+                "provider": agent.provider or "",
+                "model": agent.model or "",
+            }, 409)
+            return
+
         user_msg = body.get("message", "").strip()
         attachments = body.get("attachments") or []
 
@@ -571,13 +612,43 @@ def _do_post_inner(handler, path: str):
             len(chat_content) if isinstance(chat_content, list)
             else len(str(chat_content)),
         )
+        # ── V2 suggestion (classify-only, no side effects) ──
+        # Text-only complex intents get a badge hint so the user can
+        # promote the message into a V2 state-machine task. We used to
+        # auto-submit, which hijacked every chat; now it's opt-in.
+        v2_suggestion: dict | None = None
+        try:
+            if isinstance(chat_content, str) and chat_content.strip():
+                from app.v2.core.task_store import get_store as _get_v2_store
+                v2_store = _get_v2_store()
+                if v2_store.get_agent(agent.id) is not None:
+                    from app.chat_complexity_classifier import classify
+                    verdict = classify(chat_content)
+                    if verdict["route"] == "v2":
+                        has_active = False
+                        try:
+                            has_active = v2_store.count_active_tasks(agent.id) > 0
+                        except Exception:
+                            pass
+                        if not has_active:
+                            v2_suggestion = {
+                                "route":   "v2",
+                                "reason":  verdict.get("reason", ""),
+                                "signals": verdict.get("signals", []),
+                            }
+        except Exception as _e:
+            logger.debug("chat complexity classification skipped: %s", _e)
+
         # Route through supervisor (handles isolated / in-process)
         task = hub.supervisor.chat_async(agent.id, chat_content, source="admin")
-        handler._json({
+        _resp = {
             "task_id": task.id,
             "status": task.status.value,
             "attachments_saved": saved_refs,
-        })
+        }
+        if v2_suggestion:
+            _resp["v2_suggestion"] = v2_suggestion
+        handler._json(_resp)
 
     elif "/chat-task/" in path and path.endswith("/abort"):
         # POST /api/portal/chat-task/{task_id}/abort
@@ -4508,8 +4579,17 @@ def _do_post_inner(handler, path: str):
             reg.grant(sid, agent_id)
             # 同步到 agent.granted_skills 持久化
             ag = hub.get_agent(agent_id)
-            if ag is not None and sid not in ag.granted_skills:
-                ag.granted_skills.append(sid)
+            if ag is not None:
+                if sid not in ag.granted_skills:
+                    ag.granted_skills.append(sid)
+                # GC orphan IDs (symmetric to revoke handler) — keep
+                # agent.granted_skills consistent with the live registry.
+                try:
+                    live_ids = set(getattr(reg, "_installs", {}).keys())
+                    if live_ids:
+                        ag.granted_skills[:] = [s for s in ag.granted_skills if s in live_ids]
+                except Exception:
+                    pass
                 try:
                     hub.save_agents()
                 except Exception:
@@ -4531,8 +4611,20 @@ def _do_post_inner(handler, path: str):
             return
         reg.revoke(sid, agent_id)
         ag = hub.get_agent(agent_id)
-        if ag is not None and sid in ag.granted_skills:
-            ag.granted_skills.remove(sid)
+        if ag is not None:
+            # Remove the explicitly-revoked sid if present.
+            if sid in ag.granted_skills:
+                ag.granted_skills.remove(sid)
+            # GC orphan IDs: any entry in agent.granted_skills that no
+            # longer has a corresponding install in the registry. This
+            # fixes the "SKILLS count shows N but panel lists only N-1"
+            # bug where an uninstalled skill left a dead ID on the agent.
+            try:
+                live_ids = set(getattr(reg, "_installs", {}).keys())
+                if live_ids:
+                    ag.granted_skills[:] = [s for s in ag.granted_skills if s in live_ids]
+            except Exception:
+                pass
             try:
                 hub.save_agents()
             except Exception:
@@ -4566,10 +4658,16 @@ def _do_post_inner(handler, path: str):
             handler.send_error(404)
 
 def handle_delete(handler):
-    """Main DELETE dispatcher."""
-    path = urlparse(handler.path).path
+    """Main DELETE dispatcher.
 
+    DEPRECATED — see the file-level deprecation block. Active only when
+    TUDOU_USE_STDLIB=1 is set at launch.
+    """
     path = urlparse(handler.path).path
+    logger.warning(
+        "[stdlib-fallback] DELETE %s hitting legacy handler "
+        "(TUDOU_USE_STDLIB=1 is active). Migrate to FastAPI.", path)
+
     hub = get_hub()
 
     if not require_auth(handler, ):

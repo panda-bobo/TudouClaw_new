@@ -356,23 +356,83 @@ class AgentExecutionMixin:
             try:
                 from .template_library import get_template_library
                 tpl_lib = get_template_library()
+
+                # RolePresetV2: role-declared templates always included (top priority)
+                v2_template_ids: list[str] = []
+                try:
+                    if getattr(self.profile, "role_preset_version", 1) == 2:
+                        v2_template_ids = list(
+                            getattr(self.profile, "knowledge_templates", []) or [])
+                except Exception:
+                    v2_template_ids = []
+
+                role_declared_templates = []
+                if v2_template_ids:
+                    for tid in v2_template_ids:
+                        try:
+                            t = tpl_lib.get_template(tid) if hasattr(tpl_lib, "get_template") else None
+                            if t is not None:
+                                role_declared_templates.append(t)
+                        except Exception:
+                            continue
+
                 matched_templates = tpl_lib.match_templates(
                     _user_text, role=self.role, limit=2)
-                if matched_templates:
+                # Combine: role-declared first, then BM25-matched (de-dup by id)
+                final_templates = []
+                seen_ids = set()
+                for t in role_declared_templates + matched_templates:
+                    tid = getattr(t, "id", None) or getattr(t, "name", "")
+                    if tid in seen_ids:
+                        continue
+                    seen_ids.add(tid)
+                    final_templates.append(t)
+
+                if final_templates:
                     tpl_context = tpl_lib.render_for_agent(
-                        matched_templates, max_chars=4000)
+                        final_templates, max_chars=4000)
                     if tpl_context:
                         self.messages.append({
                             "role": "system",
                             "content": tpl_context,
                         })
-                        tpl_names = [t.name for t in matched_templates]
+                        tpl_names = [t.name for t in final_templates]
                         self._log("template_match", {
                             "templates": tpl_names,
+                            "role_declared": [getattr(t, "id", t.name) for t in role_declared_templates],
                             "chars": len(tpl_context),
                         })
             except Exception:
                 pass  # template library is optional
+
+            # --- RolePresetV2 SOP: inject current stage prompt ---
+            # Pre-hook: if the role has an active SOP template, inject
+            # the current stage's goal + guidance as a system message.
+            self._active_sop_instance = None
+            try:
+                sop_tpl_id = getattr(self.profile, "sop_template_id", "")
+                if sop_tpl_id and getattr(self.profile, "role_preset_version", 1) == 2:
+                    from .role_sop import get_sop_manager
+                    sop_mgr = get_sop_manager()
+                    # Use a stable session_id for this agent (per-agent, not per-turn).
+                    # Future: could be per-conversation if multiple sessions supported.
+                    sop_session = getattr(self, "_current_sop_session", None) or "default"
+                    inst = sop_mgr.get_or_start(self.id, sop_session, sop_tpl_id)
+                    if inst is not None:
+                        self._active_sop_instance = inst
+                        stage_prompt = sop_mgr.current_stage_prompt(inst)
+                        if stage_prompt:
+                            self.messages.append({
+                                "role": "system",
+                                "content": stage_prompt,
+                            })
+                            self._log("sop_stage_enter", {
+                                "sop_id": inst.sop_id,
+                                "stage_id": inst.current_stage,
+                                "instance_id": inst.instance_id,
+                            })
+            except Exception as _sop_err:
+                logger.debug("SOP pre-hook skipped: %s", _sop_err)
 
             # --- Skill System: auto-match and inject skills ---
             self._active_skill_ids = []
@@ -494,18 +554,24 @@ class AgentExecutionMixin:
                 max_iters = 20
 
                 # ── Task Checkpoint Injection: 任务恢复上下文 ──
-                # 当 agent 处于 EXECUTING/PLANNING 阶段时，注入断点信息
+                # [F3] 先老化长时间无活动的 active plan，防止 phase 永久
+                # 停在 EXECUTING 导致 checkpoint 反复复活老任务。
                 from .agent_types import AgentPhase
+                try:
+                    self._auto_stale_active_plans()
+                except Exception as _stale_err:
+                    logger.debug("auto_stale_active_plans failed: %s", _stale_err)
+
+                # [F2] checkpoint 改为瞬态注入（_dynamic=True），不再
+                # 追加到 self.messages，避免每轮对话永久污染历史。
+                _checkpoint_ctx = ""
                 if self.agent_phase in (AgentPhase.EXECUTING, AgentPhase.PLANNING):
-                    checkpoint_ctx = self._build_checkpoint_context()
-                    if checkpoint_ctx:
-                        self.messages.append({
-                            "role": "system",
-                            "content": checkpoint_ctx,
-                        })
+                    _checkpoint_ctx = self._build_checkpoint_context()
+                    if _checkpoint_ctx:
                         self._log("checkpoint_inject", {
                             "phase": self.agent_phase.value,
-                            "chars": len(checkpoint_ctx),
+                            "chars": len(_checkpoint_ctx),
+                            "transient": True,
                         })
                         self.history_log.add("checkpoint",
                                               f"[Checkpoint] 注入任务恢复上下文 phase={self.agent_phase.value}")
@@ -515,6 +581,24 @@ class AgentExecutionMixin:
                 # This preserves LM Studio / Ollama KV cache across turns.
                 _msgs_to_send = self._inject_dynamic_context(
                     self.messages, current_query=_user_text)
+
+                # [F2] 把 checkpoint 作为瞬态 system 消息插在最后一个
+                # user 消息之前 —— 不写回 self.messages。
+                if _checkpoint_ctx:
+                    _last_user_idx = None
+                    for _i in range(len(_msgs_to_send) - 1, -1, -1):
+                        if _msgs_to_send[_i].get("role") == "user":
+                            _last_user_idx = _i
+                            break
+                    _ctx_msg = {
+                        "role": "system",
+                        "content": _checkpoint_ctx,
+                        "_dynamic": True,
+                    }
+                    if _last_user_idx is not None and _last_user_idx > 0:
+                        _msgs_to_send.insert(_last_user_idx, _ctx_msg)
+                    else:
+                        _msgs_to_send.append(_ctx_msg)
 
                 # Debug: verify multimodal content survives the pipeline
                 if _is_multimodal:
@@ -731,8 +815,22 @@ class AgentExecutionMixin:
                             name, arguments, call_id = name_args_id
                             # Inject caller agent ID
                             if name in ("team_create", "send_message", "task_update",
-                                        "mcp_call", "bash", "write_file", "edit_file"):
+                                        "mcp_call", "bash", "write_file", "edit_file",
+                                        "submit_deliverable", "create_goal",
+                                        "update_goal_progress", "create_milestone",
+                                        "update_milestone_status"):
                                 arguments["_caller_agent_id"] = self.id
+                                # Snapshot scope here (main thread, thread-local valid)
+                                # so it survives ThreadPoolExecutor handoff.
+                                try:
+                                    from .tools import _get_current_scope
+                                    _scope = _get_current_scope()
+                                    if _scope.get("project_id"):
+                                        arguments["_project_id"] = _scope["project_id"]
+                                    if _scope.get("meeting_id"):
+                                        arguments["_meeting_id"] = _scope["meeting_id"]
+                                except Exception:
+                                    pass
                             # Execute
                             if name == "plan_update":
                                 return name, self._handle_plan_update(arguments), call_id
@@ -772,8 +870,22 @@ class AgentExecutionMixin:
 
                             # Inject caller agent ID for tools that need agent context
                             if name in ("team_create", "send_message", "task_update",
-                                        "mcp_call", "bash", "write_file", "edit_file"):
+                                        "mcp_call", "bash", "write_file", "edit_file",
+                                        "submit_deliverable", "create_goal",
+                                        "update_goal_progress", "create_milestone",
+                                        "update_milestone_status"):
                                 arguments["_caller_agent_id"] = self.id
+                                # Snapshot scope here (main thread, thread-local valid)
+                                # so it survives ThreadPoolExecutor handoff.
+                                try:
+                                    from .tools import _get_current_scope
+                                    _scope = _get_current_scope()
+                                    if _scope.get("project_id"):
+                                        arguments["_project_id"] = _scope["project_id"]
+                                    if _scope.get("meeting_id"):
+                                        arguments["_meeting_id"] = _scope["meeting_id"]
+                                except Exception:
+                                    pass
 
                             # Handle plan_update internally (needs agent context)
                             if name == "plan_update":
@@ -882,6 +994,49 @@ class AgentExecutionMixin:
                                     task_completed=analysis.task_completed)
                     except Exception:
                         pass  # auto-analysis is optional
+
+                    # ── RolePresetV2 Post-hook: QualityGate + SOP evaluate ──
+                    # Runs ONLY for V2 agents (role_preset_version == 2).
+                    # - QualityGate: hard-retry 3x with feedback, then soft-warning fallback
+                    # - SOP: evaluate current stage exit condition and advance if passed
+                    # - KPI + Experience: recorded in C.2 (hooked below)
+                    try:
+                        v2_version = getattr(self.profile, "role_preset_version", 1)
+                        if v2_version == 2 and final_content:
+                            # Collect tools_used context
+                            _tools_used_list = [
+                                e.data.get("name", "") for e in self.events[-50:]
+                                if e.kind == "tool_call"
+                            ]
+                            # Run quality gate (Phase C.1)
+                            final_content = self._run_quality_gate_with_retry(
+                                final_content, _user_text, _tools_used_list,
+                                _emit=_emit,
+                            )
+                            # SOP post-hook: evaluate exit and advance (Phase B.3)
+                            if getattr(self, "_active_sop_instance", None):
+                                try:
+                                    from .role_sop import get_sop_manager
+                                    sop_mgr = get_sop_manager()
+                                    inst = self._active_sop_instance
+                                    status = sop_mgr.evaluate_exit(inst, final_content)
+                                    self._log("sop_stage_eval", {
+                                        "sop_id": inst.sop_id,
+                                        "stage_id": inst.current_stage,
+                                        "status": status,
+                                        "instance_id": inst.instance_id,
+                                    })
+                                except Exception as _sop_post_err:
+                                    logger.debug("SOP post-hook skipped: %s", _sop_post_err)
+                            # KPI + Experience recording (Phase C.2)
+                            try:
+                                self._record_kpis_and_experience(
+                                    final_content, _user_text, _tools_used_list,
+                                )
+                            except Exception as _kpi_err:
+                                logger.debug("KPI recording skipped: %s", _kpi_err)
+                    except Exception as _v2_err:
+                        logger.debug("RolePresetV2 post-hook skipped: %s", _v2_err)
 
                     # --- Three-layer memory: post-response write-back ---
                     self._memory_write_back(_user_text, final_content)
@@ -1071,6 +1226,47 @@ class AgentExecutionMixin:
                     elif evt.kind == "error":
                         task.push_event({"type": "error",
                                          "content": evt.data.get("error", "")})
+                    elif evt.kind == "handoff_sent":
+                        # 3-state handoff handshake: ⏳ pending
+                        task.push_event({
+                            "type": "handoff_sent",
+                            "handoff_id": evt.data.get("handoff_id", ""),
+                            "from_agent_id": evt.data.get("from_agent_id", ""),
+                            "from_agent_name": evt.data.get("from_agent_name", ""),
+                            "to_agent_id": evt.data.get("to_agent_id", ""),
+                            "to_agent_name": evt.data.get("to_agent_name", ""),
+                            "task": evt.data.get("task", ""),
+                            "expected_output": evt.data.get("expected_output", ""),
+                            "timestamp": ts,
+                        })
+                    elif evt.kind == "handoff_acked":
+                        # ✅ acknowledged — receiver is now working
+                        task.push_event({
+                            "type": "handoff_acked",
+                            "handoff_id": evt.data.get("handoff_id", ""),
+                            "to_agent_id": evt.data.get("to_agent_id", ""),
+                            "to_agent_name": evt.data.get("to_agent_name", ""),
+                            "timestamp": ts,
+                        })
+                    elif evt.kind == "handoff_completed":
+                        # ✔️ done — result is available
+                        task.push_event({
+                            "type": "handoff_completed",
+                            "handoff_id": evt.data.get("handoff_id", ""),
+                            "to_agent_id": evt.data.get("to_agent_id", ""),
+                            "to_agent_name": evt.data.get("to_agent_name", ""),
+                            "result_preview": evt.data.get("result_preview", ""),
+                            "timestamp": ts,
+                        })
+                    elif evt.kind == "handoff_failed":
+                        # ✗ failed (error or timeout)
+                        task.push_event({
+                            "type": "handoff_failed",
+                            "handoff_id": evt.data.get("handoff_id", ""),
+                            "to_agent_name": evt.data.get("to_agent_name", ""),
+                            "error": evt.data.get("error", ""),
+                            "timestamp": ts,
+                        })
 
                 result = self.chat(user_message, on_event=_on_event,
                                    abort_check=lambda: task.aborted, source=source)
@@ -1129,39 +1325,103 @@ class AgentExecutionMixin:
                 except Exception as _persist_err:
                     logger.debug("post-chat persist failed: %s", _persist_err)
 
-                # Drain pending chat queue: if the user typed more messages
-                # while we were busy, run the next one now (sequentially).
+                # Drain pending chat queue: merge N rapid arrivals into
+                # one follow-up turn (soft-queue + merge).
+                # Env TUDOU_MERGE_PENDING=0 falls back to sequential.
                 try:
-                    next_item = None
+                    drained = []
                     lock = getattr(self, "_pending_chat_lock", None)
                     if lock is not None:
                         with lock:
                             q = getattr(self, "_pending_chat_queue", None) or []
                             if q:
-                                next_item = q.pop(0)
-                                # Refresh queue-position events for remaining
-                                for _i, (_t, _, _) in enumerate(q):
-                                    try:
-                                        _t.push_event({
-                                            "type": "queued",
-                                            "content": f"⏳ 排队中 ({_i+1})",
-                                            "queue_position": _i + 1,
-                                        })
-                                    except Exception:
-                                        pass
-                    if next_item is not None:
-                        nxt_task, nxt_msg, nxt_src = next_item
-                        logger.info(
-                            "Agent %s draining pending chat task %s",
-                            self.id[:8], nxt_task.id)
-                        # Re-enter the same _run closure (with rebind via
-                        # default parameters) on a fresh worker thread so we
-                        # don't grow the call stack.
-                        _runner = _run  # local name capture
-                        threading.Thread(
-                            target=lambda: _runner(nxt_task, nxt_msg, nxt_src),
-                            daemon=True,
-                        ).start()
+                                drained = list(q)
+                                q.clear()
+
+                    if drained:
+                        import os as _os_pm
+                        _merge_enabled = _os_pm.environ.get(
+                            "TUDOU_MERGE_PENDING", "1"
+                        ).strip().lower() not in ("0", "false", "no")
+                        _has_multimodal = any(
+                            isinstance(m, (list, dict))
+                            for _t, m, _s in drained
+                        )
+
+                        _runner = _run
+
+                        if (len(drained) == 1 or _has_multimodal
+                                or not _merge_enabled):
+                            first_task, first_msg, first_src = drained[0]
+                            rest = drained[1:]
+                            if rest and lock is not None:
+                                with lock:
+                                    self._pending_chat_queue[:0] = rest
+                                    for _i, (_t, _, _) in enumerate(
+                                            self._pending_chat_queue):
+                                        try:
+                                            _t.push_event({
+                                                "type": "queued",
+                                                "content": f"⏳ 排队中 ({_i+1})",
+                                                "queue_position": _i + 1,
+                                            })
+                                        except Exception:
+                                            pass
+                            logger.info(
+                                "Agent %s draining pending chat task %s",
+                                self.id[:8], first_task.id)
+                            threading.Thread(
+                                target=lambda: _runner(
+                                    first_task, first_msg, first_src),
+                                daemon=True,
+                            ).start()
+                        else:
+                            primary_task, _first_msg, primary_src = drained[0]
+                            _parts = [
+                                "（以下内容在你上一轮回复过程中陆续到达，"
+                                "请结合刚才的输出一起考虑；"
+                                "如需修正或补充请明确说明。）"
+                            ]
+                            for _idx, (_t, _m, _s) in enumerate(
+                                    drained, start=1):
+                                _parts.append(
+                                    f"【追加 {_idx}】{str(_m or '').strip()}")
+                            merged_text = "\n\n".join(_parts)
+
+                            for merged_task, _m, _s in drained[1:]:
+                                try:
+                                    merged_task.push_event({
+                                        "type": "text",
+                                        "content": ("（与同时到达的其他消息"
+                                                    "合并处理，统一回复见关联"
+                                                    f"任务 {primary_task.id[:8]}）"),
+                                    })
+                                    merged_task.set_status(
+                                        ChatTaskStatus.COMPLETED,
+                                        "已合并", 100)
+                                    merged_task.push_event({
+                                        "type": "done",
+                                        "source": "merged",
+                                        "merged_into": primary_task.id,
+                                    })
+                                except Exception:
+                                    pass
+
+                            logger.info(
+                                "Agent %s merging %d pending msgs into "
+                                "task %s",
+                                self.id[:8], len(drained), primary_task.id)
+
+                            try:
+                                primary_task.user_message = merged_text[:500]
+                            except Exception:
+                                pass
+
+                            threading.Thread(
+                                target=lambda: _runner(
+                                    primary_task, merged_text, primary_src),
+                                daemon=True,
+                            ).start()
                 except Exception as _drain_err:
                     logger.debug("pending chat drain failed: %s", _drain_err)
 
@@ -1716,3 +1976,223 @@ class AgentExecutionMixin:
             "cancelled_count": child_count,
             "agent_ids": agent_ids,
         }
+
+    # ══════════════════════════════════════════════════════════════════
+    # RolePresetV2 — QualityGate retry & KPI/Experience recording
+    # ══════════════════════════════════════════════════════════════════
+
+    def _run_quality_gate_with_retry(
+        self,
+        output_text: str,
+        user_text: str,
+        tools_used: list[str],
+        _emit: Any = None,
+    ) -> str:
+        """Phase C.1: hard-retry ≤3 times with feedback, then soft-warning fallback.
+
+        Returns the (possibly improved) output text. Never raises — any failure
+        falls through to returning the original output.
+        """
+        from .quality_gate import get_quality_gate
+        rules = list(getattr(self.profile, "quality_rules", []) or [])
+
+        # Read retry budget from V2 preset if available, AND merge playbook-derived rules
+        hard_retries = 3
+        soft_fallback = True
+        preset = None
+        try:
+            from .role_preset_registry import get_registry as _get_reg
+            preset = _get_reg().get(getattr(self.profile, "role_preset_id", ""))
+            if preset is not None:
+                hard_retries = int(getattr(preset, "quality_hard_retries", 3) or 3)
+                soft_fallback = bool(getattr(preset, "quality_soft_fallback", True))
+        except Exception:
+            pass
+
+        # Merge playbook-derived rules (required_sections_when → contains_section rules).
+        # Scopes were detected in Pre-hook and cached on self; re-derive from user_text
+        # as fallback.
+        try:
+            if preset is not None and hasattr(preset, "playbook") and not preset.playbook.is_empty():
+                from .playbook_runtime import derive_quality_rules_from_playbook
+                from .scope_detector import detect_scopes
+                scopes = getattr(self, "_playbook_active_scopes", None)
+                if not scopes:
+                    scopes = detect_scopes(user_text or "")
+                derived = derive_quality_rules_from_playbook(preset, scopes)
+                if derived:
+                    # Dedupe by id (user-written rules win if same id)
+                    existing_ids = {getattr(r, "id", None) for r in rules}
+                    for dr in derived:
+                        if dr.id not in existing_ids:
+                            rules.append(dr)
+        except Exception as _e:
+            try:
+                logger.debug("playbook quality rule derivation failed: %s", _e)
+            except Exception:
+                pass
+
+        if not rules:
+            return output_text
+
+        gate = get_quality_gate()
+        current = output_text
+        ctx = {"tools_used": tools_used or [], "user_text": user_text or ""}
+        failed_rule_counts: dict[str, int] = {}
+        exhausted_rule_ids: set[str] = set()
+
+        for attempt in range(hard_retries + 1):  # initial + hard_retries
+            result = gate.check(current, rules, context=ctx)
+            self._log("quality_check", {
+                "attempt": attempt,
+                "passed": result.passed,
+                "failing_rules": result.failing_rules,
+                "checks": [c.__dict__ for c in result.checks],
+            })
+            if result.passed:
+                return current
+            if attempt >= hard_retries:
+                break  # out of budget
+
+            # Track per-rule consecutive failures; skip rules that failed ≥2x
+            for rid in result.failing_rules:
+                failed_rule_counts[rid] = failed_rule_counts.get(rid, 0) + 1
+                if failed_rule_counts[rid] >= 2:
+                    exhausted_rule_ids.add(rid)
+
+            # Build feedback prompt and ask LLM to rewrite
+            feedback = gate.build_feedback_prompt(
+                result, current, rules,
+                prior_feedback_ids=exhausted_rule_ids,
+            )
+            self._log("quality_retry", {"attempt": attempt + 1, "feedback_len": len(feedback)})
+
+            try:
+                from . import llm as _llm
+                _prov, _mdl = self._resolve_effective_provider_model()
+                retry_messages = [
+                    {"role": "system", "content": "你需要严格按反馈改进上一轮回答，并输出完整的最终答案。"},
+                    {"role": "user", "content": user_text or ""},
+                    {"role": "assistant", "content": current},
+                    {"role": "user", "content": feedback},
+                ]
+                resp = _llm.chat_no_stream(
+                    retry_messages, tools=None,
+                    provider=_prov, model=_mdl,
+                )
+                new_content = (resp or {}).get("message", {}).get("content", "") or ""
+                if new_content.strip():
+                    current = new_content
+            except Exception as e:
+                logger.debug("QualityGate retry LLM call failed: %s", e)
+                break  # fall through to soft fallback
+
+        # Exhausted retries → soft fallback
+        if soft_fallback:
+            try:
+                from .agent_types import AgentEvent
+                evt = AgentEvent(time.time(), "quality_warning", {
+                    "failing_rules": result.failing_rules if 'result' in locals() else [],
+                    "message": "质量检查未通过，已达重试上限，返回最后一版输出（软提示兜底）",
+                })
+                self._log(evt.kind, evt.data)
+                if _emit is not None:
+                    try:
+                        _emit(evt)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        return current
+
+    def _record_kpis_and_experience(
+        self,
+        output_text: str,
+        user_text: str,
+        tools_used: list[str],
+    ) -> None:
+        """Phase C.2: record KPI values to SQLite + turn failures into Experience.
+
+        All failures are swallowed — KPI/learning is best-effort.
+        """
+        try:
+            from .kpi_recorder import get_kpi_recorder
+        except Exception as e:
+            logger.debug("kpi_recorder unavailable: %s", e)
+            return
+
+        role_id = getattr(self.profile, "role_preset_id", "") or self.profile.role
+        kpi_defs = list(getattr(self.profile, "kpi_definitions", []) or [])
+
+        # Collect signals from recent events
+        qc_events = [e for e in self.events[-20:] if e.kind == "quality_check"]
+        retry_events = [e for e in self.events[-20:] if e.kind == "quality_retry"]
+        last_qc = qc_events[-1] if qc_events else None
+        first_qc = qc_events[0] if qc_events else None
+        passed = bool(last_qc.data.get("passed", True)) if last_qc else True
+        retries_used = len(retry_events)
+        first_pass = (
+            1.0 if (first_qc and first_qc.data.get("passed")) else 0.0
+        ) if first_qc else 1.0
+
+        # Compute per-KPI values using best-effort heuristics based on signal name
+        recorder = get_kpi_recorder()
+        for kpi in kpi_defs:
+            try:
+                # KPIDefinition uses `key`; dicts loaded via from_dict keep the same.
+                if isinstance(kpi, dict):
+                    kpi_name = kpi.get("key") or kpi.get("name") or ""
+                else:
+                    kpi_name = getattr(kpi, "key", "") or getattr(kpi, "name", "")
+                if not kpi_name:
+                    continue
+                value: float | None = None
+                # Heuristic signal mapping
+                if kpi_name in ("first_pass_rate", "first_pass"):
+                    value = first_pass
+                elif kpi_name in ("retries_used", "retry_count"):
+                    value = float(retries_used)
+                elif kpi_name in ("summary_completeness", "completeness"):
+                    value = 1.0 if passed else 0.6
+                elif kpi_name in ("action_extraction_rate", "action_items"):
+                    # Rough signal: passed + contains "action" keywords
+                    value = 1.0 if (passed and ("action" in output_text.lower() or "待办" in output_text)) else 0.5
+                else:
+                    value = 1.0 if passed else 0.0
+                recorder.record(
+                    role=role_id,
+                    agent_id=self.id,
+                    key=kpi_name,
+                    value=value,
+                    meta={"retries": retries_used, "passed": passed},
+                )
+            except Exception as e:
+                logger.debug("KPI record skipped (%s): %s", kpi, e)
+
+        # Turn quality failures into high-priority Experience entries
+        try:
+            if not passed and last_qc is not None:
+                from .experience_library import get_experience_library, Experience
+                lib = get_experience_library()
+                failing = last_qc.data.get("failing_rules", []) or []
+                exp = Experience(
+                    exp_type="retrospective",
+                    source="quality_gate",
+                    scene=f"用户请求类似：{(user_text or '')[:80]}",
+                    core_knowledge=f"质量检查失败：{', '.join(failing) or '未知规则'}",
+                    action_rules=[
+                        f"针对规则 '{r}'，在初次输出前主动满足其要求"
+                        for r in failing[:3]
+                    ] or ["初次输出前对照本角色 quality_rules 逐条自检"],
+                    taboo_rules=["不要在不满足硬性规则的情况下直接提交输出"],
+                    priority="high",
+                    tags=list(failing) + ["quality_failure"],
+                )
+                lib.add_experience(role=role_id, exp=exp)
+                self._log("experience_added", {
+                    "role": role_id,
+                    "priority": "high",
+                    "tags": list(failing),
+                })
+        except Exception as e:
+            logger.debug("Experience add skipped: %s", e)

@@ -39,6 +39,8 @@ async def list_meetings(
             participant=participant or None,
         )
         return {"meetings": [m.to_summary_dict() for m in items]}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -150,6 +152,63 @@ async def manage_meetings(
             project_id=body.get("project_id", ""),
         )
         return {"ok": True, "meeting": meeting.to_dict() if hasattr(meeting, "to_dict") else meeting}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Meeting deletion
+# ---------------------------------------------------------------------------
+
+@router.delete("/meetings/{meeting_id}")
+async def delete_meeting(
+    meeting_id: str,
+    purge_workspace: bool = Query(
+        True,
+        description="Also rm -rf the meeting's workspace directory.",
+    ),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Delete a meeting record and (optionally) its workspace directory.
+
+    Meeting messages live inside the meeting document itself, so removing
+    the meeting removes its full conversation. The workspace directory
+    (``workspaces/meetings/<id>/``) is purged by default — pass
+    ``purge_workspace=false`` to keep transcripts on disk.
+    """
+    try:
+        reg = getattr(hub, "meeting_registry", None)
+        if reg is None:
+            raise HTTPException(503, "meeting registry not initialized")
+
+        meeting = reg.get(meeting_id)
+        if meeting is None:
+            raise HTTPException(404, f"Meeting {meeting_id!r} not found")
+
+        if not reg.delete(meeting_id):
+            raise HTTPException(500, "meeting delete failed")
+
+        purged_ws = False
+        if purge_workspace:
+            import os, shutil
+            from app import DEFAULT_DATA_DIR
+            data_dir = os.environ.get("TUDOU_CLAW_DATA_DIR") or DEFAULT_DATA_DIR
+            wsp = os.path.join(data_dir, "workspaces", "meetings", meeting_id)
+            if os.path.isdir(wsp):
+                try:
+                    shutil.rmtree(wsp, ignore_errors=False)
+                    purged_ws = True
+                except Exception as e:
+                    logger.warning("meeting workspace rm failed: %s", e)
+
+        return {
+            "ok": True,
+            "deleted": meeting_id,
+            "purged_workspace": purged_ws,
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -371,6 +430,7 @@ async def meeting_post_message(
         #    Stop-commands ("暂停"/"停止"/...) only interrupt in-flight
         #    replies — they do NOT trigger a new round. ──
         interrupted = False
+        respondents: list[str] = []  # agent ids expected to reply (for UI typing bubbles)
         try:
             from ...meeting import (
                 MeetingStatus, spawn_meeting_reply,
@@ -388,20 +448,39 @@ async def meeting_post_message(
                     pce = getattr(hub, "project_chat_engine", None)
                     if pce is not None and m.participants:
                         logger.info("spawning meeting reply for %d participants", len(m.participants))
+                        # target_agents semantics (explicit):
+                        #   absent / null  -> None (all participants reply)
+                        #   []             -> [] (nobody replies, user @-none)
+                        #   [ids]          -> only those reply
+                        _ta = body.get("target_agents", None)
+                        if _ta is not None and not isinstance(_ta, list):
+                            _ta = None
+                        # Compute respondents list for frontend typing bubbles
+                        _parts = list(m.participants or [])
+                        if _ta is None:
+                            respondents = _parts
+                        elif isinstance(_ta, list):
+                            _pset = set(_parts)
+                            respondents = [x for x in _ta if x in _pset]
                         spawn_meeting_reply(
                             meeting=m,
                             registry=reg,
                             agent_chat_fn=pce._chat,
                             agent_lookup_fn=pce._lookup,
                             user_msg=msg.content,
-                            target_agent_ids=body.get("target_agents") or None,
+                            target_agent_ids=_ta,
                         )
                     else:
                         logger.warning("meeting reply skipped: pce=%s, participants=%s", pce, m.participants)
         except Exception as _e:
             logger.warning("meeting agent reply spawn failed: %s", _e, exc_info=True)
 
-        return {"ok": True, "message": msg.to_dict(), "interrupted": interrupted}
+        return {
+            "ok": True,
+            "message": msg.to_dict(),
+            "interrupted": interrupted,
+            "respondents": respondents,
+        }
     except HTTPException:
         raise
     except Exception as e:

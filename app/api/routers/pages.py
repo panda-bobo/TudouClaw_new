@@ -65,3 +65,13 @@ async def login_page(request: Request):
     if request.cookies.get("td_sess"):
         response.delete_cookie("td_sess")
     return response
+
+
+@router.get("/v2", response_class=HTMLResponse)
+@router.get("/v2/", response_class=HTMLResponse)
+async def v2_spa(request: Request):
+    """Serve the V2 SPA shell. All routing inside happens via URL hash
+    (``#/v2/tasks/{id}`` etc.) — see app/static/v2/app.js."""
+    if not _is_authenticated(request):
+        return RedirectResponse(url="/login", status_code=302)
+    return templates.TemplateResponse(request, "v2.html")

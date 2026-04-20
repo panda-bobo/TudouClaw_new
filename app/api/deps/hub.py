@@ -18,6 +18,10 @@ def init_hub() -> "Hub":
 
     Called once during FastAPI lifespan startup.
     Reuses the existing Hub initialization logic from the old portal server.
+
+    Env var pass-through (parity with legacy ``run_portal``):
+      - TUDOU_NODE_NAME  → Hub.node_name  (cosmetic, shown on banner/UI)
+      - TUDOU_CLAW_DATA_DIR is read by Hub itself.
     """
     global _hub_instance
     if _hub_instance is not None:
@@ -25,8 +29,10 @@ def init_hub() -> "Hub":
 
     try:
         from ...hub import Hub
-        _hub_instance = Hub()
-        logger.info("Hub initialized: node_id=%s", _hub_instance.node_id)
+        node_name = os.environ.get("TUDOU_NODE_NAME", "")
+        _hub_instance = Hub(node_name=node_name) if node_name else Hub()
+        logger.info("Hub initialized: node_id=%s node_name=%s",
+                    _hub_instance.node_id, _hub_instance.node_name)
     except Exception as e:
         logger.error("Failed to initialize Hub: %s", e)
         raise

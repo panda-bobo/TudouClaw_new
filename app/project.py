@@ -1175,6 +1175,17 @@ class Project:
             if _s.startswith("projectstatus."):
                 _s = _s.split(".", 1)[1]
             _status_str = _s
+        # Projects created before the shared-dir autopopulate fix have an
+        # empty working_directory. Fall back to the canonical shared path so
+        # the UI (project sidebar, chat header, etc.) always shows something
+        # concrete. Lazy import to avoid a circular project<->agent import.
+        _wd = self.working_directory
+        if not _wd:
+            try:
+                from .agent import Agent as _Agent
+                _wd = _Agent.get_shared_workspace_path(self.id)
+            except Exception:
+                _wd = ""
         return {
             "id": self.id,
             "name": self.name,
@@ -1206,7 +1217,7 @@ class Project:
                 "open": sum(1 for iss in self.issues if iss.status in ("open", "investigating")),
                 "resolved": sum(1 for iss in self.issues if iss.status == "resolved"),
             },
-            "working_directory": self.working_directory,
+            "working_directory": _wd,
             "node_id": self.node_id,
             "workflow_binding": self.workflow_binding.to_dict() if self.workflow_binding.workflow_id else None,
             "paused": self.paused,
@@ -1521,16 +1532,38 @@ class ProjectChatEngine:
             logger.warning("Project chat [%s] no respondents for msg: %s",
                            project.name, content[:60])
 
-        # 让每个选中的 Agent 在后台回复
-        threads = []
-        for agent_id in respondents:
-            t = threading.Thread(
-                target=self._agent_respond,
-                args=(project, agent_id, content),
+        # ── 依次回复（而非并行）──
+        # 项目群聊里 @全员 / 多人触发时，按 respondents 顺序依次回复：
+        #   1. 避免多个 agent 同时抢发、话题撞车
+        #   2. 后发言的 agent 能看到前者的回复作为上下文（更像真人会议）
+        #   3. 下游工具（submit_deliverable 等）基于 thread-local 的
+        #      project_context 也更稳定
+        # 所有回复仍放在一个后台 daemon 线程里，HTTP 请求立即返回 respondents
+        # 用于前端渲染 "agent 正在输入" 气泡。
+        def _respond_sequentially(agent_ids: list[str]):
+            for aid in agent_ids:
+                try:
+                    self._agent_respond(project, aid, content)
+                except Exception as e:
+                    logger.exception(
+                        "Project chat [%s] sequential respond failed for %s: %s",
+                        project.name, aid, e)
+                # 项目被中途暂停/停止/关闭 → 终止后续 agent 发言
+                if project.paused or project.status in (
+                        ProjectStatus.CANCELLED, ProjectStatus.COMPLETED,
+                        ProjectStatus.ARCHIVED):
+                    logger.info(
+                        "Project chat [%s] sequential respond aborted "
+                        "(paused=%s status=%s) — remaining agents skipped",
+                        project.name, project.paused, project.status)
+                    break
+
+        if respondents:
+            threading.Thread(
+                target=_respond_sequentially,
+                args=(list(respondents),),
                 daemon=True,
-            )
-            threads.append(t)
-            t.start()
+            ).start()
 
         return respondents
 
@@ -1730,7 +1763,15 @@ class ProjectChatEngine:
         prompt = self._build_chat_prompt(project, agent, member, user_msg)
 
         try:
-            result = self._chat(agent_id, prompt)
+            # ── Thread-local project context: lets tool handlers (e.g.
+            #    submit_deliverable, create_goal, create_milestone) discover
+            #    the project id without threading it through every tool call. ──
+            from .project_context import set_project_context
+            set_project_context(project.id)
+            try:
+                result = self._chat(agent_id, prompt)
+            finally:
+                set_project_context("")
             name = f"{agent.role}-{agent.name}" if agent else agent_id
             logger.info("Project chat [%s] agent %s responded (%d chars)",
                         project.name, name, len(result))
@@ -1740,6 +1781,12 @@ class ProjectChatEngine:
                 content=result,
                 msg_type="chat",
             )
+            # B: auto-registration from chat replies is disabled on purpose —
+            # deliverables should only come from explicit submit_deliverable tool
+            # calls (or manual UI submission). Auto-scanning 📎 markers and
+            # markdown links produced too much noise (skill.md, MCP.md, code files,
+            # framework artifacts). The helper _auto_register_deliverables_from_reply
+            # is kept for reference but no longer invoked.
             # 检查是否完成了 WF Step → 自动更新状态
             self._check_wf_step_completion(project, agent_id, result)
         except Exception as e:
@@ -1756,6 +1803,94 @@ class ProjectChatEngine:
             self._save()
         except Exception:
             pass
+
+    def _auto_register_deliverables_from_reply(self, project: Project,
+                                                  agent_id: str,
+                                                  reply: str) -> int:
+        """Scan an agent reply for file references and register each as a
+        draft Deliverable (kind derived from file extension).
+
+        Scans two forms:
+          1. Paperclip marker:  📎filename.ext   (what project chat uses)
+          2. Markdown link:     [name](path/to/file.ext)
+                                [name](./file.ext)
+
+        De-dup rule: (author_agent_id, file_path) is unique — if a deliverable
+        already exists for this pair, it's skipped.
+
+        Returns the number of newly-registered deliverables.
+        """
+        if not reply:
+            return 0
+        import re
+
+        # Allowed extensions (reviewable output, not code noise)
+        EXT_KIND = {
+            ".md": "document", ".markdown": "document",
+            ".pdf": "document", ".doc": "document", ".docx": "document",
+            ".txt": "document", ".rtf": "document",
+            ".xlsx": "analysis", ".xls": "analysis", ".csv": "analysis",
+            ".ppt": "document", ".pptx": "document",
+            ".png": "media", ".jpg": "media", ".jpeg": "media",
+            ".gif": "media", ".svg": "media", ".webp": "media",
+            ".mp3": "media", ".wav": "media", ".mp4": "media", ".webm": "media",
+            ".json": "analysis", ".yaml": "analysis", ".yml": "analysis",
+            ".html": "document", ".htm": "document",
+        }
+
+        candidates: set[str] = set()
+
+        # Form 1: 📎 marker → "📎filename.ext" or "📎 filename.ext"
+        for m in re.finditer(r"\U0001f4ce\s*([^\s<>]+)", reply):
+            candidates.add(m.group(1).strip())
+
+        # Form 2: Markdown link [text](path) — only keep paths with known ext
+        for m in re.finditer(r"\[([^\]]+)\]\(([^)\s]+)\)", reply):
+            url = m.group(2).strip()
+            # Skip absolute URLs
+            if url.startswith(("http://", "https://", "mailto:", "#")):
+                continue
+            candidates.add(url)
+
+        if not candidates:
+            return 0
+
+        existing_pairs = {
+            (dv.author_agent_id, dv.file_path)
+            for dv in project.deliverables
+            if dv.file_path
+        }
+        registered = 0
+        for path in candidates:
+            # Strip leading ./ and anchors/fragments
+            clean = path.lstrip("./").split("#")[0].split("?")[0]
+            if not clean:
+                continue
+            ext = ""
+            idx = clean.rfind(".")
+            if idx >= 0:
+                ext = clean[idx:].lower()
+            if ext not in EXT_KIND:
+                continue
+            if (agent_id, clean) in existing_pairs:
+                continue
+            title = clean.rsplit("/", 1)[-1]
+            try:
+                project.add_deliverable(
+                    title=title,
+                    kind=EXT_KIND[ext],
+                    author_agent_id=agent_id,
+                    file_path=clean,
+                    content_text=f"(auto-registered from chat reply)",
+                )
+                registered += 1
+                existing_pairs.add((agent_id, clean))
+            except Exception as _ae:
+                logger.debug("add_deliverable failed for %s: %s", clean, _ae)
+        if registered:
+            logger.info("Project [%s] auto-registered %d deliverable(s) from %s's reply",
+                        project.name, registered, agent_id[:8])
+        return registered
 
     def _check_wf_step_completion(self, project: Project, agent_id: str,
                                     response: str):
@@ -2094,6 +2229,19 @@ class ProjectChatEngine:
                 "或使用 [STEP_DONE] 标记，系统会自动更新步骤状态。\n"
             )
 
+        project_scope_hint = (
+            f"\n[项目上下文] 你正在项目 {project.name!r} 中 (project_id={project.id})。\n"
+            f"可用的项目工具 (自动识别当前项目，无需传 project_id):\n"
+            f"  - submit_deliverable(title, file_path?/content_text?/url?, kind?, milestone_id?)\n"
+            f"    ⚠️ 必须显式调用该工具 —— 只在聊天回复里提到文件名或说\"已完成\"**不会**登记。\n"
+            f"    每产出一个交付件（文档/代码/设计/分析）都要单独调一次；\n"
+            f"    如果提供 file_path，系统会自动把文件复制到项目共享目录\n"
+            f"    ~/.tudou_claw/workspaces/shared/{project.id}/。\n"
+            f"  - create_goal(name, metric?, target_value?, target_text?) / update_goal_progress(goal_id, current_value?, done?)\n"
+            f"    → 识别到可度量目标时创建；有进展时更新。\n"
+            f"  - create_milestone(name, responsible_agent_id?, due_date?) / update_milestone_status(milestone_id, status?, evidence?)\n"
+            f"    → 规划重大检查点或推进状态时使用。\n"
+        )
         return (
             f"{admin_cmds_block}"
             f"{pause_block}"
@@ -2102,6 +2250,7 @@ class ProjectChatEngine:
             f"\n团队成员:\n" + "\n".join(team_lines) +
             f"{task_lines}\n"
             f"{wf_hint}"
+            f"{project_scope_hint}"
             f"\n最近聊天记录:\n{ctx}\n"
             f"\n[User]: {user_msg}\n"
             f"\n请以你的角色和职责回复。简洁、有用、直接。"

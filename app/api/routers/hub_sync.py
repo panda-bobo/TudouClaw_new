@@ -28,6 +28,37 @@ async def get_local_agents_for_sync(
         agents = hub.get_local_agents_for_sync() if hasattr(hub, "get_local_agents_for_sync") else []
         agents_list = [a.to_dict() if hasattr(a, "to_dict") else a for a in agents]
         return {"agents": agents_list}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/node/{node_id}")
+async def unregister_node(
+    node_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Unregister a remote node from this Hub.
+
+    Parity with legacy ``DELETE /api/hub/node/{id}`` in
+    ``portal_routes_post.py``. Used when a node is decommissioned or
+    offline long enough that the operator wants it removed from the
+    dashboard.
+    """
+    try:
+        hub.unregister_node(node_id)
+        try:
+            from ...auth import get_auth
+            auth = get_auth()
+            auth.audit("delete_node", actor=user.user_id,
+                       role=user.role, target=node_id)
+        except Exception:
+            pass
+        return {"ok": True}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -54,6 +85,8 @@ async def register_remote_node(
             return {"ok": True, "result": result}
 
         return {"ok": True}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -78,6 +111,8 @@ async def sync_agents(
             return {"ok": True, "result": result}
 
         return {"ok": True}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -101,6 +136,8 @@ async def send_heartbeat(
             return {"ok": True, "result": result}
 
         return {"ok": True}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -128,6 +165,8 @@ async def send_inter_agent_message(
             return {"ok": True, "result": result}
 
         return {"ok": True}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -158,6 +197,8 @@ async def broadcast_message(
             return {"ok": True, "result": result}
 
         return {"ok": True}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -180,6 +221,8 @@ async def refresh_node(
 
         ok = hub.refresh_node(node_id) if hasattr(hub, "refresh_node") else False
         return {"ok": ok}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -286,6 +329,8 @@ async def apply_config(
             "deploy_id": deploy_id,
             "agent_id": agent_id,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -303,6 +348,8 @@ async def confirm_config(
         error = body.get("error", "")
         ok = hub.confirm_config_applied(deploy_id, success, error) if hasattr(hub, "confirm_config_applied") else False
         return {"ok": ok}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -317,6 +364,8 @@ async def apply_node_config(
     try:
         result = hub.apply_received_node_config(body) if hasattr(hub, "apply_received_node_config") else {"ok": False}
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -1,4 +1,12 @@
 """
+
+
+╔════════════════════════════════════════════════════════════════════════╗
+║  ⚠️  DEPRECATED — LEGACY stdlib handler (extracted from                ║
+║     portal_routes_post.py). Active only when TUDOU_USE_STDLIB=1 is     ║
+║     set at launch. FastAPI (app/api/routers/*) is authoritative.       ║
+║     Do NOT add new routes here.                                        ║
+╚════════════════════════════════════════════════════════════════════════╝
 Scheduler route handlers extracted from portal_routes_post.py.
 
 Handles scheduler job management endpoints:

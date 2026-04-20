@@ -502,6 +502,22 @@ async def send_chat(
     import time as _time
 
     agent = _get_agent_or_404(hub, agent_id)
+
+    # Hard-gate: no LLM → no chat. Surface a distinct 409 with a stable
+    # error code so the frontend can disable the input box and prompt
+    # the admin to select provider + model.
+    if not (agent.provider or "").strip() or not (agent.model or "").strip():
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "NO_LLM_CONFIGURED",
+                "message": "该 Agent 还没有配置 LLM，请先在 Agent 设置里选择 provider 和 model。",
+                "agent_id": agent.id,
+                "provider": agent.provider or "",
+                "model": agent.model or "",
+            },
+        )
+
     user_msg = body.get("message", "").strip()
     attachments = body.get("attachments") or []
 
@@ -597,13 +613,46 @@ async def send_chat(
             suffix = "\n" + " ".join(f"📎{r}" for r in saved_refs)
             chat_content = (chat_content + suffix) if chat_content else suffix.lstrip()
 
+    # ── V2 suggestion (classify-only, no side effects) ──
+    # We used to auto-create a V2 task whenever the classifier said
+    # "complex". That hijacked every chat and spawned orphaned state
+    # machines for follow-ups like "发到邮箱" or skill clarifications
+    # ("用 pptx-author"). Now we CLASSIFY only and pass the verdict back
+    # to the client; the user decides via a badge-link on the chat bubble
+    # whether to promote the message into a V2 state-machine task.
+    v2_suggestion: dict | None = None
+    try:
+        if isinstance(chat_content, str) and chat_content.strip():
+            from app.v2.core.task_store import get_store as _get_v2_store
+            v2_store = _get_v2_store()
+            if v2_store.get_agent(agent.id) is not None:
+                from app.chat_complexity_classifier import classify
+                verdict = classify(chat_content)
+                if verdict["route"] == "v2":
+                    has_active = False
+                    try:
+                        has_active = v2_store.count_active_tasks(agent.id) > 0
+                    except Exception:
+                        pass
+                    if not has_active:
+                        v2_suggestion = {
+                            "route":   "v2",
+                            "reason":  verdict.get("reason", ""),
+                            "signals": verdict.get("signals", []),
+                        }
+    except Exception as _e:
+        logger.debug("chat complexity classification skipped: %s", _e)
+
     # Route through supervisor (handles both isolated and in-process)
     task = hub.supervisor.chat_async(agent.id, chat_content, source="admin")
-    return {
+    resp: dict = {
         "task_id": task.id,
         "status": task.status.value,
         "attachments_saved": saved_refs,
     }
+    if v2_suggestion:
+        resp["v2_suggestion"] = v2_suggestion
+    return resp
 
 
 @router.post("/agent/{agent_id}/wake")
@@ -841,6 +890,17 @@ async def create_agent(
     return agent.to_dict() if agent else {}
 
 
+@router.get("/agent/{agent_id}")
+async def get_agent_detail(
+    agent_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Return full agent detail (used by Capabilities/Skills panel)."""
+    agent = _get_agent_or_404(hub, agent_id)
+    return agent.to_dict() if hasattr(agent, "to_dict") else {}
+
+
 @router.delete("/agent/{agent_id}")
 async def delete_agent(
     agent_id: str,
@@ -881,6 +941,8 @@ async def save_file(
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(content)
         return {"ok": True, "path": file_path, "size": len(content)}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
 
@@ -965,6 +1027,8 @@ async def exec_src_tool(
     try:
         result = hub.execute_src_tool(agent_id, tool_name, payload)
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -983,6 +1047,8 @@ async def exec_src_command(
     try:
         result = hub.execute_src_command(agent_id, cmd_name, prompt)
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1027,6 +1093,8 @@ async def add_growth_task(
         )
         hub._save_agents()
         return {"ok": True, "task": task.to_dict()}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1113,6 +1181,8 @@ async def manage_prompt_packs(
                         agent.bound_prompt_packs.append(skill_id)
             hub._save_agents()
             return {"ok": True, "imported": imported_count, "bound_prompt_packs": agent.bound_prompt_packs}
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
     elif action == "import_local":
@@ -1189,6 +1259,8 @@ async def trigger_thinking(
         result = agent.trigger_thinking(trigger=trigger, context=context)
         hub._save_agents()
         return {"ok": True, "result": result}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1294,6 +1366,8 @@ async def enable_self_improvement(
             import_experience=import_exp, import_limit=import_limit)
         hub._save_agents()
         return {"ok": True, **result}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

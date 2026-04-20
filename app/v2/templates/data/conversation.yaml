@@ -1,0 +1,22 @@
+id: conversation
+display_name: 对话任务
+version: 1
+description: |
+  纯对话任务。兼容 V1 chat 语义，供从 V1 克隆的 agent 过渡使用。
+  单轮对话即一个 Task；多轮对话用 parent_task_id 串起。
+
+required_slots: []
+
+plan_prompt: |
+  用户的请求是 {intent}。
+  若需要工具（检索/计算/调用 MCP）请产出 1-3 个 step；
+  若是纯闲聊（不需要调用任何工具）请产出 1 个 step，工具留空。
+
+allowed_tools: []
+
+verify_rules: []
+
+expected_artifacts: []
+
+report_template: |
+  {last_assistant_message}

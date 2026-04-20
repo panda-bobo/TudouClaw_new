@@ -39,7 +39,33 @@ function renderCurrentView() {
     }
     case 'agent': {
       var agentObj = agents.find(function(a){ return a.id === currentAgent; });
-      titleEl.textContent = agentObj ? (agentObj.role||'general') + '-' + agentObj.name : 'Agent';
+      // V1/V2 badge: start as "V1", flip to "V1+V2" if V2 shell exists.
+      // esc() is defined in portal_bundle.js; titleEl uses innerHTML now
+      // because we want the badge chip styled next to the name.
+      var _nm = agentObj ? ((agentObj.role||'general') + '-' + agentObj.name) : 'Agent';
+      var _safeNm = (typeof esc === 'function') ? esc(_nm) : _nm;
+      titleEl.innerHTML = _safeNm +
+        ' <span id="v1v2-badge" style="display:inline-flex;align-items:center;' +
+        'font-size:10px;padding:2px 8px;border-radius:10px;margin-left:8px;' +
+        'background:var(--surface2);color:var(--text3);font-weight:600;vertical-align:middle">' +
+        'V1</span>';
+      // Async probe — if V2 shell exists, upgrade the badge.
+      try {
+        fetch('/api/v2/agents/' + encodeURIComponent(currentAgent), {
+          credentials: 'same-origin',
+        }).then(function(r) {
+          var badge = document.getElementById('v1v2-badge');
+          if (!badge) return;
+          if (r.ok) {
+            badge.textContent = 'V1 + V2';
+            badge.style.background = 'rgba(249,115,22,0.15)';
+            badge.style.color = '#f97316';
+            badge.title = '已启用状态机任务能力（6-phase 状态机）';
+          } else {
+            badge.title = '仅 V1 聊天；可在下方 状态机任务队列面板启用状态机任务 能力';
+          }
+        }).catch(function() { /* keep default V1 badge */ });
+      } catch (_e) { /* silent */ }
       actionsEl.innerHTML = '<button class="btn btn-ghost btn-sm" onclick="editAgentProfile(\''+currentAgent+'\')"><span class="material-symbols-outlined" style="font-size:16px">edit</span> Settings</button><button class="btn btn-ghost btn-sm" onclick="clearAgent(\''+currentAgent+'\')"><span class="material-symbols-outlined" style="font-size:16px">delete_sweep</span> Clear Chat</button><button class="btn btn-danger btn-sm" onclick="deleteAgent(\''+currentAgent+'\')"><span class="material-symbols-outlined" style="font-size:16px">delete</span> Delete</button>';
       // PERF/UX: if the chat DOM for this agent is already mounted, skip the full
       // re-render so we don't wipe streaming bubbles / approval cards / input focus.

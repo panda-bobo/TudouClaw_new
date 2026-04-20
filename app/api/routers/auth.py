@@ -147,14 +147,31 @@ async def revoke_token(
 
 
 @router.post("/reset-token")
-async def reset_admin_token():
-    """Reset the admin token — generates a new one."""
+async def reset_admin_token(
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Reset the admin token — generates a new one.
+
+    Super-admin only. Without auth, anyone reaching the server could
+    revoke the real operator's access by spamming this endpoint.
+    """
+    if not user.is_super_admin:
+        raise HTTPException(status_code=403, detail="super-admin only")
     from ...auth import get_auth
+    import os, secrets
     auth = get_auth()
-    new_token = auth.reset_admin_token() if hasattr(auth, "reset_admin_token") else None
-    if not new_token:
-        raise HTTPException(status_code=500, detail="Token reset failed")
-    return {"ok": True, "token": new_token}
+    # Parity with legacy portal_routes_post handler: mint a fresh admin
+    # token, create a token object for it, and persist to .admin_token.
+    raw = secrets.token_hex(24)
+    try:
+        auth._create_token_obj("admin", "admin", raw)
+        token_file = os.path.join(auth._data_dir, ".admin_token")
+        with open(token_file, "w") as f:
+            f.write(raw)
+        os.chmod(token_file, 0o600)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Token reset failed: {e}")
+    return {"ok": True, "token": raw}
 
 
 # ---------------------------------------------------------------------------

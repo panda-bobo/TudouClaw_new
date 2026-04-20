@@ -84,6 +84,8 @@ async def update_system_config(
                 cfg["scene_prompts"] = val
         llm.save_config()
         return {"ok": True}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -119,6 +121,8 @@ async def update_tool_policy(
         auth = get_auth()
         auth.tool_policy.update_policy_config(body)
         return {"ok": True}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -235,6 +239,8 @@ async def get_available_roles(
         roles = hub.get_available_roles() if hasattr(hub, "get_available_roles") else []
         roles_list = [r.to_dict() if hasattr(r, "to_dict") else r for r in roles]
         return {"roles": roles_list}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -257,6 +263,8 @@ async def get_audit_log(
         if action:
             entries = [e for e in entries if e.get("action") == action]
         return {"entries": entries}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -273,6 +281,8 @@ async def get_cost_analytics(
     """Get cost analytics across all agents."""
     try:
         return hub.get_all_costs()
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -289,6 +299,8 @@ async def get_system_info(
     """Get system information."""
     try:
         return hub.get_system_info()
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -340,6 +352,8 @@ async def get_hub_state(
             "summary": hub.summary(),
             "portal_mode": portal_mode,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -371,6 +385,8 @@ async def get_pending_reviews(
                     })
         items.sort(key=lambda it: it["step"].get("completed_at", 0) or 0)
         return {"count": len(items), "items": items}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -407,6 +423,8 @@ async def get_config_deployments(
         if deploy_id:
             return hub.get_deployment_status(deploy_id)
         return {"deployments": hub.get_deployment_status()}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -444,6 +462,8 @@ async def get_tool_surface(
     """Get tool surface index."""
     try:
         return {"index": hub.get_tool_surface(q)}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -460,6 +480,8 @@ async def get_parity_report(
     """Get parity report."""
     try:
         return hub.get_parity_report()
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -476,6 +498,8 @@ async def get_workspace_summary(
     """Get workspace summary."""
     try:
         return {"summary": hub.get_workspace_summary()}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -495,6 +519,8 @@ async def smart_route(
         raise HTTPException(status_code=400, detail="Missing q parameter")
     try:
         return hub.route_and_dispatch(q)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

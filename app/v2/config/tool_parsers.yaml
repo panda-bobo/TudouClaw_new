@@ -1,0 +1,56 @@
+# Model → ToolCallParser mapping.
+#
+# Each entry binds a model-name glob to a parser class (from
+# app.v2.bridges.tool_parsers.builtin.BUILTIN_CLASSES) with optional
+# kwargs. On tool-call time, app.v2.bridges.llm_bridge looks up
+# ParserRegistry.resolve(model) and uses the most specific match;
+# unmatched models fall through to OpenAIPassthroughParser.
+#
+# Adding a new model that uses an existing format is a YAML change,
+# NOT a code change. Adding a new format means dropping a .py into
+# app/v2/bridges/tool_parsers/user_parsers/ and it auto-registers.
+
+parsers:
+  # ── Qwen family (2, 2.5, 3) ────────────────────────────────────
+  # Qwen fine-tuned with function-calling emit <tool_call>...</tool_call>
+  # blocks in content. mlx_lm.server does NOT parse these — we must.
+  - match: "qwen*"
+    class: XMLTagJSONParser
+    config:
+      open_tag: "<tool_call>"
+      close_tag: "</tool_call>"
+
+  # ── Hermes / OpenHermes / Nous research tunes ──────────────────
+  - match: "*hermes*"
+    class: XMLTagJSONParser
+    config:
+      open_tag: "<tool_call>"
+      close_tag: "</tool_call>"
+
+  # ── Llama 3.1+ with function calling ──────────────────────────
+  # Llama 3.1 uses a similar XML-tag format as of its tool-call tune.
+  - match: "llama-3.[1-9]*"
+    class: XMLTagJSONParser
+    config:
+      open_tag: "<|python_tag|>"
+      close_tag: "<|eom_id|>"
+
+  # ── Mistral / Mixtral function-call variants ──────────────────
+  - match: "mistral-*-instruct*"
+    class: XMLTagJSONParser
+    config:
+      open_tag: "[TOOL_CALLS]"
+      close_tag: "[/TOOL_CALLS]"
+      strip_content: true
+
+  # ── GLM-4 function_call JSON ──────────────────────────────────
+  - match: "glm-4*"
+    class: JSONOnlyParser
+    config:
+      name_key: "function_call.name"
+      args_key: "function_call.arguments"
+
+  # ── DeepSeek Coder / V3 (already emits OpenAI shape via its API) ─
+  # Listed explicitly so diagnostics show a specific parser choice.
+  - match: "deepseek*"
+    class: OpenAIPassthroughParser

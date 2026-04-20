@@ -569,6 +569,7 @@ class Hub:
                     agent = Agent.from_persist_dict(d)
                     self.agents[agent.id] = agent
                 logger.info("Loaded %d agents from SQLite", len(self.agents))
+                self._auto_migrate_role_defaults()
                 return
             except Exception as e:
                 logger.warning("SQLite agent load failed, trying JSON: %s", e)
@@ -584,6 +585,89 @@ class Hub:
         except Exception as e:
             import traceback
             traceback.print_exc()
+        self._auto_migrate_role_defaults()
+
+    def _auto_migrate_role_defaults(self) -> None:
+        """Back-fill role_defaults onto existing agents at load time.
+
+        When a new prompt pack is added to ``ROLE_DEFAULTS`` (e.g.
+        ``action-first``), agents that were created BEFORE the addition
+        won't have it in ``bound_prompt_packs`` — ``create_agent`` only
+        resolves role defaults at creation time, not retroactively.
+
+        This performs a union merge: for every loaded agent, resolve what
+        its role SHOULD have today and append any missing IDs to the
+        persisted ``granted_skills`` / ``bound_prompt_packs``.  User
+        customizations are preserved — we never REMOVE anything.
+
+        Runs once per server start after all agents are loaded.  Failures
+        are non-fatal (logged).
+        """
+        try:
+            from ..core.role_defaults import resolve_role_default_ids
+            from ..core.prompt_enhancer import get_prompt_pack_registry
+        except Exception as _imp:
+            logger.debug("auto-migrate: imports failed: %s", _imp)
+            return
+
+        try:
+            pp_reg = get_prompt_pack_registry()
+        except Exception:
+            pp_reg = None
+        skill_registry = getattr(self, "skill_registry", None)
+
+        changed = 0
+        added_skills_total = 0
+        added_packs_total = 0
+        for agent in list(self.agents.values()):
+            try:
+                want_skills, want_packs = resolve_role_default_ids(
+                    agent.role or "", skill_registry, pp_reg)
+            except Exception as _re:
+                logger.debug("resolve role_defaults failed for %s: %s",
+                             agent.name, _re)
+                continue
+
+            added_here = False
+            cur_skills = list(getattr(agent, "granted_skills", []) or [])
+            for sid in want_skills:
+                if sid not in cur_skills:
+                    cur_skills.append(sid)
+                    added_skills_total += 1
+                    added_here = True
+                    if skill_registry is not None:
+                        try:
+                            skill_registry.grant(sid, agent.id)
+                        except Exception:
+                            pass
+            if added_here:
+                agent.granted_skills = cur_skills
+
+            cur_packs = list(getattr(agent, "bound_prompt_packs", []) or [])
+            packs_changed = False
+            for pid in want_packs:
+                if pid not in cur_packs:
+                    cur_packs.append(pid)
+                    added_packs_total += 1
+                    packs_changed = True
+            if packs_changed:
+                agent.bound_prompt_packs = cur_packs
+                added_here = True
+
+            if added_here:
+                changed += 1
+
+        if changed:
+            logger.info(
+                "Role-defaults auto-migrate: updated %d agents "
+                "(+%d skills, +%d packs)",
+                changed, added_skills_total, added_packs_total,
+            )
+            # Persist so the next restart doesn't redo the work.
+            try:
+                self._save_agents()
+            except Exception as _se:
+                logger.debug("auto-migrate save failed: %s", _se)
 
     def _save_agents(self):
         """Persist agents to SQLite (primary) + JSON (backup) + workspace."""
@@ -1037,17 +1121,35 @@ class Hub:
                         node_id: str = "local",
                         workflow_id: str = "",
                         step_assignments: list[dict] | None = None) -> Project:
+        import os as _os
+        from ..agent import Agent as _Agent
         proj = Project(name=name, description=description,
                       working_directory=working_directory, node_id=node_id)
+
+        # Canonical project working directory = the project's shared workspace
+        # under ~/.tudou_claw/workspaces/shared/<project_id>/. When the caller
+        # didn't specify one, we fill it in so the UI always shows a real path
+        # and every member knows where deliverables live.
+        if not proj.working_directory:
+            proj.working_directory = _Agent.get_shared_workspace_path(proj.id)
+
+        # Create the shared directory on disk.
+        try:
+            _os.makedirs(_Agent.get_shared_workspace_path(proj.id),
+                         exist_ok=True)
+        except OSError:
+            pass
+
         if member_configs:
             for mc in member_configs:
                 agent_id = mc.get("agent_id", "")
                 proj.add_member(agent_id,
                                 mc.get("responsibility", ""))
-                # Sync project working_directory to member agent
-                if working_directory and agent_id:
+                # Hook every member's shared_workspace up at creation time
+                # (was previously conditional on user-supplied working_directory).
+                if agent_id:
                     self._sync_agent_to_project_dir(
-                        agent_id, working_directory,
+                        agent_id, proj.working_directory,
                         project_id=proj.id, project_name=proj.name)
 
         # Workflow 绑定
@@ -1058,8 +1160,7 @@ class Hub:
         with self._lock:
             self.projects[proj.id] = proj
         self._save_projects()
-        if working_directory:
-            self._save_agents()
+        self._save_agents()
         return proj
 
     def _bind_workflow_to_project(self, proj: Project, workflow_id: str,
@@ -1170,6 +1271,8 @@ class Hub:
             agent.project_id = project_id
         if project_name:
             agent.project_name = project_name
+        # Mark routing context: all deliverables must go to shared_dir.
+        agent.context_type = "project"
         # Ensure the shared directory exists (skip if path is invalid)
         try:
             os.makedirs(shared_dir, exist_ok=True)
@@ -2261,6 +2364,9 @@ class Hub:
         bridge = get_bridge()
         info = bridge.get_system_info()
         import platform
+        import os  # used by workspaces_root below; module-level `os` import
+                  # is present at top of file but rebinding here keeps the
+                  # closure robust if that import ever moves.
         from .. import DEFAULT_DATA_DIR, USER_HOME
         info["app"] = {
             "local_agents": len(self.agents),

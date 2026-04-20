@@ -32,6 +32,8 @@ async def list_providers(
         reg = _get_registry()
         providers = reg.list(include_disabled=True)
         return {"providers": [p.to_dict(mask_key=True) for p in providers]}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -39,6 +41,26 @@ async def list_providers(
 # ---------------------------------------------------------------------------
 # Register a new provider — matches legacy handlers/providers.py
 # ---------------------------------------------------------------------------
+
+@router.delete("/providers/{provider_id}")
+async def delete_provider(
+    provider_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Remove an LLM provider. Parity with legacy ``DELETE /api/portal/providers/{id}``."""
+    reg = _get_registry()
+    ok = reg.remove(provider_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"provider {provider_id!r} not found")
+    try:
+        from ...auth import get_auth
+        get_auth().audit("delete_provider", actor=user.user_id,
+                         role=user.role, target=provider_id)
+    except Exception:
+        pass
+    return {"ok": True, "provider_id": provider_id}
+
 
 @router.post("/providers")
 async def register_provider(
@@ -66,6 +88,8 @@ async def register_provider(
             p.models_cache = list(body.get("manual_models", []))
             reg._save()
         return p.to_dict(mask_key=True)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -85,6 +109,8 @@ async def get_provider_models(
         reg = _get_registry()
         models = reg.detect_models(provider_id)
         return {"provider_id": provider_id, "models": models}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -173,6 +199,8 @@ async def detect_provider_models(
         reg = _get_registry()
         models = reg.detect_models(provider_id)
         return {"provider_id": provider_id, "models": models}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -188,5 +216,7 @@ async def detect_all_models(
         reg = _get_registry()
         all_models = reg.detect_all_models()
         return {"models": all_models}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -1363,6 +1363,15 @@ class MemoryManager:
             # 无 LLM 时不做事实提取
             return []
 
+        # 上游已被 auto-compact 截断 → 提取出来的都是"无法分析"式垃圾，直接跳过
+        if self._looks_like_compressed_placeholder(user_message) or \
+                self._looks_like_compressed_placeholder(assistant_response):
+            logger.debug(
+                "extract_facts skipped for agent %s: upstream context is a "
+                "compression placeholder", agent_id,
+            )
+            return []
+
         # 先检查是否值得提取（简单启发式）
         if not self._worth_extracting(user_message, assistant_response):
             return []
@@ -1643,14 +1652,69 @@ class MemoryManager:
             return hits >= 1
         return hits >= 1
 
-    def _is_similar(self, a: str, b: str) -> bool:
-        """简单相似度判断（共享词比例）。"""
-        words_a = set(a.lower().split())
-        words_b = set(b.lower().split())
-        if not words_a or not words_b:
+    @staticmethod
+    def _looks_like_compressed_placeholder(text: str) -> bool:
+        """识别 L2 auto-compact 产物（如"对话内容已被压缩"）。
+
+        这类占位符的特征是**自我描述**："对话已被压缩 / 摘要标记 / 无法分析"，
+        以及明显短于一条真实对话。L3 不该在上面做事实提取。
+        """
+        if not text:
             return False
-        overlap = len(words_a & words_b)
-        return overlap / min(len(words_a), len(words_b)) > 0.6
+        markers = (
+            "对话内容已被压缩", "上下文压缩", "仅显示摘要标记",
+            "未包含实际讨论内容", "无法提取具体讨论",
+            "内容不完整,无法分析", "context compressed",
+            "context truncated",
+        )
+        low = text[:500]
+        return any(m in low for m in markers)
+
+    def _is_similar(self, a: str, b: str) -> bool:
+        """语义去重判断 — 中英文混合。
+
+        之前版本用 str.split() 按空格分词，对**没有空格的中文**完全失效：
+        整句会被当成一个 token，两句 99% 相同但因一个标点/数字差异就判不相似，
+        导致 L3 被同类事实反复灌入（#ISSUE_L3_DEDUP_CN）。
+
+        新版：
+          • 英文: word token（长度≥3 过滤噪音）
+          • 中文: 按 bigram 切（和 _tokenize_query 一致）
+          • 合并两个 token 集合后算 Jaccard
+          • 最少 4 个 bigram 时才比较，避免短句误判
+        """
+        tokens_a = self._content_tokens(a)
+        tokens_b = self._content_tokens(b)
+        if len(tokens_a) < 4 or len(tokens_b) < 4:
+            # 太短时退化到字符串宽松匹配
+            return (a.strip() == b.strip()) or (a in b) or (b in a)
+        overlap = len(tokens_a & tokens_b)
+        union = len(tokens_a | tokens_b)
+        # Jaccard 相似度 — 比旧的"min 集合占比"更严格、更对称
+        return overlap / union >= 0.5
+
+    @staticmethod
+    def _content_tokens(s: str) -> set[str]:
+        """内容 → token 集合（英文词 + 中文 bigram）。"""
+        import re
+        tokens: set[str] = set()
+        if not s:
+            return tokens
+        s_low = s.lower()
+        # 英文词（去掉 1-2 字母噪音）
+        for w in re.findall(r"[a-z][a-z0-9_]{2,}", s_low):
+            tokens.add(w)
+        # 中文 bigram
+        for seg in re.findall(r"[\u4e00-\u9fff]+", s):
+            if len(seg) == 1:
+                tokens.add(seg)
+            else:
+                for i in range(len(seg) - 1):
+                    tokens.add(seg[i:i+2])
+        # 数字连续段（时间、端口等，对 rule/intent 去重有用）
+        for n in re.findall(r"\d{2,}", s):
+            tokens.add(n)
+        return tokens
 
     # ==================================================================
     # User Feedback → L3 Fact Learning
@@ -1813,22 +1877,92 @@ class MemoryManager:
         return facts
 
     def _prune_facts(self, agent_id: str, max_facts: int):
-        """如果事实数超出上限，删除最旧的低置信度事实。"""
+        """超上限时的分级淘汰 — 保护 intent/rule/reflection，优先删流水账。
+
+        旧版按 ``(confidence ASC, updated_at ASC)`` 排序删最"低分最老"的。
+        问题：流水账日志常被 LLM 标成 0.9 confidence，与真正的规则/意图
+        同档甚至更高；结果该删的删不动，意图反而可能被顶掉。
+
+        新版分两档清：
+          档 A — 高价值，只在档 B 清空后才动：
+              intent / rule / reflection / reasoning
+          档 B — 过程记录，先清：
+              outcome / general / 其它
+          档 B 内优先删"流水账指纹"命中的：
+              含时间戳（YYYY-MM-DD / HH:MM）
+              含 URL / 文件路径
+              开头是 "已完成" / "已成功" / "任务状态" / "已创建"
+        """
         count = self.count_facts(agent_id)
         if count <= max_facts:
             return
-        to_delete = count - max_facts
+        to_delete_count = count - max_facts
+
+        HIGH_VALUE = ("intent", "rule", "reflection", "reasoning")
+
+        # 按"可删优先级"排序：log_score DESC（流水账指纹越多越先删），
+        # category tier DESC（档 B 先删），confidence ASC，updated_at ASC。
         with self._rlock:
-            self._conn.execute("""
-                DELETE FROM memory_semantic
-                WHERE id IN (
-                    SELECT id FROM memory_semantic
-                    WHERE agent_id = ?
-                    ORDER BY confidence ASC, updated_at ASC
-                    LIMIT ?
-                )
-            """, (agent_id, to_delete))
+            rows = self._conn.execute("""
+                SELECT id, category, content, confidence, updated_at
+                FROM memory_semantic
+                WHERE agent_id = ?
+            """, (agent_id,)).fetchall()
+
+        scored = []
+        for r in rows:
+            cat = (r["category"] or "").lower()
+            content = r["content"] or ""
+            tier_b = 0 if cat in HIGH_VALUE else 1      # 1 = 先删档 B
+            log_score = self._log_fingerprint_score(content)
+            scored.append((
+                r["id"],
+                tier_b,              # 1 先 / 0 后
+                log_score,           # 高分先
+                -float(r["confidence"] or 0),  # 负号让低 confidence 先
+                r["updated_at"] or 0,          # 小（旧）先
+            ))
+        # 删除顺序：tier_b DESC, log_score DESC, -confidence DESC, updated_at ASC
+        scored.sort(key=lambda t: (-t[1], -t[2], -t[3], t[4]))
+        to_delete_ids = [row[0] for row in scored[:to_delete_count]]
+
+        if not to_delete_ids:
+            return
+        placeholders = ",".join("?" for _ in to_delete_ids)
+        with self._rlock:
+            self._conn.execute(
+                f"DELETE FROM memory_semantic WHERE id IN ({placeholders})",
+                to_delete_ids,
+            )
             self._conn.commit()
+        logger.info(
+            "L3 prune: agent=%s deleted=%d (kept=%d, cap=%d)",
+            agent_id, len(to_delete_ids), count - len(to_delete_ids), max_facts,
+        )
+
+    @staticmethod
+    def _log_fingerprint_score(content: str) -> int:
+        """流水账指纹打分 — 分数越高越像"一次性过程记录"（更该删）。"""
+        import re
+        if not content:
+            return 0
+        score = 0
+        # 时间戳 (2026-04-17 / 09:00)
+        if re.search(r"\d{4}-\d{2}-\d{2}", content):
+            score += 2
+        if re.search(r"\b\d{1,2}:\d{2}\b", content):
+            score += 1
+        # URL
+        if re.search(r"https?://", content):
+            score += 2
+        # 文件路径（含后缀）
+        if re.search(r"[\w/.-]+\.(py|js|md|yaml|yml|json|sh|txt|csv)\b", content):
+            score += 1
+        # "已完成/已成功/已创建/任务状态"类流水开头
+        if re.match(r"^\s*(已完成|已成功|已创建|已部署|已设置|任务状态|首次执行)",
+                    content):
+            score += 2
+        return score
 
     # ==================================================================
     # Utility

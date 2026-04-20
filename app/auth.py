@@ -113,6 +113,14 @@ DEFAULT_TOOL_RISK: dict[str, str] = {
     "plan_update":      "low",      # Agent updates its own plan
     "task_update":      "low",      # Task status updates
     "send_message":     "low",      # Inter-agent messaging
+    "get_skill_guide":  "low",      # Read SKILL.md from disk
+    "knowledge_lookup": "low",      # Query knowledge base (read-only)
+    "learn_from_peers": "low",      # Read other agents' experiences
+    "save_experience":  "low",      # Agent's own journal, private
+    "create_goal":      "low",      # Track own goals
+    "update_goal_progress": "low",
+    "create_milestone": "low",
+    "update_milestone_status": "low",
 
     # ── Create / Modify (中风险) ──
     "write_file":       "moderate",
@@ -121,6 +129,11 @@ DEFAULT_TOOL_RISK: dict[str, str] = {
     "web_screenshot":   "moderate",
     "http_request":     "moderate", # Outbound HTTP call
     "mcp_call":         "moderate", # Call external MCP tool
+    "propose_skill":    "moderate", # Drafts a skill for admin review
+    "submit_skill":     "moderate", # Submits skill to catalog
+    "share_knowledge":  "moderate", # Broadcast to other agents
+    "submit_deliverable": "moderate",
+    "pip_install":      "moderate", # Installs Python packages
 
     # ── Dangerous execution (高风险) ──
     "bash":             "high",     # Shell command execution
@@ -517,8 +530,20 @@ class ToolPolicy:
         # If True, moderate-risk tools auto-approve without any approval
         self.auto_approve_moderate: bool = True
         # Session-scoped approvals: set of (agent_id, tool_name) pairs
-        # pre-approved until portal restart.
+        # pre-approved and persisted to disk so they survive restarts.
+        # Despite the "session" name, the user-facing semantics is
+        # "until an admin revokes it" — nobody expects to re-approve
+        # the same tool after a service restart.
         self.session_approvals: set = set()
+        self._session_approvals_file: str = ""   # set by set_persist_path()
+
+        # Global tool denylist. Tools whose names appear here are
+        # refused for EVERY agent, regardless of allowed_tools /
+        # agent-level denied_tools. Admin-editable; persisted to disk.
+        # Ships with ``create_pptx_advanced`` pre-denied because it's a
+        # legacy internal tool fully replaced by the pptx-author skill.
+        self.global_denylist: set = {"create_pptx_advanced"}
+        self._global_denylist_file: str = ""   # set by set_persist_path()
         # Agent approval authority: agent_id → set of risk levels they can approve
         # Populated from agent priority + DEFAULT_AGENT_APPROVAL_AUTHORITY
         self.agent_approval_authority: dict[str, list[str]] = {}
@@ -621,6 +646,17 @@ class ToolPolicy:
         """
         risk = self.get_risk(tool_name)
 
+        # ── Global denylist (admin-configurable) ──
+        # Highest precedence after RED: even LOW-risk tools are refused
+        # if admin has put them on the global denylist. Used to retire
+        # legacy tools like ``create_pptx_advanced`` without touching
+        # per-agent profiles.
+        if tool_name in self.global_denylist:
+            return "deny", (
+                f"🚫 Tool '{tool_name}' is on the global denylist. "
+                "Admin can remove it from 工具与审批 settings."
+            )
+
         # ── RED — 红线: always deny ──
         if risk == "red":
             return "deny", f"🚫 红线操作: '{tool_name}' is permanently blocked (risk: RED)"
@@ -628,6 +664,29 @@ class ToolPolicy:
         # ── LOW — 低风险: always allow ──
         if risk == "low":
             return "allow", ""
+
+        # ── Skill-grant shortcut ───────────────────────────────────
+        # If admin has granted a skill to this agent via 技能商店
+        # ("Grant skill" button), and the skill's manifest declares
+        # ``tool_name`` in its tool whitelist, auto-allow the call.
+        # Rationale: a skill grant IS an admin approval for the set
+        # of tools the skill needs. Re-asking per-call is noise.
+        # Only applies when agent_id is provided (REST/agent path).
+        if agent_id:
+            try:
+                import sys as _sys
+                mod = _sys.modules.get("app.llm")
+                hub = getattr(mod, "_active_hub", None) if mod else None
+                reg = getattr(hub, "skill_registry", None) if hub else None
+                if reg is not None and hasattr(reg, "list_for_agent"):
+                    for inst in reg.list_for_agent(agent_id):
+                        whitelist = set(getattr(inst.manifest, "tools", []) or [])
+                        if tool_name in whitelist:
+                            return "allow", (
+                                f"Covered by granted skill "
+                                f"'{inst.manifest.name}'")
+            except Exception:
+                pass  # registry unavailable → fall through to risk check
 
         # ── Session-scoped pre-approval ──
         if agent_id and (agent_id, tool_name) in self.session_approvals:
@@ -890,8 +949,134 @@ class ToolPolicy:
                 self.session_approvals.add(
                     (approval.agent_id, approval.tool_name)
                 )
+                # Persist so the approval survives a restart. User-
+                # facing semantics: "until an admin revokes it."
+                self._save_session_approvals()
         approval._event.set()
         return True
+
+    # ── persistence for session_approvals + global_denylist ────────
+    def set_persist_path(self, path: str) -> None:
+        """Called by Auth on startup to bind the on-disk files and load
+        whatever was persisted from a previous process.
+
+        ``path`` is for session_approvals. The denylist uses a sibling
+        file in the same directory.
+        """
+        self._session_approvals_file = path
+        self._global_denylist_file = os.path.join(
+            os.path.dirname(path) or ".", "tool_denylist.json"
+        )
+        self._load_session_approvals()
+        self._load_global_denylist()
+
+    def _load_global_denylist(self) -> None:
+        p = self._global_denylist_file
+        if not p or not os.path.isfile(p):
+            # Auto-persist the factory default so the file exists for admin UI.
+            self._save_global_denylist()
+            return
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            denied = data.get("denied") or []
+            with self._lock:
+                self.global_denylist = set(
+                    str(x).strip() for x in denied if str(x).strip()
+                )
+        except Exception as e:
+            logging.getLogger("tudou.auth").warning(
+                "failed to load tool_denylist.json: %s", e)
+
+    def _save_global_denylist(self) -> None:
+        p = self._global_denylist_file
+        if not p:
+            return
+        try:
+            data = {"denied": sorted(self.global_denylist)}
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            tmp = p + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, p)
+        except Exception as e:
+            logging.getLogger("tudou.auth").warning(
+                "failed to save tool_denylist.json: %s", e)
+
+    def add_global_denied_tool(self, tool_name: str) -> bool:
+        """Admin: add a tool to the global denylist."""
+        tool_name = (tool_name or "").strip()
+        if not tool_name:
+            return False
+        with self._lock:
+            if tool_name in self.global_denylist:
+                return False
+            self.global_denylist.add(tool_name)
+            self._save_global_denylist()
+        return True
+
+    def remove_global_denied_tool(self, tool_name: str) -> bool:
+        """Admin: remove a tool from the global denylist."""
+        tool_name = (tool_name or "").strip()
+        with self._lock:
+            if tool_name not in self.global_denylist:
+                return False
+            self.global_denylist.discard(tool_name)
+            self._save_global_denylist()
+        return True
+
+    def list_global_denylist(self) -> list[str]:
+        with self._lock:
+            return sorted(self.global_denylist)
+
+    def _load_session_approvals(self) -> None:
+        p = self._session_approvals_file
+        if not p or not os.path.isfile(p):
+            return
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            pairs = data.get("approvals") or []
+            with self._lock:
+                for pair in pairs:
+                    if isinstance(pair, list) and len(pair) == 2:
+                        self.session_approvals.add((pair[0], pair[1]))
+        except Exception as e:
+            # Corrupt file should not crash the server; log and skip.
+            logging.getLogger("tudou.auth").warning(
+                "failed to load tool_approvals.json: %s", e)
+
+    def _save_session_approvals(self) -> None:
+        p = self._session_approvals_file
+        if not p:
+            return
+        try:
+            data = {"approvals": [list(pair) for pair in self.session_approvals]}
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            tmp = p + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, p)
+        except Exception as e:
+            logging.getLogger("tudou.auth").warning(
+                "failed to save tool_approvals.json: %s", e)
+
+    def revoke_session_approval(self, agent_id: str, tool_name: str) -> bool:
+        """Admin action: undo a previously granted session approval.
+        Returns True if it was present, False otherwise."""
+        with self._lock:
+            pair = (agent_id, tool_name)
+            if pair in self.session_approvals:
+                self.session_approvals.discard(pair)
+                self._save_session_approvals()
+                return True
+        return False
+
+    def list_session_approvals(self) -> list[dict]:
+        """Admin UI: snapshot of current approvals."""
+        with self._lock:
+            return [{"agent_id": a, "tool_name": t}
+                    for (a, t) in sorted(self.session_approvals)]
 
     def deny(self, approval_id: str, decided_by: str = "") -> bool:
         with self._lock:
@@ -1443,6 +1628,12 @@ class AuthManager:
         self._data_dir = data_dir or str(Path(__file__).parent)
         self._audit_file: str = os.path.join(self._data_dir, "audit.log")
         self.tool_policy: ToolPolicy = ToolPolicy()
+        # Bind tool_policy's session-approvals persistence now so the
+        # set survives across process restarts. Without this the user
+        # re-sees the same approval dialog every time the server restarts.
+        self.tool_policy.set_persist_path(
+            os.path.join(self._data_dir, "tool_approvals.json")
+        )
         self.admin_mgr: AdminManager = AdminManager(data_dir=self._data_dir)
         self.session_ttl = SESSION_TTL
         self.rate_limit = RATE_LIMIT_RPS

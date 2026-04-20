@@ -130,6 +130,14 @@ def tool_send_email(
             pass
 
         for att in attachments:
+            # Be lenient: LLMs naturally pass ["path1.pptx", ...] rather
+            # than [{"path": "path1.pptx"}, ...]. Previously the string
+            # form was silently dropped (isinstance(dict) check below),
+            # producing the nasty "attachments_count: 0" failure mode
+            # where the email sent but without any files attached.
+            # Normalize: string → {"path": string}.
+            if isinstance(att, str):
+                att = {"path": att}
             if not isinstance(att, dict):
                 continue
             if att.get("path"):
@@ -344,10 +352,19 @@ TOOLS_SCHEMA = [
                 "attachments": {
                     "type": "array",
                     "description": (
-                        "Attachments: [{path: '/abs/file.pdf'}] for local files, "
-                        "or [{content: 'base64...', filename: 'f.pdf', content_type: 'application/pdf'}]"
+                        "Attachments. Accepts either form: "
+                        "['/abs/file.pdf', '/abs/file2.png'] (list of paths), "
+                        "OR [{path: '/abs/file.pdf'}] (list of dicts), "
+                        "OR [{content: 'base64...', filename: 'f.pdf', content_type: 'application/pdf'}] (inline base64). "
+                        "Mixing is OK. Do NOT just mention filenames in the body — "
+                        "files that aren't in this array will not be attached."
                     ),
-                    "items": {"type": "object"},
+                    "items": {
+                        "oneOf": [
+                            {"type": "string"},
+                            {"type": "object"},
+                        ],
+                    },
                 },
             },
             "required": ["to", "subject", "body"],

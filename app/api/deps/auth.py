@@ -121,10 +121,22 @@ async def get_current_user(
             auth = get_auth()
             session = auth.validate_session(session_id)
             if session:
+                # Resolve the real admin role from admin_mgr (session.role is a
+                # coarse Role enum — "admin"/"operator" — and loses the
+                # superAdmin distinction). Fall back to session.role otherwise.
+                effective_role = getattr(session, "role", "admin")
+                admin_uid = getattr(session, "admin_user_id", "")
+                if admin_uid:
+                    try:
+                        admin = auth.admin_mgr.get_admin(admin_uid)
+                        if admin and getattr(admin, "role", ""):
+                            effective_role = admin.role
+                    except Exception:
+                        pass
                 # Bridge: create a CurrentUser from the WebSession
                 return CurrentUser(
-                    user_id=getattr(session, "admin_user_id", "") or getattr(session, "name", "legacy"),
-                    role=getattr(session, "role", "admin"),
+                    user_id=admin_uid or getattr(session, "name", "legacy"),
+                    role=effective_role,
                     claims={"session": True, "session_id": session_id},
                 )
         except Exception as e:

@@ -1,4 +1,12 @@
 """
+
+
+╔════════════════════════════════════════════════════════════════════════╗
+║  ⚠️  DEPRECATED — LEGACY stdlib handler (extracted from                ║
+║     portal_routes_post.py). Active only when TUDOU_USE_STDLIB=1 is     ║
+║     set at launch. FastAPI (app/api/routers/*) is authoritative.       ║
+║     Do NOT add new routes here.                                        ║
+╚════════════════════════════════════════════════════════════════════════╝
 Hub-Node communication handlers extracted from portal_routes_post.py.
 
 Handles Hub-Node synchronisation, message delivery, config deployment,

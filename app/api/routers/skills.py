@@ -21,6 +21,8 @@ def _get_skill_or_404(hub, skill_id: str):
         if not skill:
             raise HTTPException(status_code=404, detail=f"Skill package '{skill_id}' not found")
         return skill
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -39,6 +41,8 @@ async def list_skill_packages(
         skills = hub.list_skill_packages() if hasattr(hub, "list_skill_packages") else []
         skills_list = [s.to_dict() if hasattr(s, "to_dict") else s for s in skills]
         return {"skill_packages": skills_list}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -77,6 +81,8 @@ async def install_skill_package(
             return {"ok": True, "result": result}
 
         return {"ok": True}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -108,19 +114,26 @@ async def invoke_skill_package(
     hub=Depends(get_hub),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Invoke a skill package."""
+    """Invoke a skill package.
+
+    Parity with legacy portal_routes_post: skill-not-found and invalid
+    inputs surface as 400 (user error), not 500. Only genuinely
+    unexpected exceptions become 500.
+    """
+    agent_id = body.get("agent_id", "")
+    inputs = body.get("inputs", {}) or {}
+    reg = getattr(hub, "skill_registry", None)
+    if not reg:
+        raise HTTPException(503, "Skill registry unavailable")
     try:
-        agent_id = body.get("agent_id", "")
-        inputs = body.get("inputs", {}) or {}
-        reg = getattr(hub, "skill_registry", None)
-        if not reg:
-            raise HTTPException(503, "Skill registry unavailable")
         result = reg.invoke(skill_id, agent_id, inputs)
-        return {"ok": True, "result": result}
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # Legacy returned 400 for any reg.invoke() error — matches the
+        # semantic "client asked for something invalid" better than 500.
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "result": result}
 
 
 @router.get("/skill-pkgs/{skill_id}/agents")
@@ -292,6 +305,8 @@ async def manage_prompt_packs(
             return {"ok": True}
         else:
             raise HTTPException(400, f"Unknown action: {action}")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -345,6 +360,8 @@ async def get_skill_store_catalog(
             "annotations": store.list_annotations(),
             "stats": store.stats(),
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -577,6 +594,8 @@ async def list_pending_skills(
             "drafts": [d.to_dict() for d in drafts],
             "total": len(drafts),
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

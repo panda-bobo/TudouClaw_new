@@ -174,6 +174,33 @@ async def lifespan(app: FastAPI):
     except Exception as _sr:
         logger.warning("Skill registry init failed: %s", _sr)
 
+    # ── RolePresetV2 Registry (7-dimensional role specs) ────────
+    try:
+        from ..role_preset_registry import init_registry as _init_rp_registry
+        from ..agent import ROLE_PRESETS as _RP
+        _rp_reg = _init_rp_registry()
+        _merged = _rp_reg.merge_into_legacy(_RP)
+        logger.info("RolePresetV2 loaded: %d V2 presets merged into ROLE_PRESETS", _merged)
+    except Exception as _rp_err:
+        logger.warning("RolePresetV2 registry init failed: %s", _rp_err)
+
+    # ── LLM Tier Router (capability tier → provider/model) ─────
+    try:
+        from ..llm_tier_routing import init_router as _init_tier_router
+        _tier_router = _init_tier_router(data_dir=data_dir, autofill=True)
+        logger.info("LLMTierRouter initialized: %d tier mappings",
+                    len(_tier_router.all()))
+    except Exception as _tr_err:
+        logger.warning("LLMTierRouter init failed: %s", _tr_err)
+
+    # ── Role SOP Registry (stage-machine workflows for roles) ───
+    try:
+        from ..role_sop import init_sop as _init_sop
+        _sop_reg, _ = _init_sop()
+        logger.info("RoleSOP loaded: %d SOP templates", len(_sop_reg.all()))
+    except Exception as _sop_err:
+        logger.warning("RoleSOP init failed: %s", _sop_err)
+
     # ── SkillForge ─────────────────────────────────────────────────
     try:
         from ..skills._skill_forge import get_skill_forge
@@ -236,6 +263,21 @@ async def lifespan(app: FastAPI):
         logger.info("Scheduler initialized and started")
     except Exception as _sche:
         logger.warning("Scheduler init failed: %s", _sche)
+
+    # V2 crash recovery: any task still marked RUNNING in the DB is
+    # orphaned (previous process's daemon thread is dead). Restart them.
+    try:
+        from app.v2.core.task_store import get_store as _get_v2_store
+        from app.v2.core.task_events import TaskEventBus as _V2Bus
+        from app.v2.core import task_controller as _v2_ctrl
+        _store = _get_v2_store()
+        _bus = _V2Bus(_store)
+        restarted = _v2_ctrl.recover_orphaned_tasks(_store, _bus)
+        if restarted:
+            logger.info("V2 crash recovery: restarted %d task(s): %s",
+                        len(restarted), restarted)
+    except Exception as _v2e:
+        logger.warning("V2 crash recovery failed: %s", _v2e)
 
     _print_banner(hub, app.state.raw_admin_token)
     yield
@@ -307,6 +349,9 @@ def create_app() -> FastAPI:
         attachment,
         audio,
         pages,
+        llm_tiers,
+        role_presets_v2,
+        v2 as v2_router,
     )
 
     # ── API routers ──────────────────────────────────────────────────
@@ -325,6 +370,8 @@ def create_app() -> FastAPI:
     app.include_router(experience.router)
     app.include_router(meetings.router)
     app.include_router(admin.router)
+    app.include_router(llm_tiers.router)
+    app.include_router(role_presets_v2.router)
     app.include_router(knowledge.router)
     app.include_router(hub_sync.router)
     app.include_router(channels.router)
@@ -332,6 +379,7 @@ def create_app() -> FastAPI:
     app.include_router(i18n.router)
     app.include_router(attachment.router)
     app.include_router(audio.router)
+    app.include_router(v2_router.router)
 
     # ── Static files (JS/CSS used by portal templates) ───────────────
     server_static = os.path.join(os.path.dirname(__file__), "..", "server", "static")
@@ -340,6 +388,23 @@ def create_app() -> FastAPI:
         app.mount("/static/js", StaticFiles(directory=os.path.join(server_static, "js")), name="legacy-js")
     if os.path.isdir(app_static):
         app.mount("/static", StaticFiles(directory=app_static), name="legacy-static")
+
+    # Project shared workspaces — what the Deliverables UI links to
+    # (/workspace/shared/<project_id>/<file>). Deliberately only expose
+    # `workspaces/shared/`, NOT the full `workspaces/` tree, so each agent's
+    # private workspace stays unreachable from the browser.
+    try:
+        from .. import DEFAULT_DATA_DIR as _DDD
+        _data_dir = os.environ.get("TUDOU_CLAW_DATA_DIR") or _DDD
+        _shared_root = os.path.join(_data_dir, "workspaces", "shared")
+        os.makedirs(_shared_root, exist_ok=True)
+        app.mount("/workspace/shared",
+                  StaticFiles(directory=_shared_root),
+                  name="workspace-shared")
+    except Exception as _e:
+        import logging as _lg
+        _lg.getLogger(__name__).warning(
+            "failed to mount /workspace/shared: %s", _e)
 
     # ── Page routes (must be registered AFTER static mounts) ─────────
     app.include_router(pages.router)

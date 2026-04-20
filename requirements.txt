@@ -8,6 +8,14 @@
 
 # ── Core (required) ──────────────────────────────────────────
 requests>=2.31,<3.0          # HTTP client for LLM API calls, inter-node communication
+PyYAML>=6.0                   # YAML parsing (task templates, tool-parser config)
+
+# ── V2 LLM adapter layer ─────────────────────────────────────
+# litellm: unified client across 100+ providers (optional but recommended
+#   if V2 is used). json-repair: resilient JSON parsing for weak local
+#   models emitting malformed tool-call payloads.
+litellm>=1.50,<2.0
+json-repair>=0.25,<1.0
 
 # ── Optional: Web Screenshot ─────────────────────────────────
 # Uncomment if you want agents to take web page screenshots.

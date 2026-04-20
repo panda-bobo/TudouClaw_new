@@ -1,0 +1,41 @@
+id: meeting_summary
+display_name: 会议纪要
+version: 1
+description: 给定会议记录/transcript，产出纪要 + action items。
+
+required_slots:
+  - name: transcript
+    description: 会议文字记录或 transcript 文件路径
+  - name: audience
+    description: 纪要读者（团队/管理层/全员）
+    default: "team"
+
+plan_prompt: |
+  你要根据 {transcript} 产出一份会议纪要，读者是 {audience}。
+  产出必须包含：## Summary、## Decisions、## Action Items（带责任人和截止时间）。
+  step 建议：分段提取 → 合并 → 生成纪要 → 抽取 action items。
+
+allowed_tools:
+  - rag_query
+  - write_file
+
+verify_rules:
+  - id: has_summary_section
+    kind: contains_section
+    spec: { section: "## Summary" }
+  - id: has_action_items
+    kind: contains_section
+    spec: { section: "## Action Items" }
+  - id: action_items_non_empty
+    kind: regex
+    spec: { pattern: "- \\[[ x]\\]", min_matches: 1 }
+
+expected_artifacts:
+  - kind: file
+    pattern: "meeting_*.md"
+    min_count: 1
+
+report_template: |
+  ✅ 会议纪要已生成
+  - 产出：{artifact_count} 份
+  - Action items：{action_item_count} 条

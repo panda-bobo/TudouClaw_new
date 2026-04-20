@@ -43,5 +43,7 @@ async def get_persona(
         raise
     except ImportError:
         raise HTTPException(status_code=404, detail="Persona module not available")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -766,7 +766,17 @@ def meeting_agent_reply(meeting: "Meeting",
     """
     if meeting.status in (MeetingStatus.CLOSED, MeetingStatus.CANCELLED):
         return
-    targets = target_agent_ids or list(meeting.participants or [])
+    # Semantic:
+    #   target_agent_ids is None  -> reply by all participants (default)
+    #   target_agent_ids == []    -> explicit no-target (user @-mentioned nobody) → no reply
+    #   target_agent_ids == [ids] -> only those reply
+    if target_agent_ids is None:
+        targets = list(meeting.participants or [])
+    else:
+        targets = list(target_agent_ids)
+    if not targets:
+        logger.info("meeting %s: no reply targets, skipping reply sequence", meeting.id)
+        return
     # de-dup, cap, filter empty
     seen = set()
     chosen = []
@@ -802,7 +812,15 @@ def meeting_agent_reply(meeting: "Meeting",
                 chat_msg = [{"type": "text", "text": prompt}] + list(multimodal_parts)
             else:
                 chat_msg = prompt
-            reply = agent_chat_fn(aid, chat_msg)
+            # Mark thread-local meeting context so tools (e.g. task_update)
+            # can route produced tasks to the Standalone Task registry tagged
+            # with this meeting_id, instead of creating scheduled jobs.
+            from .meeting_context import set_meeting_context
+            set_meeting_context(meeting.id)
+            try:
+                reply = agent_chat_fn(aid, chat_msg)
+            finally:
+                set_meeting_context("")
         except Exception as e:
             reply = f"❌ 回复失败: {e}"
         # -- Post-LLM interrupt check: if user interrupted while this agent

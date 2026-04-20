@@ -187,10 +187,53 @@ def main():
         admin_token = getattr(args, "admin_token", "")
         node_name = getattr(args, "node_name", "")
         data_dir = getattr(args, "data_dir", "")
-        from .portal import run_portal
-        run_portal(port=port, node_name=node_name,
-                   secret=secret, admin_token=admin_token,
-                   data_dir=data_dir)
+
+        # ── Which backend? ───────────────────────────────────────────
+        # Default: FastAPI (app/api/main.py, uvicorn). This is the
+        # modern path with typed routes, OpenAPI docs, and ~1233 uses
+        # of Depends/HTTPException/BackgroundTasks.
+        #
+        # Fallback: stdlib BaseHTTPRequestHandler (app/server/portal_*).
+        # Set TUDOU_USE_STDLIB=1 to opt back in. Kept so a bad FastAPI
+        # deploy is reversible without a code change.
+        import os as _os
+        use_stdlib = _os.environ.get("TUDOU_USE_STDLIB", "").lower() in (
+            "1", "true", "yes", "on")
+
+        if use_stdlib:
+            from .portal import run_portal
+            run_portal(port=port, node_name=node_name,
+                       secret=secret, admin_token=admin_token,
+                       data_dir=data_dir)
+        else:
+            # Plumb CLI flags into env vars the FastAPI lifespan reads.
+            if secret:
+                _os.environ["TUDOU_ADMIN_SECRET"] = secret
+            if admin_token:
+                _os.environ["TUDOU_ADMIN_TOKEN"] = admin_token
+            if data_dir:
+                _os.environ["TUDOU_CLAW_DATA_DIR"] = data_dir
+            if node_name:
+                _os.environ["TUDOU_NODE_NAME"] = node_name
+            _os.environ["TUDOU_PORT"] = str(port)   # banner reads this
+            try:
+                import uvicorn
+            except ImportError:
+                print("ERROR: FastAPI path requires uvicorn.")
+                print("  Install: pip install uvicorn[standard]")
+                print("  Or use stdlib fallback: TUDOU_USE_STDLIB=1 python -m app portal")
+                sys.exit(1)
+            # Bind to all interfaces so the dashboard is reachable from
+            # LAN the same way the old server was.
+            from .defaults import BIND_ADDRESS
+            uvicorn.run(
+                "app.api.main:app",
+                host=BIND_ADDRESS,
+                port=port,
+                log_level="info",
+                # reload off in prod — turn on via dev flag if needed
+                reload=False,
+            )
 
     elif command == "agent":
         # Build profile overrides from CLI args

@@ -1,7 +1,10 @@
 """Project management router — CRUD, tasks, milestones, goals, deliverables."""
 from __future__ import annotations
 
+import base64
 import logging
+import os
+import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
@@ -21,6 +24,8 @@ def _get_project_or_404(hub, project_id: str):
         if not project:
             raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
         return project
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -39,6 +44,8 @@ async def list_projects(
         projects = hub.list_projects() if hasattr(hub, "list_projects") else []
         projects_list = [p.to_dict() if hasattr(p, "to_dict") else p for p in projects]
         return {"projects": projects_list}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -54,18 +61,89 @@ async def manage_projects(
         action = body.get("action", "create")
 
         if action == "create":
-            project = hub.create_project(body) if hasattr(hub, "create_project") else {}
-            return {"ok": True, "project": project}
+            if not hasattr(hub, "create_project"):
+                raise HTTPException(500, "hub.create_project not available")
+            project = hub.create_project(
+                name=body.get("name", "New Project"),
+                description=body.get("description", ""),
+                member_configs=body.get("members", []),
+                working_directory=body.get("working_directory", ""),
+                node_id=body.get("node_id", "local"),
+                workflow_id=body.get("workflow_id", ""),
+                step_assignments=body.get("step_assignments", []),
+            )
+            return {"ok": True, "project": project.to_dict() if hasattr(project, "to_dict") else project}
         elif action == "update":
-            project = hub.update_project(body.get("project_id"), body) if hasattr(hub, "update_project") else {}
-            return {"ok": True, "project": project}
+            project = hub.update_project(body.get("project_id"), body) if hasattr(hub, "update_project") else None
+            return {
+                "ok": True,
+                "project": project.to_dict() if hasattr(project, "to_dict") else (project or {}),
+            }
         elif action == "delete":
-            hub.delete_project(body.get("project_id")) if hasattr(hub, "delete_project") else None
+            pid = body.get("project_id", "")
+            if not pid:
+                raise HTTPException(400, "project_id required")
+            if hasattr(hub, "remove_project"):
+                hub.remove_project(pid)
+            elif hasattr(hub, "delete_project"):
+                hub.delete_project(pid)
+            # Cascade: SQLite row + projects/*{id}*.md docs.
+            try:
+                from ...infra.database import get_database
+                db = get_database()
+                if db and hasattr(db, "delete_project"):
+                    db.delete_project(pid)
+            except Exception as _e:
+                logger.warning("projects DB delete failed: %s", _e)
+            try:
+                import os, glob
+                from ... import DEFAULT_DATA_DIR
+                data_dir = os.environ.get("TUDOU_CLAW_DATA_DIR") or DEFAULT_DATA_DIR
+                for md in glob.glob(os.path.join(data_dir, "projects", f"*{pid}*.md")):
+                    os.remove(md)
+            except Exception as _e:
+                logger.warning("projects md cleanup failed: %s", _e)
             return {"ok": True}
         else:
             raise HTTPException(400, f"Unknown action: {action}")
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.exception("manage_projects failed")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/projects/{project_id}")
+async def delete_project(
+    project_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """RESTful alias for ``POST /projects {action: delete}``.
+    Removes the project + SQLite row + ``projects/*{id}*.md`` docs."""
+    project = hub.get_project(project_id) if hasattr(hub, "get_project") else None
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    fn = getattr(hub, "remove_project", None) or getattr(hub, "delete_project", None)
+    if fn is None:
+        raise HTTPException(501, "hub has no project delete method")
+    ok = bool(fn(project_id))
+    try:
+        from ...infra.database import get_database
+        db = get_database()
+        if db and hasattr(db, "delete_project"):
+            db.delete_project(project_id)
+    except Exception as _e:
+        logger.warning("projects DB delete failed: %s", _e)
+    try:
+        import os, glob
+        from ... import DEFAULT_DATA_DIR
+        data_dir = os.environ.get("TUDOU_CLAW_DATA_DIR") or DEFAULT_DATA_DIR
+        for md in glob.glob(os.path.join(data_dir, "projects", f"*{project_id}*.md")):
+            os.remove(md)
+    except Exception as _e:
+        logger.warning("projects md cleanup failed: %s", _e)
+    return {"ok": ok, "deleted": project_id}
 
 
 @router.get("/projects/{project_id}")
@@ -241,11 +319,35 @@ async def get_project_overview(
     hub=Depends(get_hub),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Get project overview (summary stats)."""
+    """Get project overview (summary stats).
+
+    Project has no dedicated get_overview(); to_dict() already carries every
+    field the frontend reads (goal_summary/deliverable_summary/issue_summary/
+    task_summary + goals/deliverables/issues lists). We just reshape it to
+    match the legacy stdlib handler's response.
+    """
     try:
         project = _get_project_or_404(hub, project_id)
-        overview = project.get_overview() if hasattr(project, "get_overview") else {}
-        return overview if isinstance(overview, dict) else {"data": overview}
+        d = project.to_dict()
+        return {
+            "project": {
+                "id": d["id"], "name": d["name"],
+                "description": d["description"], "status": d["status"],
+                "members": d["members"],
+                "working_directory": d["working_directory"],
+                "node_id": d["node_id"],
+                "created_at": d["created_at"],
+                "updated_at": d["updated_at"],
+            },
+            "goals": d.get("goals", []),
+            "goal_summary": d.get("goal_summary", {}),
+            "milestones": d.get("milestones", []),
+            "deliverables": d.get("deliverables", []),
+            "deliverable_summary": d.get("deliverable_summary", {}),
+            "issues": d.get("issues", []),
+            "issue_summary": d.get("issue_summary", {}),
+            "task_summary": d.get("task_summary", {}),
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -304,21 +406,90 @@ async def send_project_message(
     hub=Depends(get_hub),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Send a message in project chat."""
+    """Send a message in project chat.
+
+    Frontend sends ``content`` (primary); legacy clients may send ``message``.
+    Persistence is done via ``hub.project_chat(proj_id, content, target_agents)``
+    which also fans out to agent respondents. Attachments (list of
+    ``{name, mime, size, data_base64}``) are saved under the project working
+    directory and their filenames are appended to the content as 📎 refs.
+    """
     try:
         project = _get_project_or_404(hub, project_id)
-        message = body.get("message", "").strip()
-        if not message:
+
+        # Primary field is `content` (frontend); tolerate legacy `message`.
+        content = (body.get("content") or body.get("message") or "").strip()
+        target_agents = body.get("target_agents")
+        attachments = body.get("attachments") or []
+
+        # Persist attachments to project working dir, append 📎refs to content.
+        saved_refs: list[str] = []
+        if isinstance(attachments, list) and attachments:
+            try:
+                base_dir = (
+                    getattr(project, "working_directory", "")
+                    or os.path.join(
+                        os.environ.get("TUDOU_CLAW_DATA_DIR", "."),
+                        "projects", project_id,
+                    )
+                )
+                att_dir = os.path.join(base_dir, "attachments")
+                os.makedirs(att_dir, exist_ok=True)
+                MAX_SIZE = 20 * 1024 * 1024  # 20 MB
+                for att in attachments[:10]:  # cap at 10 per message
+                    if not isinstance(att, dict):
+                        continue
+                    raw_name = str(att.get("name") or "attachment.bin")
+                    safe_name = "".join(
+                        c for c in raw_name if c.isalnum() or c in "._-"
+                    ) or "attachment.bin"
+                    data_b64 = att.get("data_base64") or ""
+                    if not data_b64:
+                        continue
+                    try:
+                        data_bytes = base64.b64decode(data_b64)
+                    except Exception:
+                        continue
+                    if len(data_bytes) > MAX_SIZE:
+                        continue
+                    ts = int(time.time() * 1000)
+                    fname = f"{ts}_{safe_name}"
+                    fpath = os.path.join(att_dir, fname)
+                    try:
+                        with open(fpath, "wb") as _f:
+                            _f.write(data_bytes)
+                    except Exception:
+                        continue
+                    saved_refs.append(fname)
+            except Exception as _ae:
+                logger.warning("attachment save failed: %s", _ae)
+
+        if saved_refs:
+            suffix = "\n" + " ".join(f"\U0001f4ce{r}" for r in saved_refs)
+            content = (content + suffix) if content else suffix.lstrip()
+
+        if not content:
             raise HTTPException(400, "Empty message")
 
-        if hasattr(project, "send_message"):
-            result = project.send_message(message, user_id=user.user_id)
-            return {"ok": True, "result": result}
+        respondents: list = []
+        if hasattr(hub, "project_chat"):
+            respondents = hub.project_chat(project_id, content, target_agents) or []
+        elif hasattr(project, "post_message"):
+            project.post_message(
+                sender="user",
+                sender_name=getattr(user, "user_id", "user") or "user",
+                content=content,
+            )
 
-        return {"ok": True}
+        return {
+            "ok": True,
+            "respondents": respondents,
+            "attachments_saved": saved_refs,
+        }
     except HTTPException:
         raise
     except Exception as e:
+        logger.exception("send_project_message failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1061,6 +1232,8 @@ async def list_standalone_tasks(
             status=status or None,
         )
         return {"tasks": [t.to_dict() for t in items]}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1208,33 +1381,172 @@ async def get_deliverables_by_agent(
     hub=Depends(get_hub),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Get project deliverables grouped by member agent."""
+    """Get project deliverables grouped by member agent.
+
+    Response contract (consumed by ``_renderProjectDeliverables`` in
+    ``portal_bundle.js``)::
+
+        {
+          "agents": [
+            {
+              "agent_id": "...",
+              "agent_name": "...",
+              "role": "...",
+              "responsibility": "...",
+              "deliverable_dir": "/path/to/workspace",
+              "explicit_deliverables": [dv.to_dict(), ...],
+              "files": [{id,name,path,rel_path,kind,mime,size,mtime,url,is_remote}, ...],
+              "file_count": int,
+              "explicit_count": int,
+            }, ...
+          ],
+          "unassigned_deliverables": [dv.to_dict(), ...],
+        }
+    """
     proj = _get_project_or_404(hub, project_id)
     try:
+        import os as _os
+        try:
+            from ...agent_state.extractors import scan_deliverable_dir
+            from ...agent_state.artifact import ArtifactStore
+        except Exception:
+            scan_deliverable_dir = None  # type: ignore
+            ArtifactStore = None         # type: ignore
+
+        # ── Project-level shared workspace: the single canonical deliverables
+        # directory. Layout: ~/.tudou_claw/workspaces/shared/<project_id>/
+        from ...agent import Agent as _Agent
+        shared_dir = ""
+        try:
+            shared_dir = _Agent.get_shared_workspace_path(project_id)
+        except Exception:
+            shared_dir = ""
+        shared_base_real = ""
+        if shared_dir:
+            try:
+                shared_base_real = _os.path.realpath(shared_dir)
+            except Exception:
+                shared_base_real = ""
+
+        def _path_under_shared(p: str) -> bool:
+            """True when `p` resolves into the project's shared dir."""
+            if not p or not shared_base_real:
+                return False
+            try:
+                if _os.path.isabs(p):
+                    real = _os.path.realpath(p)
+                else:
+                    real = _os.path.realpath(_os.path.join(shared_dir, p))
+            except Exception:
+                return False
+            return real == shared_base_real or real.startswith(
+                shared_base_real + _os.sep)
+
+        # Index explicit deliverables by author id.
+        # Skip legacy auto-registered entries (📎/markdown scan of agent replies)
+        # identified by sentinel content_text="(auto-registered from chat reply)".
+        # Also skip explicit deliverables whose file_path points OUTSIDE the
+        # project's shared dir — only the shared dir is treated as canonical.
+        # Content-only deliverables (no file_path, just content_text/url) pass
+        # through unconditionally; those are the 11-style stage submissions.
+        AUTO_SENTINEL = "(auto-registered from chat reply)"
         explicit_by_author: dict = {}
-        unassigned = []
+        unassigned_explicit: list = []
         for dv in proj.deliverables:
+            if (getattr(dv, "content_text", "") or "").strip() == AUTO_SENTINEL:
+                continue
+            fp = (getattr(dv, "file_path", "") or "").strip()
+            if fp and not _path_under_shared(fp):
+                continue  # file-referencing deliverable outside shared dir → drop
             aid = (getattr(dv, "author_agent_id", "") or "").strip()
+            dv_dict = dv.to_dict() if hasattr(dv, "to_dict") else dv
             if aid:
-                explicit_by_author.setdefault(aid, []).append(
-                    dv.to_dict() if hasattr(dv, "to_dict") else dv)
+                explicit_by_author.setdefault(aid, []).append(dv_dict)
             else:
-                unassigned.append(dv.to_dict() if hasattr(dv, "to_dict") else dv)
-        groups = []
-        for member in (proj.members or []):
-            agent = hub.get_agent(member) if hasattr(hub, "get_agent") else None
-            groups.append({
-                "agent_id": member,
-                "agent_name": agent.name if agent else member,
-                "deliverables": explicit_by_author.get(member, []),
+                unassigned_explicit.append(dv_dict)
+
+        agents_out: list = []
+        seen_ids: set = set()
+        for m in (proj.members or []):
+            # m is a ProjectMember dataclass, not a string id
+            aid = (getattr(m, "agent_id", "") or "").strip()
+            if not aid or aid in seen_ids:
+                continue
+            seen_ids.add(aid)
+            agent = hub.get_agent(aid) if hasattr(hub, "get_agent") else None
+            agent_name = getattr(agent, "name", aid) if agent else aid
+            role = getattr(agent, "role", "") if agent else ""
+
+            # The canonical "where this agent should write deliverables" is the
+            # project's shared dir, not the agent's private workspace. Report it
+            # verbatim so the UI caption is consistent across members.
+            explicit_list = explicit_by_author.get(aid, [])
+            agents_out.append({
+                "agent_id": aid,
+                "agent_name": agent_name,
+                "role": role,
+                "responsibility": getattr(m, "responsibility", "") or "",
+                "deliverable_dir": shared_dir,
+                "explicit_deliverables": explicit_list,
+                "files": [],              # per-agent scan removed (shared at project level)
+                "file_count": 0,
+                "explicit_count": len(explicit_list),
             })
-        if unassigned:
-            groups.append({
-                "agent_id": "",
-                "agent_name": "Unassigned",
-                "deliverables": unassigned,
-            })
-        return {"groups": groups}
+
+        # Explicit deliverables whose author isn't a current member → unassigned
+        for aid, items in explicit_by_author.items():
+            if aid not in seen_ids:
+                unassigned_explicit.extend(items)
+
+        # ── Project-level: depth-1 listing of the shared dir.
+        # Only direct children (files + folders) are surfaced. Nested files
+        # inside subdirectories are intentionally NOT recursed into — they
+        # are treated as part of the folder, not as individual deliverables.
+        shared_files: list = []
+        import mimetypes as _mt
+        if shared_dir and _os.path.isdir(shared_dir):
+            try:
+                for name in _os.listdir(shared_dir):
+                    if name.startswith("."):
+                        continue  # hide dotfiles
+                    full = _os.path.join(shared_dir, name)
+                    try:
+                        st = _os.stat(full)
+                    except OSError:
+                        continue
+                    is_dir = _os.path.isdir(full)
+                    mime, _ = _mt.guess_type(full) if not is_dir else ("", None)
+                    shared_files.append({
+                        "id": name,
+                        "name": name,
+                        "path": full,
+                        "rel_path": name,
+                        "kind": "directory" if is_dir else "file",
+                        "mime": mime or ("inode/directory" if is_dir else ""),
+                        "size": None if is_dir else st.st_size,
+                        "mtime": st.st_mtime,
+                        # Dirs don't have a download URL — show them as a marker
+                        # so users see the folder exists without drilling in.
+                        "url": "" if is_dir else f"/workspace/shared/{project_id}/{name}",
+                        "is_remote": False,
+                        "is_dir": is_dir,
+                    })
+                # Folders first (alphabetical), then files (newest first)
+                shared_files.sort(key=lambda f: (
+                    0 if f.get("is_dir") else 1,
+                    f.get("name", "").lower() if f.get("is_dir")
+                        else -(f.get("mtime") or 0),
+                ))
+            except Exception:
+                shared_files = []
+
+        return {
+            "agents": agents_out,
+            "unassigned_deliverables": unassigned_explicit,
+            "shared_dir": shared_dir,
+            "shared_files": shared_files,
+            "shared_file_count": len(shared_files),
+        }
     except HTTPException:
         raise
     except Exception as e:

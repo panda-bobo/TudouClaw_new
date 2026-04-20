@@ -470,9 +470,13 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "send_message",
             "description": (
-                "Send a message to another agent for inter-agent communication. "
-                "Use this to coordinate with other agents, share results, or request help. "
-                "The target agent will receive the message and may respond."
+                "Send a one-way message to another agent (broadcast / FYI / share status). "
+                "Use this for non-blocking communication — announcements, progress pings, "
+                "sharing intermediate findings — where you do NOT expect a structured result back. "
+                "DO NOT use this for work handoffs: if you are transferring a task and expect the "
+                "receiver to produce output, call `handoff_request` instead (it gives a visible "
+                "3-state ack/complete handshake). Saying \"I'll ask X to do Y\" is not a substitute "
+                "for calling one of these tools — pick the right one and call it."
             ),
             "parameters": {
                 "type": "object",
@@ -494,14 +498,57 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "handoff_request",
+            "description": (
+                "Hand off a task to another agent with a visible 3-state handshake "
+                "(pending → acknowledged → completed). Use this (not send_message) "
+                "whenever you are transferring work to a teammate and expect them "
+                "to produce a result — e.g. coder → tester for verification, "
+                "researcher → writer for drafting. The user sees a badge "
+                "that flips ⏳ → ✅ → ✔️ as the receiver picks it up and "
+                "finishes. This call blocks until the receiver returns or fails. "
+                "Do NOT use send_message + @mention for handoffs — that is a "
+                "one-way broadcast with no acknowledgement."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to_agent": {
+                        "type": "string",
+                        "description": "Target agent ID or name (the teammate picking up the work)",
+                    },
+                    "task": {
+                        "type": "string",
+                        "description": "What the receiver should do. Be concrete and self-contained — the receiver may not have your full context.",
+                    },
+                    "expected_output": {
+                        "type": "string",
+                        "description": "What the receiver should return (format / acceptance criteria). Optional but strongly recommended.",
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Any extra background the receiver needs (file paths, links, prior findings). Optional.",
+                    },
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "description": "Max wait time before marking the handoff as timed out (default 600).",
+                    },
+                },
+                "required": ["to_agent", "task"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "task_update",
             "description": (
-                "Manage the shared task list. Create one-time OR RECURRING tasks, update "
-                "status, or complete tasks.\n"
+                "Create / update / complete entries in the shared task list. Call this DIRECTLY — "
+                "do not describe the task in prose and then stop; the call IS the record.\n"
                 "• RECURRING: When the user asks for periodic work (\"每天9点\", \"每周一\", "
-                "\"daily\", \"weekly\"), use action=create with recurrence + recurrence_spec.\n"
+                "\"daily\", \"weekly\"), call action=create with recurrence + recurrence_spec.\n"
                 "• DELAYED ONE-TIME: When the user asks \"5分钟后\", \"in 10 mins\", "
-                "\"下午3点做X\", use action=create with run_at (e.g. run_at='+5m').\n"
+                "\"下午3点做X\", call action=create with run_at (e.g. run_at='+5m').\n"
                 "The scheduler fires these tasks automatically at the configured time. "
                 "Do NOT reply that you cannot run scheduled tasks."
             ),
@@ -561,9 +608,12 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "plan_update",
             "description": (
-                "Manage your execution plan — a visible step-by-step checklist "
-                "that shows the user your progress. Use this at the START of a task "
-                "to decompose it into steps, then update each step as you work through them. "
+                "Write / advance your execution plan — the visible step-by-step checklist "
+                "the user sees as your progress indicator. At the START of any multi-step "
+                "task, CALL this with action=create_plan BEFORE doing the work — do not "
+                "describe the plan in prose and then stop (the checklist IS the plan). "
+                "As you execute, call start_step → complete_step for each item so the "
+                "user watches progress live. "
                 "Actions: create_plan (set task_summary + steps array), "
                 "start_step (mark a step as in_progress), "
                 "complete_step (mark done with result_summary), "
@@ -1089,7 +1139,17 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "create_pptx_advanced",
-            "description": "创建高级精美PowerPoint演示文稿。支持形状、图表、表格、多栏布局、信息图表等专业元素。每页通过elements数组精确控制所有元素的位置和样式。",
+            "description": (
+                "创建高级精美PowerPoint演示文稿。支持形状、图表、表格、多栏布局、信息图表等专业元素。"
+                "每页通过 layout（智能布局）或 elements 数组（手动控制）来定义内容。"
+                "\n\n**重要 — layout.type 必须是下列已注册类型之一**：cover（封面）/ "
+                "toc（目录）/ section（章节分隔页）/ cards（通用内容卡片，**做普通内容页首选**）/ "
+                "process（流程步骤）/ kpi（关键指标）/ comparison（左右对比）/ "
+                "timeline（时间轴）/ chart / table / closing（结尾页）。"
+                "\n\n❌ 绝不要编造新类型（如 overview / analysis / content / status / summary 等）——"
+                "未注册类型会自动降级为 cards，但会丢失语义。"
+                "\n✅ 普通内容页、列表页、要点页统一用 `cards`（items 支持 1-9 个）。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1117,9 +1177,21 @@ TOOL_DEFINITIONS: list[dict] = [
                             "properties": {
                                 "layout": {
                                     "type": "object",
-                                    "description": "智能布局（推荐）。设置type和items，工具自动计算坐标。type: cover|toc|section|cards|process|kpi|comparison|timeline|chart|table|closing。示例: {\"type\":\"process\",\"title\":\"流程\",\"page_num\":3,\"items\":[{\"title\":\"步骤1\",\"detail\":\"说明\"}]}",
+                                    "description": "智能布局（推荐）。设置type和items，工具自动计算坐标。普通内容页请统一使用 cards。示例: {\"type\":\"process\",\"title\":\"流程\",\"page_num\":3,\"items\":[{\"title\":\"步骤1\",\"detail\":\"说明\"}]}",
                                     "properties": {
-                                        "type": {"type": "string", "description": "布局类型: cover|toc|section|cards|process|kpi|comparison|timeline|chart|table|closing"},
+                                        "type": {
+                                            "type": "string",
+                                            "enum": [
+                                                "cover", "toc", "section",
+                                                "cards", "grid", "grid_2x2",
+                                                "grid_2x3", "two_column",
+                                                "three_column", "process",
+                                                "kpi", "comparison", "timeline",
+                                                "chart", "chart_page",
+                                                "table", "table_page", "closing",
+                                            ],
+                                            "description": "布局类型。cover=封面；toc=目录；section=章节分隔；cards=通用内容卡片（普通内容页首选）；process=流程步骤；kpi=关键指标；comparison=左右对比；timeline=时间轴；chart/chart_page=图表页；table/table_page=表格页；closing=结尾页。不要传其它字符串——未注册类型会降级为 cards 并打 warning。",
+                                        },
                                         "title": {"type": "string", "description": "页面标题"},
                                         "page_num": {"type": "integer", "description": "页码编号"},
                                         "items": {"type": "array", "description": "内容项数组，结构因布局类型而异"},
@@ -1357,6 +1429,130 @@ TOOL_DEFINITIONS: list[dict] = [
                     },
                 },
                 "required": ["dir_name"],
+            },
+        },
+    },
+    # ── Project-scope tools ─────────────────────────────────────────────
+    # These tools auto-discover the current project via thread-local
+    # context (set by ProjectChatEngine). They will no-op with an error
+    # if called from outside a project chat and no project_id is given.
+    {
+        "type": "function",
+        "function": {
+            "name": "submit_deliverable",
+            "description": (
+                "Register a deliverable for the current project and mark it "
+                "SUBMITTED (ready for review). Use this when you have produced "
+                "a concrete artifact (document / code / analysis / design). "
+                "Provide at least one of file_path, content_text, or url. "
+                "If content_text is supplied WITHOUT file_path, the content is "
+                "automatically written as a file in the project's shared "
+                "workspace (~/.tudou_claw/workspaces/shared/<project_id>/), so "
+                "it appears in the project deliverables directory. "
+                "Auto-discovers project from chat context; pass project_id to override."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Short title for the deliverable"},
+                    "file_path": {"type": "string", "description": "Absolute or relative path to the artifact file"},
+                    "content_text": {"type": "string", "description": "Inline content (for text-only deliverables)"},
+                    "url": {"type": "string", "description": "External URL (for hosted artifacts)"},
+                    "kind": {"type": "string", "description": "document | code | design | analysis | other (default: document)"},
+                    "milestone_id": {"type": "string", "description": "Optional milestone id to link this deliverable to"},
+                    "task_id": {"type": "string", "description": "Optional task id that produced this deliverable"},
+                    "project_id": {"type": "string", "description": "Project id (optional; inferred from chat context)"},
+                },
+                "required": ["title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_goal",
+            "description": (
+                "Create a measurable goal for the current project. "
+                "Use metric='count' with target_value for numeric goals, "
+                "or metric='text' with target_text for qualitative goals. "
+                "Auto-discovers project from chat context."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Goal name (short)"},
+                    "description": {"type": "string", "description": "Longer description / rationale"},
+                    "metric": {"type": "string", "description": "count | percent | text (default: count)"},
+                    "target_value": {"type": "number", "description": "Numeric target for count/percent metrics"},
+                    "target_text": {"type": "string", "description": "Qualitative target for text metrics"},
+                    "owner_agent_id": {"type": "string", "description": "Optional owner agent id (default: calling agent)"},
+                    "project_id": {"type": "string", "description": "Project id (optional; inferred from chat context)"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_goal_progress",
+            "description": (
+                "Update a goal's current value and/or mark it done. "
+                "Call this when progress is made toward a goal you or your "
+                "teammates previously created."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "goal_id": {"type": "string", "description": "The goal id to update"},
+                    "current_value": {"type": "number", "description": "New current value (for count/percent metrics)"},
+                    "done": {"type": "boolean", "description": "Mark as complete"},
+                    "note": {"type": "string", "description": "Optional progress note"},
+                    "project_id": {"type": "string", "description": "Project id (optional; inferred from chat context)"},
+                },
+                "required": ["goal_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_milestone",
+            "description": (
+                "Create a milestone for the current project. Milestones mark "
+                "major checkpoints and typically bundle multiple deliverables. "
+                "Auto-discovers project from chat context."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Milestone name"},
+                    "responsible_agent_id": {"type": "string", "description": "Optional responsible agent id (default: calling agent)"},
+                    "due_date": {"type": "string", "description": "Due date in YYYY-MM-DD or natural form"},
+                    "project_id": {"type": "string", "description": "Project id (optional; inferred from chat context)"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_milestone_status",
+            "description": (
+                "Update a milestone's status or attach evidence. "
+                "Status transitions are typically: pending → in_progress → done. "
+                "Admin confirm/reject happens via a separate flow."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "milestone_id": {"type": "string", "description": "The milestone id"},
+                    "status": {"type": "string", "description": "pending | in_progress | done"},
+                    "evidence": {"type": "string", "description": "Evidence text (e.g. links, summary of what was completed)"},
+                    "project_id": {"type": "string", "description": "Project id (optional; inferred from chat context)"},
+                },
+                "required": ["milestone_id"],
             },
         },
     },
@@ -1768,6 +1964,40 @@ def _tool_task_update(action: str, task_id: str = "", title: str = "",
             rec = (recurrence or "once").lower()
             agent_id = caller_id or (agent.id if agent else "")
 
+            # ── Meeting-scope routing ──
+            # If this tool is being called from within a meeting reply loop,
+            # route the task to the Standalone Task registry (tagged with
+            # meeting_id) instead of creating a scheduled job. Keeps meeting
+            # discussions' "action items" out of the scheduler while still
+            # making them visible in 任务中心 and traceable to the meeting.
+            try:
+                from .meeting_context import get_meeting_context
+                _meeting_id = get_meeting_context()
+            except Exception:
+                _meeting_id = ""
+            if _meeting_id and getattr(hub, "standalone_task_registry", None):
+                try:
+                    st = hub.standalone_task_registry.create(
+                        title=title,
+                        description=description or "",
+                        assigned_to=agent_id,
+                        created_by=agent_id,
+                        priority="normal",
+                        due_hint=run_at or recurrence_spec or "",
+                        source_meeting_id=_meeting_id,
+                        tags=["from_meeting"],
+                    )
+                    return (
+                        f"Task created (standalone, from meeting): {st.id} — {title}"
+                        f" [source_meeting_id={_meeting_id}]"
+                    )
+                except Exception as _st_err:
+                    logger.warning(
+                        "Standalone-task routing failed for meeting %s: %s. "
+                        "Falling through to default scheduler path.",
+                        _meeting_id, _st_err,
+                    )
+
             # Route through agent.add_task so recurrence / next_run_at is computed
             if agent:
                 new_task = agent.add_task(
@@ -2142,6 +2372,334 @@ def _handle_builtin_mcp(target: Any, tool_name: str, arguments: Any,
 # The ``_handle_builtin_mcp`` helper further below is registered with
 # the dispatcher at import time so builtin TTS/STT calls flow through
 # the same router/dispatcher pipeline as external MCPs.
+
+def _get_current_scope() -> dict:
+    """Return the current thread's agent-scope context.
+
+    Reads both project and meeting thread-local contexts (set by
+    ``ProjectChatEngine._agent_respond`` and the meeting equivalent).
+    Either field may be empty if the caller is not inside that scope.
+
+    Returns:
+        {"project_id": str, "meeting_id": str}
+    """
+    try:
+        from .project_context import get_project_context
+        pid = get_project_context()
+    except Exception:
+        pid = ""
+    try:
+        from .meeting_context import get_meeting_context
+        mid = get_meeting_context()
+    except Exception:
+        mid = ""
+    return {"project_id": pid or "", "meeting_id": mid or ""}
+
+
+def _resolve_project(project_id: str = "",
+                     kwargs: dict | None = None) -> tuple[Any, str]:
+    """Resolve a Project instance from explicit id, injected kwarg, or thread-local.
+
+    Resolution order:
+      1. explicit ``project_id`` argument
+      2. ``_project_id`` snapshot in kwargs (set by dispatcher — survives
+         ThreadPoolExecutor handoff)
+      3. thread-local ``get_project_context()`` (works on sequential path)
+
+    Returns (project, error_message). If project is None, error_message
+    explains why (for surfacing back to the LLM).
+    """
+    pid = (project_id or "").strip()
+    if not pid and kwargs:
+        pid = (kwargs.get("_project_id") or "").strip()
+    if not pid:
+        pid = _get_current_scope().get("project_id", "")
+    if not pid:
+        return None, (
+            "Error: no project context. Call this tool from within a project "
+            "chat, or pass project_id explicitly."
+        )
+    try:
+        hub = _get_hub()
+        proj = hub.get_project(pid) if hasattr(hub, "get_project") else None
+        if proj is None:
+            return None, f"Error: project not found: {pid}"
+        return proj, ""
+    except Exception as e:
+        return None, f"Error: failed to resolve project {pid}: {e}"
+
+
+def _save_projects_silently() -> None:
+    """Persist projects to disk; swallow errors (best-effort)."""
+    try:
+        hub = _get_hub()
+        save_fn = getattr(hub, "_save_projects", None)
+        if callable(save_fn):
+            save_fn()
+    except Exception as e:
+        logger.debug("_save_projects_silently failed: %s", e)
+
+
+def _tool_submit_deliverable(title: str = "", file_path: str = "",
+                              content_text: str = "", url: str = "",
+                              kind: str = "document",
+                              milestone_id: str = "",
+                              task_id: str = "",
+                              project_id: str = "",
+                              **_: Any) -> str:
+    """Explicitly register a deliverable for the current project.
+
+    If content_text is provided without file_path, the content is written to a
+    file under the project's shared workspace
+    (~/.tudou_claw/workspaces/shared/<project_id>/) and the resulting path is
+    recorded on the deliverable. This guarantees every textual deliverable
+    physically exists in the canonical project directory.
+    """
+    if not title:
+        return "Error: 'title' is required."
+    if not (file_path or content_text or url):
+        return "Error: one of file_path / content_text / url is required."
+    proj, err = _resolve_project(project_id, kwargs=_ if isinstance(_, dict) else None)
+    if err:
+        return err
+    caller_id = _.get("_caller_agent_id", "") if isinstance(_, dict) else ""
+
+    resolved_file_path = (file_path or "").strip()
+
+    # ── Ensure the deliverable physically lives under the project's shared
+    # workspace (~/.tudou_claw/workspaces/shared/<project_id>/). The
+    # Deliverables UI only scans the shared dir, so anything outside it is
+    # invisible to the rest of the team. Two code paths:
+    #   1) content_text without file_path  → write content to shared dir
+    #   2) file_path outside shared dir    → copy file/folder into shared dir
+    try:
+        import os as _os
+        import re as _re
+        import shutil as _shutil
+        from .agent import Agent as _Agent
+
+        shared_dir = _Agent.get_shared_workspace_path(proj.id)
+        _os.makedirs(shared_dir, exist_ok=True)
+        shared_real = _os.path.realpath(shared_dir)
+
+        def _slug(raw: str, default: str = "deliverable") -> str:
+            s = _re.sub(r"[\\/:*?\"<>|\r\n\t]+", "_", (raw or "").strip())
+            s = s.strip(" .") or default
+            return s[:80]
+
+        def _unique(target: str) -> str:
+            if not _os.path.exists(target):
+                return target
+            stem, ext = _os.path.splitext(target)
+            for n in range(2, 1000):
+                cand = f"{stem}_{n}{ext}"
+                if not _os.path.exists(cand):
+                    return cand
+            return target  # give up; caller will overwrite
+
+        # Path 1: content_text → new file in shared dir
+        if content_text and not resolved_file_path:
+            ext_by_kind = {
+                "document": ".md", "analysis": ".md", "report": ".md",
+                "design": ".md", "spec": ".md", "plan": ".md",
+                "media": ".txt", "code": ".txt",
+            }
+            ext = ext_by_kind.get(
+                (kind or "document").strip().lower(), ".md")
+            target = _unique(_os.path.join(
+                shared_dir, f"{_slug(title)}{ext}"))
+            with open(target, "w", encoding="utf-8") as fh:
+                fh.write(content_text)
+            resolved_file_path = target
+            logger.info(
+                "submit_deliverable: materialized content_text → %s", target)
+
+        # Path 2: file_path exists and is outside the shared dir → copy in.
+        elif resolved_file_path:
+            src = _os.path.expanduser(resolved_file_path)
+            if _os.path.exists(src):
+                src_real = _os.path.realpath(src)
+                # Already inside shared dir? leave as-is.
+                if not (src_real == shared_real
+                        or src_real.startswith(shared_real + _os.sep)):
+                    base = _os.path.basename(src_real.rstrip(_os.sep)) \
+                        or _slug(title)
+                    dst = _unique(_os.path.join(shared_dir, base))
+                    if _os.path.isdir(src_real):
+                        _shutil.copytree(src_real, dst)
+                    else:
+                        _shutil.copy2(src_real, dst)
+                    resolved_file_path = dst
+                    logger.info(
+                        "submit_deliverable: copied %s → %s", src_real, dst)
+            else:
+                logger.warning(
+                    "submit_deliverable: file_path does not exist: %s",
+                    resolved_file_path)
+    except Exception as _we:
+        logger.warning(
+            "submit_deliverable: failed to place deliverable under shared "
+            "dir (%s); recording path as-is", _we)
+
+    try:
+        dv = proj.add_deliverable(
+            title=title.strip(),
+            kind=(kind or "document").strip(),
+            author_agent_id=caller_id,
+            task_id=(task_id or "").strip(),
+            milestone_id=(milestone_id or "").strip(),
+            content_text=content_text or "",
+            file_path=resolved_file_path,
+            url=(url or "").strip(),
+        )
+        # Auto-transition to SUBMITTED so it shows up in review queue.
+        try:
+            proj.submit_deliverable(dv.id)
+        except Exception:
+            pass
+        _save_projects_silently()
+        logger.info("submit_deliverable OK: project=%s dv=%s title=%r author=%s file=%s",
+                    proj.id, dv.id, title, caller_id or "-",
+                    resolved_file_path or "-")
+        return (
+            f"Deliverable registered: {dv.id} — {title} "
+            f"[kind={kind}, project={proj.id}, file={resolved_file_path or '(content-only)'}]"
+        )
+    except Exception as e:
+        logger.exception("submit_deliverable failed")
+        return f"Error: submit_deliverable failed: {e}"
+
+
+def _tool_create_goal(name: str = "", description: str = "",
+                      metric: str = "count", target_value: float = 0.0,
+                      target_text: str = "", owner_agent_id: str = "",
+                      project_id: str = "", **_: Any) -> str:
+    """Create a ProjectGoal for the current project."""
+    if not name:
+        return "Error: 'name' is required."
+    proj, err = _resolve_project(project_id, kwargs=_ if isinstance(_, dict) else None)
+    if err:
+        return err
+    caller_id = _.get("_caller_agent_id", "") if isinstance(_, dict) else ""
+    try:
+        g = proj.add_goal(
+            name=name.strip(),
+            description=description or "",
+            owner_agent_id=(owner_agent_id or caller_id or "").strip(),
+            metric=(metric or "count").strip(),
+            target_value=float(target_value or 0),
+            target_text=target_text or "",
+        )
+        _save_projects_silently()
+        logger.info("create_goal OK: project=%s goal=%s name=%r",
+                    proj.id, g.id, name)
+        return (
+            f"Goal created: {g.id} — {name} "
+            f"[metric={metric}, target={target_value or target_text}, project={proj.id}]"
+        )
+    except Exception as e:
+        logger.exception("create_goal failed")
+        return f"Error: create_goal failed: {e}"
+
+
+def _tool_update_goal_progress(goal_id: str = "", current_value: Any = None,
+                                done: Any = None, note: str = "",
+                                project_id: str = "", **_: Any) -> str:
+    """Update a goal's progress (current_value) or mark as done."""
+    if not goal_id:
+        return "Error: 'goal_id' is required."
+    proj, err = _resolve_project(project_id, kwargs=_ if isinstance(_, dict) else None)
+    if err:
+        return err
+    try:
+        cv = None
+        if current_value is not None and str(current_value) != "":
+            try:
+                cv = float(current_value)
+            except Exception:
+                return f"Error: current_value must be numeric, got {current_value!r}"
+        dn = None
+        if done is not None and str(done) != "":
+            if isinstance(done, bool):
+                dn = done
+            else:
+                dn = str(done).lower() in ("true", "1", "yes", "y", "done")
+        g = proj.update_goal_progress(goal_id, current_value=cv, done=dn)
+        if g is None:
+            return f"Error: goal not found: {goal_id}"
+        _save_projects_silently()
+        return (
+            f"Goal progress updated: {g.id} — current={g.current_value} "
+            f"done={g.done}"
+            + (f" note={note!r}" if note else "")
+        )
+    except Exception as e:
+        logger.exception("update_goal_progress failed")
+        return f"Error: update_goal_progress failed: {e}"
+
+
+def _tool_create_milestone(name: str = "", responsible_agent_id: str = "",
+                            due_date: str = "", project_id: str = "",
+                            **_: Any) -> str:
+    """Create a ProjectMilestone for the current project."""
+    if not name:
+        return "Error: 'name' is required."
+    proj, err = _resolve_project(project_id, kwargs=_ if isinstance(_, dict) else None)
+    if err:
+        return err
+    caller_id = _.get("_caller_agent_id", "") if isinstance(_, dict) else ""
+    try:
+        ms = proj.add_milestone(
+            name=name.strip(),
+            responsible_agent_id=(responsible_agent_id or caller_id or "").strip(),
+            due_date=(due_date or "").strip(),
+        )
+        _save_projects_silently()
+        logger.info("create_milestone OK: project=%s ms=%s name=%r",
+                    proj.id, ms.id, name)
+        return (
+            f"Milestone created: {ms.id} — {name} "
+            f"[responsible={ms.responsible_agent_id or '-'}, due={ms.due_date or '-'}, "
+            f"project={proj.id}]"
+        )
+    except Exception as e:
+        logger.exception("create_milestone failed")
+        return f"Error: create_milestone failed: {e}"
+
+
+def _tool_update_milestone_status(milestone_id: str = "", status: str = "",
+                                   evidence: str = "",
+                                   project_id: str = "", **_: Any) -> str:
+    """Update a milestone's status / attach evidence.
+
+    Status can be any string the project model accepts (pending/in_progress/
+    done/etc.). Admin-level confirm/reject is handled via separate endpoints.
+    """
+    if not milestone_id:
+        return "Error: 'milestone_id' is required."
+    proj, err = _resolve_project(project_id, kwargs=_ if isinstance(_, dict) else None)
+    if err:
+        return err
+    try:
+        kwargs: dict[str, Any] = {}
+        if status:
+            kwargs["status"] = status.strip()
+        if evidence:
+            kwargs["evidence"] = evidence
+        if not kwargs:
+            return "Error: provide at least one of status / evidence."
+        ms = proj.update_milestone(milestone_id, **kwargs)
+        if ms is None:
+            return f"Error: milestone not found: {milestone_id}"
+        _save_projects_silently()
+        return (
+            f"Milestone updated: {ms.id} — status={ms.status} "
+            + (f"evidence_len={len(evidence)} " if evidence else "")
+        )
+    except Exception as e:
+        logger.exception("update_milestone_status failed")
+        return f"Error: update_milestone_status failed: {e}"
+
 
 def _tool_mcp_call(mcp_id: str = "", tool: str = "", arguments: Any = None,
                    list_mcps: bool = False, **_: Any) -> str:
@@ -3653,11 +4211,16 @@ def _tool_create_video(output_path: str, frames: list, fps: int = 24, audio_path
 # Skill guide on-demand loader
 # ---------------------------------------------------------------------------
 
-def _tool_get_skill_guide(arguments: dict) -> str:
+def _tool_get_skill_guide(**arguments) -> str:
     """Load the full SKILL.md guide + ancillary file list for a granted skill.
 
     Returns the complete instructions (with frontmatter stripped) so the
     agent can follow the step-by-step guide and run scripts from skill_dir.
+
+    NOTE: accepts **kwargs because the registry dispatches via
+    ``entry.handler(**arguments)``. Previously this was typed as
+    ``arguments: dict`` which broke every call with
+    "unexpected keyword argument 'name'".
     """
     name = (arguments.get("name") or "").strip()
     if not name:
@@ -4008,6 +4571,12 @@ _TOOL_FUNCS: dict[str, callable] = {
     "team_create": _tool_team_create,
     "send_message": _tool_send_message,
     "task_update": _tool_task_update,
+    # Project-scope tools (auto-discover project from thread-local context)
+    "submit_deliverable": _tool_submit_deliverable,
+    "create_goal": _tool_create_goal,
+    "update_goal_progress": _tool_update_goal_progress,
+    "create_milestone": _tool_create_milestone,
+    "update_milestone_status": _tool_update_milestone_status,
     "mcp_call": _tool_mcp_call,
     # Experience persistence + skill generation
     "save_experience": _tool_save_experience,
@@ -4019,6 +4588,8 @@ _TOOL_FUNCS: dict[str, callable] = {
     "learn_from_peers": _tool_learn_from_peers,
     # Human-in-the-loop tools (handled specially by agent, not dispatched here)
     "request_web_login": lambda **kw: "ERROR: request_web_login must be handled by agent directly",
+    # Inter-agent handoff with 3-state handshake (handled specially by agent)
+    "handoff_request": lambda **kw: "ERROR: handoff_request must be handled by agent directly",
     # System and productivity tools
     "pip_install": _tool_pip_install,
     "create_pptx": _tool_create_pptx,
@@ -4140,6 +4711,8 @@ def _init_registry() -> ToolRegistry:
 
         # Human-in-the-loop
         "request_web_login": "coordination",
+        # Inter-agent handoff
+        "handoff_request": "coordination",
         # System and productivity tools
         "pip_install": "system",
         "create_pptx": "productivity",

@@ -1,0 +1,68 @@
+# Product Architect SOP — v1
+# 4 stages: scope → design → risks → review
+
+sop_id: sop_architect_v1
+display_name: 产品架构师标准流程
+version: 1
+
+stages:
+  - id: scope
+    display_name: 需求边界
+    goal: |
+      明确方案的范围：功能诉求、非功能约束（性能/成本/合规）、依赖系统。
+    guidance: |
+      1. 列出 In-scope / Out-of-scope
+      2. 汇总已知约束（SLA、预算、合规要求）
+      3. 明确主要依赖系统
+    exit_condition:
+      type: contains_section
+      spec:
+        heading_patterns: ["## 范围", "## Scope", "## 约束"]
+        min_content_length: 80
+    allow_rollback: false
+    next: design
+
+  - id: design
+    display_name: 方案设计
+    goal: |
+      给出至少 2 个候选方案 + Trade-off 分析 + 推荐方案（含架构图、关键接口）。
+    guidance: |
+      - 候选方案：列出不同维度的差异（复杂度、成本、可扩展性）
+      - Trade-off：用表格或列表对比
+      - 推荐方案：给出架构图（mermaid/ASCII）、核心接口契约、关键数据模型
+    exit_condition:
+      type: contains_section
+      spec:
+        heading_patterns: ["## Trade-off", "## 权衡", "## 方案对比"]
+    allow_rollback: true
+    rollback_to: scope
+    next: risks
+
+  - id: risks
+    display_name: 风险评估
+    goal: |
+      识别 ≥3 条风险，覆盖技术可行性 / 性能瓶颈 / 上线依赖，附缓解措施。
+    guidance: |
+      每条风险包含：title、category（tech|perf|launch）、severity（high/med/low）、mitigation。
+      可输出为结构化列表或 JSON 数组。
+    exit_condition:
+      type: contains_section
+      spec:
+        heading_patterns: ["## 风险", "## Risks"]
+    allow_rollback: true
+    rollback_to: design
+    next: review
+
+  - id: review
+    display_name: 自我评审
+    goal: |
+      自检架构完整性、接口一致性、风险覆盖度。
+    guidance: |
+      - 非功能指标是否覆盖（性能/可靠性/安全/成本）
+      - 是否留有扩展点 / 可观测性
+      - 待验证项是否显式列出
+    exit_condition:
+      type: any
+    allow_rollback: true
+    rollback_to: risks
+    next: null

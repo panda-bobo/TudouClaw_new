@@ -1,5 +1,18 @@
 """
 Portal GET route handlers.
+
+╔════════════════════════════════════════════════════════════════════════╗
+║  ⚠️  DEPRECATED — LEGACY stdlib HTTP handler                          ║
+║                                                                        ║
+║  FastAPI (app/api/routers/*) is now the authoritative production       ║
+║  path. This file runs ONLY when TUDOU_USE_STDLIB=1 is set at launch.   ║
+║                                                                        ║
+║  Do NOT add new routes here. New GETs go into                          ║
+║  app/api/routers/<domain>.py with @router.get(...).                    ║
+║                                                                        ║
+║  Scheduled for deletion: after one full release cycle of stable        ║
+║  FastAPI operation (≥30 days without rollback).                        ║
+╚════════════════════════════════════════════════════════════════════════╝
 """
 import json
 import logging
@@ -189,8 +202,17 @@ def _build_orchestration_graph(hub, project_filter: str = "") -> dict:
 
 
 def handle_get(handler):
-    """Main GET dispatcher - called from _PortalHandler.do_GET()"""
+    """Main GET dispatcher - called from _PortalHandler.do_GET().
+
+    DEPRECATED — see the file-level deprecation block. Active only when
+    TUDOU_USE_STDLIB=1 is set at launch.
+    """
     path = urlparse(handler.path).path
+    # Static & documents don't need the noisy warning.
+    if not (path.startswith("/static") or path == "/favicon.ico"):
+        logger.warning(
+            "[stdlib-fallback] GET %s hitting legacy handler "
+            "(TUDOU_USE_STDLIB=1 is active). Migrate to FastAPI.", path)
     try:
         _do_get_inner(handler, path)
     except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
@@ -702,32 +724,66 @@ def _do_get_inner(handler, path: str):
             handler._json({"error": "Project not found"}, 404)
 
     elif path.startswith("/api/portal/projects/") and path.endswith("/deliverables-by-agent"):
-        # Group deliverables by member agent. For each project member:
-        #   - explicit Deliverable rows where author_agent_id == member
-        #   - every recognised file in the agent's deliverable_dir,
-        #     ingested via scan_deliverable_dir so per-file URLs route
-        #     through the existing agent-state artifact streamer.
+        # Project deliverables view.
+        # Single source of truth: the project's shared workspace at
+        # ~/.tudou_claw/workspaces/shared/<project_id>/. We do NOT scan each
+        # agent's private workspace (that surfaces code / skill.md / MCP.md /
+        # logs — noise, not deliverables). Explicit Deliverable rows are
+        # filtered to those referencing a path inside the shared dir (or
+        # content-only rows that get materialized there by submit_deliverable).
         proj_id = path.split("/")[4]
         proj = hub.get_project(proj_id)
         if not proj:
             handler._json({"error": "Project not found"}, 404)
         else:
+            import os as _os
             try:
                 from ..agent_state.extractors import scan_deliverable_dir
-                from ..agent_state.shadow import install_into_agent
-                from ..agent_state.artifact import ProducedBy
-                from .html_tag_router import build_artifact_url
+                from ..agent_state.artifact import ArtifactStore
             except Exception as _e:
                 logger.debug("deliverables-by-agent: imports failed: %s", _e)
                 scan_deliverable_dir = None  # type: ignore
-                install_into_agent = None    # type: ignore
-                build_artifact_url = lambda *a, **k: ""  # type: ignore
-                ProducedBy = None            # type: ignore
+                ArtifactStore = None         # type: ignore
 
-            # Index explicit deliverables by author for O(1) lookup
+            # Resolve the canonical project shared dir
+            from ..agent import Agent as _Agent
+            try:
+                shared_dir = _Agent.get_shared_workspace_path(proj_id)
+            except Exception:
+                shared_dir = ""
+            shared_base_real = ""
+            if shared_dir:
+                try:
+                    shared_base_real = _os.path.realpath(shared_dir)
+                except Exception:
+                    shared_base_real = ""
+
+            def _under_shared(p: str) -> bool:
+                if not p or not shared_base_real:
+                    return False
+                try:
+                    if _os.path.isabs(p):
+                        real = _os.path.realpath(p)
+                    else:
+                        real = _os.path.realpath(_os.path.join(shared_dir, p))
+                except Exception:
+                    return False
+                return (real == shared_base_real
+                        or real.startswith(shared_base_real + _os.sep))
+
+            # Filter explicit deliverables:
+            #  - drop legacy "(auto-registered from chat reply)" sentinel rows
+            #  - drop rows with file_path outside the shared dir
+            #  - keep content-only rows unconditionally
+            AUTO_SENTINEL = "(auto-registered from chat reply)"
             explicit_by_author: dict = {}
             unassigned_explicit = []
             for dv in proj.deliverables:
+                if (getattr(dv, "content_text", "") or "").strip() == AUTO_SENTINEL:
+                    continue
+                fp = (getattr(dv, "file_path", "") or "").strip()
+                if fp and not _under_shared(fp):
+                    continue
                 aid = (dv.author_agent_id or "").strip()
                 if aid:
                     explicit_by_author.setdefault(aid, []).append(dv.to_dict())
@@ -744,102 +800,70 @@ def _do_get_inner(handler, path: str):
                 agent = hub.get_agent(aid)
                 agent_name = getattr(agent, "name", aid) if agent else aid
                 role = getattr(agent, "role", "") if agent else ""
-
-                # Resolve deliverable_dir
-                deliverable_dir = ""
-                if agent is not None:
-                    try:
-                        deliverable_dir = str(agent._effective_working_dir())  # noqa: SLF001
-                    except Exception:
-                        deliverable_dir = getattr(agent, "working_dir", "") or ""
-
-                # Scan + collect files via shadow store
-                files_out = []
-                if (agent is not None and deliverable_dir
-                        and scan_deliverable_dir is not None
-                        and install_into_agent is not None):
-                    try:
-                        shadow = getattr(agent, "_shadow", None)
-                        if shadow is None:
-                            shadow = install_into_agent(agent)
-                        if shadow is not None:
-                            store = shadow.state.artifacts
-                            try:
-                                scan_deliverable_dir(
-                                    store,
-                                    deliverable_dir,
-                                    produced_by=ProducedBy(
-                                        kind="agent", id=aid, name=agent_name)
-                                    if ProducedBy else None,
-                                )
-                            except Exception as _e:
-                                logger.debug(
-                                    "scan_deliverable_dir failed for %s: %s",
-                                    aid, _e)
-                            # List every artifact in the store that lives
-                            # under this agent's deliverable_dir
-                            try:
-                                import os as _os
-                                base_real = _os.path.realpath(deliverable_dir)
-                                for art in store.all():
-                                    val = getattr(art, "value", "") or ""
-                                    if not val:
-                                        continue
-                                    # URL artifacts are typically agent
-                                    # browsing/learning history, not actual
-                                    # deliverables — skip them.
-                                    if val.startswith(("http://", "https://")):
-                                        continue
-                                    try:
-                                        real = _os.path.realpath(val)
-                                    except Exception:
-                                        continue
-                                    if not (real == base_real
-                                            or real.startswith(base_real + _os.sep)):
-                                        continue
-                                    files_out.append({
-                                        "id": art.id,
-                                        "name": getattr(art, "label", "")
-                                                or _os.path.basename(val),
-                                        "path": val,
-                                        "rel_path": _os.path.relpath(val, base_real),
-                                        "kind": getattr(art, "kind", "file"),
-                                        "mime": getattr(art, "mime", ""),
-                                        "size": getattr(art, "size", None),
-                                        "mtime": getattr(art, "produced_at", 0),
-                                        "url": build_artifact_url(aid, art.id),
-                                        "is_remote": False,
-                                    })
-                            except Exception as _e:
-                                logger.debug(
-                                    "list artifacts failed for %s: %s", aid, _e)
-                    except Exception as _e:
-                        logger.debug("shadow attach failed for %s: %s", aid, _e)
-
-                # Sort files newest first
-                files_out.sort(key=lambda f: f.get("mtime") or 0, reverse=True)
-
+                explicit_list = explicit_by_author.get(aid, [])
                 agents_out.append({
                     "agent_id": aid,
                     "agent_name": agent_name,
                     "role": role,
                     "responsibility": getattr(m, "responsibility", "") or "",
-                    "deliverable_dir": deliverable_dir,
-                    "explicit_deliverables": explicit_by_author.get(aid, []),
-                    "files": files_out,
-                    "file_count": len(files_out),
-                    "explicit_count": len(explicit_by_author.get(aid, [])),
+                    "deliverable_dir": shared_dir,   # canonical shared dir
+                    "explicit_deliverables": explicit_list,
+                    "files": [],                     # per-agent scan removed
+                    "file_count": 0,
+                    "explicit_count": len(explicit_list),
                 })
 
-            # Any explicit deliverable whose author isn't a current member
-            # ends up in `unassigned_explicit` (set above for empty author).
+            # Unassigned: explicit rows whose author isn't a current member
             for aid, items in explicit_by_author.items():
                 if aid not in seen_agent_ids:
                     unassigned_explicit.extend(items)
 
+            # Depth-1 listing of the shared dir (files + folders at top level).
+            # Subdirectories are shown as folder markers, not recursed into —
+            # nested code / build artifacts are NOT surfaced as deliverables.
+            shared_files = []
+            import mimetypes as _mt
+            if shared_dir and _os.path.isdir(shared_dir):
+                try:
+                    for name in _os.listdir(shared_dir):
+                        if name.startswith("."):
+                            continue
+                        full = _os.path.join(shared_dir, name)
+                        try:
+                            st = _os.stat(full)
+                        except OSError:
+                            continue
+                        is_dir = _os.path.isdir(full)
+                        mime = ""
+                        if not is_dir:
+                            mime = (_mt.guess_type(full)[0] or "")
+                        shared_files.append({
+                            "id": name,
+                            "name": name,
+                            "path": full,
+                            "rel_path": name,
+                            "kind": "directory" if is_dir else "file",
+                            "mime": mime or ("inode/directory" if is_dir else ""),
+                            "size": None if is_dir else st.st_size,
+                            "mtime": st.st_mtime,
+                            "url": "" if is_dir else f"/workspace/shared/{proj_id}/{name}",
+                            "is_remote": False,
+                            "is_dir": is_dir,
+                        })
+                    shared_files.sort(key=lambda f: (
+                        0 if f.get("is_dir") else 1,
+                        f.get("name", "").lower() if f.get("is_dir")
+                            else -(f.get("mtime") or 0),
+                    ))
+                except Exception as _e:
+                    logger.debug("shared files listing failed: %s", _e)
+
             handler._json({
                 "agents": agents_out,
                 "unassigned_deliverables": unassigned_explicit,
+                "shared_dir": shared_dir,
+                "shared_files": shared_files,
+                "shared_file_count": len(shared_files),
             })
 
     elif path.startswith("/api/portal/projects/") and path.endswith("/issues"):
@@ -1762,6 +1786,86 @@ def _do_get_inner(handler, path: str):
             handler.wfile.write(data)
         else:
             handler.send_error(404)
+
+    elif path.startswith("/workspace/"):
+        # Serve files that an agent references in chat as
+        #   http://host:port/workspace/<relative-path>
+        # Resolve against the global workspaces tree (all agents). Supports:
+        #   1. Direct relative path:  /workspace/agents/<aid>/workspace/foo.md
+        #   2. Basename search:       /workspace/lessons_learned.md
+        # Path-traversal protected: result must live under DATA_DIR/workspaces.
+        import mimetypes as _mt
+        from pathlib import Path as _P
+        from .. import DEFAULT_DATA_DIR as _DDD2
+
+        rel = path[len("/workspace/"):]
+        rel_norm = rel.replace("\\", "/").lstrip("./").lstrip("/")
+        if not rel_norm:
+            handler.send_error(404)
+            return
+
+        data_dir = os.environ.get("TUDOU_CLAW_DATA_DIR") or _DDD2
+        ws_root = os.path.normpath(str(_P(data_dir) / "workspaces"))
+
+        candidate = ""
+        # 1. Try direct path under workspaces/
+        direct = os.path.normpath(os.path.join(ws_root, rel_norm))
+        if (direct == ws_root or direct.startswith(ws_root + os.sep)) \
+                and os.path.isfile(direct):
+            candidate = direct
+
+        # 2. Basename walk (bounded) if direct missed
+        if not candidate:
+            basename = os.path.basename(rel_norm)
+            if basename and os.path.isdir(ws_root):
+                MAX_ENTRIES = PROJECT_SCAN_MAX_FILES
+                scanned = 0
+                found = False
+                for dirpath, dirnames, filenames in os.walk(ws_root):
+                    dirnames[:] = [d for d in dirnames
+                                   if not d.startswith(".")
+                                   and d not in ("node_modules", "__pycache__",
+                                                 "large_results", "memories")]
+                    scanned += len(filenames)
+                    if basename in filenames:
+                        candidate = os.path.normpath(
+                            os.path.join(dirpath, basename))
+                        found = True
+                        break
+                    if scanned > MAX_ENTRIES:
+                        break
+                if not found:
+                    candidate = ""
+
+        # 3. Path-traversal check: resolved must live under workspaces/
+        safe = (candidate == ws_root
+                or candidate.startswith(ws_root + os.sep)) if candidate else False
+
+        if not candidate or not safe or not os.path.isfile(candidate):
+            logger.info("workspace: not found — rel=%r ws_root=%s",
+                        rel_norm, ws_root)
+            handler.send_error(404)
+            return
+
+        mime = _mt.guess_type(candidate)[0] or "application/octet-stream"
+        # Text files: force utf-8 charset so Chinese content renders correctly
+        if mime.startswith("text/"):
+            mime = f"{mime}; charset=utf-8"
+        elif mime in ("application/json", "application/javascript"):
+            mime = f"{mime}; charset=utf-8"
+        try:
+            with open(candidate, "rb") as f:
+                data = f.read()
+        except Exception as e:
+            logger.warning("workspace read failed %s: %s", candidate, e)
+            handler.send_error(500)
+            return
+        handler.send_response(200)
+        handler.send_header("Content-Type", mime)
+        handler.send_header("Content-Length", str(len(data)))
+        handler.send_header("Cache-Control", "private, max-age=60")
+        handler.end_headers()
+        handler.wfile.write(data)
 
     elif path.startswith("/api/portal/agent/") and path.endswith("/thinking"):
         agent_id = path.split("/")[4]
