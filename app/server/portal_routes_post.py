@@ -624,42 +624,47 @@ def _do_post_inner(handler, path: str):
             len(chat_content) if isinstance(chat_content, list)
             else len(str(chat_content)),
         )
-        # ── V2 suggestion (classify-only, no side effects) ──
-        # Text-only complex intents get a badge hint so the user can
-        # promote the message into a V2 state-machine task. We used to
-        # auto-submit, which hijacked every chat; now it's opt-in.
-        v2_suggestion: dict | None = None
+        # ── Route through supervisor (handles isolated / in-process) ──
+        task = hub.supervisor.chat_async(agent.id, chat_content, source="admin")
+
+        # ── Create a ConversationTask record if this looks non-trivial ──
+        # Replaces the old "v2_suggestion" badge. Classifier is purely
+        # side-effect free and the task record is just an observer — the
+        # V1 chat loop is still the executor. Plan extraction + step
+        # tracking wire up in M2 / M3.
+        conv_task_id = ""
         try:
             if isinstance(chat_content, str) and chat_content.strip():
-                from app.v2.core.task_store import get_store as _get_v2_store
-                v2_store = _get_v2_store()
-                if v2_store.get_agent(agent.id) is not None:
-                    from app.chat_complexity_classifier import classify
-                    verdict = classify(chat_content)
-                    if verdict["route"] == "v2":
-                        has_active = False
-                        try:
-                            has_active = v2_store.count_active_tasks(agent.id) > 0
-                        except Exception:
-                            pass
-                        if not has_active:
-                            v2_suggestion = {
-                                "route":   "v2",
-                                "reason":  verdict.get("reason", ""),
-                                "signals": verdict.get("signals", []),
-                            }
+                from app.chat_complexity_classifier import classify
+                verdict = classify(chat_content)
+                if verdict["route"] == "v2":   # classifier still uses v2 label
+                    from app.conversation_task import (
+                        ConversationTask, ConversationTaskStatus, get_store,
+                    )
+                    store = get_store()
+                    ct = ConversationTask(
+                        agent_id=agent.id,
+                        intent=chat_content,
+                        title=(chat_content[:40] +
+                               ("…" if len(chat_content) > 40 else "")),
+                        status=ConversationTaskStatus.RUNNING,
+                        chat_task_id=task.id,
+                        created_by=actor_name or "admin",
+                    )
+                    store.save(ct)
+                    conv_task_id = ct.id
+                    logger.info("ConversationTask created: id=%s agent=%s",
+                                ct.id, agent.id)
         except Exception as _e:
-            logger.debug("chat complexity classification skipped: %s", _e)
+            logger.debug("ConversationTask create skipped: %s", _e)
 
-        # Route through supervisor (handles isolated / in-process)
-        task = hub.supervisor.chat_async(agent.id, chat_content, source="admin")
         _resp = {
             "task_id": task.id,
             "status": task.status.value,
             "attachments_saved": saved_refs,
         }
-        if v2_suggestion:
-            _resp["v2_suggestion"] = v2_suggestion
+        if conv_task_id:
+            _resp["conversation_task_id"] = conv_task_id
         handler._json(_resp)
 
     elif "/chat-task/" in path and path.endswith("/abort"):
@@ -675,6 +680,73 @@ def _do_post_inner(handler, path: str):
         auth.audit("abort_task", actor=actor_name, role=user_role,
                    target=task_id, ip=get_client_ip(handler))
         handler._json({"ok": True, "status": task.status.value})
+
+    elif path.startswith("/api/portal/conversation-task/") and \
+         path.endswith("/resume"):
+        # POST /api/portal/conversation-task/{id}/resume
+        # Re-kick a PAUSED task by re-sending its intent as a new user
+        # message to the agent. The observer will reattach to the new
+        # ChatTask and keep advancing the same row.
+        task_id = path.split("/")[-2]
+        try:
+            from ..conversation_task import (
+                get_store as _get_ct_store, ConversationTaskStatus,
+            )
+            ct_store = _get_ct_store()
+            ct = ct_store.get(task_id)
+            if not ct:
+                handler._json({"error": "task not found"}, 404)
+                return
+            if ct.status not in (ConversationTaskStatus.PAUSED,
+                                 ConversationTaskStatus.FAILED):
+                handler._json({
+                    "error": f"only paused/failed tasks can resume; "
+                             f"this one is {ct.status}"
+                }, 409)
+                return
+            agent = hub.get_agent(ct.agent_id)
+            if not agent:
+                handler._json({"error": "agent not found"}, 404)
+                return
+
+            # Build resume prompt: remind the agent where it was. Keep
+            # it short — the agent's own conversation history already
+            # has the full thread.
+            done_steps = [s for s in (ct.steps or []) if s.status == "done"]
+            todo_steps = [s for s in (ct.steps or []) if s.status != "done"]
+            lines = [
+                f"[继续任务 · 之前中断了]",
+                f"原始请求：{ct.intent}",
+            ]
+            if done_steps:
+                lines.append("已完成：")
+                for i, s in enumerate(done_steps, 1):
+                    lines.append(f"  {i}. {s.goal}")
+            if todo_steps:
+                lines.append("还要做：")
+                for i, s in enumerate(todo_steps, 1):
+                    lines.append(f"  {i}. {s.goal}" +
+                                 (f"（工具: {s.tool_hint}）" if s.tool_hint else ""))
+                lines.append("请从未完成的第一步继续。")
+            else:
+                lines.append("请检查现有状态并完成未尽事宜。")
+            resume_msg = "\n".join(lines)
+
+            task = hub.supervisor.chat_async(agent.id, resume_msg,
+                                              source="admin")
+            # Relink the ConversationTask to the new ChatTask id.
+            from ..conversation_task import ConversationTaskStatus as _CTS
+            ct.chat_task_id = task.id
+            ct.status = _CTS.RUNNING
+            ct_store.save(ct)
+            auth.audit("resume_conversation_task", actor=actor_name,
+                       role=user_role, target=task_id,
+                       ip=get_client_ip(handler))
+            handler._json({"ok": True, "task_id": task.id,
+                           "conversation_task_id": ct.id})
+        except Exception as e:
+            logger.warning("conversation-task resume failed: %s", e)
+            handler._json({"error": str(e)}, 500)
 
     elif path.startswith("/api/portal/agent/") and path.endswith("/save-file"):
         # POST /api/portal/agent/{agent_id}/save-file
@@ -4782,6 +4854,20 @@ def handle_delete(handler):
         ok = router.remove_channel(channel_id)
         auth.audit("delete_channel", actor=actor_name, role=user_role, target=channel_id, ip=get_client_ip(handler))
         handler._json({"ok": ok})
+
+    elif path.startswith("/api/portal/conversation-task/") and \
+         not path.endswith("/resume"):
+        # DELETE /api/portal/conversation-task/{id}
+        task_id = path.split("/")[-1]
+        try:
+            from ..conversation_task import get_store as _get_ct_store
+            ok = _get_ct_store().delete(task_id)
+            auth.audit("delete_conversation_task", actor=actor_name,
+                       role=user_role, target=task_id,
+                       ip=get_client_ip(handler))
+            handler._json({"ok": ok})
+        except Exception as e:
+            handler._json({"error": str(e)}, 500)
 
     else:
         if path.startswith("/api/"):

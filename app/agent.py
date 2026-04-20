@@ -1780,6 +1780,21 @@ class Agent:
         if len(self.events) > 2000:
             self.events = self.events[-1500:]
 
+        # Forward to the ConversationTask observer. Best-effort — never
+        # block the chat loop on an observer error. The observer checks
+        # internally whether this agent has a task in progress before
+        # mutating anything.
+        if kind in ("message", "tool_call", "tool_result"):
+            try:
+                from .conversation_observer import on_agent_event
+                on_agent_event(self.id, {
+                    "timestamp": time.time(),
+                    "kind": kind,
+                    "data": data,
+                })
+            except Exception:
+                pass
+
     # ---- system prompt ----
 
     def _get_git_context(self) -> str:
@@ -2806,6 +2821,36 @@ class Agent:
                 "• Supported formats: png, jpg, jpeg, gif, webp, svg, bmp, ico.\n"
                 "</image_display>"
             )
+
+        # ── Plan + step tracking protocol (for UI task-queue visuals) ─
+        # We ask the agent to emit a structured plan block at the very
+        # start of a complex reply, and a ✓ marker as each step
+        # finishes. The host (app.agent) observes these markers and
+        # updates the TASK QUEUE panel in real time. If the agent
+        # forgets, no harm done — the conversation still works, the
+        # UI just won't show step progress for that turn.
+        parts.append(
+            "\n"
+            "## 任务分解 & 进度汇报协议\n"
+            "当用户请求是一个多步任务（比如研究 + 写报告、搜索 + 生成文件 + 发邮件），"
+            "请在**开始执行之前**先输出一个计划块，然后再开始动手：\n"
+            "\n"
+            "```\n"
+            "📋 计划\n"
+            "1. [第一步做什么] — 工具: <tool_name>\n"
+            "2. [第二步做什么] — 工具: <tool_name>\n"
+            "3. ...\n"
+            "```\n"
+            "\n"
+            "规则：\n"
+            "- 计划块只在**首次响应**里出现一次；后续轮次无需重复。\n"
+            "- 每完成一步，单独一行写 `✓ 第 N 步：<一句话说做了什么>`。\n"
+            "- 如果用户只是闲聊/一次问答（不涉及多步交付），**跳过**计划块，直接回答。\n"
+            "- 工具名要和你后续实际调用的工具一致（如 `web_search` / `bash` / `write_file`）。\n"
+            "- 步骤数 1–6 个，不要拆得太细；一个「搜 3 个来源」算一步，不要写成 3 步。\n"
+            "\n"
+            "这个协议只是让 UI 能把工具调用归到对应步骤——你该说的话、用的工具都不变。"
+        )
 
         result = "\n".join(parts)
 

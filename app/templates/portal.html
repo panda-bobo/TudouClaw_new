@@ -945,21 +945,15 @@ body {
     <div class="subtitle" id="node-info">Admin Console</div>
   </div>
   <div class="nav">
-    <!-- V1 / V2 mode toggle — flips app-wide feature set without leaving the page.
-         V2 mode enriches existing pages (新任务中心 tab / agent 创建强版 / Tier 绑定 tab) rather than replacing them. -->
-    <div class="nav-section" style="margin-bottom:10px;padding:0 4px">
-      <label style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 12px;background:var(--surface);border:1px solid var(--border);border-radius:10px;cursor:pointer;user-select:none"
-             id="mode-toggle-label">
-        <div style="display:flex;align-items:center;gap:8px">
-          <span class="material-symbols-outlined" style="font-size:18px;color:#f97316">rocket_launch</span>
-          <span style="font-size:12px;font-weight:600">状态机任务管理</span>
-        </div>
-        <input type="checkbox" id="mode-toggle" style="cursor:pointer"
-               onchange="toggleV2Mode(this.checked)">
-      </label>
-      <div id="mode-hint" style="font-size:10px;color:var(--text3);padding:4px 12px 0;line-height:1.4">
-        开启后：任务中心多出「状态机任务」tab · 创建 agent 可配 tier/多模态 · 多出 Tier 绑定页
-      </div>
+    <!-- State-machine mode toggle: DEPRECATED and hidden as of the
+         chat-task refactor. The 6-phase state machine proved too
+         brittle against weak open-source models; chat + in-band plan
+         protocol replaces it. Keep the DOM element with display:none
+         so existing JS references (isV2Mode, toggleV2Mode) don't NPE;
+         they now treat V2 as permanently off. -->
+    <div class="nav-section" style="display:none">
+      <input type="checkbox" id="mode-toggle" style="display:none"
+             onchange="toggleV2Mode(this.checked)">
     </div>
 
     <!-- Primary navigation: 7 high-frequency entry points -->

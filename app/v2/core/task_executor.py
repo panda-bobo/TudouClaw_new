@@ -1,6 +1,13 @@
 """
 TaskExecutor — Execute-phase LLM+tool loop (PRD §6.3).
 
+╔════════════════════════════════════════════════════════════════════════╗
+║  ⚠️  DEPRECATED — see app/v2/core/task_loop.py banner.                ║
+║  New chat-task flow uses V1 agent.chat tool loop directly; this       ║
+║  executor is kept only for in-flight V2 tasks that submitted before   ║
+║  cutover. No new code should route through here.                       ║
+╚════════════════════════════════════════════════════════════════════════╝
+
 THIS is the only V2 module that talks to the LLM. All tool dispatch
 (skills + MCPs) flows through the L1 bridges so V2 never imports V1's
 agent runtime.

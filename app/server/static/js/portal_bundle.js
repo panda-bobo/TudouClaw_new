@@ -516,8 +516,106 @@ async function refresh() {
     buildAgentOptions();
     populateNodeSelect();
     renderCurrentView();
+    // On login / refresh, probe for paused tasks waiting to resume.
+    try { _checkResumableTasks(); } catch(_e) {}
   } catch(e) { console.error('refresh error', e); }
 }
+
+// ── Resume banner (M4) ────────────────────────────────────────────────
+// Fires on refresh(). If any ConversationTask is PAUSED (meaning the
+// previous server process died mid-execution, or the user closed the
+// tab), show a sticky top-of-page banner with a Continue button.
+async function _checkResumableTasks() {
+  try {
+    var r = await api('GET', '/api/portal/conversation-tasks/resumable');
+    if (!r || !r.tasks) return;
+    var tasks = r.tasks.filter(function(t) { return t.status === 'paused'; });
+    _renderResumeBanner(tasks);
+  } catch (e) { /* silent */ }
+}
+
+function _renderResumeBanner(tasks) {
+  var existing = document.getElementById('resume-banner');
+  if (existing) existing.remove();
+  if (!tasks || !tasks.length) return;
+
+  var bar = document.createElement('div');
+  bar.id = 'resume-banner';
+  bar.style.cssText = 'position:fixed;top:8px;right:8px;z-index:5000;' +
+    'max-width:460px;background:#1e293b;border:1px solid #f59e0b;' +
+    'border-radius:10px;padding:14px 16px;box-shadow:0 6px 24px rgba(0,0,0,0.4);' +
+    'font-size:12px';
+  bar.innerHTML = '<div style="display:flex;align-items:flex-start;gap:10px;' +
+    'margin-bottom:10px">' +
+      '<span style="font-size:20px">⏸</span>' +
+      '<div style="flex:1">' +
+        '<div style="color:#f59e0b;font-weight:700;margin-bottom:2px">' +
+          tasks.length + ' 个任务未完成 — 服务重启或断线时中断</div>' +
+        '<div style="color:var(--text3);font-size:10px">' +
+          '可以从上次断开的地方继续，或直接关闭。</div>' +
+      '</div>' +
+      '<button onclick="document.getElementById(\'resume-banner\').remove()" ' +
+        'style="background:none;border:none;color:var(--text3);cursor:pointer;' +
+        'font-size:16px;padding:0 4px">×</button>' +
+    '</div>' +
+    tasks.slice(0, 5).map(function(t) {
+      var doneCount = 0, total = (t.steps || []).length;
+      (t.steps || []).forEach(function(s){ if (s.status === 'done') doneCount++; });
+      var progress = total ? (doneCount + '/' + total + ' steps done') : '(no plan)';
+      return '<div style="display:flex;justify-content:space-between;' +
+        'align-items:center;gap:8px;padding:6px 0;' +
+        'border-top:1px solid rgba(255,255,255,0.05)">' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="color:var(--text);font-weight:600;' +
+              'overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
+              esc(t.title || t.intent) + '</div>' +
+            '<div style="color:var(--text3);font-size:10px">' +
+              progress + ' · agent ' + esc((t.agent_id || '').slice(0, 6)) +
+            '</div>' +
+          '</div>' +
+          '<button class="btn btn-primary btn-sm" ' +
+            'style="font-size:11px;white-space:nowrap" ' +
+            'onclick="_resumeConversationTask(\'' + esc(t.id) + '\')">继续</button>' +
+          '<button class="btn btn-ghost btn-sm" ' +
+            'style="font-size:11px;color:var(--text3)" ' +
+            'onclick="_dismissConversationTask(\'' + esc(t.id) + '\')">丢弃</button>' +
+        '</div>';
+    }).join('') +
+    (tasks.length > 5 ? '<div style="color:var(--text3);font-size:10px;' +
+      'padding-top:6px;text-align:center">+ ' + (tasks.length - 5) +
+      ' more</div>' : '');
+  document.body.appendChild(bar);
+}
+
+async function _resumeConversationTask(taskId) {
+  try {
+    var r = await api('POST',
+      '/api/portal/conversation-task/' + taskId + '/resume');
+    if (r && r.task_id) {
+      // Success — refresh banner + task queue
+      _checkResumableTasks();
+      if (currentAgent && typeof window.loadConversationTasksIntoQueue === 'function') {
+        window.loadConversationTasksIntoQueue(currentAgent);
+      }
+    } else {
+      alert('继续失败：' + (r && r.error ? r.error : 'unknown error'));
+    }
+  } catch (e) {
+    alert('继续失败：' + e.message);
+  }
+}
+
+async function _dismissConversationTask(taskId) {
+  try {
+    await fetch('/api/portal/conversation-task/' + taskId, {
+      method: 'DELETE', credentials: 'same-origin',
+    });
+    _checkResumableTasks();
+  } catch (e) { /* silent */ }
+}
+
+window._resumeConversationTask = _resumeConversationTask;
+window._dismissConversationTask = _dismissConversationTask;
 
 async function refreshSidebar() {
   // Lightweight refresh: update agent status in sidebar without re-rendering current view
@@ -559,8 +657,8 @@ async function refreshSidebar() {
       // when renderCurrentView ran, which refreshSidebar doesn't trigger.
       try {
         if (typeof window.isV2Mode === 'function' && window.isV2Mode() &&
-            typeof window.loadV2TasksIntoQueue === 'function') {
-          window.loadV2TasksIntoQueue(currentAgent);
+            typeof window.loadConversationTasksIntoQueue === 'function') {
+          window.loadConversationTasksIntoQueue(currentAgent);
         }
       } catch (_e) { /* silent */ }
     }
@@ -1655,7 +1753,7 @@ function renderAgentChat(agentId) {
     '</section>';
     // NOTE: V2 tasks are no longer rendered as a separate panel here.
     // They now merge into the existing Task Queue column (tasks-list-<id>)
-    // via loadTasks() + loadV2TasksIntoQueue(). One list, one place to look.
+    // via loadTasks() + loadConversationTasksIntoQueue(). One list, one place to look.
   loadAgentChat(agentId).then(function() {
     // After history is rendered, attach file cards to historical
     // bubbles by matching filenames mentioned in their text.
@@ -1665,12 +1763,12 @@ function renderAgentChat(agentId) {
   loadAgentEventLog(agentId);
   loadExecutionSteps(agentId);
   loadInterAgentMessages(agentId);
-  // V2 tasks are merged into the main Task Queue via loadV2TasksIntoQueue
+  // V2 tasks are merged into the main Task Queue via loadConversationTasksIntoQueue
   // — see the loadTasks() wrapper below.
   try {
     if (typeof window.isV2Mode === 'function' && window.isV2Mode() &&
-        typeof window.loadV2TasksIntoQueue === 'function') {
-      window.loadV2TasksIntoQueue(agentId);
+        typeof window.loadConversationTasksIntoQueue === 'function') {
+      window.loadConversationTasksIntoQueue(agentId);
     }
   } catch (_e) { /* silent */ }
   // Always probe V2 status (even when V2 mode is off so the badge reads
@@ -2395,8 +2493,8 @@ function _attachV2SuggestionBadge(bubble, agentId, intent, suggestion) {
       };
       link.style.pointerEvents = 'auto';
       // Nudge the Task Queue to pick up the new row without waiting for poll.
-      if (typeof window.loadV2TasksIntoQueue === 'function') {
-        try { window.loadV2TasksIntoQueue(agentId); } catch (_e) {}
+      if (typeof window.loadConversationTasksIntoQueue === 'function') {
+        try { window.loadConversationTasksIntoQueue(agentId); } catch (_e) {}
       }
     } catch (e) {
       link.textContent = '✗ 创建失败: ' + (e && e.message ? e.message : e);
@@ -3069,11 +3167,9 @@ async function sendAgentMsg(agentId) {
     }
 
     // V2 suggestion badge — classifier thinks this is a multi-step task.
-    // We don't auto-promote anymore (that spammed the task center with
-    // dead state machines). User clicks the badge to upgrade.
-    if (result.v2_suggestion && result.v2_suggestion.route === 'v2' && userBubble) {
-      _attachV2SuggestionBadge(userBubble, agentId, text, result.v2_suggestion);
-    }
+    // v2_suggestion badge was removed with the state-machine refactor.
+    // Chat tasks are now created inline via classifier + plan extraction
+    // (see M1/M2); no user action required.
 
     await _streamTaskEvents(agentId, result.task_id, thinkDiv, progressBar);
     refreshSidebar();
@@ -8889,7 +8985,7 @@ async function loadTasks(agentId) {
   const tasks = allTasks.filter(t => t.status !== 'done' && t.status !== 'cancelled');
 
   // Upsert: only touch V1 rows. Don't use el.innerHTML = ... because that
-  // clobbers V2 rows rendered by loadV2TasksIntoQueue and causes a
+  // clobbers V2 rows rendered by loadConversationTasksIntoQueue and causes a
   // "Queued → Analyzing → Queued" flicker on every poll.
   el.querySelectorAll('[data-v1-row]').forEach(function(n) { n.remove(); });
   el.querySelectorAll('[data-v1-empty]').forEach(function(n) { n.remove(); });
@@ -8908,8 +9004,8 @@ async function loadTasks(agentId) {
     }
     try {
       if (typeof window.isV2Mode === 'function' && window.isV2Mode() &&
-          typeof window.loadV2TasksIntoQueue === 'function') {
-        window.loadV2TasksIntoQueue(agentId);
+          typeof window.loadConversationTasksIntoQueue === 'function') {
+        window.loadConversationTasksIntoQueue(agentId);
       }
     } catch (_e) { /* silent */ }
     return;
@@ -8955,8 +9051,8 @@ async function loadTasks(agentId) {
   // Append V2 tasks (when V2 mode + shell) so both live in one Task Queue.
   try {
     if (typeof window.isV2Mode === 'function' && window.isV2Mode() &&
-        typeof window.loadV2TasksIntoQueue === 'function') {
-      window.loadV2TasksIntoQueue(agentId);
+        typeof window.loadConversationTasksIntoQueue === 'function') {
+      window.loadConversationTasksIntoQueue(agentId);
     }
   } catch (_e) { /* silent */ }
 }

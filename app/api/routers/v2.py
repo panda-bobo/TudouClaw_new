@@ -1,6 +1,14 @@
 """
 V2 REST + SSE router (PRD §10.1-10.3).
 
+╔════════════════════════════════════════════════════════════════════════╗
+║  ⚠️  DEPRECATED — see app/v2/core/task_loop.py for rationale.         ║
+║  Endpoints remain functional for in-flight tasks and admin cleanup,   ║
+║  but ``POST /agents/{id}/tasks`` logs a warning and the frontend no   ║
+║  longer offers state-machine task creation. New work goes through     ║
+║  the V1 chat loop + in-band `<plan>` protocol (chat-task refactor).   ║
+╚════════════════════════════════════════════════════════════════════════╝
+
 All endpoints are rooted at ``/api/v2``. Conventions:
     - Success:  ``{"ok": true, ...}``
     - Error:    ``{"ok": false, "error": "...", "error_code": "..."}``
@@ -332,6 +340,17 @@ async def submit_task(
     body: dict = Body(...),
     user: CurrentUser = Depends(get_current_user),
 ):
+    # DEPRECATED — see module banner. New work should go through the
+    # V1 chat endpoint; the in-band <plan> protocol + chat-task UI
+    # replaces the state-machine flow. Leaving this callable so an
+    # admin can still programmatically submit for regression / cleanup,
+    # but log loudly so it shows up in audit trails.
+    logger.warning(
+        "DEPRECATED state-machine task submit_task called by %s for agent=%s. "
+        "Migrate to POST /api/portal/agent/%s/chat.",
+        user.user_id if hasattr(user, "user_id") else "?",
+        agent_id, agent_id,
+    )
     agent = _get_agent_or_404(agent_id)
     intent = str(body.get("intent") or "").strip()
     if not intent:

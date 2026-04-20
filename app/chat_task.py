@@ -69,6 +69,21 @@ class ChatTask:
                 self.progress = min(progress, 100)
             self.updated_at = time.time()
 
+        # Propagate terminal state to any attached ConversationTask so
+        # the UI / resume logic sees DONE / FAILED. Best-effort: the
+        # conversation observer silently returns if no task is linked.
+        if status in (ChatTaskStatus.COMPLETED, ChatTaskStatus.FAILED,
+                      ChatTaskStatus.ABORTED):
+            try:
+                from .conversation_observer import mark_done
+                mark_done(
+                    agent_id=self.agent_id,
+                    chat_task_id=self.id,
+                    failed=(status != ChatTaskStatus.COMPLETED),
+                )
+            except Exception:
+                pass
+
     def to_dict(self) -> dict:
         return {
             "id": self.id,

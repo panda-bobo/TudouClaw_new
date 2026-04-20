@@ -49,6 +49,39 @@ _MCP_SOURCE_MODULE_RE = re.compile(
 )
 
 
+def _ct_compact(t) -> dict:
+    """Compact serialisation of a ConversationTask for list endpoints.
+
+    Drops heavy per-step tool_calls bodies (UI fetches detail per task
+    when expanded) so the list payload stays small even with a backlog
+    of 50 rows. Kept fields are everything the TASK QUEUE row renderer
+    needs to show progress + summary.
+    """
+    steps = []
+    for s in (t.steps or []):
+        steps.append({
+            "id": s.id,
+            "goal": s.goal,
+            "tool_hint": s.tool_hint,
+            "status": s.status,
+            "tool_call_count": len(s.tool_calls or []),
+        })
+    return {
+        "id": t.id,
+        "agent_id": t.agent_id,
+        "title": t.title or (t.intent[:40] + "…" if t.intent else ""),
+        "intent": t.intent,
+        "status": t.status,
+        "steps": steps,
+        "current_step_idx": t.current_step_idx,
+        "tool_call_total": t.tool_call_total,
+        "chat_task_id": t.chat_task_id,
+        "created_at": t.created_at,
+        "updated_at": t.updated_at,
+        "completed_at": t.completed_at,
+    }
+
+
 def _mcp_source_resolver():
     """Return (app_dir, proj_root, resolve_fn).
 
@@ -913,6 +946,48 @@ def _do_get_inner(handler, path: str):
             handler._json(proj.to_dict())
         else:
             handler._json({"error": "Project not found"}, 404)
+
+    elif path == "/api/portal/conversation-tasks/resumable":
+        # Global GET /api/portal/conversation-tasks/resumable
+        # Returns paused tasks across all agents — the login banner
+        # uses this to prompt the admin to continue unfinished work.
+        try:
+            from ..conversation_task import get_store as _get_ct_store
+            ct_store = _get_ct_store()
+            tasks = ct_store.list_resumable("")
+            handler._json({
+                "tasks": [_ct_compact(t) for t in tasks],
+                "count": len(tasks),
+            })
+        except Exception as e:
+            logger.warning("resumable list failed: %s", e)
+            handler._json({"tasks": [], "count": 0})
+
+    elif path.startswith("/api/portal/agent/") and path.endswith("/conversation-tasks"):
+        # Conversation-task queue: complex user messages that got
+        # promoted to a tracked task. Returns newest first. Query
+        # params:
+        #   active=1     — only non-terminal rows (default shows all)
+        #   limit=N      — cap (default 50)
+        agent_id = path.split("/")[4]
+        qs = parse_qs(urlparse(handler.path).query)
+        active_only = qs.get("active", ["0"])[0] in ("1", "true", "yes")
+        try:
+            limit = max(1, min(200, int(qs.get("limit", ["50"])[0])))
+        except (ValueError, TypeError):
+            limit = 50
+        try:
+            from ..conversation_task import get_store as _get_ct_store
+            ct_store = _get_ct_store()
+            tasks = ct_store.list_for_agent(
+                agent_id, include_terminal=not active_only, limit=limit)
+            handler._json({
+                "tasks": [_ct_compact(t) for t in tasks],
+                "active_only": active_only,
+            })
+        except Exception as e:
+            logger.warning("conversation-tasks list failed: %s", e)
+            handler._json({"tasks": []})
 
     elif path.startswith("/api/portal/agent/") and path.endswith("/tasks"):
         agent_id = path.split("/")[4]

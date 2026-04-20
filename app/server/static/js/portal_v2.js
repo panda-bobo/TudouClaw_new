@@ -25,17 +25,18 @@
 
   // ── mode flag ──────────────────────────────────────────────────────
 
-  function isV2Mode() {
-    try { return localStorage.getItem('tudou_mode') === 'v2'; }
-    catch(_e) { return false; }
-  }
+  // State-machine mode is DEPRECATED. isV2Mode always returns false
+  // so every ``if (isV2Mode())`` gate in the UI short-circuits. The
+  // toggle setter is kept as a no-op for any lingering onclick refs.
+  // Purge any leftover localStorage flag so a previously opt-in user
+  // comes back to the unified chat-task experience automatically.
+  try { localStorage.removeItem('tudou_mode'); } catch(_e) {}
 
-  function toggleV2Mode(on) {
-    try {
-      if (on) localStorage.setItem('tudou_mode', 'v2');
-      else localStorage.removeItem('tudou_mode');
-    } catch(_e) {}
-    location.reload();
+  function isV2Mode() { return false; }
+
+  function toggleV2Mode(_on) {
+    try { localStorage.removeItem('tudou_mode'); } catch(_e) {}
+    /* no reload — V2 is permanently disabled. */
   }
 
   // Apply the current flag to the sidebar toggle on boot.
@@ -753,15 +754,203 @@
   window.v2SaveTiers = v2SaveTiers;
   window.v2EnableForAgent = v2EnableForAgent;
 
-  // ── loadV2TasksIntoQueue ───────────────────────────────────────────
-  // Append V2 tasks into the existing V1 Task Queue list (tasks-list-<id>)
-  // so users see both kinds in ONE place. Each V2 item gets a 🚀 prefix
-  // + status chip to distinguish it from V1 tasks without visual clutter.
-  async function loadV2TasksIntoQueue(agentId) {
+  // ══════════════════════════════════════════════════════════════════
+  // loadConversationTasksIntoQueue — NEW (M3)
+  // ══════════════════════════════════════════════════════════════════
+  //
+  // Replaces loadV2TasksIntoQueue. Renders chat-derived task rows
+  // into the existing ``tasks-list-<agentId>`` panel: each row shows
+  // the intent title, status chip, progress bar (step done/total),
+  // and a collapsible list of plan steps when clicked.
+  //
+  // Runs on: agent-page render + refreshSidebar 15s heartbeat.
+  // Data source: GET /api/portal/agent/{id}/conversation-tasks
+  // Upsert by data-ct-task-id so polls don't reset scroll/flicker.
+  async function loadConversationTasksIntoQueue(agentId) {
     if (!agentId) return;
     var host = document.getElementById('tasks-list-' + agentId);
     if (!host) return;
 
+    var payload;
+    try {
+      payload = await _v2api('GET',
+        '/api/portal/agent/' + agentId + '/conversation-tasks?limit=50');
+    } catch (e) {
+      // transient / auth — don't wipe existing DOM
+      return;
+    }
+    var tasks = (payload && payload.tasks) || [];
+
+    // Ensure a separator row at the top of CT rows.
+    var sep = host.querySelector('[data-ct-sep]');
+    if (tasks.length) {
+      if (!sep) {
+        sep = document.createElement('div');
+        sep.setAttribute('data-ct-row', '1');
+        sep.setAttribute('data-ct-sep', '1');
+        sep.style.cssText = 'margin:10px 0 4px;font-size:9px;font-weight:700;' +
+          'color:#f97316;text-transform:uppercase;letter-spacing:0.5px';
+        sep.textContent = '🚀 状态机任务';
+        host.appendChild(sep);
+      }
+    } else if (sep) {
+      sep.remove();
+    }
+
+    var liveIds = {};
+    tasks.forEach(function(t) { liveIds[t.id] = true; });
+
+    // Remove rows for tasks that vanished.
+    host.querySelectorAll('[data-ct-task-id]').forEach(function(el) {
+      var id = el.getAttribute('data-ct-task-id');
+      if (!liveIds[id]) el.remove();
+    });
+
+    // Upsert each task row.
+    tasks.forEach(function(t) {
+      var steps = t.steps || [];
+      var doneCount = 0;
+      for (var i = 0; i < steps.length; i++) {
+        if (steps[i].status === 'done') doneCount++;
+      }
+      var totalSteps = steps.length;
+
+      var statusInfo = (function(st) {
+        switch (st) {
+          case 'running':   return ['#22c55e', '运行中', '🔄'];
+          case 'paused':    return ['#f59e0b', '已暂停', '⏸'];
+          case 'done':      return ['#22c55e', '已完成', '✅'];
+          case 'failed':    return ['#ef4444', '失败',   '❌'];
+          case 'cancelled': return ['var(--text3)', '已取消', '⏹'];
+          default:          return ['var(--text3)', st || '?', '·'];
+        }
+      })(t.status);
+
+      // Build step list HTML (collapsible — shown on hover or always
+      // visible? keep visible — Claude-style. Compact single-line per step).
+      var stepsHtml = '';
+      if (totalSteps > 0) {
+        stepsHtml = '<div style="margin-top:6px;padding-left:4px">' +
+          steps.map(function(s, i) {
+            var icon = (s.status === 'done')    ? '✓'
+                     : (s.status === 'running') ? '⟳'
+                     : (s.status === 'skipped') ? '⊘'
+                     :                            '○';
+            var color = (s.status === 'done')    ? '#22c55e'
+                      : (s.status === 'running') ? '#f97316'
+                      : (s.status === 'skipped') ? 'var(--text3)'
+                      :                            'var(--text3)';
+            var goalShort = _esc((s.goal || '').slice(0, 60));
+            var toolBadge = s.tool_hint ?
+              ' <span style="font-size:9px;color:var(--text3)">· ' + _esc(s.tool_hint) + '</span>' : '';
+            var callCount = s.tool_call_count || 0;
+            var callBadge = callCount ?
+              ' <span style="font-size:9px;color:var(--text3)">⟳ ' + callCount + '</span>' : '';
+            return '<div style="font-size:10px;line-height:1.6;color:' + color + '">' +
+              '<span style="font-weight:700;width:14px;display:inline-block">' + icon + '</span>' +
+              (i + 1) + '. ' + goalShort + toolBadge + callBadge +
+              '</div>';
+          }).join('') +
+          '</div>';
+      }
+
+      var progressBar = '';
+      if (totalSteps > 0) {
+        var pct = Math.round((doneCount / totalSteps) * 100);
+        progressBar =
+          '<div style="height:3px;background:var(--surface);border-radius:2px;overflow:hidden;margin-top:6px">' +
+            '<div style="height:100%;width:' + pct + '%;background:' + statusInfo[0] +
+              ';transition:width 0.3s"></div>' +
+          '</div>';
+      }
+
+      var isTerminal = (t.status === 'done' || t.status === 'failed' ||
+                        t.status === 'cancelled');
+      var actionBtn = '';
+      if (t.status === 'paused' || t.status === 'failed') {
+        actionBtn += '<button class="btn btn-ghost btn-xs" ' +
+          'title="从中断处继续" style="color:#22c55e;padding:2px 6px" ' +
+          'onclick="event.stopPropagation();_resumeConversationTask(\'' +
+          _esc(t.id) + '\')">▶</button>';
+      }
+      if (isTerminal) {
+        actionBtn += '<button class="btn btn-ghost btn-xs" ' +
+          'title="清除此任务" style="color:var(--text3);padding:2px 6px" ' +
+          'onclick="event.stopPropagation();_ctDelete(\'' + _esc(t.id) +
+          '\', \'' + _esc(agentId) + '\')">🗑</button>';
+      }
+
+      var innerHtml =
+        '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px">' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-size:11px;font-weight:600;overflow:hidden;' +
+              'text-overflow:ellipsis;white-space:nowrap">' +
+              statusInfo[2] + ' ' + _esc(t.title || t.intent || '(no intent)') +
+            '</div>' +
+            '<div style="font-size:9px;color:var(--text3);margin-top:2px">' +
+              (totalSteps ? (doneCount + '/' + totalSteps + ' steps') : 'no plan') +
+              ' · ' + _age(t.created_at) +
+              (t.tool_call_total ? ' · ⟳' + t.tool_call_total + ' tools' : '') +
+            '</div>' +
+          '</div>' +
+          '<div style="display:flex;gap:4px;align-items:center">' +
+            '<span style="font-size:9px;padding:2px 6px;border-radius:8px;' +
+              'background:rgba(255,255,255,0.08);color:' + statusInfo[0] +
+              ';font-weight:600">' + statusInfo[1] + '</span>' +
+            actionBtn +
+          '</div>' +
+        '</div>' +
+        progressBar + stepsHtml;
+
+      var row = host.querySelector('[data-ct-task-id="' + t.id + '"]');
+      if (row) {
+        if (row.innerHTML !== innerHtml) row.innerHTML = innerHtml;
+      } else {
+        row = document.createElement('div');
+        row.setAttribute('data-ct-row', '1');
+        row.setAttribute('data-ct-task-id', t.id);
+        row.style.cssText = 'background:var(--surface3);border-radius:6px;' +
+          'padding:8px 10px;border:1px solid rgba(249,115,22,0.2);' +
+          'margin-bottom:4px';
+        row.innerHTML = innerHtml;
+        host.appendChild(row);
+      }
+    });
+  }
+
+  async function _ctDelete(taskId, agentId) {
+    if (!confirm('删除此任务记录？（不会影响历史消息）')) return;
+    try {
+      await _v2api('DELETE', '/api/portal/conversation-task/' + taskId);
+      loadConversationTasksIntoQueue(agentId);
+    } catch (e) {
+      _toast('删除失败：' + e.message, 'error');
+    }
+  }
+
+  window.loadConversationTasksIntoQueue = loadConversationTasksIntoQueue;
+  window._ctDelete = _ctDelete;
+
+  // ── loadV2TasksIntoQueue (DEPRECATED shim) ──────────────────────────
+  // Append V2 tasks into the existing V1 Task Queue list (tasks-list-<id>)
+  // so users see both kinds in ONE place. Each V2 item gets a 🚀 prefix
+  // + status chip to distinguish it from V1 tasks without visual clutter.
+  async function loadV2TasksIntoQueue(agentId) {
+    // DEPRECATED — state-machine task queue is no longer shown in UI.
+    // Chat-task rendering takes over (see loadChatTasksIntoQueue in
+    // portal_chat_tasks.js). Short-circuit so existing call sites can
+    // stay wired until M1 replaces the call to the new function.
+    // We also clean up any legacy V2 rows the previous session left
+    // in the DOM so users don't see ghost "运行中" entries.
+    if (!agentId) return;
+    var host = document.getElementById('tasks-list-' + agentId);
+    if (!host) return;
+    host.querySelectorAll('[data-v2-row], [data-v2-task-id], [data-v2-sep], [data-v2-addbtn]').forEach(function(el){ el.remove(); });
+    var hint = document.getElementById('v2-queue-hint-' + agentId);
+    if (hint) hint.remove();
+    return;
+
+    // eslint-disable-next-line no-unreachable  -- preserved for reference
     var qr;
     try {
       qr = await _v2api('GET', '/api/v2/agents/' + agentId + '/queue');

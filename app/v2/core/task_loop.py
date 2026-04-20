@@ -1,6 +1,23 @@
 """
 TaskLoop — 6-phase state machine (PRD §6.2).
 
+╔════════════════════════════════════════════════════════════════════════╗
+║  ⚠️  DEPRECATED — not the production path.                            ║
+║                                                                        ║
+║  The 6-phase state machine (intake→plan→execute→verify→deliver→       ║
+║  report) proved brittle against weak / quantized open-source models   ║
+║  (Qwen 3.6-35B etc.): strict structured-JSON plan output was hit by   ║
+║  empty-content responses and parser mismatches. The "强制 JSON plan"  ║
+║  model doesn't fit this class of LLM.                                 ║
+║                                                                        ║
+║  Replacement: V1 chat loop + in-band `<plan>` protocol + step-aware   ║
+║  UI (chat-task refactor, M0-M4). The V2 core persists for backward    ║
+║  compat only — DO NOT submit new tasks through this path.             ║
+║                                                                        ║
+║  Planned removal: after chat-task flow is stable in production        ║
+║  (≥30 days, typically 1 release cycle).                                ║
+╚════════════════════════════════════════════════════════════════════════╝
+
 Responsibility: drive a Task from its current phase to DONE. Phase
 handlers return ``bool`` indicating whether the phase's exit condition
 was met. This is the ONLY contract they must honor; retry / soft-fail

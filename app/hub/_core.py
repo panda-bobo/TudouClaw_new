@@ -242,6 +242,21 @@ class Hub:
             self.standalone_task_registry = None
 
         # ── Heartbeat watchdog + downstream node ping ──
+        # ── ConversationTask crash recovery ────────────────────────
+        # Any task left in RUNNING at startup belongs to a previous
+        # process that's now gone. Flip them to PAUSED so the UI shows
+        # a "continue" affordance instead of a ghost "running" chip.
+        try:
+            from ..conversation_task import get_store as _get_ct_store
+            flipped = _get_ct_store().mark_paused_if_running()
+            if flipped:
+                logger.info(
+                    "ConversationTask recovery: %d running tasks flipped "
+                    "to PAUSED (resumable)", flipped,
+                )
+        except Exception as _cre:
+            logger.warning("ConversationTask recovery skipped: %s", _cre)
+
         self._heartbeat_stop = threading.Event()
         self._heartbeat_interval = float(
             os.environ.get("TUDOU_HEARTBEAT_INTERVAL", "15") or 15
