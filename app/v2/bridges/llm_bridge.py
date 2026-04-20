@@ -46,10 +46,20 @@ def call_llm(
     tools: list[dict] | None = None,
     *,
     tier: str = "default",
+    agent_provider: str = "",
+    agent_model: str = "",
     max_tokens: int = 4096,   # noqa: ARG001 — V1 provider handles per-call
     stream: bool = False,     # noqa: ARG001 — V2 executor is always non-stream
 ) -> dict:
     """Call the resolved LLM and return a normalised assistant message.
+
+    Resolution priority:
+      1. Explicit ``tier`` → ``llm_tier_routing.resolve_tier``
+      2. Agent's own ``(provider, model)`` passed in via
+         ``agent_provider`` / ``agent_model`` kwargs (NEW fallback —
+         keeps tier="default" calls working when the admin hasn't
+         mapped "default" in llm_tiers.json)
+      3. V1 global default (now typically unset, see config.yaml)
 
     Return shape::
 
@@ -59,6 +69,13 @@ def call_llm(
     explicitly.
     """
     provider, model = _resolve_tier(tier)
+
+    # Tier didn't resolve → use the agent's own LLM instead of falling
+    # through to V1 config.yaml default (which may be intentionally
+    # empty so that agents without a bound LLM fail fast).
+    if not provider or not model:
+        if agent_provider and agent_model:
+            provider, model = agent_provider, agent_model
 
     # V1 owns provider routing (registry, fallback chain, cost, pool).
     raw = _call_via_v1(

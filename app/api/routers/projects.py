@@ -63,8 +63,17 @@ async def manage_projects(
         if action == "create":
             if not hasattr(hub, "create_project"):
                 raise HTTPException(500, "hub.create_project not available")
+            # Validation: require a real name. Default "New Project" is
+            # a placeholder, not a project. Reject so the DB doesn't
+            # fill with placeholder rows.
+            name = (body.get("name") or "").strip()
+            if not name:
+                raise HTTPException(400, "name is required (non-empty)")
+            if name.lower() in ("new project", "project", "untitled"):
+                raise HTTPException(400,
+                    "name is too generic — pick something meaningful")
             project = hub.create_project(
-                name=body.get("name", "New Project"),
+                name=name,
                 description=body.get("description", ""),
                 member_configs=body.get("members", []),
                 working_directory=body.get("working_directory", ""),
@@ -1192,14 +1201,24 @@ async def create_standalone_task(
     hub=Depends(get_hub),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Create a standalone task."""
+    """Create a standalone task.
+
+    Gate: title is required (non-empty). Rejecting placeholder titles
+    prevents the dashboard from filling with empty "独立任务" rows.
+    """
+    title = (body.get("title") or "").strip()
+    if not title:
+        raise HTTPException(400, "title is required (non-empty)")
+    if title.lower() in ("new task", "task", "untitled", "独立任务"):
+        raise HTTPException(400,
+            "title is too generic — pick something meaningful")
     try:
         reg = getattr(hub, "standalone_task_registry", None)
         if reg is None:
             raise HTTPException(503, "standalone task registry not initialized")
         actor = user.user_id if hasattr(user, "user_id") else "admin"
         t = reg.create(
-            title=body.get("title", ""),
+            title=title,
             description=body.get("description", ""),
             assigned_to=body.get("assigned_to", ""),
             created_by=body.get("created_by", "") or actor,

@@ -2198,8 +2198,15 @@ def _tool_web_search(query: str, max_results: int = 8, **_: Any) -> str:
     return f"Search results for: {query}\n\n" + "\n\n".join(results)
 
 
-def _tool_web_fetch(url: str, max_length: int = 10000, **_: Any) -> str:
-    """Fetch the text content of a web page URL."""
+def _tool_web_fetch(url: str, max_length: int = 5000, **_: Any) -> str:
+    """Fetch the text content of a web page URL.
+
+    Default max_length is 5000 chars (~1250 tokens). A typical research
+    session does 3-6 fetches — at 10000 chars/fetch the history alone
+    burned 25k+ tokens and crowded out the actual work. Callers that
+    need more can pass max_length explicitly, but the default now
+    favors breadth (more URLs visited) over depth per URL.
+    """
     import urllib.request
 
     headers = {

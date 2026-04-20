@@ -324,6 +324,12 @@
     try {
       var r = await _v2api('GET', '/api/v2/tasks/' + taskId);
       var t = r.task;
+      // Error events come back inline on the GET response (see
+      // _task_to_dict → errors[]). Keeps us off the SSE /events
+      // stream which can't be consumed by a plain fetch().json().
+      var events = (r.errors || []).map(function(e) {
+        return { type: 'phase_error', phase: e.phase, payload: e };
+      });
       var phases = ['intake', 'plan', 'execute', 'verify', 'deliver', 'report'];
       var cur = phases.indexOf(t.phase);
       var phasesHtml = phases.map(function(p, i) {
@@ -350,6 +356,43 @@
           _esc(le.issue) + ' → ' + _esc(le.fix || '-') + '</li>';
       }).join('');
 
+      // Pull every phase_error event (most useful diagnostic when task
+      // is failed). Render the error string + any raw_content hint.
+      var errorEvents = (events || []).filter(function(e){
+        return e.type === 'phase_error';
+      });
+      var errorsHtml = '';
+      if (errorEvents.length) {
+        errorsHtml = '<div style="margin-top:16px;padding:12px;' +
+          'background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.3);' +
+          'border-radius:6px">' +
+          '<h4 style="margin:0 0 8px;font-size:11px;color:#ef4444;' +
+          'text-transform:uppercase">❌ Errors (' + errorEvents.length + ')</h4>' +
+          errorEvents.map(function(e) {
+            var p = e.payload || {};
+            var block = '<div style="margin-bottom:8px;padding:6px 0;' +
+              'border-bottom:1px dotted rgba(239,68,68,0.2);font-size:11px">' +
+              '<div style="color:var(--text2)"><b>[' + _esc(p.phase || e.phase) + ']</b> ' +
+              _esc(p.error || '(no message)') + '</div>';
+            if (p.raw_content) {
+              block += '<pre style="margin:4px 0 0;padding:6px;background:var(--bg2);' +
+                'border-radius:4px;font-size:10px;color:var(--text3);' +
+                'white-space:pre-wrap;word-break:break-all;max-height:120px;overflow-y:auto">' +
+                _esc(String(p.raw_content)) + '</pre>';
+            }
+            if (p.hint) {
+              block += '<div style="font-size:10px;color:var(--text3);margin-top:4px">💡 ' +
+                _esc(p.hint) + '</div>';
+            }
+            if (p.skipped && p.skipped.length) {
+              block += '<div style="font-size:10px;color:var(--text3);margin-top:4px">skipped: ' +
+                _esc(p.skipped.join('; ')) + '</div>';
+            }
+            return block + '</div>';
+          }).join('') +
+          '</div>';
+      }
+
       var html = '<div style="padding:24px;max-width:700px;max-height:80vh;overflow-y:auto">' +
         '<h3 style="margin:0 0 8px">' + _esc(t.intent || '(no intent)') + '</h3>' +
         '<div style="font-size:11px;color:var(--text3);margin-bottom:16px">' +
@@ -366,6 +409,7 @@
             '<ul style="list-style:none;padding:0;margin:0">' + lessons + '</ul>' : '') +
           '</div>' +
         '</div>' +
+        errorsHtml +
         '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">' +
           (t.status === 'running' || t.status === 'queued' ?
             '<button class="btn btn-ghost btn-sm" onclick="v2CancelTask(\'' + _esc(t.id) + '\');closeModal()" style="color:#ef4444">取消任务</button>'
@@ -735,6 +779,10 @@
           'style="color:var(--primary);cursor:pointer">启用</a>';
         host.appendChild(notice);
       }
+      // For ANY error we still need to drop stale rows — otherwise a
+      // transient 5xx / network blip leaves a dead "运行中" row in the
+      // DOM forever. The old behavior silently returned which is how
+      // failed tasks appeared to "stick" after an API hiccup.
       return;
     }
 
@@ -779,6 +827,20 @@
       var isActive = (t === qr.active);
       var statusLabel = isActive ? '运行中' : '排队中';
       var statusColor = isActive ? '#22c55e' : 'var(--primary)';
+      // Show total task lifetime (created_at), not "time since last
+      // update". The latter resets to 0s on every phase retry, which
+      // misled users into thinking the task had restarted. Also surface
+      // retry counts so a stuck phase is visible instead of hidden
+      // behind a perpetual "0s 运行中".
+      var ageStr = _age(t.created_at);
+      var retrySuffix = '';
+      var retries = t.retries || {};
+      var retryEntries = Object.keys(retries).filter(function(k){ return retries[k] > 0; });
+      if (retryEntries.length) {
+        retrySuffix = ' · ⟳' + retryEntries.map(function(k){
+          return k + ':' + retries[k];
+        }).join(' ');
+      }
       var innerHtml =
         '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px">' +
           '<div style="flex:1;min-width:0">' +
@@ -786,7 +848,7 @@
               'text-overflow:ellipsis;white-space:nowrap">🚀 ' +
               _esc(t.intent || '(no intent)') + '</div>' +
             '<div style="font-size:9px;color:var(--text3);margin-top:2px">' +
-              'phase=' + _esc(t.phase) + ' · ' + _age(t.updated_at || t.created_at) + '</div>' +
+              'phase=' + _esc(t.phase) + ' · ' + ageStr + retrySuffix + '</div>' +
           '</div>' +
           '<span style="font-size:9px;padding:2px 6px;border-radius:8px;' +
             'background:rgba(255,255,255,0.08);color:' + statusColor + ';font-weight:600">' +

@@ -357,6 +357,18 @@ def _do_post_inner(handler, path: str):
             return
 
     if path == "/api/portal/agent/create":
+        # Validation: require a real name. Ghost "Claw"/empty rows were
+        # filling the dashboard because the UI (or a client retry loop)
+        # could POST with no body. Reject at the gate.
+        _req_name = (body.get("name") or "").strip()
+        if not _req_name:
+            handler._json({"error": "name is required (non-empty)"}, 400)
+            return
+        if _req_name.lower() in ("claw", "new agent", "agent"):
+            handler._json({
+                "error": "name is too generic — pick something meaningful"
+            }, 400)
+            return
         target_node = body.get("node_id", "local")
         logger.info("CREATE_AGENT request: name=%s role=%s target_node=%s actor=%s",
                     body.get("name"), body.get("role"), target_node, actor_name)
@@ -2070,20 +2082,36 @@ def _do_post_inner(handler, path: str):
             handler._json({"error": str(_ex)}, 500)
 
     elif path == "/api/portal/providers":
-        # Add new provider
+        # Add new provider — reject empty-config placeholders.
+        _prov_name = (body.get("name") or "").strip()
+        _prov_base = (body.get("base_url") or "").strip()
+        _prov_key = (body.get("api_key") or "").strip()
+        if not _prov_name:
+            handler._json({"error": "name is required (non-empty)"}, 400)
+            return
+        if not _prov_base and not _prov_key:
+            handler._json({
+                "error": "Provider must have a base_url or api_key — "
+                         "empty placeholders clutter the registry"
+            }, 400)
+            return
         reg = get_registry()
-        p = reg.add(
-            name=body.get("name", ""),
-            kind=body.get("kind", "openai"),
-            base_url=body.get("base_url", ""),
-            api_key=body.get("api_key", ""),
-            enabled=body.get("enabled", True),
-            manual_models=body.get("manual_models"),
-            scope=body.get("scope", "local"),
-            max_concurrent=max(1, int(body.get("max_concurrent", 1))),
-            schedule_strategy=body.get("schedule_strategy", "serial"),
-            rate_limit_rpm=max(0, int(body.get("rate_limit_rpm", 0))),
-        )
+        try:
+            p = reg.add(
+                name=_prov_name,
+                kind=body.get("kind", "openai"),
+                base_url=_prov_base,
+                api_key=_prov_key,
+                enabled=body.get("enabled", True),
+                manual_models=body.get("manual_models"),
+                scope=body.get("scope", "local"),
+                max_concurrent=max(1, int(body.get("max_concurrent", 1))),
+                schedule_strategy=body.get("schedule_strategy", "serial"),
+                rate_limit_rpm=max(0, int(body.get("rate_limit_rpm", 0))),
+            )
+        except ValueError as _ve:
+            handler._json({"error": str(_ve)}, 400)
+            return
         # Set models_cache from manual_models
         if body.get("manual_models"):
             p.models_cache = list(body.get("manual_models", []))
@@ -2477,8 +2505,18 @@ def _do_post_inner(handler, path: str):
     elif path == "/api/portal/projects":
         action = body.get("action", "create")
         if action == "create":
+            # Validation: real name required (not the UI placeholder).
+            _p_name = (body.get("name") or "").strip()
+            if not _p_name:
+                handler._json({"error": "name is required (non-empty)"}, 400)
+                return
+            if _p_name.lower() in ("new project", "project", "untitled"):
+                handler._json({
+                    "error": "name is too generic — pick something meaningful"
+                }, 400)
+                return
             proj = hub.create_project(
-                name=body.get("name", "New Project"),
+                name=_p_name,
                 description=body.get("description", ""),
                 member_configs=body.get("members", []),
                 working_directory=body.get("working_directory", ""),
@@ -3341,12 +3379,22 @@ def _do_post_inner(handler, path: str):
 
     # ── Standalone Tasks (non-project) ──
     elif path == "/api/portal/standalone-tasks":
+        # Gate: require a real title (no empty / generic placeholders).
+        _st_title = (body.get("title") or "").strip()
+        if not _st_title:
+            handler._json({"error": "title is required (non-empty)"}, 400)
+            return
+        if _st_title.lower() in ("new task", "task", "untitled", "独立任务"):
+            handler._json({
+                "error": "title is too generic — pick something meaningful"
+            }, 400)
+            return
         reg = getattr(hub, "standalone_task_registry", None)
         if reg is None:
             handler._json({"error": "standalone task registry not initialized"}, 503)
         else:
             t = reg.create(
-                title=body.get("title", ""),
+                title=_st_title,
                 description=body.get("description", ""),
                 assigned_to=body.get("assigned_to", ""),
                 created_by=body.get("created_by", "") or actor_name or "user",
@@ -3534,11 +3582,25 @@ def _do_post_inner(handler, path: str):
 
     # ---- Channel endpoints ----
     elif path == "/api/portal/channels":
+        # Validation: reject empty channels at the gate. Without this
+        # the DB fills with ghost rows every time the UI double-clicks.
+        _name = (body.get("name") or "").strip()
+        _agent_id = (body.get("agent_id") or "").strip()
+        _ctype = (body.get("channel_type") or "").strip()
+        if not _name:
+            handler._json({"error": "name is required (non-empty)"}, 400)
+            return
+        if not _agent_id:
+            handler._json({"error": "agent_id is required — bind the channel to an agent"}, 400)
+            return
+        if not _ctype:
+            handler._json({"error": "channel_type is required"}, 400)
+            return
         router = get_router()
         ch = router.add_channel(
-            name=body.get("name", ""),
-            channel_type=ChannelType(body.get("channel_type", "webhook")),
-            agent_id=body.get("agent_id", ""),
+            name=_name,
+            channel_type=ChannelType(_ctype),
+            agent_id=_agent_id,
             bot_token=body.get("bot_token", ""),
             signing_secret=body.get("signing_secret", ""),
             webhook_url=body.get("webhook_url", ""),

@@ -68,14 +68,29 @@ async def register_provider(
     hub=Depends(get_hub),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Register a new LLM provider."""
+    """Register a new LLM provider.
+
+    Gate: reject empty-name / empty-config providers at the REST layer
+    so the registry doesn't fill with placeholders. The underlying
+    ProviderRegistry.add also validates, but catching here returns a
+    400 instead of the generic 500-wrapping-ValueError.
+    """
+    name = (body.get("name") or "").strip()
+    base_url = (body.get("base_url") or "").strip()
+    api_key = (body.get("api_key") or "").strip()
+    if not name:
+        raise HTTPException(400, "name is required (non-empty)")
+    if not base_url and not api_key:
+        raise HTTPException(400,
+            "Provider must have a base_url or api_key — "
+            "empty placeholders clutter the registry")
     try:
         reg = _get_registry()
         p = reg.add(
-            name=body.get("name", ""),
+            name=name,
             kind=body.get("kind", "openai"),
-            base_url=body.get("base_url", ""),
-            api_key=body.get("api_key", ""),
+            base_url=base_url,
+            api_key=api_key,
             enabled=body.get("enabled", True),
             manual_models=body.get("manual_models"),
             scope=body.get("scope", "local"),
@@ -88,6 +103,8 @@ async def register_provider(
             p.models_cache = list(body.get("manual_models", []))
             reg._save()
         return p.to_dict(mask_key=True)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     except HTTPException:
         raise
     except Exception as e:

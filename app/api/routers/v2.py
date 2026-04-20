@@ -404,7 +404,28 @@ async def get_task(
     task_id: str,
     user: CurrentUser = Depends(get_current_user),
 ):
-    return {"ok": True, "task": _task_to_dict(_get_task_or_404(task_id))}
+    task = _get_task_or_404(task_id)
+    # Surface phase_error events inline so the UI can show WHY a task
+    # failed without opening the SSE stream. Limited to recent errors
+    # (last 10) to keep payload small.
+    errors: list[dict] = []
+    try:
+        events = get_store().load_events(task_id)
+        for evt in events:
+            if evt.type == "phase_error":
+                payload = evt.payload if isinstance(evt.payload, dict) else {}
+                errors.append({
+                    "ts": evt.ts,
+                    "phase": payload.get("phase") or evt.phase,
+                    "error": payload.get("error", ""),
+                    "raw_content": payload.get("raw_content", ""),
+                    "hint": payload.get("hint", ""),
+                    "skipped": payload.get("skipped", []),
+                })
+        errors = errors[-10:]
+    except Exception:
+        errors = []
+    return {"ok": True, "task": _task_to_dict(task), "errors": errors}
 
 
 @router.post("/tasks/{task_id}/pause")

@@ -90,14 +90,32 @@ async def create_channel(
     hub=Depends(get_hub),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Create a new channel."""
+    """Create a new channel.
+
+    Required fields: ``name`` (non-empty), ``channel_type``, ``agent_id``.
+    A channel without a name/agent is junk and clutters the dashboard;
+    reject them at the gate instead of letting the DB fill with ghosts.
+    """
+    name = (body.get("name") or "").strip()
+    agent_id = (body.get("agent_id") or "").strip()
+    channel_type_raw = (body.get("channel_type") or "").strip()
+    if not name:
+        raise HTTPException(400, "name is required (non-empty)")
+    if not agent_id:
+        raise HTTPException(400, "agent_id is required — bind the channel to an agent")
+    if not channel_type_raw:
+        raise HTTPException(400, "channel_type is required (webhook|slack|telegram|...)")
     try:
         from ...channel import get_router as get_ch_router, ChannelType
         ch_router = get_ch_router()
+        try:
+            ctype = ChannelType(channel_type_raw)
+        except ValueError:
+            raise HTTPException(400, f"unknown channel_type: {channel_type_raw!r}")
         ch = ch_router.add_channel(
-            name=body.get("name", ""),
-            channel_type=ChannelType(body.get("channel_type", "webhook")),
-            agent_id=body.get("agent_id", ""),
+            name=name,
+            channel_type=ctype,
+            agent_id=agent_id,
             bot_token=body.get("bot_token", ""),
             signing_secret=body.get("signing_secret", ""),
             webhook_url=body.get("webhook_url", ""),

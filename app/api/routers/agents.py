@@ -832,10 +832,21 @@ async def create_agent(
     hub=Depends(get_hub),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Create a new agent."""
+    """Create a new agent.
+
+    Name is required and must be specific. "Claw" / "" / "Agent" /
+    "New Agent" are rejected because those are the default placeholders
+    that a runaway client loop produces — they don't identify anything.
+    """
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "name is required (non-empty)")
+    if name.lower() in ("claw", "new agent", "agent"):
+        raise HTTPException(400,
+            "name is too generic — pick something meaningful")
     try:
         agent = hub.create_agent(
-            name=body.get("name", ""),
+            name=name,
             role=body.get("role", "general"),
             model=body.get("model", ""),
             provider=body.get("provider", ""),

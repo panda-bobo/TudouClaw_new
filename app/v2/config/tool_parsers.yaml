@@ -11,10 +11,23 @@
 # app/v2/bridges/tool_parsers/user_parsers/ and it auto-registers.
 
 parsers:
-  # ── Qwen family (2, 2.5, 3) ────────────────────────────────────
+  # ── Qwen family (2, 2.5, 3, 3.5, 3.6) ──────────────────────────
   # Qwen fine-tuned with function-calling emit <tool_call>...</tool_call>
   # blocks in content. mlx_lm.server does NOT parse these — we must.
+  # Match plain "qwen...", CamelCase "Qwen...", and vendor-prefixed
+  # variants (mlx-community/Qwen..., unsloth/Qwen..., Alibaba-NLP/...)
+  # that ship pre-quantized weights.
   - match: "qwen*"
+    class: XMLTagJSONParser
+    config:
+      open_tag: "<tool_call>"
+      close_tag: "</tool_call>"
+  - match: "*/qwen*"
+    class: XMLTagJSONParser
+    config:
+      open_tag: "<tool_call>"
+      close_tag: "</tool_call>"
+  - match: "*Qwen*"
     class: XMLTagJSONParser
     config:
       open_tag: "<tool_call>"

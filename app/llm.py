@@ -1208,6 +1208,19 @@ class ProviderEntry:
         return p
 
 
+def _is_ghost_provider_dict(d: dict) -> bool:
+    """A provider is a 'ghost' if it has no way to actually do anything:
+    no base_url, no api_key, and no models cached/manual. These rows come
+    from buggy callers that construct ``ProviderEntry()`` empty or
+    persist a partial dict. Load paths skip them to keep the registry
+    from filling with placeholders on every restart.
+    """
+    base = (d.get("base_url") or "").strip()
+    key = (d.get("api_key") or "").strip()
+    models = (d.get("models_cache") or []) or (d.get("manual_models") or [])
+    return not base and not key and not models
+
+
 class ProviderRegistry:
     """Dynamic registry of LLM providers, persisted to JSON."""
 
@@ -1229,10 +1242,31 @@ class ProviderRegistry:
             return None
 
     def _load(self):
+        """Load providers from DB (primary) or JSON (fallback).
+
+        Skips rows that would materialise as ghost providers —
+        i.e. empty id/name/base_url/api_key. The DB's ``data`` column
+        used to sometimes be NULL (upsert path bug), which caused
+        ``from_dict({})`` to generate a fresh uuid and persist a
+        placeholder row on every restart.
+        """
         db = self._get_db()
         if db and db.count("providers") > 0:
             try:
                 for d in db.load_providers():
+                    # DB row_to_dict merges the `data` blob. If blob is NULL
+                    # or missing an 'id'/'name' we only have the `provider_id`
+                    # column — fall back to that, and skip truly empty rows.
+                    if not d.get("id") and d.get("provider_id"):
+                        d["id"] = d["provider_id"]
+                    if not (d.get("id") or "").strip():
+                        logger.warning("Skipping ghost provider row (no id): %r",
+                                       {k: d.get(k) for k in ("provider_id", "name")})
+                        continue
+                    if _is_ghost_provider_dict(d):
+                        logger.warning("Skipping ghost provider %r: no base_url/api_key/models",
+                                       d.get("id"))
+                        continue
                     p = ProviderEntry.from_dict(d)
                     self._providers[p.id] = p
                 return
@@ -1245,23 +1279,44 @@ class ProviderRegistry:
             with open(self._file, "r", encoding="utf-8") as f:
                 data = json.load(f)
             for d in data.get("providers", []):
+                if not (d.get("id") or "").strip():
+                    continue
+                if _is_ghost_provider_dict(d):
+                    logger.warning("Skipping ghost provider %r from JSON", d.get("id"))
+                    continue
                 p = ProviderEntry.from_dict(d)
                 self._providers[p.id] = p
         except Exception:
             self._seed_defaults()
 
     def _save(self):
+        """Persist providers to DB + JSON. Ghost entries (empty
+        base_url / api_key / models) are filtered out and logged so
+        they disappear on the next flush even if something upstream
+        snuck one into memory.
+        """
         os.makedirs(self._data_dir, exist_ok=True)
+        real: list[ProviderEntry] = []
+        for p in self._providers.values():
+            if _is_ghost_provider_dict(p.to_dict()):
+                logger.warning(
+                    "Dropping ghost provider on save: id=%s name=%s",
+                    p.id, p.name,
+                )
+                continue
+            real.append(p)
+        # Evict ghosts from memory too so future reads are consistent.
+        if len(real) != len(self._providers):
+            self._providers = {p.id: p for p in real}
+
         db = self._get_db()
         if db:
             try:
-                for p in self._providers.values():
+                for p in real:
                     db.save_provider(p.to_dict())
             except Exception:
                 pass
-        data = {
-            "providers": [p.to_dict() for p in self._providers.values()]
-        }
+        data = {"providers": [p.to_dict() for p in real]}
         try:
             with open(self._file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -1345,7 +1400,19 @@ class ProviderRegistry:
             schedule_strategy: str = "serial",
             rate_limit_rpm: int = 0,
             fallback_providers: list[str] | None = None) -> ProviderEntry:
-        p = ProviderEntry(name=name, kind=kind, base_url=base_url,
+        # Validation: every provider needs at minimum a non-empty name
+        # AND one of {base_url, api_key}. Without this the registry
+        # fills with ghost entries named after random uuid4 prefixes
+        # (caller passed name="" → ProviderEntry auto-IDed from uuid →
+        # to_dict() showed id==name and an empty base, unusable).
+        _name = (name or "").strip()
+        if not _name:
+            raise ValueError("Provider name is required (non-empty)")
+        if not (base_url or "").strip() and not (api_key or "").strip():
+            raise ValueError(
+                "Provider must have at least a base_url or api_key — "
+                "empty placeholder providers clutter the registry")
+        p = ProviderEntry(name=_name, kind=kind, base_url=base_url,
                           api_key=api_key, enabled=enabled, manual_models=manual_models,
                           scope=scope, max_concurrent=max_concurrent,
                           model_concurrency=model_concurrency,

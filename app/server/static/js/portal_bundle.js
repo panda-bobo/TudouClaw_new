@@ -551,6 +551,18 @@ async function refreshSidebar() {
     // Update event log and task count (but NOT chat messages)
     if (currentAgent) {
       loadAgentEventLog(currentAgent);
+      // Also refresh the state-machine task queue so failed tasks drop
+      // off the UI within the 15s heartbeat instead of sticking around
+      // until the user navigates away and back. Without this, a task
+      // that flipped to failed/cancelled after its row was rendered
+      // appeared to "stay running forever" — its DOM was only cleared
+      // when renderCurrentView ran, which refreshSidebar doesn't trigger.
+      try {
+        if (typeof window.isV2Mode === 'function' && window.isV2Mode() &&
+            typeof window.loadV2TasksIntoQueue === 'function') {
+          window.loadV2TasksIntoQueue(currentAgent);
+        }
+      } catch (_e) { /* silent */ }
     }
   } catch(e) {}
 }

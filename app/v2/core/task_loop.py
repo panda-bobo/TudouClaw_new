@@ -262,23 +262,46 @@ class TaskLoop:
     # ── Plan (PRD §8.2) ────────────────────────────────────────────────
 
     def _plan(self) -> bool:
-        """Generate a structured ``Plan`` from intent + slots + lessons."""
+        """Generate a structured ``Plan`` from intent + slots + lessons.
+
+        Emits a ``phase_error`` on every soft-fail path so the UI can
+        show WHY planning failed instead of the opaque
+        "phase plan exceeded max retries" summary.
+        """
         template = self._load_template()
         plan_json = self._llm_generate_plan(template)
         if not plan_json:
-            return False  # retry budget = 3
+            # _llm_generate_plan already emitted a phase_error when the
+            # bridge raised. But if it simply returned None because the
+            # LLM wrote text that didn't parse as JSON, that surface is
+            # silent — make it visible.
+            self._emit("phase_error", {
+                "phase": TaskPhase.PLAN.value,
+                "error": "plan_json empty or not parseable "
+                         "(LLM returned text without a valid ```json block)",
+            })
+            return False
 
         steps_raw = plan_json.get("steps") or []
         if not isinstance(steps_raw, list) or len(steps_raw) == 0:
+            self._emit("phase_error", {
+                "phase": TaskPhase.PLAN.value,
+                "error": f"plan has no steps: {type(steps_raw).__name__} "
+                         f"(length={len(steps_raw) if hasattr(steps_raw,'__len__') else '?'})",
+                "plan_sample": str(plan_json)[:400],
+            })
             return False
 
         steps: list[PlanStep] = []
+        skipped: list[str] = []
         for i, s in enumerate(steps_raw):
             if not isinstance(s, dict):
+                skipped.append(f"#{i}: not a dict ({type(s).__name__})")
                 continue
             step_id = str(s.get("id") or f"s{i+1}")
             goal = str(s.get("goal") or "").strip()
             if not goal:
+                skipped.append(f"#{i} ({step_id}): empty goal")
                 continue
             exit_check = s.get("exit_check") or {}
             if not isinstance(exit_check, dict):
@@ -291,6 +314,12 @@ class TaskLoop:
             ))
 
         if not steps:
+            self._emit("phase_error", {
+                "phase": TaskPhase.PLAN.value,
+                "error": "plan produced no valid steps after filtering",
+                "skipped": skipped[:6],
+                "raw_steps": str(steps_raw)[:400],
+            })
             return False
 
         self.task.plan = Plan(
@@ -676,7 +705,7 @@ class TaskLoop:
             + ("\n".join(lesson_lines) if lesson_lines else "（无）")
         )
         try:
-            msg = llm_bridge.call_llm(
+            msg = self._call_llm(
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user",   "content": user},
@@ -739,6 +768,48 @@ class TaskLoop:
             return (self.agent.capabilities.llm_tier or "default") if self.agent else "default"
         except Exception:
             return "default"
+
+    def _call_llm(self, *, messages, tools=None, max_tokens=2000, tier=None):
+        """Unified llm_bridge.call_llm wrapper that always passes an
+        agent-LLM fallback. All phase handlers that need LLM go through
+        this — avoids duplicating the agent-fallback plumbing.
+        """
+        from ..bridges import llm_bridge
+        prov, mdl = self._agent_llm_fallback()
+        return llm_bridge.call_llm(
+            messages=messages,
+            tools=tools,
+            tier=(tier or self._llm_tier()),
+            agent_provider=prov,
+            agent_model=mdl,
+            max_tokens=max_tokens,
+        )
+
+    def _agent_llm_fallback(self) -> tuple[str, str]:
+        """Return the V1 agent's (provider, model) for call_llm fallback.
+
+        V2 uses tier-based routing, but if the admin hasn't mapped the
+        tier (common for tier='default'), we fall back to the agent's
+        own LLM binding rather than V1's global config. Returns
+        ("","") if no agent or no binding — caller will surface the
+        resulting NO_LLM_CONFIGURED error.
+        """
+        try:
+            if not self.agent:
+                return ("", "")
+            v1_id = getattr(self.agent, "v1_agent_id", "") or self.agent.id
+            import sys as _sys
+            mod = _sys.modules.get("app.llm")
+            hub = getattr(mod, "_active_hub", None) if mod else None
+            if hub is None:
+                return ("", "")
+            v1_agent = hub.get_agent(v1_id) if hasattr(hub, "get_agent") else None
+            if v1_agent is None:
+                return ("", "")
+            return (getattr(v1_agent, "provider", "") or "",
+                    getattr(v1_agent, "model", "") or "")
+        except Exception:
+            return ("", "")
 
     def _multimodal_supported(self) -> bool:
         """True iff the provider resolved from the agent's tier has
@@ -809,7 +880,7 @@ class TaskLoop:
         )
 
         try:
-            msg = llm_bridge.call_llm(
+            msg = self._call_llm(
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user",   "content": user},
@@ -875,7 +946,7 @@ class TaskLoop:
         )
 
         try:
-            msg = llm_bridge.call_llm(
+            msg = self._call_llm(
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user",   "content": user},
@@ -889,7 +960,62 @@ class TaskLoop:
                 "error": f"llm_bridge failed: {type(e).__name__}: {e}",
             })
             return None
-        return _extract_json(msg.get("content", ""))
+        content = msg.get("content", "") or ""
+        result = _extract_json(content)
+
+        # Tool-calls fallback: if content is empty but the LLM emitted
+        # the plan as a tool_call's arguments (common with Qwen-family
+        # models that reflexively wrap structured output in tool_call
+        # markers), try to lift the plan out of there.
+        if result is None and not content:
+            for tc in (msg.get("tool_calls") or []):
+                fn = tc.get("function") if isinstance(tc, dict) else None
+                if not isinstance(fn, dict):
+                    continue
+                raw_args = fn.get("arguments")
+                if isinstance(raw_args, dict) and "steps" in raw_args:
+                    result = raw_args
+                    break
+                if isinstance(raw_args, str):
+                    parsed = _extract_json(raw_args) or None
+                    try:
+                        if parsed is None:
+                            parsed = json.loads(raw_args)
+                    except Exception:
+                        parsed = None
+                    if isinstance(parsed, dict) and "steps" in parsed:
+                        result = parsed
+                        break
+
+        if result is None:
+            # Last-resort diagnostic: dump the full msg shape so the
+            # user can see exactly what came back.
+            tool_calls = msg.get("tool_calls") or []
+            other_keys = [k for k in msg.keys()
+                          if k not in ("role", "content", "tool_calls")]
+            details = {
+                "phase": TaskPhase.PLAN.value,
+                "error": "could not extract JSON from LLM response",
+                "raw_content": content[:600],
+                "content_len": len(content),
+                "tool_calls_count": len(tool_calls),
+                "tool_calls_sample": str(tool_calls)[:400] if tool_calls else "",
+                "other_msg_keys": other_keys,
+                "msg_sample": str(msg)[:600],
+                "hint": ("LLM returned empty content. Likely causes: "
+                         "(1) parser stripped a <tool_call> block — check "
+                         "tool_parsers.yaml matches this model; (2) context "
+                         "window exceeded (40k+ tokens) — see prompt bloat; "
+                         "(3) model silently hit max_tokens."
+                         if not content and not tool_calls else
+                         "LLM emitted tool_calls but their arguments don't "
+                         "contain a plan-shaped dict. Check raw below."
+                         if not content else
+                         "Check that the agent's LLM reliably emits "
+                         "```json blocks in response to plan prompts."),
+            }
+            self._emit("phase_error", details)
+        return result
 
 
 # ── module helpers ─────────────────────────────────────────────────────

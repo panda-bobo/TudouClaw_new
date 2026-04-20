@@ -60,7 +60,7 @@ class FakeLLMBridge:
         self.last_messages: list[dict] | None = None
         self.last_tools: list[dict] | None = None
 
-    def call_llm(self, *, messages, tools=None, tier="default", max_tokens=4096):
+    def call_llm(self, *, messages, tools=None, tier="default", max_tokens=4096, **_ignored):
         self.call_count += 1
         self.last_messages = list(messages)
         self.last_tools = list(tools) if tools else None

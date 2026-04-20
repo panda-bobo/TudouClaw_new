@@ -130,6 +130,52 @@ def _strip_old_images(messages: list[dict]) -> list[dict]:
     return result
 
 
+def _compress_old_tool_results(messages: list[dict],
+                                keep_last: int = 4,
+                                max_body_chars: int = 600) -> list[dict]:
+    """Truncate the body of tool-result messages older than ``keep_last``.
+
+    Without this, every ``web_fetch`` result (up to 5k chars) stays in
+    the message history and is re-sent on every tool-call round. A
+    research session with 5-6 fetches + 10 iterations easily burns
+    40k+ input tokens on STALE tool output.
+
+    Recent results (``keep_last`` newest) are preserved in full so the
+    model can still reason on current data. Older ones are replaced by
+    their first ``max_body_chars`` characters + a clear truncation
+    marker — enough for the model to remember what it already saw
+    without re-paying for it.
+
+    Returns a NEW list; never mutates the input.
+    """
+    # Pass 1: index all tool-result messages (role == "tool").
+    tool_idx = [i for i, m in enumerate(messages)
+                if m.get("role") == "tool"]
+    if len(tool_idx) <= keep_last:
+        return messages
+    to_compress = set(tool_idx[:-keep_last])
+
+    result: list[dict] = []
+    for i, m in enumerate(messages):
+        if i not in to_compress:
+            result.append(m)
+            continue
+        content = m.get("content", "")
+        if not isinstance(content, str):
+            result.append(m)
+            continue
+        if len(content) <= max_body_chars:
+            result.append(m)
+            continue
+        trimmed = (
+            content[:max_body_chars]
+            + f"\n\n... [truncated from {len(content)} chars — "
+            "older tool result, see recent turns for full data]"
+        )
+        result.append({**m, "content": trimmed})
+    return result
+
+
 # ── Narrator-stall detection (weak-model nudge) ────────────────────────────
 # Weak / quantized / open-source models frequently reply with phrases like
 # "Let me fix the errors:" or "让我检查一下：" and then end the turn *without*
@@ -4860,6 +4906,10 @@ Write only the summary body. Do not include any preamble or prefix."""
                 # Older images are replaced with a text placeholder to save
                 # tokens and avoid confusing the model with stale images.
                 _msgs_to_send = _strip_old_images(_msgs_to_send)
+                # Same idea for stale tool bodies (web_fetch / search
+                # results from earlier iterations). Keep the newest 4
+                # in full; older ones get a 600-char head preview.
+                _msgs_to_send = _compress_old_tool_results(_msgs_to_send)
 
                 # ── Multimodal diagnostic: verify images survive pipeline ──
                 if _is_multimodal:
@@ -4936,9 +4986,10 @@ Write only the summary body. Do not include any preamble or prefix."""
                     # may have grown with tool results from previous iteration).
                     # Dynamic context is appended at the end — keeps prefix stable.
                     if iteration > 0:
-                        _msgs_to_send = _strip_old_images(
-                            self._inject_dynamic_context(
-                                self.messages, current_query=_user_text))
+                        _msgs_to_send = _compress_old_tool_results(
+                            _strip_old_images(
+                                self._inject_dynamic_context(
+                                    self.messages, current_query=_user_text)))
                     # Strategy: always try streaming first (with tools).
                     # If the provider doesn't support streaming+tools,
                     # it falls back to non-streaming internally.
@@ -5100,9 +5151,10 @@ Write only the summary body. Do not include any preamble or prefix."""
                             _nudged_this_turn = True
                             # Rebuild the outbound message list so the next
                             # iteration picks up the two new messages.
-                            _msgs_to_send = _strip_old_images(
-                                self._inject_dynamic_context(
-                                    self.messages, current_query=_user_text))
+                            _msgs_to_send = _compress_old_tool_results(
+                                _strip_old_images(
+                                    self._inject_dynamic_context(
+                                        self.messages, current_query=_user_text)))
                             # Log for observability
                             try:
                                 _emit(AgentEvent(time.time(), "nudge",

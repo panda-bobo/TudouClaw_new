@@ -188,7 +188,8 @@ def test_submit_task_happy(isolated_v2_client, monkeypatch):
     import app.v2.bridges.skill_bridge as sb
     import app.v2.bridges.mcp_bridge as mb
 
-    def _fake_llm(messages, tools=None, tier="default", max_tokens=4096):
+    def _fake_llm(messages, tools=None, tier="default",
+                  max_tokens=4096, **_ignored):
         sigs = " ".join(m.get("content", "") for m in messages
                          if m.get("role") == "system")
         if "任务预处理助手" in sigs:
@@ -276,7 +277,7 @@ def test_pause_on_non_running_returns_409(isolated_v2_client, monkeypatch):
     """A task that isn't RUNNING can't be paused — 409."""
     import app.v2.bridges.llm_bridge as lb
 
-    def _quick(messages, tools=None, tier="default", max_tokens=4096):
+    def _quick(messages, tools=None, tier="default", max_tokens=4096, **_ignored):
         sigs = " ".join(m.get("content", "") for m in messages
                          if m.get("role") == "system")
         if "任务预处理助手" in sigs:
@@ -675,7 +676,7 @@ def test_sse_replays_persisted_events(isolated_v2_client, monkeypatch):
     import app.v2.bridges.skill_bridge as sb
     import app.v2.bridges.mcp_bridge as mb
 
-    def _quick(messages, tools=None, tier="default", max_tokens=4096):
+    def _quick(messages, tools=None, tier="default", max_tokens=4096, **_ignored):
         sigs = " ".join(m.get("content", "") for m in messages
                          if m.get("role") == "system")
         if "任务预处理助手" in sigs:

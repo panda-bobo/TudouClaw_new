@@ -94,7 +94,8 @@ class LLMRouter:
         self.report_text = report_text
         self.call_log: list[str] = []
 
-    def __call__(self, *, messages, tools=None, tier="default", max_tokens=4096):
+    def __call__(self, *, messages, tools=None, tier="default",
+                 max_tokens=4096, **_ignored):
         sigs = " ".join(
             (m.get("content") or "") for m in messages
             if m.get("role") == "system"
