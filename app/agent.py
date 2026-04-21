@@ -130,9 +130,16 @@ def _strip_old_images(messages: list[dict]) -> list[dict]:
     return result
 
 
+# Knobs for _compress_old_tool_results. Surface-level constants so
+# anyone tuning prompt-size behavior doesn't have to read the function.
+_KEEP_LAST_TOOL_RESULTS = 4        # most recent N tool results preserved in full
+_OLD_TOOL_RESULT_HEAD_CHARS = 600  # older tool results trimmed to this many head chars
+
+
 def _compress_old_tool_results(messages: list[dict],
-                                keep_last: int = 4,
-                                max_body_chars: int = 600) -> list[dict]:
+                                keep_last: int = _KEEP_LAST_TOOL_RESULTS,
+                                max_body_chars: int = _OLD_TOOL_RESULT_HEAD_CHARS
+                                ) -> list[dict]:
     """Truncate the body of tool-result messages older than ``keep_last``.
 
     Without this, every ``web_fetch`` result (up to 5k chars) stays in
@@ -1792,8 +1799,11 @@ class Agent:
                     "kind": kind,
                     "data": data,
                 })
-            except Exception:
-                pass
+            except Exception as e:   # noqa: BLE001
+                # Never crash the chat loop on observer failure, but
+                # make the failure visible (debug level — observer
+                # hiccups are noise, not bugs we'd page on).
+                logger.debug("conversation_observer forward failed: %s", e)
 
     # ---- system prompt ----
 

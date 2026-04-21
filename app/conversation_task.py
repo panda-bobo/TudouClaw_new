@@ -321,3 +321,44 @@ def _reset_singleton_for_tests() -> None:
     global _store_singleton
     with _store_singleton_lock:
         _store_singleton = None
+
+
+# ── Resume-prompt builder ─────────────────────────────────────────────
+#
+# Pure function — no I/O, no globals. Easy to unit-test and safe to
+# reuse from batch-resume scripts or CLI tools that want the same
+# continuation string without going through the REST layer.
+
+
+def build_resume_prompt(task: ConversationTask) -> str:
+    """Produce the user-facing continuation message for a PAUSED task.
+
+    The resulting string is what we POST into the chat endpoint as a
+    fresh user message when the operator clicks "Continue". The agent
+    reads it, realises it's a resume, and picks up from the first
+    un-finished step.
+
+    Kept deliberately short: the agent's own conversation history
+    still has the full original thread, so this is just a reminder
+    header — not a re-narration of everything already done.
+    """
+    done_steps = [s for s in (task.steps or []) if s.status == "done"]
+    todo_steps = [s for s in (task.steps or []) if s.status != "done"]
+
+    lines: list[str] = [
+        "[继续任务 · 之前中断了]",
+        f"原始请求：{task.intent}",
+    ]
+    if done_steps:
+        lines.append("已完成：")
+        for i, step in enumerate(done_steps, 1):
+            lines.append(f"  {i}. {step.goal}")
+    if todo_steps:
+        lines.append("还要做：")
+        for i, step in enumerate(todo_steps, 1):
+            suffix = f"（工具: {step.tool_hint}）" if step.tool_hint else ""
+            lines.append(f"  {i}. {step.goal}{suffix}")
+        lines.append("请从未完成的第一步继续。")
+    else:
+        lines.append("请检查现有状态并完成未尽事宜。")
+    return "\n".join(lines)

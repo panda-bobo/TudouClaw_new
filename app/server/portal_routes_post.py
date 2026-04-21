@@ -179,6 +179,67 @@ def _bridge_standalone_to_agent(hub, st_task, st_reg) -> bool:
         return False
 
 
+# ── Conversation-task resume ──────────────────────────────────────────
+# Extracted from the dispatch elif so the flow is testable and the
+# 4700-line _do_post_inner doesn't grow even longer. Each early-return
+# path maps to an HTTP status the frontend already distinguishes.
+
+_RESUME_ALLOWED_STATUSES = ("paused", "failed")
+
+
+def _handle_conversation_task_resume(handler, hub, auth, actor_name,
+                                      user_role, *, task_id: str) -> None:
+    try:
+        from ..conversation_task import (
+            get_store as _get_ct_store,
+            ConversationTaskStatus,
+            build_resume_prompt,
+        )
+    except ImportError as e:
+        handler._json({"error": f"conversation_task unavailable: {e}"}, 500)
+        return
+
+    ct_store = _get_ct_store()
+    ct = ct_store.get(task_id)
+    if ct is None:
+        handler._json({"error": "task not found"}, 404)
+        return
+    if ct.status not in _RESUME_ALLOWED_STATUSES:
+        handler._json({
+            "error": (f"only paused/failed tasks can resume; "
+                      f"this one is {ct.status}"),
+        }, 409)
+        return
+    agent = hub.get_agent(ct.agent_id)
+    if agent is None:
+        handler._json({"error": "agent not found"}, 404)
+        return
+
+    try:
+        resume_msg = build_resume_prompt(ct)
+        task = hub.supervisor.chat_async(agent.id, resume_msg, source="admin")
+        ct.chat_task_id = task.id
+        ct.status = ConversationTaskStatus.RUNNING
+        ct_store.save(ct)
+    except Exception as e:
+        logger.warning("conversation-task resume failed: %s", e)
+        handler._json({"error": str(e)}, 500)
+        return
+
+    try:
+        auth.audit("resume_conversation_task", actor=actor_name,
+                   role=user_role, target=task_id,
+                   ip=get_client_ip(handler))
+    except Exception as e:
+        logger.debug("audit emit skipped: %s", e)
+
+    handler._json({
+        "ok": True,
+        "task_id": task.id,
+        "conversation_task_id": ct.id,
+    })
+
+
 def handle_post(handler):
     """Main POST dispatcher.
 
@@ -684,69 +745,10 @@ def _do_post_inner(handler, path: str):
     elif path.startswith("/api/portal/conversation-task/") and \
          path.endswith("/resume"):
         # POST /api/portal/conversation-task/{id}/resume
-        # Re-kick a PAUSED task by re-sending its intent as a new user
-        # message to the agent. The observer will reattach to the new
-        # ChatTask and keep advancing the same row.
-        task_id = path.split("/")[-2]
-        try:
-            from ..conversation_task import (
-                get_store as _get_ct_store, ConversationTaskStatus,
-            )
-            ct_store = _get_ct_store()
-            ct = ct_store.get(task_id)
-            if not ct:
-                handler._json({"error": "task not found"}, 404)
-                return
-            if ct.status not in (ConversationTaskStatus.PAUSED,
-                                 ConversationTaskStatus.FAILED):
-                handler._json({
-                    "error": f"only paused/failed tasks can resume; "
-                             f"this one is {ct.status}"
-                }, 409)
-                return
-            agent = hub.get_agent(ct.agent_id)
-            if not agent:
-                handler._json({"error": "agent not found"}, 404)
-                return
-
-            # Build resume prompt: remind the agent where it was. Keep
-            # it short — the agent's own conversation history already
-            # has the full thread.
-            done_steps = [s for s in (ct.steps or []) if s.status == "done"]
-            todo_steps = [s for s in (ct.steps or []) if s.status != "done"]
-            lines = [
-                f"[继续任务 · 之前中断了]",
-                f"原始请求：{ct.intent}",
-            ]
-            if done_steps:
-                lines.append("已完成：")
-                for i, s in enumerate(done_steps, 1):
-                    lines.append(f"  {i}. {s.goal}")
-            if todo_steps:
-                lines.append("还要做：")
-                for i, s in enumerate(todo_steps, 1):
-                    lines.append(f"  {i}. {s.goal}" +
-                                 (f"（工具: {s.tool_hint}）" if s.tool_hint else ""))
-                lines.append("请从未完成的第一步继续。")
-            else:
-                lines.append("请检查现有状态并完成未尽事宜。")
-            resume_msg = "\n".join(lines)
-
-            task = hub.supervisor.chat_async(agent.id, resume_msg,
-                                              source="admin")
-            # Relink the ConversationTask to the new ChatTask id.
-            from ..conversation_task import ConversationTaskStatus as _CTS
-            ct.chat_task_id = task.id
-            ct.status = _CTS.RUNNING
-            ct_store.save(ct)
-            auth.audit("resume_conversation_task", actor=actor_name,
-                       role=user_role, target=task_id,
-                       ip=get_client_ip(handler))
-            handler._json({"ok": True, "task_id": task.id,
-                           "conversation_task_id": ct.id})
-        except Exception as e:
-            logger.warning("conversation-task resume failed: %s", e)
-            handler._json({"error": str(e)}, 500)
+        _handle_conversation_task_resume(
+            handler, hub, auth, actor_name, user_role,
+            task_id=path.split("/")[-2],
+        )
 
     elif path.startswith("/api/portal/agent/") and path.endswith("/save-file"):
         # POST /api/portal/agent/{agent_id}/save-file

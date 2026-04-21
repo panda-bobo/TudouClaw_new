@@ -138,6 +138,77 @@ def test_singleton_returns_same_instance(tmp_path, monkeypatch):
     ct_mod._reset_singleton_for_tests()
 
 
+# ── build_resume_prompt (pure) ────────────────────────────────────────
+
+
+def _build_task_with_steps(done_goals=(), todo_goals=(), tool_hints=None):
+    """Build a ConversationTask with N done + M todo steps and
+    optional per-step tool hints (keyed by goal name)."""
+    tool_hints = tool_hints or {}
+    steps = []
+    for g in done_goals:
+        steps.append(ConversationStep(
+            id=f"d_{g}", goal=g, status="done",
+            tool_hint=tool_hints.get(g, ""),
+        ))
+    for g in todo_goals:
+        steps.append(ConversationStep(
+            id=f"t_{g}", goal=g, status="pending",
+            tool_hint=tool_hints.get(g, ""),
+        ))
+    return ConversationTask(
+        agent_id="A", intent="do the research", title="...",
+        steps=steps,
+    )
+
+
+def test_build_resume_prompt_with_done_and_todo():
+    from app.conversation_task import build_resume_prompt
+    t = _build_task_with_steps(
+        done_goals=("search",),
+        todo_goals=("fetch", "write"),
+        tool_hints={"fetch": "web_fetch"},
+    )
+    out = build_resume_prompt(t)
+    assert "[继续任务" in out
+    assert "原始请求：do the research" in out
+    assert "已完成：" in out
+    assert "1. search" in out
+    assert "还要做：" in out
+    assert "1. fetch（工具: web_fetch）" in out
+    assert "2. write" in out
+    assert "从未完成的第一步继续" in out
+
+
+def test_build_resume_prompt_all_done():
+    from app.conversation_task import build_resume_prompt
+    t = _build_task_with_steps(done_goals=("a", "b"), todo_goals=())
+    out = build_resume_prompt(t)
+    assert "已完成：" in out
+    assert "还要做：" not in out
+    assert "请检查现有状态并完成未尽事宜" in out
+
+
+def test_build_resume_prompt_all_todo():
+    from app.conversation_task import build_resume_prompt
+    t = _build_task_with_steps(done_goals=(), todo_goals=("x",))
+    out = build_resume_prompt(t)
+    assert "已完成：" not in out
+    assert "1. x" in out
+    assert "从未完成的第一步继续" in out
+
+
+def test_build_resume_prompt_no_steps_at_all():
+    """Task was paused before any plan was extracted — prompt still
+    references the original intent so the agent can start fresh."""
+    from app.conversation_task import build_resume_prompt
+    t = ConversationTask(agent_id="A", intent="help me draft an email",
+                          title="...", steps=[])
+    out = build_resume_prompt(t)
+    assert "原始请求：help me draft an email" in out
+    assert "请检查现有状态并完成未尽事宜" in out
+
+
 def test_mark_paused_preserves_step_state(store):
     """Crash recovery: running task is flipped to paused, but its
     step history (plan + tool_calls) must survive intact. Resume

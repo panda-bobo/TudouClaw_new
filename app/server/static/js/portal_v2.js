@@ -758,164 +758,219 @@
   // loadConversationTasksIntoQueue — NEW (M3)
   // ══════════════════════════════════════════════════════════════════
   //
-  // Replaces loadV2TasksIntoQueue. Renders chat-derived task rows
-  // into the existing ``tasks-list-<agentId>`` panel: each row shows
-  // the intent title, status chip, progress bar (step done/total),
-  // and a collapsible list of plan steps when clicked.
+  // Renders chat-derived task rows into the existing
+  // ``tasks-list-<agentId>`` panel: each row shows the intent title,
+  // status chip, progress bar, and a compact list of plan steps.
   //
-  // Runs on: agent-page render + refreshSidebar 15s heartbeat.
-  // Data source: GET /api/portal/agent/{id}/conversation-tasks
-  // Upsert by data-ct-task-id so polls don't reset scroll/flicker.
-  async function loadConversationTasksIntoQueue(agentId) {
-    if (!agentId) return;
-    var host = document.getElementById('tasks-list-' + agentId);
-    if (!host) return;
+  // Decomposed into small helpers — the top-level orchestrator is
+  // intentionally short so the control flow is visible at a glance.
 
-    var payload;
-    try {
-      payload = await _v2api('GET',
-        '/api/portal/agent/' + agentId + '/conversation-tasks?limit=50');
-    } catch (e) {
-      // transient / auth — don't wipe existing DOM
+  // Shared constants — centralised so runtime code and future tests
+  // can import the same set. Status strings must match the Python
+  // ConversationTaskStatus enum; keep in sync if you rename either.
+  var CT_STATUS = Object.freeze({
+    RUNNING:   'running',
+    PAUSED:    'paused',
+    DONE:      'done',
+    FAILED:    'failed',
+    CANCELLED: 'cancelled',
+  });
+  var STEP_STATUS = Object.freeze({
+    PENDING: 'pending',
+    RUNNING: 'running',
+    DONE:    'done',
+    SKIPPED: 'skipped',
+  });
+  var CT_STATUS_CHIP = {};
+  CT_STATUS_CHIP[CT_STATUS.RUNNING]   = ['#22c55e',      '运行中', '🔄'];
+  CT_STATUS_CHIP[CT_STATUS.PAUSED]    = ['#f59e0b',      '已暂停', '⏸'];
+  CT_STATUS_CHIP[CT_STATUS.DONE]      = ['#22c55e',      '已完成', '✅'];
+  CT_STATUS_CHIP[CT_STATUS.FAILED]    = ['#ef4444',      '失败',   '❌'];
+  CT_STATUS_CHIP[CT_STATUS.CANCELLED] = ['var(--text3)', '已取消', '⏹'];
+  var STEP_CHIP = {};
+  STEP_CHIP[STEP_STATUS.DONE]    = ['#22c55e',      '✓'];
+  STEP_CHIP[STEP_STATUS.RUNNING] = ['#f97316',      '⟳'];
+  STEP_CHIP[STEP_STATUS.SKIPPED] = ['var(--text3)', '⊘'];
+  STEP_CHIP[STEP_STATUS.PENDING] = ['var(--text3)', '○'];
+
+  // Tunables. Keep these at the top so token / UI budgets are
+  // obvious without hunting through render code.
+  var CT_LIST_LIMIT               = 50;   // server-side query cap
+  var CT_STEP_GOAL_PREVIEW_CHARS  = 60;   // per-step goal line
+  var CT_BANNER_TASK_DISPLAY_CAP  = 5;    // max rows in resume banner
+
+  // ── Small render helpers ──────────────────────────────────────────
+
+  function _ctStatusChip(status) {
+    return CT_STATUS_CHIP[status] || ['var(--text3)', status || '?', '·'];
+  }
+
+  function _ctStepChip(stepStatus) {
+    return STEP_CHIP[stepStatus] || STEP_CHIP[STEP_STATUS.PENDING];
+  }
+
+  function _ctCountDoneSteps(steps) {
+    var n = 0;
+    for (var i = 0; i < steps.length; i++) {
+      if (steps[i].status === STEP_STATUS.DONE) n++;
+    }
+    return n;
+  }
+
+  function _ctIsTerminal(status) {
+    return status === CT_STATUS.DONE
+        || status === CT_STATUS.FAILED
+        || status === CT_STATUS.CANCELLED;
+  }
+
+  function _ctRenderStepLine(step, idx) {
+    var chip = _ctStepChip(step.status);
+    var color = chip[0], icon = chip[1];
+    var goalShort = _esc((step.goal || '').slice(0, CT_STEP_GOAL_PREVIEW_CHARS));
+    var toolBadge = step.tool_hint ?
+      ' <span style="font-size:9px;color:var(--text3)">· ' +
+      _esc(step.tool_hint) + '</span>' : '';
+    var callCount = step.tool_call_count || 0;
+    var callBadge = callCount ?
+      ' <span style="font-size:9px;color:var(--text3)">⟳ ' +
+      callCount + '</span>' : '';
+    return '<div style="font-size:10px;line-height:1.6;color:' + color + '">' +
+      '<span style="font-weight:700;width:14px;display:inline-block">' +
+      icon + '</span>' + (idx + 1) + '. ' + goalShort + toolBadge + callBadge +
+      '</div>';
+  }
+
+  function _ctRenderStepList(steps) {
+    if (!steps || !steps.length) return '';
+    return '<div style="margin-top:6px;padding-left:4px">' +
+      steps.map(_ctRenderStepLine).join('') +
+      '</div>';
+  }
+
+  function _ctRenderProgressBar(doneCount, totalSteps, color) {
+    if (!totalSteps) return '';
+    var pct = Math.round((doneCount / totalSteps) * 100);
+    return '<div style="height:3px;background:var(--surface);border-radius:2px;' +
+      'overflow:hidden;margin-top:6px">' +
+      '<div style="height:100%;width:' + pct + '%;background:' + color +
+      ';transition:width 0.3s"></div></div>';
+  }
+
+  function _ctRenderActionButtons(t, agentId) {
+    var html = '';
+    if (t.status === CT_STATUS.PAUSED || t.status === CT_STATUS.FAILED) {
+      html += '<button class="btn btn-ghost btn-xs" ' +
+        'title="从中断处继续" style="color:#22c55e;padding:2px 6px" ' +
+        'onclick="event.stopPropagation();_resumeConversationTask(\'' +
+        _esc(t.id) + '\')">▶</button>';
+    }
+    if (_ctIsTerminal(t.status)) {
+      html += '<button class="btn btn-ghost btn-xs" ' +
+        'title="清除此任务" style="color:var(--text3);padding:2px 6px" ' +
+        'onclick="event.stopPropagation();_ctDelete(\'' + _esc(t.id) +
+        '\', \'' + _esc(agentId) + '\')">🗑</button>';
+    }
+    return html;
+  }
+
+  function _ctRenderRowInner(t, agentId) {
+    var steps = t.steps || [];
+    var doneCount = _ctCountDoneSteps(steps);
+    var total = steps.length;
+    var chip = _ctStatusChip(t.status);
+    var color = chip[0], label = chip[1], icon = chip[2];
+    var summaryLine =
+      (total ? (doneCount + '/' + total + ' steps') : 'no plan') +
+      ' · ' + _age(t.created_at) +
+      (t.tool_call_total ? ' · ⟳' + t.tool_call_total + ' tools' : '');
+    return (
+      '<div style="display:flex;justify-content:space-between;' +
+        'align-items:flex-start;gap:6px">' +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="font-size:11px;font-weight:600;overflow:hidden;' +
+            'text-overflow:ellipsis;white-space:nowrap">' +
+            icon + ' ' + _esc(t.title || t.intent || '(no intent)') +
+          '</div>' +
+          '<div style="font-size:9px;color:var(--text3);margin-top:2px">' +
+            summaryLine +
+          '</div>' +
+        '</div>' +
+        '<div style="display:flex;gap:4px;align-items:center">' +
+          '<span style="font-size:9px;padding:2px 6px;border-radius:8px;' +
+            'background:rgba(255,255,255,0.08);color:' + color +
+            ';font-weight:600">' + label + '</span>' +
+          _ctRenderActionButtons(t, agentId) +
+        '</div>' +
+      '</div>' +
+      _ctRenderProgressBar(doneCount, total, color) +
+      _ctRenderStepList(steps)
+    );
+  }
+
+  function _ctEnsureSeparator(host, hasAny) {
+    var sep = host.querySelector('[data-ct-sep]');
+    if (!hasAny) {
+      if (sep) sep.remove();
       return;
     }
-    var tasks = (payload && payload.tasks) || [];
+    if (sep) return;
+    sep = document.createElement('div');
+    sep.setAttribute('data-ct-row', '1');
+    sep.setAttribute('data-ct-sep', '1');
+    sep.style.cssText = 'margin:10px 0 4px;font-size:9px;font-weight:700;' +
+      'color:#f97316;text-transform:uppercase;letter-spacing:0.5px';
+    sep.textContent = '🚀 状态机任务';
+    host.appendChild(sep);
+  }
 
-    // Ensure a separator row at the top of CT rows.
-    var sep = host.querySelector('[data-ct-sep]');
-    if (tasks.length) {
-      if (!sep) {
-        sep = document.createElement('div');
-        sep.setAttribute('data-ct-row', '1');
-        sep.setAttribute('data-ct-sep', '1');
-        sep.style.cssText = 'margin:10px 0 4px;font-size:9px;font-weight:700;' +
-          'color:#f97316;text-transform:uppercase;letter-spacing:0.5px';
-        sep.textContent = '🚀 状态机任务';
-        host.appendChild(sep);
-      }
-    } else if (sep) {
-      sep.remove();
-    }
-
-    var liveIds = {};
-    tasks.forEach(function(t) { liveIds[t.id] = true; });
-
-    // Remove rows for tasks that vanished.
+  function _ctRemoveStaleRows(host, liveIds) {
     host.querySelectorAll('[data-ct-task-id]').forEach(function(el) {
       var id = el.getAttribute('data-ct-task-id');
       if (!liveIds[id]) el.remove();
     });
+  }
 
-    // Upsert each task row.
-    tasks.forEach(function(t) {
-      var steps = t.steps || [];
-      var doneCount = 0;
-      for (var i = 0; i < steps.length; i++) {
-        if (steps[i].status === 'done') doneCount++;
-      }
-      var totalSteps = steps.length;
+  function _ctUpsertRow(host, t, agentId) {
+    var innerHtml = _ctRenderRowInner(t, agentId);
+    var row = host.querySelector('[data-ct-task-id="' + t.id + '"]');
+    if (row) {
+      if (row.innerHTML !== innerHtml) row.innerHTML = innerHtml;
+      return;
+    }
+    row = document.createElement('div');
+    row.setAttribute('data-ct-row', '1');
+    row.setAttribute('data-ct-task-id', t.id);
+    row.style.cssText = 'background:var(--surface3);border-radius:6px;' +
+      'padding:8px 10px;border:1px solid rgba(249,115,22,0.2);margin-bottom:4px';
+    row.innerHTML = innerHtml;
+    host.appendChild(row);
+  }
 
-      var statusInfo = (function(st) {
-        switch (st) {
-          case 'running':   return ['#22c55e', '运行中', '🔄'];
-          case 'paused':    return ['#f59e0b', '已暂停', '⏸'];
-          case 'done':      return ['#22c55e', '已完成', '✅'];
-          case 'failed':    return ['#ef4444', '失败',   '❌'];
-          case 'cancelled': return ['var(--text3)', '已取消', '⏹'];
-          default:          return ['var(--text3)', st || '?', '·'];
-        }
-      })(t.status);
+  async function _ctFetchTasks(agentId) {
+    try {
+      var payload = await _v2api('GET',
+        '/api/portal/agent/' + agentId +
+        '/conversation-tasks?limit=' + CT_LIST_LIMIT);
+      return (payload && payload.tasks) || [];
+    } catch (e) {
+      // Transient / auth — don't wipe DOM; just skip this poll.
+      return null;
+    }
+  }
 
-      // Build step list HTML (collapsible — shown on hover or always
-      // visible? keep visible — Claude-style. Compact single-line per step).
-      var stepsHtml = '';
-      if (totalSteps > 0) {
-        stepsHtml = '<div style="margin-top:6px;padding-left:4px">' +
-          steps.map(function(s, i) {
-            var icon = (s.status === 'done')    ? '✓'
-                     : (s.status === 'running') ? '⟳'
-                     : (s.status === 'skipped') ? '⊘'
-                     :                            '○';
-            var color = (s.status === 'done')    ? '#22c55e'
-                      : (s.status === 'running') ? '#f97316'
-                      : (s.status === 'skipped') ? 'var(--text3)'
-                      :                            'var(--text3)';
-            var goalShort = _esc((s.goal || '').slice(0, 60));
-            var toolBadge = s.tool_hint ?
-              ' <span style="font-size:9px;color:var(--text3)">· ' + _esc(s.tool_hint) + '</span>' : '';
-            var callCount = s.tool_call_count || 0;
-            var callBadge = callCount ?
-              ' <span style="font-size:9px;color:var(--text3)">⟳ ' + callCount + '</span>' : '';
-            return '<div style="font-size:10px;line-height:1.6;color:' + color + '">' +
-              '<span style="font-weight:700;width:14px;display:inline-block">' + icon + '</span>' +
-              (i + 1) + '. ' + goalShort + toolBadge + callBadge +
-              '</div>';
-          }).join('') +
-          '</div>';
-      }
+  // ── Orchestrator (short on purpose) ───────────────────────────────
 
-      var progressBar = '';
-      if (totalSteps > 0) {
-        var pct = Math.round((doneCount / totalSteps) * 100);
-        progressBar =
-          '<div style="height:3px;background:var(--surface);border-radius:2px;overflow:hidden;margin-top:6px">' +
-            '<div style="height:100%;width:' + pct + '%;background:' + statusInfo[0] +
-              ';transition:width 0.3s"></div>' +
-          '</div>';
-      }
-
-      var isTerminal = (t.status === 'done' || t.status === 'failed' ||
-                        t.status === 'cancelled');
-      var actionBtn = '';
-      if (t.status === 'paused' || t.status === 'failed') {
-        actionBtn += '<button class="btn btn-ghost btn-xs" ' +
-          'title="从中断处继续" style="color:#22c55e;padding:2px 6px" ' +
-          'onclick="event.stopPropagation();_resumeConversationTask(\'' +
-          _esc(t.id) + '\')">▶</button>';
-      }
-      if (isTerminal) {
-        actionBtn += '<button class="btn btn-ghost btn-xs" ' +
-          'title="清除此任务" style="color:var(--text3);padding:2px 6px" ' +
-          'onclick="event.stopPropagation();_ctDelete(\'' + _esc(t.id) +
-          '\', \'' + _esc(agentId) + '\')">🗑</button>';
-      }
-
-      var innerHtml =
-        '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px">' +
-          '<div style="flex:1;min-width:0">' +
-            '<div style="font-size:11px;font-weight:600;overflow:hidden;' +
-              'text-overflow:ellipsis;white-space:nowrap">' +
-              statusInfo[2] + ' ' + _esc(t.title || t.intent || '(no intent)') +
-            '</div>' +
-            '<div style="font-size:9px;color:var(--text3);margin-top:2px">' +
-              (totalSteps ? (doneCount + '/' + totalSteps + ' steps') : 'no plan') +
-              ' · ' + _age(t.created_at) +
-              (t.tool_call_total ? ' · ⟳' + t.tool_call_total + ' tools' : '') +
-            '</div>' +
-          '</div>' +
-          '<div style="display:flex;gap:4px;align-items:center">' +
-            '<span style="font-size:9px;padding:2px 6px;border-radius:8px;' +
-              'background:rgba(255,255,255,0.08);color:' + statusInfo[0] +
-              ';font-weight:600">' + statusInfo[1] + '</span>' +
-            actionBtn +
-          '</div>' +
-        '</div>' +
-        progressBar + stepsHtml;
-
-      var row = host.querySelector('[data-ct-task-id="' + t.id + '"]');
-      if (row) {
-        if (row.innerHTML !== innerHtml) row.innerHTML = innerHtml;
-      } else {
-        row = document.createElement('div');
-        row.setAttribute('data-ct-row', '1');
-        row.setAttribute('data-ct-task-id', t.id);
-        row.style.cssText = 'background:var(--surface3);border-radius:6px;' +
-          'padding:8px 10px;border:1px solid rgba(249,115,22,0.2);' +
-          'margin-bottom:4px';
-        row.innerHTML = innerHtml;
-        host.appendChild(row);
-      }
-    });
+  async function loadConversationTasksIntoQueue(agentId) {
+    if (!agentId) return;
+    var host = document.getElementById('tasks-list-' + agentId);
+    if (!host) return;
+    var tasks = await _ctFetchTasks(agentId);
+    if (tasks === null) return;                  // fetch failed; keep DOM
+    _ctEnsureSeparator(host, tasks.length > 0);
+    var liveIds = {};
+    tasks.forEach(function(t) { liveIds[t.id] = true; });
+    _ctRemoveStaleRows(host, liveIds);
+    tasks.forEach(function(t) { _ctUpsertRow(host, t, agentId); });
   }
 
   async function _ctDelete(taskId, agentId) {
@@ -928,8 +983,14 @@
     }
   }
 
+  // Export the smaller building blocks too — portal_bundle.js uses a
+  // couple of them for the resume banner so we don't duplicate HTML.
   window.loadConversationTasksIntoQueue = loadConversationTasksIntoQueue;
   window._ctDelete = _ctDelete;
+  window.CT_STATUS = CT_STATUS;
+  window.STEP_STATUS = STEP_STATUS;
+  window.CT_BANNER_TASK_DISPLAY_CAP = CT_BANNER_TASK_DISPLAY_CAP;
+  window._ctCountDoneSteps = _ctCountDoneSteps;
 
   // ── loadV2TasksIntoQueue (DEPRECATED shim) ──────────────────────────
   // Append V2 tasks into the existing V1 Task Queue list (tasks-list-<id>)

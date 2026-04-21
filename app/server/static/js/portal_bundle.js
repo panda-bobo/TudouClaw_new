@@ -522,69 +522,100 @@ async function refresh() {
 }
 
 // ── Resume banner (M4) ────────────────────────────────────────────────
-// Fires on refresh(). If any ConversationTask is PAUSED (meaning the
-// previous server process died mid-execution, or the user closed the
-// tab), show a sticky top-of-page banner with a Continue button.
+// Fires on refresh(). If any ConversationTask is PAUSED (previous
+// server process died mid-execution, or user closed the tab), show a
+// sticky top-of-page banner with a Continue button.
+
+var _CT_PAUSED = (typeof window.CT_STATUS === 'object' && window.CT_STATUS)
+  ? window.CT_STATUS.PAUSED : 'paused';
+var _BANNER_ID = 'resume-banner';
+
 async function _checkResumableTasks() {
   try {
     var r = await api('GET', '/api/portal/conversation-tasks/resumable');
     if (!r || !r.tasks) return;
-    var tasks = r.tasks.filter(function(t) { return t.status === 'paused'; });
-    _renderResumeBanner(tasks);
+    var paused = r.tasks.filter(function(t) { return t.status === _CT_PAUSED; });
+    _renderResumeBanner(paused);
   } catch (e) { /* silent */ }
 }
 
+// ── _renderResumeBanner — decomposed into small pieces ───────────────
+
 function _renderResumeBanner(tasks) {
-  var existing = document.getElementById('resume-banner');
+  var existing = document.getElementById(_BANNER_ID);
   if (existing) existing.remove();
   if (!tasks || !tasks.length) return;
 
+  var cap = window.CT_BANNER_TASK_DISPLAY_CAP || 5;
+  var shown = tasks.slice(0, cap);
+  var overflow = tasks.length - shown.length;
+
   var bar = document.createElement('div');
-  bar.id = 'resume-banner';
-  bar.style.cssText = 'position:fixed;top:8px;right:8px;z-index:5000;' +
+  bar.id = _BANNER_ID;
+  bar.style.cssText =
+    'position:fixed;top:8px;right:8px;z-index:5000;' +
     'max-width:460px;background:#1e293b;border:1px solid #f59e0b;' +
-    'border-radius:10px;padding:14px 16px;box-shadow:0 6px 24px rgba(0,0,0,0.4);' +
-    'font-size:12px';
-  bar.innerHTML = '<div style="display:flex;align-items:flex-start;gap:10px;' +
+    'border-radius:10px;padding:14px 16px;' +
+    'box-shadow:0 6px 24px rgba(0,0,0,0.4);font-size:12px';
+  bar.innerHTML =
+    _renderResumeBannerHeader(tasks.length) +
+    shown.map(_renderResumeBannerRow).join('') +
+    _renderResumeBannerOverflow(overflow);
+  document.body.appendChild(bar);
+}
+
+function _renderResumeBannerHeader(taskCount) {
+  return '<div style="display:flex;align-items:flex-start;gap:10px;' +
     'margin-bottom:10px">' +
       '<span style="font-size:20px">⏸</span>' +
       '<div style="flex:1">' +
         '<div style="color:#f59e0b;font-weight:700;margin-bottom:2px">' +
-          tasks.length + ' 个任务未完成 — 服务重启或断线时中断</div>' +
+          taskCount + ' 个任务未完成 — 服务重启或断线时中断</div>' +
         '<div style="color:var(--text3);font-size:10px">' +
           '可以从上次断开的地方继续，或直接关闭。</div>' +
       '</div>' +
-      '<button onclick="document.getElementById(\'resume-banner\').remove()" ' +
-        'style="background:none;border:none;color:var(--text3);cursor:pointer;' +
-        'font-size:16px;padding:0 4px">×</button>' +
-    '</div>' +
-    tasks.slice(0, 5).map(function(t) {
-      var doneCount = 0, total = (t.steps || []).length;
-      (t.steps || []).forEach(function(s){ if (s.status === 'done') doneCount++; });
-      var progress = total ? (doneCount + '/' + total + ' steps done') : '(no plan)';
-      return '<div style="display:flex;justify-content:space-between;' +
-        'align-items:center;gap:8px;padding:6px 0;' +
-        'border-top:1px solid rgba(255,255,255,0.05)">' +
-          '<div style="flex:1;min-width:0">' +
-            '<div style="color:var(--text);font-weight:600;' +
-              'overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
-              esc(t.title || t.intent) + '</div>' +
-            '<div style="color:var(--text3);font-size:10px">' +
-              progress + ' · agent ' + esc((t.agent_id || '').slice(0, 6)) +
-            '</div>' +
-          '</div>' +
-          '<button class="btn btn-primary btn-sm" ' +
-            'style="font-size:11px;white-space:nowrap" ' +
-            'onclick="_resumeConversationTask(\'' + esc(t.id) + '\')">继续</button>' +
-          '<button class="btn btn-ghost btn-sm" ' +
-            'style="font-size:11px;color:var(--text3)" ' +
-            'onclick="_dismissConversationTask(\'' + esc(t.id) + '\')">丢弃</button>' +
-        '</div>';
-    }).join('') +
-    (tasks.length > 5 ? '<div style="color:var(--text3);font-size:10px;' +
-      'padding-top:6px;text-align:center">+ ' + (tasks.length - 5) +
-      ' more</div>' : '');
-  document.body.appendChild(bar);
+      '<button onclick="document.getElementById(\'' + _BANNER_ID +
+        '\').remove()" ' +
+        'style="background:none;border:none;color:var(--text3);' +
+        'cursor:pointer;font-size:16px;padding:0 4px">×</button>' +
+    '</div>';
+}
+
+function _bannerRowProgress(task) {
+  var steps = task.steps || [];
+  if (!steps.length) return '(no plan)';
+  var doneCount = (typeof window._ctCountDoneSteps === 'function')
+    ? window._ctCountDoneSteps(steps)
+    : steps.filter(function(s){ return s.status === 'done'; }).length;
+  return doneCount + '/' + steps.length + ' steps done';
+}
+
+function _renderResumeBannerRow(task) {
+  var progress = _bannerRowProgress(task);
+  return '<div style="display:flex;justify-content:space-between;' +
+    'align-items:center;gap:8px;padding:6px 0;' +
+    'border-top:1px solid rgba(255,255,255,0.05)">' +
+      '<div style="flex:1;min-width:0">' +
+        '<div style="color:var(--text);font-weight:600;' +
+          'overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
+          esc(task.title || task.intent) + '</div>' +
+        '<div style="color:var(--text3);font-size:10px">' +
+          progress + ' · agent ' + esc((task.agent_id || '').slice(0, 6)) +
+        '</div>' +
+      '</div>' +
+      '<button class="btn btn-primary btn-sm" ' +
+        'style="font-size:11px;white-space:nowrap" ' +
+        'onclick="_resumeConversationTask(\'' + esc(task.id) + '\')">继续</button>' +
+      '<button class="btn btn-ghost btn-sm" ' +
+        'style="font-size:11px;color:var(--text3)" ' +
+        'onclick="_dismissConversationTask(\'' + esc(task.id) + '\')">丢弃</button>' +
+    '</div>';
+}
+
+function _renderResumeBannerOverflow(overflowCount) {
+  if (overflowCount <= 0) return '';
+  return '<div style="color:var(--text3);font-size:10px;' +
+    'padding-top:6px;text-align:center">+ ' + overflowCount + ' more</div>';
 }
 
 async function _resumeConversationTask(taskId) {

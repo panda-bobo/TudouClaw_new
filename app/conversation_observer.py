@@ -49,7 +49,17 @@ from .conversation_plan_parser import (
 logger = logging.getLogger("tudou.conversation_observer")
 
 
-def _summarize(s: str, n: int = 160) -> str:
+# ── Tunables (all in chars) ─────────────────────────────────────────
+# Centralised so truncation limits don't drift between call sites.
+_TOOL_ARGS_PREVIEW_CHARS      = 160
+_TOOL_RESULT_PREVIEW_CHARS    = 200
+_LAST_ASSISTANT_PREVIEW_CHARS = 200
+# Recent resumable scan window used by _find_active_task. Keeping
+# this small avoids scanning months of terminal rows on every event.
+_FIND_ACTIVE_SCAN_LIMIT       = 5
+
+
+def _summarize(s: str, n: int) -> str:
     """Shrink a string to n chars, adding an ellipsis if truncated."""
     if not isinstance(s, str):
         s = str(s)
@@ -73,7 +83,8 @@ def _find_active_task(agent_id: str,
             if t.chat_task_id == chat_task_id:
                 return t
     # Fallback: newest RUNNING task for this agent.
-    active = store.list_for_agent(agent_id, include_terminal=False, limit=5)
+    active = store.list_for_agent(agent_id, include_terminal=False,
+                                    limit=_FIND_ACTIVE_SCAN_LIMIT)
     for t in active:
         if t.status == ConversationTaskStatus.RUNNING:
             return t
@@ -157,7 +168,7 @@ def _on_message(agent_id: str, data: dict, chat_task_id: str) -> None:
                 dirty = True
 
     # 3. last_assistant_preview for the UI.
-    preview = _summarize(content, 200)
+    preview = _summarize(content, _LAST_ASSISTANT_PREVIEW_CHARS)
     if preview != task.last_assistant_preview:
         task.last_assistant_preview = preview
         dirty = True
@@ -176,7 +187,7 @@ def _on_tool_call(agent_id: str, data: dict, chat_task_id: str) -> None:
     args = data.get("arguments") or data.get("args") or {}
     entry = {
         "name": name,
-        "arguments_preview": _summarize(str(args), 160),
+        "arguments_preview": _summarize(str(args), _TOOL_ARGS_PREVIEW_CHARS),
         "result_preview": "",
         "ts": time.time(),
     }
@@ -229,7 +240,7 @@ def _on_tool_result(agent_id: str, data: dict, chat_task_id: str) -> None:
     for step in reversed(task.steps):
         for entry in reversed(step.tool_calls):
             if entry.get("name") == name and not entry.get("result_preview"):
-                entry["result_preview"] = _summarize(result, 200)
+                entry["result_preview"] = _summarize(result, _TOOL_RESULT_PREVIEW_CHARS)
                 _get_store().save(task)
                 return
 
