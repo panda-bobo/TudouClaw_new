@@ -975,10 +975,17 @@ def _build_execution_prompt(
         f"- 角色: {role}",
         f"- 名字: {name}",
         "",
-        "## 共享工作区",
-        f"- 目录: {workspace}",
-        "  成果物（报告 / 代码 / 设计稿等）请**写入此目录**并通过 "
-        "`submit_deliverable` 工具注册，这样用户才能在会议 Deliverables 栏看到。",
+        "## 共享工作区（本会议所有 agent 共用这一个目录）",
+        f"- 路径: {workspace}",
+        "- **先用 `glob_files` 看看里面已经有什么** —— 上一个 agent "
+        "可能已经产出了相关文件，你要做的是 **接续 / 复用**，不是从头"
+        "重做。比如看到 `report_draft.md` 就用 `read_file` 读它，在上面"
+        "补充，而不是另写一份。",
+        "- 本次任务的所有产出（报告 / 代码 / 设计稿 / 数据文件等）"
+        "**必须写入这个共享目录**。写到你自己的 agent 目录里，下一个"
+        "接手的 agent 看不到。",
+        "- 调用 `submit_deliverable` 注册产出，让用户在会议 Deliverables "
+        "栏看到。",
     ])
     if bound_mcps:
         lines.extend([
@@ -1106,10 +1113,32 @@ def execute_meeting_assignment(
         capture_events_since,
     )
     events_cursor = snapshot_event_count(ag)
+
+    # Collaboration layer A — shared workspace.
+    # The agent normally writes to its own private workspace; for
+    # meeting execution we want every participant's output to land in
+    # the MEETING workspace so downstream agents (next assignment,
+    # summary generator, reviewer) can read what was produced. We
+    # temporarily point agent.shared_workspace at meeting.workspace_dir
+    # so the sandbox policy includes it in allowed_dirs, then restore.
+    #
+    # Design note: mutating agent state is risky in concurrent
+    # contexts, but execute_meeting_assignment runs inside the single
+    # daemon thread spawned by spawn_meeting_reply — no two executors
+    # race on the same agent. Restoring in `finally` keeps other
+    # surfaces (agent chat, project chat) seeing the original value.
+    prior_shared_ws = getattr(ag, "shared_workspace", "") or ""
+    meeting_ws = getattr(meeting, "workspace_dir", "") or ""
+    if meeting_ws:
+        ag.shared_workspace = meeting_ws
+
     try:
         reply = agent_chat_fn(aid, prompt)
     except Exception as e:
         reply = f"❌ 任务执行失败: {e}"
+    finally:
+        ag.shared_workspace = prior_shared_ws
+
     captured_blocks = capture_events_since(ag, events_cursor)
 
     # User-priority interrupt check — same pattern as discussion replies.
