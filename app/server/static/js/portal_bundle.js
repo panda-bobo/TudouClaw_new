@@ -1832,20 +1832,132 @@ function renderAgentChat(agentId) {
 }
 
 // Load event log for agent bottom panel
+// Per-kind color for the event log chip.
+var _EVENT_KIND_COLORS = {
+  message:             'var(--primary)',
+  tool_call:           'var(--warning)',
+  tool_result:         'var(--success)',
+  skill_match:         '#a78bfa',  // distinct purple — skills are their own axis
+  error:               'var(--error)',
+  approval:            'var(--warning)',
+  memory:              '#6b7280',
+  inter_agent_message: '#6b7280',
+};
+
+// Event-log filter state keyed by agent. Three preset filters:
+//   'tools_skills' — tool_call/tool_result/skill_match/approval (default —
+//                     this is what users usually want to see)
+//   'messages'     — assistant/user messages + inter_agent
+//   'all'          — everything, no filter
+// Last selection persists via localStorage.
+var _EVENT_LOG_PRESETS = {
+  tools_skills: new Set(['tool_call', 'tool_result', 'skill_match', 'approval', 'error']),
+  messages:     new Set(['message', 'inter_agent_message']),
+  all:          null,   // null = show everything
+};
+
+function _getEventLogFilter(agentId) {
+  try {
+    var key = 'eventLogFilter:' + agentId;
+    return localStorage.getItem(key) || 'tools_skills';
+  } catch (_) { return 'tools_skills'; }
+}
+
+function _setEventLogFilter(agentId, preset) {
+  try { localStorage.setItem('eventLogFilter:' + agentId, preset); } catch (_) {}
+  loadAgentEventLog(agentId);
+}
+
+if (typeof window !== 'undefined') {
+  window._setEventLogFilter = _setEventLogFilter;
+}
+
+function _renderEventLogFilterChips(agentId) {
+  var current = _getEventLogFilter(agentId);
+  var chip = function(key, label) {
+    var selected = current === key;
+    return (
+      '<button onclick="_setEventLogFilter(\'' + agentId + '\',\'' + key + '\')" ' +
+      'style="font-size:10px;padding:3px 8px;border-radius:4px;cursor:pointer;' +
+      'border:1px solid ' + (selected ? 'var(--primary)' : 'rgba(255,255,255,0.1)') + ';' +
+      'background:' + (selected ? 'var(--primary-weak,rgba(99,102,241,0.15))' : 'transparent') + ';' +
+      'color:' + (selected ? 'var(--primary)' : 'var(--text3)') + '">' + label + '</button>'
+    );
+  };
+  return (
+    '<div style="display:flex;gap:4px;margin-bottom:6px">' +
+      chip('tools_skills', '🛠 Tools & Skills') +
+      chip('messages',     '💬 Messages') +
+      chip('all',          '🌐 All') +
+    '</div>'
+  );
+}
+
+// Pretty-print one event line with per-kind formatting.
+function _formatEventLogEntry(e) {
+  var color = _EVENT_KIND_COLORS[e.kind] || 'var(--text3)';
+  var time = new Date(e.timestamp * 1000).toLocaleTimeString();
+  var content;
+  var d = e.data || {};
+  if (e.kind === 'tool_call') {
+    // "▸ tool_name  primary_arg"
+    var argsStr = JSON.stringify(d.arguments || d.args || {});
+    var primary = (typeof _extractPrimaryArg === 'function')
+                    ? _extractPrimaryArg(argsStr) : '';
+    content = '▸ <b>' + esc(d.name || '') + '</b>  '
+            + esc(primary || argsStr.slice(0, 80));
+  } else if (e.kind === 'tool_result') {
+    var res = (d.result || '').slice(0, 120);
+    content = '<b>' + esc(d.name || '') + '</b> → ' + esc(res);
+  } else if (e.kind === 'skill_match') {
+    // Surface skill name + score/reason
+    content = '<b>' + esc(d.skill_name || d.name || '?') + '</b>  '
+            + esc(d.reason || d.triggered_by || '').slice(0, 80);
+  } else if (e.kind === 'message') {
+    var role = d.role || '';
+    var c = (d.content || '').slice(0, 120);
+    content = '<span style="opacity:0.6">[' + esc(role) + ']</span> ' + esc(c);
+  } else if (e.kind === 'inter_agent_message') {
+    var from = d.from_agent_name || d.from_agent || '';
+    var to = d.to_agent_name || d.to_agent || '';
+    content = '<span style="opacity:0.6">' + esc(from) + ' → ' + esc(to) + '</span> '
+            + esc((d.content || '').slice(0, 80));
+  } else {
+    content = esc(JSON.stringify(d).slice(0, 120));
+  }
+  return (
+    '<p style="margin:2px 0;line-height:1.4">' +
+      '<span style="color:rgba(203,201,255,0.3)">[' + time + ']</span> ' +
+      '<span style="color:' + color + ';font-weight:500">' + esc(e.kind).toUpperCase() + ':</span> ' +
+      content +
+    '</p>'
+  );
+}
+
 async function loadAgentEventLog(agentId) {
   try {
     var data = await api('GET', '/api/portal/agent/' + agentId + '/events');
     if (!data) return;
     var el = document.getElementById('agent-event-log-' + agentId);
     if (!el) return;
-    var events = (data.events || []).slice(-30).reverse();
-    el.innerHTML = events.map(function(e) {
-      var color = e.kind==='message'?'var(--primary)':e.kind==='tool_call'?'var(--warning)':e.kind==='tool_result'?'var(--success)':e.kind==='error'?'var(--error)':'var(--text3)';
-      var time = new Date(e.timestamp*1000).toLocaleTimeString();
-      var content = JSON.stringify(e.data||{}).slice(0,120);
-      return '<p><span style="color:rgba(203,201,255,0.3)">[' + time + ']</span> <span style="color:' + color + '">' + esc(e.kind).toUpperCase() + ':</span> ' + esc(content) + '</p>';
-    }).join('');
-    // Update task count
+
+    var preset = _getEventLogFilter(agentId);
+    var allowed = _EVENT_LOG_PRESETS[preset];
+    var all = data.events || [];
+    // Apply filter FIRST so the 30-line budget goes to relevant events
+    // rather than being swallowed by meeting prompt noise.
+    var filtered = allowed ? all.filter(function(e) { return allowed.has(e.kind); }) : all;
+    var shown = filtered.slice(-50).reverse();
+
+    var summary = '<div style="font-size:10px;color:var(--text3);margin-bottom:4px">' +
+                  'showing ' + shown.length + ' of ' + filtered.length + ' filtered · ' +
+                  all.length + ' total</div>';
+
+    el.innerHTML = _renderEventLogFilterChips(agentId) +
+                   summary +
+                   shown.map(_formatEventLogEntry).join('');
+
+    // Update task count (unchanged)
     var countEl = document.getElementById('agent-task-count-' + agentId);
     if (countEl) {
       var taskData = await api('GET', '/api/portal/agent/' + agentId + '/tasks');
