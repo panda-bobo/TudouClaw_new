@@ -4162,7 +4162,23 @@ Write only the summary body. Do not include any preamble or prefix."""
     # ---- tool execution with policy check ----
 
     def _get_effective_tools(self) -> list[dict]:
-        """Filter tool definitions based on agent's profile permissions."""
+        """Filter tool definitions based on profile + global denylist.
+
+        Filters applied in order:
+          1. profile.allowed_tools (if non-empty, INTERSECT — only these)
+          2. profile.denied_tools  (per-agent deny)
+          3. GLOBAL denylist from ~/.tudou_claw/tool_denylist.json —
+             previously this only blocked EXECUTION, but the tool's
+             JSON schema still shipped to the LLM, wasting ~750 tokens
+             per globally-denied tool. Fixing here strips them before
+             the schema is serialized for the model.
+
+        NOT narrowed by meeting/project scope — those contexts are for
+        conversation, but users still expect the agent to be able to
+        produce a pptx / send an email when asked mid-meeting. Scope-
+        level tool restriction should be done explicitly via the global
+        denylist UI, not implicitly.
+        """
         all_tools = tools.get_tool_definitions()
         allowed = self.profile.allowed_tools
         denied = set(self.profile.denied_tools)
@@ -4175,6 +4191,21 @@ Write only the summary body. Do not include any preamble or prefix."""
         if denied:
             all_tools = [t for t in all_tools
                          if t["function"]["name"] not in denied]
+
+        # Global denylist — admin-level deny that affects every agent.
+        # Lives on AuthManager.tool_policy.global_denylist (ToolPolicy).
+        # Previously ONLY enforced at call time; tool schema still
+        # shipped to the LLM, wasting ~750 tok per denied tool.
+        try:
+            from .auth import get_auth
+            auth = get_auth()
+            policy = getattr(auth, "tool_policy", None)
+            g_denied = set(getattr(policy, "global_denylist", None) or ())
+            if g_denied:
+                all_tools = [t for t in all_tools
+                             if t["function"]["name"] not in g_denied]
+        except Exception:
+            pass
 
         return all_tools
 
