@@ -3697,6 +3697,129 @@ if (typeof window !== 'undefined') {
   window._appendMessageBlocks = _appendMessageBlocks;
 }
 
+// ────────────────────────────────────────────────────────────────
+// Live activity indicator (fix for "agent 看起来死了" UX)
+// Polls an agent's event log for events newer than ``since`` to
+// derive a compact "what is the agent doing right now" string used
+// inside typing bubbles in project/meeting chat.
+// ────────────────────────────────────────────────────────────────
+
+// Single in-flight fetch per agent — avoids burying the server when
+// multiple polls overlap.
+var _liveActivityInFlight = {};
+
+/**
+ * Fetch recent tool/skill activity for an agent since ``sinceTs``
+ * (unix seconds). Returns {lastToolName, toolCount, lastSkillName,
+ * isWorking} or null on error.
+ *
+ * isWorking := "most recent event is a tool_call with no matching
+ * tool_result yet" — means the agent is currently blocked inside
+ * that tool call (e.g. web_fetch still running).
+ */
+async function _fetchAgentActivity(agentId, sinceTs) {
+  if (_liveActivityInFlight[agentId]) return _liveActivityInFlight[agentId];
+  var p = (async function() {
+    try {
+      var data = await api('GET', '/api/portal/agent/' + agentId + '/events');
+      if (!data || !Array.isArray(data.events)) return null;
+      var recent = data.events.filter(function(e) {
+        return (e.timestamp || 0) >= sinceTs;
+      });
+      if (!recent.length) return null;
+      var toolCalls = recent.filter(function(e) { return e.kind === 'tool_call'; });
+      var toolResults = recent.filter(function(e) { return e.kind === 'tool_result'; });
+      var skillMatches = recent.filter(function(e) { return e.kind === 'skill_match'; });
+      var last = recent[recent.length - 1];
+      var isWorking = last && last.kind === 'tool_call';  // no result yet for this call
+      var lastToolName = '';
+      if (toolCalls.length) {
+        lastToolName = (toolCalls[toolCalls.length - 1].data || {}).name || '';
+      }
+      var lastSkillName = '';
+      if (skillMatches.length) {
+        var sd = skillMatches[skillMatches.length - 1].data || {};
+        lastSkillName = sd.skill_name || sd.name || '';
+      }
+      return {
+        lastToolName: lastToolName,
+        toolCount: toolCalls.length,
+        resultCount: toolResults.length,
+        lastSkillName: lastSkillName,
+        skillCount: skillMatches.length,
+        isWorking: isWorking,
+      };
+    } catch (e) { return null; }
+  })();
+  _liveActivityInFlight[agentId] = p;
+  p.finally(function() { delete _liveActivityInFlight[agentId]; });
+  return p;
+}
+
+/**
+ * Build a compact activity suffix for use inside typing bubbles.
+ * Returns a short HTML string or empty when there's nothing to show.
+ * Examples:
+ *   '🔧 web_fetch · 3 tools · 🎯 deep-research'
+ *   '✓ 5 tools'                (work completed; waiting on next step)
+ *   ''                         (no activity data)
+ */
+function _formatActivitySuffix(activity) {
+  if (!activity) return '';
+  var parts = [];
+  if (activity.isWorking && activity.lastToolName) {
+    parts.push('🔧 ' + _escHtml(activity.lastToolName));
+  } else if (activity.lastToolName) {
+    parts.push('✓ ' + _escHtml(activity.lastToolName));
+  }
+  if (activity.toolCount > 1) {
+    parts.push(activity.toolCount + ' tools');
+  }
+  if (activity.lastSkillName) {
+    parts.push('🎯 ' + _escHtml(activity.lastSkillName));
+  }
+  if (!parts.length) return '';
+  return (
+    ' <span style="opacity:0.75;font-size:10px;font-family:ui-monospace,monospace">· ' +
+    parts.join(' · ') +
+    '</span>'
+  );
+}
+
+/**
+ * Walk all typing-bubble DOM nodes for a given scope (project/meeting)
+ * and append/update a live-activity suffix based on agent event logs.
+ * Called after the scope's poll fetches latest messages — reuses the
+ * current typing state, no extra polls beyond the one events fetch
+ * per visible bubble.
+ */
+async function _decorateTypingBubbles(container, pendingMap) {
+  if (!container || !pendingMap) return;
+  var bubbles = container.querySelectorAll(
+    '.project-typing-bubble[data-agent-id], .mtg-typing-bubble[data-agent-id]');
+  for (var i = 0; i < bubbles.length; i++) {
+    var bubble = bubbles[i];
+    var aid = bubble.getAttribute('data-agent-id');
+    var since = pendingMap[aid];
+    if (!aid || !since) continue;
+    var activity = await _fetchAgentActivity(aid, since);
+    var suffix = _formatActivitySuffix(activity);
+    var slot = bubble.querySelector('.typing-activity-suffix');
+    if (!slot) {
+      slot = document.createElement('span');
+      slot.className = 'typing-activity-suffix';
+      bubble.appendChild(slot);
+    }
+    slot.innerHTML = suffix;
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window._fetchAgentActivity = _fetchAgentActivity;
+  window._formatActivitySuffix = _formatActivitySuffix;
+  window._decorateTypingBubbles = _decorateTypingBubbles;
+}
+
 function _markToolResult(agentId, resultSnippet) {
   var idx = _toolLogCounter[agentId] || 0;
   var entry = document.getElementById('tool-entry-'+agentId+'-'+idx);
@@ -11475,7 +11598,10 @@ async function loadProjectChat(projId) {
           var label = ag ? ((ag.role||'general')+'-'+ag.name) : aid;
           var bubble = document.createElement('div');
           bubble.className = 'project-typing-bubble';
-          bubble.style.cssText = 'align-self:flex-start;background:var(--surface);border:1px solid rgba(255,255,255,0.05);border-radius:12px;border-bottom-left-radius:4px;padding:10px 14px;font-size:12px;color:var(--text3);display:inline-flex;align-items:center;gap:8px;max-width:70%';
+          // data-agent-id lets _decorateTypingBubbles find this bubble
+          // and append a live activity suffix (current tool, count).
+          bubble.setAttribute('data-agent-id', aid);
+          bubble.style.cssText = 'align-self:flex-start;background:var(--surface);border:1px solid rgba(255,255,255,0.05);border-radius:12px;border-bottom-left-radius:4px;padding:10px 14px;font-size:12px;color:var(--text3);display:inline-flex;align-items:center;gap:8px;max-width:70%;flex-wrap:wrap';
           bubble.innerHTML =
             '<span class="material-symbols-outlined" style="font-size:16px;color:var(--primary);animation:robotTyping 1s infinite">smart_toy</span>' +
             '<span style="font-weight:700;color:var(--primary);font-size:11px">'+esc(label)+'</span>' +
@@ -11483,6 +11609,8 @@ async function loadProjectChat(projId) {
             '<span class="thinking-dots" style="display:inline-flex;gap:2px"><span>●</span><span>●</span><span>●</span></span>';
           el.appendChild(bubble);
         });
+        // Fire-and-forget: fill each bubble with live tool activity.
+        _decorateTypingBubbles(el, typing.pending);
       }
     }
 
@@ -13910,7 +14038,10 @@ async function openMeetingDetail(mid) {
           var role = ag ? (ag.role || 'general') : '';
           var bubble = document.createElement('div');
           bubble.className = 'mtg-typing-bubble';
-          bubble.style.cssText = 'align-self:flex-start;background:var(--surface);border:1px solid rgba(255,255,255,0.05);border-radius:12px;border-bottom-left-radius:4px;padding:10px 14px;margin:6px 0;font-size:12px;color:var(--text3);display:inline-flex;align-items:center;gap:8px;max-width:70%';
+          // data-agent-id enables _decorateTypingBubbles to append
+          // a live activity suffix (current tool, tool count).
+          bubble.setAttribute('data-agent-id', aid);
+          bubble.style.cssText = 'align-self:flex-start;background:var(--surface);border:1px solid rgba(255,255,255,0.05);border-radius:12px;border-bottom-left-radius:4px;padding:10px 14px;margin:6px 0;font-size:12px;color:var(--text3);display:inline-flex;align-items:center;gap:8px;max-width:70%;flex-wrap:wrap';
           bubble.innerHTML =
             '<span class="material-symbols-outlined" style="font-size:16px;color:var(--primary);animation:robotTyping 1s infinite">smart_toy</span>' +
             '<span style="font-weight:700;color:var(--primary);font-size:11px">'+esc(name)+(role?' · '+esc(role):'')+'</span>' +
@@ -13918,6 +14049,9 @@ async function openMeetingDetail(mid) {
             '<span class="thinking-dots" style="display:inline-flex;gap:2px"><span>●</span><span>●</span><span>●</span></span>';
           chatScroll.appendChild(bubble);
         });
+        // Live-activity decoration — fills each bubble with the
+        // current tool/skill snapshot based on per-agent event log.
+        _decorateTypingBubbles(chatScroll, typingMtg.pending);
       }
     }
 
