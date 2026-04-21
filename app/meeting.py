@@ -662,6 +662,11 @@ def _build_meeting_prompt(meeting: "Meeting", agent, user_msg: str,
     ]
     if meeting.workspace_dir:
         lines.append(f"- 共享目录: {meeting.workspace_dir}")
+    # Inline MCP summary — avoids the "没有绑定 MCP" hallucination
+    # where the agent forgets to consult its workspace/MCP.md.
+    bound_mcp_names = _summarize_bound_mcps(agent)
+    if bound_mcp_names:
+        lines.append(f"- 可用 MCP: {bound_mcp_names}")
 
     # Show current assignments
     if meeting.assignments:
@@ -752,6 +757,40 @@ def bump_meeting_reply_gen(meeting_id: str) -> int:
 def current_meeting_reply_gen(meeting_id: str) -> int:
     with _meeting_reply_gen_lock:
         return _meeting_reply_gen.get(meeting_id, 0)
+
+
+def _summarize_bound_mcps(agent) -> str:
+    """Return a compact one-line MCP summary for prompt injection.
+
+    Reads from ``agent.profile.mcp_servers`` which is kept in sync with
+    the live MCP manager at workspace-refresh time. Used by both the
+    discussion prompt (_build_meeting_prompt) and the execution prompt
+    (_build_execution_prompt) so the agent cannot fall into the
+    "no MCP bound" hallucination even when the workspace/MCP.md
+    context chunk has been trimmed by compression.
+
+    Returns e.g. "AgentMail, Email (SMTP/IMAP), Web Browser" or ""
+    if none bound / agent has no profile.
+    """
+    try:
+        profile = getattr(agent, "profile", None)
+        mcps = list(getattr(profile, "mcp_servers", []) or [])
+    except Exception:
+        return ""
+    names = []
+    for m in mcps:
+        enabled = getattr(m, "enabled", True)
+        if enabled is False:
+            continue
+        name = getattr(m, "name", "") or getattr(m, "id", "")
+        if name:
+            names.append(name)
+    # Bound to avoid ballooning prompt on agents with many MCPs.
+    max_shown = 10
+    if len(names) > max_shown:
+        extra = len(names) - max_shown
+        return ", ".join(names[:max_shown]) + f" (+{extra} more)"
+    return ", ".join(names)
 
 
 # Task-intent trigger words. Meeting message containing `@<name>` AND
@@ -926,6 +965,10 @@ def _build_execution_prompt(
     if assignment.due_hint:
         lines.append(f"截止提示：{assignment.due_hint}")
 
+    # Inline MCP list so the agent never mistakenly reports "no MCP
+    # bound" when it actually has email / search / browser etc.
+    bound_mcps = _summarize_bound_mcps(agent)
+
     lines.extend([
         "",
         "## 你的身份",
@@ -936,6 +979,18 @@ def _build_execution_prompt(
         f"- 目录: {workspace}",
         "  成果物（报告 / 代码 / 设计稿等）请**写入此目录**并通过 "
         "`submit_deliverable` 工具注册，这样用户才能在会议 Deliverables 栏看到。",
+    ])
+    if bound_mcps:
+        lines.extend([
+            "",
+            "## 可用 MCP",
+            f"- {bound_mcps}",
+            "  调用方式：`mcp_call(mcp_id=<id>, tool=<name>, arguments={...})`。"
+            "先 `mcp_call(list_mcps=true)` 可看到每个 MCP 的具体工具名。"
+            "如果需要发邮件、抓网页、访问数据库等，直接用这里的 MCP —— "
+            "不要对外声称\"没有绑定\"。",
+        ])
+    lines.extend([
         "",
         "## 执行要求",
         "1. **先用工具干活，再写结论** —— 需要查资料就 web_search / web_fetch，"
