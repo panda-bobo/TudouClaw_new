@@ -3704,52 +3704,26 @@ if (typeof window !== 'undefined') {
 // inside typing bubbles in project/meeting chat.
 // ────────────────────────────────────────────────────────────────
 
-// Single in-flight fetch per agent — avoids burying the server when
-// multiple polls overlap.
+// Single in-flight fetch per agent to avoid overlapping server hits.
 var _liveActivityInFlight = {};
 
 /**
- * Fetch recent tool/skill activity for an agent since ``sinceTs``
- * (unix seconds). Returns {lastToolName, toolCount, lastSkillName,
- * isWorking} or null on error.
- *
- * isWorking := "most recent event is a tool_call with no matching
- * tool_result yet" — means the agent is currently blocked inside
- * that tool call (e.g. web_fetch still running).
+ * Fetch all renderable events (tool_call / tool_result / skill_match)
+ * for an agent since ``sinceTs`` (unix seconds). Returns the raw event
+ * list so caller can render them however it wants — giving meeting /
+ * project chat the same per-event rendering agent chat gets via SSE.
  */
-async function _fetchAgentActivity(agentId, sinceTs) {
+async function _fetchAgentActivityEvents(agentId, sinceTs) {
   if (_liveActivityInFlight[agentId]) return _liveActivityInFlight[agentId];
   var p = (async function() {
     try {
       var data = await api('GET', '/api/portal/agent/' + agentId + '/events');
-      if (!data || !Array.isArray(data.events)) return null;
-      var recent = data.events.filter(function(e) {
-        return (e.timestamp || 0) >= sinceTs;
+      if (!data || !Array.isArray(data.events)) return [];
+      var keep = {tool_call: 1, tool_result: 1, skill_match: 1};
+      return data.events.filter(function(e) {
+        return (e.timestamp || 0) >= sinceTs && keep[e.kind];
       });
-      if (!recent.length) return null;
-      var toolCalls = recent.filter(function(e) { return e.kind === 'tool_call'; });
-      var toolResults = recent.filter(function(e) { return e.kind === 'tool_result'; });
-      var skillMatches = recent.filter(function(e) { return e.kind === 'skill_match'; });
-      var last = recent[recent.length - 1];
-      var isWorking = last && last.kind === 'tool_call';  // no result yet for this call
-      var lastToolName = '';
-      if (toolCalls.length) {
-        lastToolName = (toolCalls[toolCalls.length - 1].data || {}).name || '';
-      }
-      var lastSkillName = '';
-      if (skillMatches.length) {
-        var sd = skillMatches[skillMatches.length - 1].data || {};
-        lastSkillName = sd.skill_name || sd.name || '';
-      }
-      return {
-        lastToolName: lastToolName,
-        toolCount: toolCalls.length,
-        resultCount: toolResults.length,
-        lastSkillName: lastSkillName,
-        skillCount: skillMatches.length,
-        isWorking: isWorking,
-      };
-    } catch (e) { return null; }
+    } catch (e) { return []; }
   })();
   _liveActivityInFlight[agentId] = p;
   p.finally(function() { delete _liveActivityInFlight[agentId]; });
@@ -3757,41 +3731,15 @@ async function _fetchAgentActivity(agentId, sinceTs) {
 }
 
 /**
- * Build a compact activity suffix for use inside typing bubbles.
- * Returns a short HTML string or empty when there's nothing to show.
- * Examples:
- *   '🔧 web_fetch · 3 tools · 🎯 deep-research'
- *   '✓ 5 tools'                (work completed; waiting on next step)
- *   ''                         (no activity data)
- */
-function _formatActivitySuffix(activity) {
-  if (!activity) return '';
-  var parts = [];
-  if (activity.isWorking && activity.lastToolName) {
-    parts.push('🔧 ' + _escHtml(activity.lastToolName));
-  } else if (activity.lastToolName) {
-    parts.push('✓ ' + _escHtml(activity.lastToolName));
-  }
-  if (activity.toolCount > 1) {
-    parts.push(activity.toolCount + ' tools');
-  }
-  if (activity.lastSkillName) {
-    parts.push('🎯 ' + _escHtml(activity.lastSkillName));
-  }
-  if (!parts.length) return '';
-  return (
-    ' <span style="opacity:0.75;font-size:10px;font-family:ui-monospace,monospace">· ' +
-    parts.join(' · ') +
-    '</span>'
-  );
-}
-
-/**
- * Walk all typing-bubble DOM nodes for a given scope (project/meeting)
- * and append/update a live-activity suffix based on agent event logs.
- * Called after the scope's poll fetches latest messages — reuses the
- * current typing state, no extra polls beyond the one events fetch
- * per visible bubble.
+ * Decorate typing bubbles with a LIVE event-by-event feed that mirrors
+ * agent chat's inline tool_log. Each bubble gets a sub-area listing
+ * every tool_call / tool_result / skill_match that has fired since the
+ * bubble appeared. Events accumulate across polls (dedup by event
+ * timestamp+kind+name) so users see the progression rather than just
+ * the most recent state.
+ *
+ * This replaces the single-line suffix — now meeting / project chat
+ * shows the SAME activity story agent chat streams in real time.
  */
 async function _decorateTypingBubbles(container, pendingMap) {
   if (!container || !pendingMap) return;
@@ -3802,21 +3750,72 @@ async function _decorateTypingBubbles(container, pendingMap) {
     var aid = bubble.getAttribute('data-agent-id');
     var since = pendingMap[aid];
     if (!aid || !since) continue;
-    var activity = await _fetchAgentActivity(aid, since);
-    var suffix = _formatActivitySuffix(activity);
-    var slot = bubble.querySelector('.typing-activity-suffix');
-    if (!slot) {
-      slot = document.createElement('span');
-      slot.className = 'typing-activity-suffix';
-      bubble.appendChild(slot);
+
+    var events = await _fetchAgentActivityEvents(aid, since);
+
+    // Ensure the bubble has a log area (flex-column below the header).
+    var log = bubble.querySelector('.typing-activity-log');
+    if (!log) {
+      log = document.createElement('div');
+      log.className = 'typing-activity-log';
+      log.style.cssText = 'width:100%;margin-top:4px;display:flex;flex-direction:column;gap:1px;font-size:10px;font-family:ui-monospace,monospace';
+      // Ensure bubble can wrap the multi-row log.
+      bubble.style.flexDirection = 'column';
+      bubble.style.alignItems = 'flex-start';
+      bubble.appendChild(log);
     }
-    slot.innerHTML = suffix;
+
+    // Dedup key per event so repeated polls don't double-render.
+    bubble._activityKeys = bubble._activityKeys || {};
+
+    // For tool_result, flip the matching tool_call row from ⏳ → ✓.
+    events.forEach(function(evt) {
+      var key = evt.kind + '|' + (evt.timestamp || 0)
+              + '|' + ((evt.data || {}).name || '');
+      if (bubble._activityKeys[key]) return;
+      bubble._activityKeys[key] = true;
+
+      var d = evt.data || {};
+      if (evt.kind === 'tool_call') {
+        var argsStr = JSON.stringify(d.arguments || d.args || {});
+        var primary = (typeof _extractPrimaryArg === 'function')
+                        ? _extractPrimaryArg(argsStr) : '';
+        var preview = _escHtml(primary || argsStr.slice(0, 80));
+        var row = document.createElement('div');
+        row.setAttribute('data-tool-name', d.name || '');
+        row.style.cssText = 'display:flex;gap:4px;align-items:baseline';
+        row.innerHTML =
+          '<span style="color:var(--primary)">▸</span>' +
+          '<span style="color:var(--text2);font-weight:500" class="tool-name">' + _escHtml(d.name || '') + '</span>' +
+          '<span class="tool-status" style="color:var(--warning,#f0ad4e)">⏳</span>' +
+          (preview ? '<span style="color:var(--text3);opacity:0.75;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + preview + '</span>' : '');
+        log.appendChild(row);
+      } else if (evt.kind === 'tool_result') {
+        // Find the last pending row for this tool and mark it done.
+        var rows = log.querySelectorAll(
+          '[data-tool-name="' + (d.name || '').replace(/"/g, '\\"') + '"] .tool-status');
+        for (var j = rows.length - 1; j >= 0; j--) {
+          if (rows[j].textContent === '⏳') {
+            rows[j].textContent = '✓';
+            rows[j].style.color = 'var(--success,#5cb85c)';
+            break;
+          }
+        }
+      } else if (evt.kind === 'skill_match') {
+        var row2 = document.createElement('div');
+        row2.style.cssText = 'display:flex;gap:4px;align-items:baseline';
+        row2.innerHTML =
+          '<span style="color:#a78bfa">🎯</span>' +
+          '<span style="color:#a78bfa;font-weight:500">' + _escHtml(d.skill_name || d.name || '') + '</span>' +
+          (d.reason ? '<span style="color:var(--text3);opacity:0.75">' + _escHtml(d.reason).slice(0, 80) + '</span>' : '');
+        log.appendChild(row2);
+      }
+    });
   }
 }
 
 if (typeof window !== 'undefined') {
-  window._fetchAgentActivity = _fetchAgentActivity;
-  window._formatActivitySuffix = _formatActivitySuffix;
+  window._fetchAgentActivityEvents = _fetchAgentActivityEvents;
   window._decorateTypingBubbles = _decorateTypingBubbles;
 }
 
