@@ -20,6 +20,32 @@ templates = Jinja2Templates(directory=_TEMPLATE_DIR)
 logger = logging.getLogger("tudouclaw.api.pages")
 router = APIRouter(tags=["pages"])
 
+# Static JS files we fingerprint with mtime so the browser picks up
+# new versions without a manual hard-refresh. Paths are relative to
+# the app/server/static tree (mounted at /static). Missing files are
+# tolerated (mtime=0) so tests / early-boot don't explode.
+_CACHE_BUSTED_JS = (
+    ("bundle_v", "app/server/static/js/portal_bundle.js"),
+    ("v2_v",     "app/server/static/js/portal_v2.js"),
+)
+
+
+def _asset_versions() -> dict[str, int]:
+    """Return {template-var-name: int(mtime)} for the cache-busted
+    static files. Cheap to recompute per-request; files are local and
+    os.stat is microseconds.
+    """
+    out: dict[str, int] = {}
+    # Resolve paths relative to the repo root (two levels up from here).
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    for var_name, rel_path in _CACHE_BUSTED_JS:
+        try:
+            st = os.stat(os.path.join(repo_root, rel_path))
+            out[var_name] = int(st.st_mtime)
+        except OSError:
+            out[var_name] = 0
+    return out
+
 
 def _is_authenticated(request: Request) -> bool:
     """Validate the session cookie or JWT — not just check existence."""
@@ -51,7 +77,12 @@ def _is_authenticated(request: Request) -> bool:
 @router.get("/index.html", response_class=HTMLResponse)
 async def index(request: Request):
     if _is_authenticated(request):
-        return templates.TemplateResponse(request, "portal.html")
+        # Inject mtime-based versions so each edit to portal_bundle.js
+        # invalidates the browser cache automatically — no more "I
+        # updated the code but Chrome still shows the old version".
+        return templates.TemplateResponse(
+            request, "portal.html", _asset_versions(),
+        )
     # Clear stale cookie and show login
     response = templates.TemplateResponse(request, "login.html")
     if request.cookies.get("td_sess"):

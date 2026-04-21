@@ -1899,7 +1899,7 @@ body {
 <div id="toast-container"></div>
 
 <!-- Portal main application scripts (bundled) -->
-<script src="/static/js/portal_bundle.js"></script>
-<script src="/static/js/portal_v2.js"></script>
+<script src="/static/js/portal_bundle.js?v={{ bundle_v | default(0) }}"></script>
+<script src="/static/js/portal_v2.js?v={{ v2_v | default(0) }}"></script>
 </body>
 </html>
