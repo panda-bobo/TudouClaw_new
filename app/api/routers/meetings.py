@@ -425,6 +425,43 @@ async def meeting_post_message(
         )
         reg.save()
 
+        # Phase-2 wiring: auto-create MeetingAssignment when the user's
+        # message contains @<agent> + a task-intent keyword ("请完成",
+        # "调研", "生成报告", etc.). After the discussion round ends,
+        # meeting_agent_reply will find these OPEN assignments and
+        # hand each off to an execution-mode worker.
+        try:
+            if msg.role == "user":
+                from ...meeting import _detect_task_assignment
+                pce = getattr(hub, "project_chat_engine", None)
+                lookup = pce._lookup if pce else (lambda _i: None)
+                detected = _detect_task_assignment(
+                    msg.content or "", m, lookup,
+                )
+                for d in detected:
+                    try:
+                        m.add_assignment(
+                            title=d["title"],
+                            assignee_agent_id=d["assignee_agent_id"],
+                            description="来自会议消息的自动识别任务",
+                        )
+                        logger.info(
+                            "meeting %s: auto-created assignment for %s",
+                            m.id, d["assignee_agent_id"][:8],
+                        )
+                    except Exception as _ae:
+                        logger.warning(
+                            "meeting %s: add_assignment failed: %s",
+                            m.id, _ae,
+                        )
+                if detected:
+                    reg.save()
+        except Exception as _det_err:
+            logger.warning(
+                "meeting %s: task detection failed: %s",
+                m.id, _det_err,
+            )
+
         # ── Agent auto-reply: when a user posts to an ACTIVE meeting,
         #    each participant agent replies in sequence (daemon thread).
         #    Stop-commands ("暂停"/"停止"/...) only interrupt in-flight

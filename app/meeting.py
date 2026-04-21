@@ -754,6 +754,67 @@ def current_meeting_reply_gen(meeting_id: str) -> int:
         return _meeting_reply_gen.get(meeting_id, 0)
 
 
+# Task-intent trigger words. Meeting message containing `@<name>` AND
+# any of these qualifies as a task assignment — the recipient will get
+# an open MeetingAssignment created automatically and, after the
+# discussion round ends, a background executor that actually performs
+# the work (full tool access, deliverable generation, status posting).
+#
+# Kept narrow on purpose: vague phrasings ("你觉得呢?") should NOT
+# create a task. The trigger words below all imply "produce something
+# concrete" — 调研 / 报告 / 验证 / 准备 / 生成 / etc.
+_TASK_TRIGGER_WORDS: tuple[str, ...] = (
+    # Chinese — action verbs that imply deliverable
+    "完成", "做一份", "做个", "写一份", "写个", "写一", "生成",
+    "制作", "准备", "整理", "起草", "草拟",
+    "调研", "调查", "研究", "分析", "验证", "核实", "评估", "梳理",
+    "负责", "承担",
+    # English
+    "complete", "finish", "write a", "produce", "prepare", "draft",
+    "investigate", "research", "analyze", "analyse", "verify",
+    "review", "summarize", "compile",
+)
+
+
+def _detect_task_assignment(
+    content: str,
+    meeting: "Meeting",
+    agent_lookup_fn: Callable[[str], object],
+    exclude_agent_id: str = "",
+) -> list[dict]:
+    """Detect task assignments embedded in a chat message.
+
+    Returns a list of {"assignee_agent_id": str, "title": str} for each
+    @-mentioned participant where the message also contains at least
+    one task-intent trigger word. Order preserved; at most one entry
+    per assignee per message.
+
+    Non-goals:
+      - No LLM / fuzzy semantics; plain keyword matching. Misses
+        creative phrasings but avoids false positives.
+      - No title derivation heuristics yet — the whole message becomes
+        the assignment's title (truncated). Admins can rename later.
+    """
+    if not content or not meeting.participants:
+        return []
+
+    # Fast short-circuit — no trigger word present, no task intent.
+    if not any(w in content for w in _TASK_TRIGGER_WORDS):
+        return []
+
+    mentioned_ids = _find_at_mentioned_agents(
+        content, meeting, agent_lookup_fn,
+        exclude_agent_id=exclude_agent_id,
+    )
+    if not mentioned_ids:
+        return []
+
+    # Title: compact preview of the message, 80 chars max.
+    title = content.strip().replace("\n", " ")[:80]
+    return [{"assignee_agent_id": aid, "title": title}
+            for aid in mentioned_ids]
+
+
 def _find_at_mentioned_agents(
     content: str,
     meeting: "Meeting",
@@ -829,6 +890,216 @@ def _find_at_mentioned_agents(
         working = working[:idx] + blanks + working[idx + len(needle):]
         working_lower = working.lower()
     return found
+
+
+def _build_execution_prompt(
+    meeting: "Meeting",
+    agent,
+    assignment: "MeetingAssignment",
+    recent_tail: int = 30,
+) -> str:
+    """Build an EXECUTION-mode prompt for the agent assigned a task.
+
+    This is deliberately DIFFERENT from _build_meeting_prompt:
+      - No "简短为先" / "只说一次" restrictions. The agent is expected
+        to actually DO the work now, which may involve multiple tool
+        calls, long reasoning, and a substantial final report.
+      - Frames the task as the primary goal, with the meeting record
+        as background context (not the other way around).
+      - Points at the shared workspace as the canonical output
+        location so the generated deliverable lands where everyone
+        expects to find it.
+    """
+    role = getattr(agent, "role", "") or "agent"
+    name = getattr(agent, "name", "") or "agent"
+    workspace = meeting.workspace_dir or "(未设置)"
+
+    lines = [
+        "你正在执行会议 **{}** 里分配给你的任务。".format(
+            meeting.title or "(未命名)"),
+        "",
+        "## 你的任务",
+        f"**{assignment.title}**",
+    ]
+    if assignment.description:
+        lines.append(f"详情：{assignment.description}")
+    if assignment.due_hint:
+        lines.append(f"截止提示：{assignment.due_hint}")
+
+    lines.extend([
+        "",
+        "## 你的身份",
+        f"- 角色: {role}",
+        f"- 名字: {name}",
+        "",
+        "## 共享工作区",
+        f"- 目录: {workspace}",
+        "  成果物（报告 / 代码 / 设计稿等）请**写入此目录**并通过 "
+        "`submit_deliverable` 工具注册，这样用户才能在会议 Deliverables 栏看到。",
+        "",
+        "## 执行要求",
+        "1. **先用工具干活，再写结论** —— 需要查资料就 web_search / web_fetch，"
+        "读文件就 read_file，处理数据就 json_process / text_process，写代码就 "
+        "write_file，需要执行就 bash。禁止只写一句话就收工。",
+        "2. **多步任务必须用 plan_update** —— 开始前 "
+        "`plan_update(action='create_plan', steps=[...])`，每步开始 / 完成"
+        "都调用 start_step / complete_step，用户能实时看到进度。",
+        "3. **结果要落地** —— 最终产出（报告、分析、设计）必须写入文件或调用 "
+        "`submit_deliverable` 注册。纯文本回复视为未完成。",
+        "4. **完成后简短总结** —— 工具跑完后给一条简短的完成说明"
+        "（200 字内），指向 deliverable 路径 / 链接，不要把文件内容原文粘回来。",
+        "5. **不要再 @ 其他 agent** —— 这是你单独执行的阶段，需要协作就在"
+        "讨论阶段做；执行阶段保持独立。",
+        "",
+        "── 会议讨论记录（背景上下文，只读）──",
+    ])
+    msgs = list(meeting.messages or [])[-recent_tail:]
+    for m in msgs:
+        sname = getattr(m, "sender_name", "") or getattr(m, "sender", "user")
+        content = getattr(m, "content", "") or ""
+        mrole = getattr(m, "role", "")
+        tag = "[主持人]" if mrole == "user" else "[Agent]"
+        lines.append(f"{tag} {sname}: {content}")
+    lines.extend([
+        "",
+        "现在开始执行。记住：**工具优先，产出落地**。",
+    ])
+    return "\n".join(lines)
+
+
+def execute_meeting_assignment(
+    meeting: "Meeting",
+    registry: "MeetingRegistry",
+    agent_chat_fn: Callable[[str, Any], str],
+    agent_lookup_fn: Callable[[str], object],
+    assignment: "MeetingAssignment",
+    gen: Optional[int] = None,
+) -> None:
+    """Run the background execution phase for a single assignment.
+
+    Caller: ``meeting_agent_reply`` after its discussion loop exits.
+    Runs synchronously in the caller's thread; ``spawn_meeting_reply``
+    already runs the whole chain in a daemon thread so this inherits
+    non-blocking behavior.
+
+    Posts a "🚧 开始执行" status message first (so users see progress
+    starting), then drives the assignee agent with an execution prompt.
+    On success posts the final reply + marks the assignment done. On
+    failure posts the error + leaves the assignment open.
+
+    If ``gen`` is provided and a user interrupt lands while this
+    executor is running, the result is dropped and the assignment
+    stays open — consistent with how discussion replies handle interrupts.
+    """
+    if meeting.status in (MeetingStatus.CLOSED, MeetingStatus.CANCELLED):
+        return
+    aid = getattr(assignment, "assignee_agent_id", "")
+    if not aid:
+        logger.info(
+            "meeting %s assignment %s has no assignee, skipping executor",
+            meeting.id, getattr(assignment, "id", "?"),
+        )
+        return
+    ag = None
+    try:
+        ag = agent_lookup_fn(aid)
+    except Exception:
+        ag = None
+    if ag is None:
+        logger.warning(
+            "meeting %s assignment %s: assignee agent %s not found",
+            meeting.id, assignment.id, aid[:8] if aid else "?",
+        )
+        return
+
+    role = getattr(ag, "role", "") or "agent"
+    aname = getattr(ag, "name", "") or aid
+    sender_label = f"{role}-{aname}"
+
+    # Mark assignment in-progress + post a visible status tick so the
+    # user knows the executor picked it up (discussion just ended,
+    # now "real work" starts).
+    try:
+        if hasattr(assignment, "status"):
+            try:
+                assignment.status = AssignmentStatus.IN_PROGRESS
+            except Exception:
+                pass
+            assignment.updated_at = time.time()
+    except Exception:
+        pass
+
+    try:
+        meeting.add_message(
+            sender=aid,
+            sender_name=sender_label,
+            role="system",
+            content=f"🚧 开始执行任务：{assignment.title}",
+        )
+        registry.save()
+    except Exception:
+        pass
+
+    prompt = _build_execution_prompt(meeting, ag, assignment)
+
+    # Execution-mode thread-local: NOT meeting context, so tool handlers
+    # that route based on get_meeting_context (e.g. task_update routing
+    # to StandaloneTaskRegistry) behave normally. Project context
+    # preserved if the meeting is linked to a project.
+    from .agent_event_capture import (
+        snapshot_event_count,
+        capture_events_since,
+    )
+    events_cursor = snapshot_event_count(ag)
+    try:
+        reply = agent_chat_fn(aid, prompt)
+    except Exception as e:
+        reply = f"❌ 任务执行失败: {e}"
+    captured_blocks = capture_events_since(ag, events_cursor)
+
+    # User-priority interrupt check — same pattern as discussion replies.
+    # Revert assignment back to OPEN so a later round (or admin) can
+    # pick it up cleanly rather than seeing an orphan IN_PROGRESS.
+    if gen is not None and current_meeting_reply_gen(meeting.id) != gen:
+        logger.info(
+            "meeting %s dropping assignment %s result — user interrupt",
+            meeting.id, assignment.id,
+        )
+        try:
+            if hasattr(assignment, "status"):
+                assignment.status = AssignmentStatus.OPEN
+                assignment.updated_at = time.time()
+                registry.save()
+        except Exception:
+            pass
+        return
+
+    success = bool(reply) and not reply.startswith("❌")
+
+    try:
+        meeting.add_message(
+            sender=aid,
+            sender_name=sender_label,
+            role="assistant",
+            content=reply or "(no output)",
+            blocks=captured_blocks,
+        )
+        if hasattr(assignment, "status"):
+            try:
+                assignment.status = (
+                    AssignmentStatus.DONE if success else AssignmentStatus.OPEN
+                )
+            except Exception:
+                pass
+            if success:
+                assignment.result = (reply or "")[:2000]
+            assignment.updated_at = time.time()
+        registry.save()
+    except Exception as e:
+        logger.warning(
+            "meeting %s: failed to persist assignment result: %s",
+            meeting.id, e,
+        )
 
 
 def meeting_agent_reply(meeting: "Meeting",
@@ -1004,6 +1275,48 @@ def meeting_agent_reply(meeting: "Meeting",
             # Never let mention parsing crash the reply sequence.
             logger.warning("meeting %s: @-mention scan failed: %s",
                            meeting.id, _mention_err)
+
+    # ── Phase 2: Execution ──────────────────────────────────────────
+    # Discussion round is done. For every assignment that is still
+    # OPEN (i.e. auto-created from the user message on post, or added
+    # manually and not yet resolved), run the assignee in EXECUTION
+    # mode — different prompt, full tool access, produces a
+    # deliverable. Runs serially in this same daemon thread to avoid
+    # flooding the hub with parallel agent chat threads; users waiting
+    # on multiple assignments still see each finish in order.
+    try:
+        open_assignments = []
+        for assignment in list(meeting.assignments or []):
+            # Respect interrupt gen even before starting each executor.
+            if gen is not None and current_meeting_reply_gen(meeting.id) != gen:
+                break
+            status_val = assignment.status
+            if hasattr(status_val, "value"):
+                status_val = status_val.value
+            if str(status_val).lower() != "open":
+                continue
+            open_assignments.append(assignment)
+
+        for assignment in open_assignments:
+            if gen is not None and current_meeting_reply_gen(meeting.id) != gen:
+                break
+            if meeting.status in (MeetingStatus.CLOSED, MeetingStatus.CANCELLED):
+                break
+            execute_meeting_assignment(
+                meeting=meeting,
+                registry=registry,
+                agent_chat_fn=agent_chat_fn,
+                agent_lookup_fn=agent_lookup_fn,
+                assignment=assignment,
+                gen=gen,
+            )
+    except Exception as _exec_err:
+        # Executor crash must not take down the daemon thread —
+        # subsequent meetings / messages should still work.
+        logger.warning(
+            "meeting %s: executor phase failed: %s",
+            meeting.id, _exec_err, exc_info=True,
+        )
 
 
 def spawn_meeting_reply(meeting, registry, agent_chat_fn, agent_lookup_fn,
