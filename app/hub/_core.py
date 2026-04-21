@@ -102,13 +102,25 @@ class Hub:
             get_agent_fn=lambda aid: self.agents.get(aid),
             save_fn=self._save_agents,
         )
-        # Project chat engine
+        # Project / meeting chat uses _direct_chat (preserves agent
+        # identity for MCP / skill bindings). Workflow engine sticks
+        # with _workflow_chat because its "delegate" semantic is what
+        # the workflow step orchestrator actually needs (spawn a
+        # worker, run, discard).
+        #
+        # Design principle (stated by user 2026-04-21): "Agent作为一
+        # 个对象，能力包装是固定的，meeting/project/channel 只是外部
+        # 接入方式不同". So accessing the same agent via meeting or
+        # project MUST use the same agent.id — delegate() forking a
+        # child with a fresh uuid breaks MCP bindings and is wrong
+        # for these surfaces.
         self.project_chat_engine = ProjectChatEngine(
-            agent_chat_fn=self._workflow_chat,
+            agent_chat_fn=self._direct_chat,
             agent_lookup_fn=lambda aid: self.agents.get(aid),
             save_fn=self._save_projects,
         )
-        # Workflow engine — uses Hub's agent chat for execution
+        # Workflow engine — uses _workflow_chat (delegate) because it
+        # specifically wants worker forking for each step.
         self.workflow_engine = WorkflowEngine(
             agent_chat_fn=self._workflow_chat
         )
@@ -555,6 +567,11 @@ class Hub:
 
         When agent isolation is enabled (TUDOU_AGENT_ISOLATION=1), the call
         is routed to an isolated worker subprocess via the Supervisor.
+
+        Uses delegate() on purpose — workflow steps are short-lived
+        worker invocations where a fresh child context is appropriate.
+        For meeting / project chat use _direct_chat instead, which
+        preserves the agent's primary identity.
         """
         # Local agent — route through supervisor (handles both isolated
         # and in-process paths transparently)
@@ -562,6 +579,49 @@ class Hub:
             return self.supervisor.delegate(agent_id, message,
                                             from_agent="workflow")
         # Try remote (remote only supports string)
+        node = self.find_agent_node(agent_id)
+        if node:
+            _msg_str = message if isinstance(message, str) else (
+                " ".join(p.get("text", "") for p in message
+                         if isinstance(p, dict) and p.get("type") == "text")
+                or str(message)
+            )
+            return self.proxy_chat_sync(agent_id, node, _msg_str)
+        raise ValueError(f"Agent not found: {agent_id}")
+
+    def _direct_chat(self, agent_id: str, message) -> str:
+        """Call an agent's native chat() path directly, preserving identity.
+
+        Why this exists (contrast with _workflow_chat):
+
+            _workflow_chat → supervisor.delegate(agent_id, ...)
+                           → agent.delegate(content, from_agent=...)
+                           → spawns a CHILD Agent with a fresh uuid
+                           → child_agent.chat(prompt)
+                           → tools see _caller_agent_id = <child_uuid>
+
+            MCP router then looks up
+            get_agent_effective_mcps(node_id, <child_uuid>) which
+            returns nothing because the child was never registered in
+            the MCP manager's binding table. Net effect: in meeting /
+            project chat the agent hallucinates "not bound to agent"
+            errors even when the primary agent clearly has the MCP
+            bound. Same story for skill grants, experience library,
+            etc. — anything keyed by agent_id.
+
+        Meeting / project / channel are just different WAYS the user
+        talks to the SAME agent. The agent's capability bundle is
+        stable; only the input/output plumbing changes. So those
+        surfaces MUST call the agent's own chat() and keep the
+        original agent_id all the way through.
+
+        Supports str or list[dict] (multimodal) messages, same as
+        _workflow_chat. Remote path unchanged.
+        """
+        agent = self.agents.get(agent_id)
+        if agent is not None:
+            return agent.chat(message)
+        # Remote — same as _workflow_chat's remote branch.
         node = self.find_agent_node(agent_id)
         if node:
             _msg_str = message if isinstance(message, str) else (
