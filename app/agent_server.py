@@ -9,6 +9,7 @@ Usage:
     python -m app agent --port 8081 --hub http://portal-host:9090 --secret mykey
 """
 import json
+import logging
 import os
 import socket
 import sys
@@ -23,6 +24,8 @@ from . import llm, tools
 from .agent import Agent, AgentEvent, AgentStatus, create_agent
 from .auth import get_auth, init_auth
 from .defaults import IP_DETECT_TARGET, IP_DETECT_PORT, AGENT_PORT, PORTAL_PORT
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -205,11 +208,13 @@ class AgentServer:
         if self.hub_url:
             ok = self.register_with_hub()
             if ok:
+                logger.info("Registered with hub: %s", self.hub_url)
                 print(f"  Registered with hub: {self.hub_url}")
                 self._heartbeat_thread = threading.Thread(
                     target=self._heartbeat_loop, daemon=True)
                 self._heartbeat_thread.start()
             else:
+                logger.warning("Failed to register with hub: %s", self.hub_url)
                 print(f"  WARNING: Failed to register with hub")
 
         # Create handler class bound to this server

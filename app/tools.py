@@ -1563,32 +1563,9 @@ TOOL_DEFINITIONS: list[dict] = [
 # Tool implementations
 # ---------------------------------------------------------------------------
 
-def _tool_read_file(path: str, offset: int = 0, limit: int | None = None, **_: Any) -> str:
-    pol = _sandbox.get_current_policy()
-    try:
-        p = pol.safe_path(path)
-    except _sandbox.SandboxViolation as e:
-        return f"Error: {e}"
-    if not p.exists():
-        return f"Error: File not found: {path}"
-    if not p.is_file():
-        return f"Error: Not a file: {path}"
-    try:
-        lines = p.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
-    except Exception as e:
-        return f"Error reading file: {e}"
-
-    total = len(lines)
-    start = max(0, offset)
-    end = total if limit is None else min(total, start + limit)
-    selected = lines[start:end]
-
-    # Format with line numbers
-    numbered = []
-    for i, line in enumerate(selected, start=start + 1):
-        numbered.append(f"{i:>6}\t{line.rstrip()}")
-    header = f"[{p} — lines {start + 1}-{end} of {total}]"
-    return header + "\n" + "\n".join(numbered)
+# _tool_read_file moved to app/tools_split/read_file.py (see import above
+# near tool dispatcher). This stub is kept only as a doc anchor.
+from .tools_split.read_file import _tool_read_file  # noqa: E402,F401
 
 
 def _tool_write_file(path: str, content: str, **_: Any) -> str:
@@ -1670,83 +1647,11 @@ def _tool_bash(command: str, timeout: int = 30, **_: Any) -> str:
         return f"Error executing command: {e}"
 
 
-def _tool_search_files(pattern: str, path: str = ".", include: str = "", **_: Any) -> str:
-    pol = _sandbox.get_current_policy()
-    try:
-        base = pol.safe_path(path)
-    except _sandbox.SandboxViolation as e:
-        return f"Error: {e}"
-    if not base.exists():
-        return f"Error: Path not found: {path}"
+# _tool_search_files moved to app/tools_split/search_files.py
+from .tools_split.search_files import _tool_search_files  # noqa: E402,F401
 
-    try:
-        regex = re.compile(pattern)
-    except re.error as e:
-        return f"Error: Invalid regex pattern: {e}"
-
-    matches = []
-    max_matches = 200
-
-    def _search_file(fpath: Path):
-        try:
-            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
-                for lineno, line in enumerate(f, 1):
-                    if regex.search(line):
-                        matches.append(f"{fpath}:{lineno}: {line.rstrip()}")
-                        if len(matches) >= max_matches:
-                            return
-        except (PermissionError, IsADirectoryError, OSError):
-            pass
-
-    if base.is_file():
-        _search_file(base)
-    else:
-        for root, _dirs, files in os.walk(base):
-            # Skip hidden / common noise directories
-            root_path = Path(root)
-            parts = root_path.parts
-            if any(p.startswith(".") and p not in (".", "..") for p in parts):
-                continue
-            if any(p in ("node_modules", "__pycache__", ".git") for p in parts):
-                continue
-
-            for fname in files:
-                if include and not fnmatch.fnmatch(fname, include):
-                    continue
-                _search_file(root_path / fname)
-                if len(matches) >= max_matches:
-                    break
-            if len(matches) >= max_matches:
-                break
-
-    if not matches:
-        return "No matches found."
-    result = "\n".join(matches)
-    if len(matches) >= max_matches:
-        result += f"\n... (truncated at {max_matches} matches)"
-    return result
-
-
-def _tool_glob_files(pattern: str, path: str = ".", **_: Any) -> str:
-    pol = _sandbox.get_current_policy()
-    try:
-        base = pol.safe_path(path)
-    except _sandbox.SandboxViolation as e:
-        return f"Error: {e}"
-    if not base.exists():
-        return f"Error: Path not found: {path}"
-
-    found = sorted(base.glob(pattern))
-    # Filter out hidden dirs
-    filtered = [
-        str(f) for f in found
-        if not any(part.startswith(".") and part not in (".", "..") for part in f.parts)
-    ]
-    if not filtered:
-        return "No files found."
-    if len(filtered) > 500:
-        return "\n".join(filtered[:500]) + f"\n... ({len(filtered)} total, showing first 500)"
-    return "\n".join(filtered)
+# _tool_glob_files moved to app/tools_split/glob_files.py
+from .tools_split.glob_files import _tool_glob_files  # noqa: E402,F401
 
 
 # ---------------------------------------------------------------------------
@@ -4053,8 +3958,7 @@ def _tool_create_pptx_advanced(
                     auto_els = generate_layout(layout_spec, theme_dict)
                     all_elements.extend(auto_els)
                 except Exception as _le:
-                    import sys as _sys
-                    print(f"[pptx_advanced] layout error: {_le}", file=_sys.stderr)
+                    logger.warning("pptx_advanced layout error: %s", _le)
 
             # Append any manually-specified elements (can supplement layout)
             all_elements.extend(slide_data.get("elements") or [])
@@ -4071,9 +3975,7 @@ def _tool_create_pptx_advanced(
                         handler(slide, el)
                     except Exception as e:
                         # Non-critical: log but continue
-                        import sys as _sys
-                        print(f"[pptx_advanced] element error ({el_type}): {e}",
-                              file=_sys.stderr)
+                        logger.warning("pptx_advanced element error (%s): %s", el_type, e)
 
         prs.save(str(output_file))
         return f"✓ Created advanced presentation ({slide_count} slides): {output_file}"

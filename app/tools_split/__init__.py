@@ -44,5 +44,19 @@ Work each chat session:
     ``pytest tests/`` → commit. Resume next session.
 """
 
-# Deliberately empty for now. The module exists so the folder
-# appears in the tree without shadowing app/tools.py imports.
+# Migration status
+# ----------------
+# Batch 1 (filesystem-read tools) — DONE:
+#     read_file     → tools_split/read_file.py
+#     search_files  → tools_split/search_files.py
+#     glob_files    → tools_split/glob_files.py
+#
+# tools.py still owns the TOOL_DEFINITIONS schema list and the
+# _TOOL_FUNCS dispatcher. Handlers are now re-exported from this
+# package so downstream imports (app.tools._tool_read_file, etc.)
+# keep working unchanged.
+#
+# Next batches (not yet started):
+#     write_file / edit_file / bash — filesystem-write + exec (batch 2)
+#     web_search / web_fetch / web_screenshot / http_request (batch 3)
+#     team_create / send_message / task_update + project tools (batch 4)
