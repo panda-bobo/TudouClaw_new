@@ -44,24 +44,30 @@ Work each chat session:
     ``pytest tests/`` → commit. Resume next session.
 """
 
-# Migration status (by category, not one-file-per-tool)
-# -----------------------------------------------------
-# DONE:
-#   fs.py   — read_file, write_file, edit_file, search_files, glob_files
-#   web.py  — web_search, web_fetch, web_screenshot, http_request
-#
-# TODO:
-#   system.py       — bash, pip_install, desktop_screenshot
-#   coordination.py — team_create, send_message, task_update
+# Migration status (by category, not one-file-per-tool) — DONE.
+# -------------------------------------------------------------
+#   _common.py      — _get_hub (lazy hub import, shared by 4 modules)
+#   fs.py           — read_file, write_file, edit_file, search_files,
+#                     glob_files (5)
+#   web.py          — web_search, web_fetch, web_screenshot, http_request (4)
+#   system.py       — bash, pip_install, desktop_screenshot (3)
+#   coordination.py — team_create, send_message, task_update (3)
 #   project.py      — submit_deliverable, create_goal, update_goal_progress,
-#                     create_milestone, update_milestone_status
-#   data.py         — datetime_calc, json_process, text_process
+#                     create_milestone, update_milestone_status (5)
+#                     + _get_current_scope, _resolve_project,
+#                       _save_projects_silently helpers
+#   data.py         — datetime_calc, json_process, text_process (3)
 #   knowledge.py    — save_experience, knowledge_lookup, share_knowledge,
-#                     learn_from_peers
-#   media.py        — create_pptx, create_pptx_advanced, create_video
-#   skills.py       — get_skill_guide, propose_skill, submit_skill
-#   mcp.py          — mcp_call
+#                     learn_from_peers (4)
+#   media.py        — create_pptx, create_pptx_advanced, create_video (3)
+#   skills.py       — get_skill_guide, propose_skill, submit_skill (3)
+#   mcp.py          — mcp_call + builtin TTS/STT handler + audio event
+#                     queue (1 tool + 3 helpers)
+#
+# Total: 34 tools + 7 shared helpers.
 #
 # tools.py retains TOOL_DEFINITIONS (schemas) and _TOOL_FUNCS
-# (dispatcher). Handlers are re-exported from each module here so
-# ``app.tools._tool_read_file`` etc. keep working unchanged.
+# (dispatcher). Handlers and the helpers used by external modules
+# (agent.py, agent_execution.py, portal REST) are re-exported from
+# tools.py so ``app.tools._tool_read_file``, ``app.tools._get_hub``,
+# ``app.tools.get_audio_events`` etc. keep working unchanged.
