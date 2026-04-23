@@ -19,6 +19,7 @@ from ..defaults import (
     IP_DETECT_TARGET, IP_DETECT_PORT,
 )
 import logging
+import re
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -29,6 +30,78 @@ from .middleware.security import SecurityHeadersMiddleware
 from .deps.hub import init_hub, shutdown_hub
 
 logger = logging.getLogger("tudouclaw.api")
+
+
+# ---------------------------------------------------------------------------
+# uvicorn access-log filter — drop routine polling noise
+# ---------------------------------------------------------------------------
+# Frontend polls /api/portal/state + /api/portal/projects every ~15s. With
+# default uvicorn config each 200 shows up as an INFO line, drowning out real
+# signal (errors, state-changing POSTs, slow calls). Filter: drop 2xx logs
+# for a whitelist of polling endpoints; keep 4xx/5xx for any URL; keep any
+# non-poll URL at all status codes.
+
+_POLL_NOISE_PATHS = (
+    "/api/portal/state",
+    "/api/portal/projects",
+    "/api/portal/tasks",
+    "/api/portal/agents",
+    "/api/portal/health",
+    "/api/portal/stats",
+    "/api/portal/admin/me",
+    "/api/portal/inbox/unread",
+    "/api/portal/meetings/active",
+    "/health",
+)
+# Compiled regex matches the uvicorn access format:
+#   'host:port - "METHOD /path HTTP/1.1" STATUS'
+_ACCESS_RE = re.compile(
+    r'"(?P<method>[A-Z]+)\s+(?P<path>\S+)\s+HTTP/\d\.\d"\s+(?P<status>\d{3})'
+)
+
+
+class _AccessNoiseFilter(logging.Filter):
+    """Drop uvicorn.access INFO lines for routine polling endpoints at 2xx.
+    Override via env TUDOU_LOG_ACCESS=1 to keep everything (debugging)."""
+
+    def __init__(self):
+        super().__init__()
+        import os as _os
+        self._verbose = _os.environ.get("TUDOU_LOG_ACCESS", "0") == "1"
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if self._verbose:
+            return True
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        m = _ACCESS_RE.search(msg)
+        if not m:
+            return True
+        method = m.group("method")
+        path = m.group("path")
+        status = int(m.group("status"))
+        # Always keep errors (4xx / 5xx) so real problems stay visible.
+        if status >= 400:
+            return True
+        # Only filter GET/HEAD — POST/PUT/PATCH/DELETE on these paths are
+        # state-changing operations and must remain visible.
+        if method not in ("GET", "HEAD"):
+            return True
+        # Strip query string for whitelist match
+        path = path.split("?", 1)[0]
+        for noise in _POLL_NOISE_PATHS:
+            if path == noise or path.startswith(noise + "/"):
+                return False  # drop
+        return True
+
+
+# Install filter as early as possible — uvicorn.access logger is created
+# when uvicorn boots. Attaching here (module-level, before uvicorn.run) is
+# safe: the logger gets the filter whether we're invoked via `python -m app`
+# or a bare `uvicorn app.api.main:app`.
+logging.getLogger("uvicorn.access").addFilter(_AccessNoiseFilter())
 
 # ---------------------------------------------------------------------------
 # Lifespan: startup / shutdown
