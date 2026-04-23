@@ -78,6 +78,10 @@ if [ "$FULL_INSTALL" = true ]; then
     # matplotlib: chart rendering in skill's plot_* helpers
     $PYTHON_CMD -m pip install akshare>=1.15 matplotlib>=3.7 tabulate>=0.9
 
+    # Skill converter (skill-converter skill)
+    # readability-lxml + html2text: clean HTML → markdown extraction
+    $PYTHON_CMD -m pip install readability-lxml>=0.8 html2text>=2024.0 lxml_html_clean>=0.4
+
     # Screenshot (Playwright)
     echo ""
     echo -e "${YELLOW}Installing Playwright + Chromium for screenshots...${NC}"

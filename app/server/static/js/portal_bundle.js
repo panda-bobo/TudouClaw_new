@@ -1144,7 +1144,9 @@ function renderAgentsList() {
   }
 
   var isOfficeOpen = !!window._agentsOfficeOpen;
-  var officeBtn = '<div style="display:flex;justify-content:flex-end;margin-bottom:16px"><button onclick="toggleAgentsOffice()" style="padding:8px 14px;border:1px solid var(--border);background:'+(isOfficeOpen?'var(--primary)':'var(--surface2)')+';color:'+(isOfficeOpen?'#fff':'var(--text)')+';font-size:12px;font-weight:600;cursor:pointer;border-radius:8px;display:flex;align-items:center;gap:6px;font-family:inherit"><span class="material-symbols-outlined" style="font-size:16px">apartment</span>AI Office</button></div>';
+  // AI Office 入口已下线（per user request 2026-04-23）。保留变量避免
+  // 下游 render 代码 NPE；toggleAgentsOffice 函数仍在，以防直接 URL 访问。
+  var officeBtn = '';
 
   c.innerHTML = officeBtn
     + (isOfficeOpen ? '<div id="agents-office-wrap" style="height:360px;margin-bottom:16px;border:1px solid var(--border-light);border-radius:12px;overflow:hidden;background:#1a1a2e;position:relative"><canvas id="office-canvas" style="width:100%;height:100%;display:block"></canvas><div style="position:absolute;top:8px;left:16px;right:16px;display:flex;align-items:center;gap:6px;z-index:10"><span class="material-symbols-outlined" style="font-size:18px;color:var(--primary)">apartment</span><span style="font-family:monospace;font-size:11px;color:var(--primary);font-weight:800">AI AGENT OFFICE</span><span id="office-agent-count" style="font-size:10px;color:var(--text3);margin-left:auto;background:var(--overlay-10);padding:2px 8px;border-radius:10px"></span></div></div>' : '')
