@@ -18497,6 +18497,7 @@ function _permSelectUser(uid) {
   var a = (window._permAdmins || []).find(function(x) { return x.user_id === uid; });
   if (!a) return;
   var nodes = window._permNodes || [];
+  var allAgents = window._permAgents || [];
   var delegatedNodes = new Set(a.node_ids || []);
   var isSuper = a.role === 'superAdmin';
   var isUser  = a.role === 'user';
@@ -18520,8 +18521,47 @@ function _permSelectUser(uid) {
       + '<b>superAdmin</b> ' + window.t('perm.superNote', '拥有全部权限，无需授权。')
       + '</div>';
   } else if (isUser) {
-    body = '<div style="padding:10px 12px;background:var(--overlay-8);border-radius:8px;font-size:12px;color:var(--text2);margin-bottom:16px">'
-      + window.t('perm.userNote', 'user 只能使用 agent，不能管理。无需授权节点。')
+    // User: agent-level binding only. Superadmin picks a subset of agents
+    // this user can USE (view + chat). Empty = has access to none.
+    var delegatedAgents = new Set(a.agent_ids || []);
+    var agentRows = (allAgents && allAgents.length)
+      ? allAgents.map(function(ag) {
+          var aid = ag.id || ag.agent_id;
+          if (!aid) return '';
+          var checked = delegatedAgents.has(aid) ? 'checked' : '';
+          var name = ag.name || ag.display_name || aid;
+          var role = ag.role || '';
+          var node = ag.node_id || ag.node_name || '';
+          return '<label style="display:flex;align-items:center;gap:8px;padding:4px 6px;cursor:pointer;font-size:12px">'
+            + '<input type="checkbox" class="perm-agent-cb" value="' + esc(aid) + '" ' + checked + '>'
+            + '<span style="flex:1">' + esc(name) + '</span>'
+            + (role ? '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:var(--overlay-8);color:var(--text3)">' + esc(role) + '</span>' : '')
+            + (node ? '<span style="font-size:10px;color:var(--text3)">' + esc(node) + '</span>' : '')
+            + '</label>';
+        }).join('')
+      : '<div style="padding:8px;color:var(--text3);font-size:12px">' + window.t('common.noData', '暂无数据') + '</div>';
+    body = ''
+      + '<div style="padding:10px 12px;background:var(--overlay-8);border-radius:8px;font-size:12px;color:var(--text2);margin-bottom:16px">'
+      +   window.t('perm.userNote', 'user 只能使用被授权的 agent，不能管理。勾选允许此用户使用的 agent。')
+      + '</div>'
+      + '<div style="margin-bottom:20px">'
+      +   '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'
+      +     '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text3)">'
+      +       window.t('perm.allowedAgents', '可使用的 Agent') + ' (' + delegatedAgents.size + '/' + (allAgents || []).length + ')'
+      +     '</div>'
+      +     '<div>'
+      +       '<button class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 8px" onclick="_permUserToggleAll(true)">'
+      +         window.t('perm.selectAll', '全选') + '</button>'
+      +       '<button class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 8px" onclick="_permUserToggleAll(false)">'
+      +         window.t('perm.clearAll', '清空') + '</button>'
+      +     '</div>'
+      +   '</div>'
+      +   '<div style="font-size:11px;color:var(--text3);margin-bottom:8px">'
+      +     window.t('perm.userScopeHint', 'user 登录后只能看到并使用被勾选的 agent。')
+      +   '</div>'
+      +   '<div style="max-height:320px;overflow-y:auto;border:1px solid var(--border-light);border-radius:8px;padding:4px">'
+      +     agentRows
+      +   '</div>'
       + '</div>';
   } else if (isAdmin) {
     // Admin: node delegation only (admin's agent access derives from node ownership)
@@ -18550,10 +18590,10 @@ function _permSelectUser(uid) {
       + '</div>';
   }
 
-  // Actions row (common: reset pw + disable/enable + delete; save only for admin)
+  // Actions row (common: reset pw + disable/enable + delete; save for admin+user)
   var actions = '<div style="display:flex;gap:8px">'
-    + (isAdmin
-        ? '<button class="btn btn-primary btn-sm" onclick="_permSaveDelegation(\'' + esc(uid) + '\')">'
+    + ((isAdmin || isUser)
+        ? '<button class="btn btn-primary btn-sm" onclick="_permSaveDelegation(\'' + esc(uid) + '\',\'' + esc(a.role) + '\')">'
           + '<span class="material-symbols-outlined" style="font-size:16px">save</span> '
           + window.t('action.save', '保存') + '</button>'
         : '')
@@ -18573,19 +18613,29 @@ function _permSelectUser(uid) {
   detail.innerHTML = header + body + actions;
 }
 
-async function _permSaveDelegation(uid) {
+async function _permSaveDelegation(uid, role) {
   try {
-    // Node-scoped admin model: admin's agent management derives from
-    // node ownership. We only save node_ids here; agent_ids is legacy
-    // and intentionally ignored.
-    var nodeIds = Array.from(document.querySelectorAll('.perm-node-cb:checked')).map(function(x){return x.value;});
-    await api('POST', '/api/portal/admins/bind-nodes', {user_id: uid, node_ids: nodeIds});
+    if (role === 'user') {
+      // User-role: bind agent_ids (what agents they can USE).
+      var agentIds = Array.from(document.querySelectorAll('.perm-agent-cb:checked')).map(function(x){return x.value;});
+      await api('POST', '/api/portal/admins/bind', {user_id: uid, agent_ids: agentIds});
+    } else {
+      // Admin-role: bind node_ids (what nodes they can MANAGE;
+      // agent access derives from node ownership).
+      var nodeIds = Array.from(document.querySelectorAll('.perm-node-cb:checked')).map(function(x){return x.value;});
+      await api('POST', '/api/portal/admins/bind-nodes', {user_id: uid, node_ids: nodeIds});
+    }
     window._toast(window.t('perm.saved', '权限已更新'), 'success');
     // Refresh the whole panel so lists reflect the saved state.
     renderPermissionsPanel();
   } catch (e) {
     alert(window.t('perm.saveFailed', '保存失败') + ': ' + (e && e.message || e));
   }
+}
+
+function _permUserToggleAll(select) {
+  var boxes = document.querySelectorAll('.perm-agent-cb');
+  for (var i = 0; i < boxes.length; i++) boxes[i].checked = !!select;
 }
 
 // Create-user modal: opened from the "+ 新建用户" button at the top of
