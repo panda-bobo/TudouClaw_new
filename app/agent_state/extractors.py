@@ -345,12 +345,16 @@ def scan_deliverable_dir(
     #   - .shadow / cache    : agent-state metadata
     # Without this filter, every bash/read_file spill shows up as a
     # download card on the chat bubble after the next /files call.
-    _SCAN_EXCLUDE_DIRS = {"tool_outputs", "skills", "cache", "__pycache__"}
+    _SCAN_EXCLUDE_DIRS = {"tool_outputs", "skills", "cache", "__pycache__",
+                          "attachments"}
     # Root-level workspace meta files that are context docs, not deliverables.
     _SCAN_EXCLUDE_ROOT_FILES = {
         "Project.md", "Skills.md", "MCP.md", "Tasks.md",
         "Scheduled.md", "ActiveThinking.md",
     }
+    # Suffix-based exclusions: skill preview / draft markdowns.
+    _SCAN_EXCLUDE_SUFFIXES = ("-skill.md",)
+    _SCAN_EXCLUDE_EXACT = {"skill-full.md"}
 
     for dirpath, dirnames, filenames in os.walk(root_abs, followlinks=False):
         # depth guard
@@ -373,6 +377,11 @@ def scan_deliverable_dir(
                 continue
             # At workspace root, skip meta files (Project.md, etc.)
             if is_root and fn in _SCAN_EXCLUDE_ROOT_FILES:
+                continue
+            # Skip skill preview / draft markdowns anywhere in tree
+            if fn in _SCAN_EXCLUDE_EXACT:
+                continue
+            if any(fn.endswith(sfx) for sfx in _SCAN_EXCLUDE_SUFFIXES):
                 continue
             n_seen += 1
             if n_seen > max_files:

@@ -196,6 +196,41 @@ class ShadowRecorder:
         "knowledge_lookup",
     })
 
+    # Reserved workspace filenames — config files already injected into the
+    # system prompt via XML blocks. Rendering them as chat attachments is
+    # pure noise. Centralised here so record_tool_result,
+    # build_envelope_refs, and compute_file_index_from_events all apply
+    # the same rule.
+    _RESERVED_WORKSPACE_NAMES = frozenset({
+        "Project.md", "Tasks.md", "Skills.md",
+        "MCP.md", "Scheduled.md", "ActiveThinking.md",
+    })
+    # Path-fragment blacklist for infra directories whose contents are
+    # NEVER deliverables (spill cache, shared meeting reads, agent meta).
+    _INFRA_PATH_FRAGMENTS = (
+        "/tool_outputs/",
+        "/.tudou_claw/",
+        "/workspaces/meetings/",
+    )
+
+    @staticmethod
+    def _looks_like_infra(value: str) -> bool:
+        """Return True if `value` (a path/url) refers to an infra file
+        that must never become a chat attachment."""
+        if not value:
+            return False
+        val = str(value)
+        base = val.rsplit("/", 1)[-1] if "/" in val else val
+        if base in ShadowRecorder._RESERVED_WORKSPACE_NAMES:
+            return True
+        # Skill preview / draft markdowns that sometimes leak through
+        if base.endswith("-skill.md") or base == "skill-full.md":
+            return True
+        for frag in ShadowRecorder._INFRA_PATH_FRAGMENTS:
+            if frag in val:
+                return True
+        return False
+
     def record_tool_result(self, tool_name: str, result_str: str) -> None:
         if not result_str:
             return
@@ -239,27 +274,13 @@ class ShadowRecorder:
                             c for c in candidates
                             if c.get("kind") not in _NON_DELIVERABLE_KINDS
                         ]
-                    # Reserved-name filter — skip workspace config files
-                    # (Project.md / Tasks.md / Skills.md / MCP.md /
-                    # Scheduled.md) and skill preview markdowns that are
-                    # already injected into the system prompt via XML
-                    # blocks. They're not deliverables, they're config.
+                    # Reserved-name + infra-path filter (single source
+                    # of truth — see ShadowRecorder._looks_like_infra).
                     if candidates:
-                        _RESERVED_CFG = {
-                            "Project.md", "Tasks.md", "Skills.md",
-                            "MCP.md", "Scheduled.md",
-                        }
-
-                        def _keep(c) -> bool:
-                            val = str(c.get("value", "") or "")
-                            base = val.rsplit("/", 1)[-1] if val else ""
-                            if base in _RESERVED_CFG:
-                                return False
-                            if base.endswith("-skill.md") or base == "skill-full.md":
-                                return False
-                            return True
-
-                        candidates = [c for c in candidates if _keep(c)]
+                        candidates = [
+                            c for c in candidates
+                            if not self._looks_like_infra(c.get("value", ""))
+                        ]
                     if not candidates:
                         # still record a tool turn so we can audit
                         self.state.conversation.append(
@@ -570,6 +591,12 @@ class ShadowRecorder:
                                 }
                                 cands = [c for c in cands
                                          if c.get("kind") not in _NON_DELIV]
+                            # Reserved-name + infra-path filter (same
+                            # rule as live record_tool_result — MUST
+                            # match or replay diverges from live state).
+                            if cands:
+                                cands = [c for c in cands
+                                         if not self._looks_like_infra(c.get("value", ""))]
                             if cands:
                                 normalize_path_candidates(cands, base_dir)
                                 pb = ProducedBy(
@@ -714,51 +741,22 @@ class ShadowRecorder:
                     ArtifactKind.DOCUMENT,
                     ArtifactKind.ARCHIVE,
                 }
-                # Reserved workspace filenames — these are config files
-                # already injected into the system prompt via XML blocks
-                # (<project>/<tasks>/<skills>/<mcp_servers>/<scheduled_tasks>).
-                # Rendering them as chat attachments is pure noise, since
-                # the agent already reads them every turn via the prompt.
-                _RESERVED_NAMES = {
-                    "Project.md", "Tasks.md", "Skills.md",
-                    "MCP.md", "Scheduled.md",
-                }
-                # Reserved path fragments — infrastructure directories whose
-                # contents are NEVER deliverables (spill cache, skill source,
-                # tool_outputs). Matches anywhere in the artifact's value/url.
-                _INFRA_PATH_FRAGMENTS = (
-                    "/tool_outputs/",
-                    "/.tudou_claw/",
-                    "/workspaces/meetings/",  # shared meeting workspace —
-                    # files the agent reads, not produces
-                )
-
-                def _is_reserved(art) -> bool:
-                    name = (getattr(art, "label", "") or "").strip()
-                    if name in _RESERVED_NAMES:
-                        return True
-                    val = str(getattr(art, "value", "") or "")
-                    base = val.rsplit("/", 1)[-1] if val else ""
-                    if base in _RESERVED_NAMES:
-                        return True
-                    for frag in _INFRA_PATH_FRAGMENTS:
-                        if frag in val:
-                            return True
-                    # Skill preview / draft markdowns that sometimes leak
-                    # through (LLM paste of prompt templates, etc.)
-                    if base.endswith("-skill.md") or base == "skill-full.md":
-                        return True
-                    return False
-
+                # Reserved / infra filter is centralised in
+                # _looks_like_infra (match live record_tool_result +
+                # compute_file_index_from_events exactly).
                 out: List[dict] = []
                 for aid in last_assistant.artifact_refs:
                     art = self.state.artifacts.get(aid)
                     if art is None or art.kind not in file_kinds:
                         continue
-                    if _is_reserved(art):
+                    # Match against label (filename) and value (path/url).
+                    label = (getattr(art, "label", "") or "").strip()
+                    value = str(getattr(art, "value", "") or "")
+                    if (self._looks_like_infra(value)
+                            or self._looks_like_infra(label)):
                         logger.debug(
                             "shadow: skip reserved ref %s (%s)",
-                            aid, getattr(art, "label", ""))
+                            aid, label or value)
                         continue
                     ref = self._artifact_to_ref(aid)
                     if ref is not None:
