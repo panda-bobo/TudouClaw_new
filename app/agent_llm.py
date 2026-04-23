@@ -1848,21 +1848,16 @@ class AgentLLMMixin:
                     confidence=0.95,
                 ))
 
-            # 写入每个步骤为 action_plan
-            for step in plan.steps:
-                mm.save_fact(SemanticFact(
-                    agent_id=self.id,
-                    category="action_plan",
-                    content=f"[步骤{step.order + 1}] {step.title}"
-                             + (f" - {step.detail}" if step.detail else ""),
-                    source=f"execution_plan:{plan.id}:step:{step.id}",
-                    confidence=0.9,
-                ))
-
+            # 不再为每个 step 单独写一条 action_plan 记忆 —— 之前的做法
+            # 会把一个 8 步 plan 炸成 8 条 "[步骤N] ..." L3 entries，召回时
+            # 挤占 top-K 但信息量极低（步骤标题本身不是 reusable 的知识）。
+            # 单个 plan 只写一条 goal（上面已写）足够承载任务上下文，步骤
+            # 细节通过 completion 阶段的 outcome 按需升格。
             self._log("memory", {
                 "action": "plan_to_memory",
                 "plan_id": plan.id,
                 "steps": len(plan.steps),
+                "facts_written": 1,
             })
         except Exception as e:
             logger.debug("Failed to write plan to memory: %s", e)

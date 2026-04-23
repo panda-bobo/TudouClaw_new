@@ -1651,46 +1651,20 @@ class MemoryManager:
             return []
 
         current_time = time.strftime("%Y-%m-%d %H:%M")
+        # Minimal structural prompt only — category enum + response schema.
+        # Detailed trigger-word heuristics, examples, and severity policy
+        # live in the operator-maintained global system prompt (config-driven),
+        # NOT in this Python source. See docs for the recommended preference /
+        # rule extraction guidance snippet.
+        categories = "|".join(self.CANONICAL_CATEGORIES)
         prompt = (
-            "你是 Agent 的记忆提取器。从对话中提取**对未来有用的关键记忆**。\n\n"
-            "核心原则: Agent 记忆 = 用户画像 + 经验 + 规则 + 结论，不是日志。\n"
-            "不记录: 每条命令本身、终端输出全文、无意义重试、状态轮询、系统噪音。\n\n"
-            "六层记忆分类:\n\n"
-            "| category | 记什么 | 举例 | 触发词（用户一说立刻记）|\n"
-            "|----------|--------|------|------|\n"
-            "| preference ⭐ | 用户**长期画像**: 偏好/风格/禁忌/口味/身份设定 | "
-            "\"用户偏好中英混合回复\" / \"用户要求代码不加 emoji\" / \"用户是 Ops 背景，看重运维细节\" | "
-            "\"我喜欢/我讨厌/我是/我禁止/以后都/从此/请一直/永远不要\" |\n"
-            "| intent | 任务的真实目标、用户意图、约束条件、成功标准 | "
-            "\"用户需要将记忆体系从流水账改为结构化模型，约束: 兼容旧数据\" | "
-            "\"我要做/帮我实现/本次任务\" |\n"
-            "| reasoning | 为什么选这个方案、排除了什么、当时的假设和风险判断 | "
-            "\"选择重构L3分类而非新建表，因为SQLite schema变更成本高\" | "
-            "\"之所以/因为/所以我们选\" |\n"
-            "| outcome | 最终成功/失败、关键输出、状态变化、失败原因 | "
-            "\"记忆体系重构完成，6层分类上线\" | "
-            "\"完成/失败/交付\" |\n"
-            "| rule | 场景→方案、错误→修复、前置条件→必须先做什么 | "
-            "\"新分支首次推送必须加 -u 关联上游\" | "
-            "\"下次遇到/如果.../记得要\" |\n"
-            "| reflection | 哪里低效、下次优先检查什么、可合并的步骤 | "
-            "\"下次修改DB schema前应先检查未迁移旧数据\" | "
-            "\"早知道/本应该/如果重来\" |\n\n"
-            f"当前时间: {current_time}\n\n"
+            f"Agent 记忆提取器。当前时间: {current_time}\n\n"
             f"用户: {user_message[:1000]}\n"
             f"助手: {assistant_response[:1000]}\n\n"
-            "提取规则:\n"
-            "- 每条 content 必须**自包含**，脱离上下文也能理解\n"
-            "- **preference 优先级最高** —— 用户一表达长期偏好/风格/禁忌，必抽，"
-            "即便整轮对话只有一句；confidence 写 0.9+\n"
-            "- preference 区别 rule: preference 是用户**本人**表达的永久画像（\"我喜欢 X\"），"
-            "rule 是 agent 自己学到的操作教训（\"调 X 前必须先 Y\"）\n"
-            "- rule 要抽象成「场景→方案」if-then 模式\n"
-            "- reasoning 记「为什么」，reflection 要有具体改进动作\n"
-            "- confidence: 0.95=用户明确/工具验证, 0.8=从对话合理推断, 0.5=不太确定\n"
-            "- 宁缺毋滥: 无高价值信息返回 []。绝不要为了凑数提取\"本次会话执行了 N 个操作\"类流水\n\n"
-            "返回 JSON 数组（不要包含其他内容）:\n"
-            '[{"content": "自包含描述", "category": "preference|intent|reasoning|outcome|rule|reflection", "confidence": 0.9}]'
+            f"返回 JSON 数组（无高价值信息返回 []）: "
+            f'[{{"content": "自包含描述", '
+            f'"category": "{categories}", '
+            f'"confidence": 0.0-1.0}}]'
         )
         try:
             result = llm_call(prompt)
@@ -1822,14 +1796,17 @@ class MemoryManager:
         else:
             result_text = None
 
-        if not result_text:
-            # Simple aggregation without LLM
-            tools_used = list(tool_groups.keys())
-            result_text = (
-                f"[{time.strftime('%Y-%m-%d')}] "
-                f"本次会话执行了 {len(buf)} 个操作 "
-                f"(工具: {', '.join(tools_used[:5])})"
-            )
+        if not result_text or not result_text.strip():
+            # No LLM summary available → skip write entirely. The old
+            # "[日期] 本次会话执行了 N 个操作 (工具: X)" fallback was
+            # low-signal noise that flooded L3 with duplicates carrying
+            # zero reusable information. Better to miss a write than to
+            # pollute the store with templated non-facts.
+            logger.info(
+                "Action buffer flush for %s: %d actions — no LLM summary, "
+                "skipping write (avoided templated noise)",
+                agent_id, len(buf))
+            return None
 
         fact = SemanticFact(
             agent_id=agent_id,
