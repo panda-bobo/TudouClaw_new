@@ -9085,6 +9085,14 @@ Write only the summary body. Do not include any preamble or prefix."""
         failed_rule_counts: dict[str, int] = {}
         exhausted_rule_ids: set[str] = set()
         result = None
+        # Same budgets as agent_execution._run_quality_gate_with_retry —
+        # 3-per-rule + 6-total. Tunable via env so ops can dial based on
+        # observed retry waste.
+        import os as _os
+        _MAX_PER_RULE = int(
+            _os.environ.get("TUDOU_QUALITY_MAX_PER_RULE", "3") or 3)
+        _MAX_TOTAL = int(
+            _os.environ.get("TUDOU_QUALITY_MAX_TOTAL_FAILS", "6") or 6)
 
         for attempt in range(hard_retries + 1):
             result = gate.check(current, rules, context=ctx)
@@ -9100,8 +9108,14 @@ Write only the summary body. Do not include any preamble or prefix."""
 
             for rid in result.failing_rules:
                 failed_rule_counts[rid] = failed_rule_counts.get(rid, 0) + 1
-                if failed_rule_counts[rid] >= 2:
+                if failed_rule_counts[rid] >= _MAX_PER_RULE:
                     exhausted_rule_ids.add(rid)
+            if sum(failed_rule_counts.values()) >= _MAX_TOTAL:
+                logger.info(
+                    "Agent %s: quality-retry total-fail cap hit (%d ≥ %d)",
+                    self.id[:8],
+                    sum(failed_rule_counts.values()), _MAX_TOTAL)
+                break
 
             feedback = gate.build_feedback_prompt(
                 result, current, rules,
@@ -9131,12 +9145,25 @@ Write only the summary body. Do not include any preamble or prefix."""
                 logger.debug("QualityGate retry LLM call failed: %s", e)
                 break
 
-        # Exhausted retries → soft fallback
+        # Exhausted retries → soft fallback. Agent turn always continues —
+        # return last-best output so caller can deliver it; UI shows a
+        # quality_warning banner so the user sees the failure.
         if soft_fallback and result is not None and not result.passed:
             try:
+                _failing = result.failing_rules
+                _total = sum(failed_rule_counts.values())
                 evt = AgentEvent(time.time(), "quality_warning", {
-                    "failing_rules": result.failing_rules,
-                    "message": "质量检查未通过，已达重试上限，返回最后一版输出（软提示兜底）",
+                    "failing_rules": _failing,
+                    "exhausted_rules": sorted(exhausted_rule_ids),
+                    "total_fails": _total,
+                    "message": (
+                        f"质量检查未通过 / Quality check failed after "
+                        f"{_total} retry attempts. 返回最后一版输出，"
+                        f"agent 继续执行 / returning last-best output, "
+                        f"agent continues."
+                        + (f" 未通过规则 / failing: {', '.join(_failing)}"
+                           if _failing else "")
+                    ),
                 })
                 self._log(evt.kind, evt.data)
                 if _emit is not None:
@@ -9146,6 +9173,10 @@ Write only the summary body. Do not include any preamble or prefix."""
                         pass
             except Exception:
                 pass
+        # Defensive: if retries produced empty content, fall back to original
+        # so downstream chat turn always has something non-empty.
+        if not (current or "").strip():
+            current = output_text
         return current
 
     def _record_kpis_and_experience(

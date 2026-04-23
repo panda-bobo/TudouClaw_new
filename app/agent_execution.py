@@ -2589,6 +2589,13 @@ class AgentExecutionMixin:
         ctx = {"tools_used": tools_used or [], "user_text": user_text or ""}
         failed_rule_counts: dict[str, int] = {}
         exhausted_rule_ids: set[str] = set()
+        # Quality-retry budgets (tunable via env). Default 3-per-rule + 6-total
+        # replaces the old rigid 2-per-rule. A rule can now legitimately fail
+        # 3 times before we blacklist it (accounts for minor drift between
+        # retries), AND a global 6-strike cap prevents a scenario where 3
+        # independent rules each burn 3 retries = 9 LLM round trips.
+        _MAX_PER_RULE = int(os.environ.get("TUDOU_QUALITY_MAX_PER_RULE", "3") or 3)
+        _MAX_TOTAL = int(os.environ.get("TUDOU_QUALITY_MAX_TOTAL_FAILS", "6") or 6)
 
         for attempt in range(hard_retries + 1):  # initial + hard_retries
             result = gate.check(current, rules, context=ctx)
@@ -2603,11 +2610,21 @@ class AgentExecutionMixin:
             if attempt >= hard_retries:
                 break  # out of budget
 
-            # Track per-rule consecutive failures; skip rules that failed ≥2x
+            # Track per-rule consecutive failures; skip rules that exceed
+            # _MAX_PER_RULE so we stop wasting turns on an unfixable rule
+            # but keep retrying the others.
             for rid in result.failing_rules:
                 failed_rule_counts[rid] = failed_rule_counts.get(rid, 0) + 1
-                if failed_rule_counts[rid] >= 2:
+                if failed_rule_counts[rid] >= _MAX_PER_RULE:
                     exhausted_rule_ids.add(rid)
+            # Global circuit-break: total accumulated failures too high →
+            # stop retrying entirely and fall through to soft fallback.
+            if sum(failed_rule_counts.values()) >= _MAX_TOTAL:
+                logger.info(
+                    "Agent %s: quality-retry total-fail cap hit (%d ≥ %d), "
+                    "aborting retries", self.id[:8],
+                    sum(failed_rule_counts.values()), _MAX_TOTAL)
+                break
 
             # Build feedback prompt and ask LLM to rewrite
             feedback = gate.build_feedback_prompt(
@@ -2636,13 +2653,29 @@ class AgentExecutionMixin:
                 logger.debug("QualityGate retry LLM call failed: %s", e)
                 break  # fall through to soft fallback
 
-        # Exhausted retries → soft fallback
+        # Exhausted retries → soft fallback. Agent turn always continues —
+        # we return the LAST-BEST output (never None, never raise) so the
+        # chat loop can deliver something the user can act on. The user sees
+        # a quality_warning event banner so they know it wasn't clean.
         if soft_fallback:
             try:
                 from .agent_types import AgentEvent
+                _failing = (result.failing_rules if 'result' in locals()
+                            and result is not None else [])
+                _exhausted_list = sorted(exhausted_rule_ids)
+                _total = sum(failed_rule_counts.values())
                 evt = AgentEvent(time.time(), "quality_warning", {
-                    "failing_rules": result.failing_rules if 'result' in locals() else [],
-                    "message": "质量检查未通过，已达重试上限，返回最后一版输出（软提示兜底）",
+                    "failing_rules": _failing,
+                    "exhausted_rules": _exhausted_list,
+                    "total_fails": _total,
+                    "message": (
+                        f"质量检查未通过 / Quality check failed after "
+                        f"{_total} retry attempts. 返回最后一版输出，"
+                        f"agent 继续执行 / returning last-best output, "
+                        f"agent continues."
+                        + (f" 未通过规则 / failing: {', '.join(_failing)}"
+                           if _failing else "")
+                    ),
                 })
                 self._log(evt.kind, evt.data)
                 if _emit is not None:
@@ -2652,6 +2685,11 @@ class AgentExecutionMixin:
                         pass
             except Exception:
                 pass
+        # Defensive: if retry LLM gave an empty string back but we still
+        # have the original output_text, prefer the original over empty so
+        # the downstream chat turn has something to deliver.
+        if not (current or "").strip():
+            current = output_text
         return current
 
     def _record_kpis_and_experience(
