@@ -93,7 +93,26 @@ def slide_cover(prs):
 # The script path: $AGENT_WORKSPACE/build_report.py (or project shared dir)
 ```
 
-脚本模板见下面 "Reference scripts" 章节，直接抄改即可。
+**⭐ 必用 `_pptx_helpers` —— 一行导入，省掉 200 行样板**
+
+脚本开头只要一行：
+
+```python
+from _pptx_helpers import *   # bash 工具已自动 PYTHONPATH，直接 import
+```
+
+`_pptx_helpers` 已经导出了：
+- `Presentation` / `Inches` / `Pt` / `Emu` / `RGBColor` / `MSO_SHAPE` / `PP_ALIGN` / `MSO_ANCHOR` / `CategoryChartData` / `XL_CHART_TYPE`
+- `THEME`（bg/fg/accent/accent2/muted/card_bg/ok/warn/bad...）/ `FONT` / `SW` / `SH`
+- `new_deck()` / `blank_layout(prs)` / `hex_color("#XXXXXX")`
+- `set_bg / add_text / add_rect / add_card / add_styled_table / add_bullets / add_bar_chart / add_line_chart / add_image`
+- `header_bar(prs, title)` —— 一行创建带标题栏的新页
+- `check_bounds(path)` / `verify_slides(path)` —— 质量门
+- `strip_md / parse_md_outline` —— md → outline
+
+**不要**再写 `from pptx.util import ...` 或 `from pptx.dml.color import ...` —— 会 shadow 掉上面导出的版本。**也不要**自己重新 `def set_bg`、重新 `THEME = {...}` —— 抄了就会漏字段、错拼 key。
+
+完整最小脚本（30 行以内）见下面 "Reference scripts"。
 
 ### 3. 先语法检查，再跑脚本
 
@@ -112,7 +131,17 @@ python build_report.py 2>&1
 - **有 traceback** → 看**最后一行**报错 → 定位行号 → 改那一行 → **不要整个重写**（改错的地方，保留其他）
 - **退出码非 0** → 绝对不能当成功上报。bash 工具现在会用 ❌ 标记，你必须解决
 
-### 4. 逐页验证——这一步不可省
+### 4. 逐页验证——这一步不可省（用 `verify_slides`）
+
+调 helper 里的 `verify_slides(path)` 就行，不要再写内嵌 `python - <<'PY'`：
+
+```bash
+python -c "from _pptx_helpers import verify_slides; verify_slides('out.pptx')"
+```
+
+`verify_slides` 默认 strict 模式：只要有一页 BLANK（0 shape）或任何 shape 越出画布，就 `sys.exit(2)` —— bash 工具的 ❌ 会自动触发，你必须回第 3 步修。
+
+### 4b. 旧版等价写法（仅供对照，不推荐）
 
 ```bash
 python - <<'PY'

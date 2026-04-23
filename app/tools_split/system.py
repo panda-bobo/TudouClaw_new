@@ -46,6 +46,28 @@ def _tool_bash(command: str, timeout: int = _BASH_TIMEOUT_DEFAULT_S,
     cwd = str(pol.root) if getattr(pol, "root", None) else os.getcwd()
     env = pol.scrub_env() if jailed else None
 
+    # Auto-inject PYTHONPATH so activated-skill python helpers are importable
+    # from agent scripts with a plain `from _pptx_helpers import *` (no
+    # sys.path preamble). Looks at <cwd>/skills/*/ — that's where
+    # add_skill_to_workspace drops skill files per agent. Idempotent: we
+    # prepend, so existing PYTHONPATH entries still win if the caller
+    # explicitly sets one for a specific script.
+    try:
+        skills_root = os.path.join(cwd, "skills")
+        if os.path.isdir(skills_root):
+            extra = [os.path.join(skills_root, d)
+                     for d in sorted(os.listdir(skills_root))
+                     if os.path.isdir(os.path.join(skills_root, d))]
+            if extra:
+                if env is None:
+                    env = os.environ.copy()
+                existing = env.get("PYTHONPATH", "")
+                parts = extra + ([existing] if existing else [])
+                env["PYTHONPATH"] = os.pathsep.join(parts)
+    except Exception:
+        # Never block bash on path-discovery failure.
+        pass
+
     # Switched from subprocess.run → Popen + communicate so we can
     # track the child pid in the abort registry. A user clicking "终止"
     # on a meeting/project/agent flips the registry's abort flag AND
