@@ -3380,14 +3380,20 @@ class Agent:
                 self._memory_turn_counter = 0  # 重置计数
 
             # === L3: 提取事实 ===
+            # 行为规则走 Global Config → System Prompts (见 agent_llm 同段注释)
             if mem_config.auto_extract_facts:
                 llm_call = self._make_summary_llm_call()
+                try:
+                    _scene_prompts = self._get_scene_prompts_text() or ""
+                except Exception:
+                    _scene_prompts = ""
                 facts = mm.extract_facts(
                     agent_id=self.id,
                     user_message=user_message,
                     assistant_response=assistant_response,
                     llm_call=llm_call,
                     config=mem_config,
+                    extra_context=_scene_prompts,
                 )
                 if facts:
                     self._log("memory", {

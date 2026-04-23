@@ -1465,14 +1465,23 @@ class AgentLLMMixin:
                 logger.debug("Feedback learning failed: %s", _fb_err)
 
             # === L3: 提取事实 ===
+            # 把 operator 在 Global Config → System Prompts 维护的行为
+            # 规则（preference 触发词、confidence 分档、宁缺毋滥原则等）
+            # 作为 extra_context 传入 —— L3 抽取 LLM 与主 chat 共享同一
+                            # 套语义规则，避免 Python 里二次硬编码。
             if mem_config.auto_extract_facts:
                 llm_call = self._make_summary_llm_call()
+                try:
+                    _scene_prompts = self._get_scene_prompts_text() or ""
+                except Exception:
+                    _scene_prompts = ""
                 facts = mm.extract_facts(
                     agent_id=self.id,
                     user_message=user_message,
                     assistant_response=assistant_response,
                     llm_call=llm_call,
                     config=mem_config,
+                    extra_context=_scene_prompts,
                 )
                 if facts:
                     self._log("memory", {

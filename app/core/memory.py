@@ -1621,11 +1621,20 @@ class MemoryManager:
                       assistant_response: str,
                       llm_call: Any = None,
                       config: Optional[MemoryConfig] = None,
+                      extra_context: str = "",
                       ) -> list[SemanticFact]:
         """
         从一轮对话中提取长期事实，存入 L3。
 
         仅在用户表达偏好、规则、项目约定等情况下提取。
+
+        Args:
+            extra_context: 可选的前置上下文 —— 调用方（agent_llm/agent）
+                应传入 Global Config → System Prompts (scene_prompts) 的
+                合并文本。这样 operator 在 UI 维护的行为规则（"怎么抽
+                preference"、confidence 分档、触发词等）会被 L3 提取的
+                这一路 LLM 看到，保持与主 chat 同一套语义。Python 源码
+                内只留 minimal structural prompt，行为规则全走 config。
         """
         if config is None:
             config = self.get_config(agent_id)
@@ -1652,12 +1661,13 @@ class MemoryManager:
 
         current_time = time.strftime("%Y-%m-%d %H:%M")
         # Minimal structural prompt only — category enum + response schema.
-        # Detailed trigger-word heuristics, examples, and severity policy
-        # live in the operator-maintained global system prompt (config-driven),
-        # NOT in this Python source. See docs for the recommended preference /
-        # rule extraction guidance snippet.
+        # All behavioral rules (triggers, examples, confidence policy) come
+        # from `extra_context` which the caller builds from operator-maintained
+        # Global Config → System Prompts. Python source only owns structure.
         categories = "|".join(self.CANONICAL_CATEGORIES)
+        prefix = (extra_context.strip() + "\n\n") if extra_context.strip() else ""
         prompt = (
+            f"{prefix}"
             f"Agent 记忆提取器。当前时间: {current_time}\n\n"
             f"用户: {user_message[:1000]}\n"
             f"助手: {assistant_response[:1000]}\n\n"
