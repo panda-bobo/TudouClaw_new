@@ -73,6 +73,11 @@ if [ "$FULL_INSTALL" = true ]; then
     # Web enhancement
     $PYTHON_CMD -m pip install beautifulsoup4>=4.12 lxml>=5.0
 
+    # Stock market data (akshare-stock skill)
+    # akshare: Chinese A-share / 港股 / 美股 data
+    # matplotlib: chart rendering in skill's plot_* helpers
+    $PYTHON_CMD -m pip install akshare>=1.15 matplotlib>=3.7 tabulate>=0.9
+
     # Screenshot (Playwright)
     echo ""
     echo -e "${YELLOW}Installing Playwright + Chromium for screenshots...${NC}"
