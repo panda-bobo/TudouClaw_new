@@ -552,6 +552,14 @@ class AgentExecutionMixin:
                 self._llm_manages_plan_this_turn = False
             except Exception:
                 pass
+            # Reset auto-continue counter at each USER-initiated turn
+            # (system-injected continue messages don't reset it — that
+            # counter only breaks the auto loop, not a real new turn).
+            try:
+                if source != "auto_continue":
+                    self._auto_continue_count = 0
+            except Exception:
+                pass
             msg = {"role": "user", "content": _msg_content, "source": source}
             self.messages.append(msg)
             self._log("message", {"role": "user", "content": _user_text[:500], "source": source})
@@ -1252,6 +1260,70 @@ class AgentExecutionMixin:
                                               "_source": "llm",
                                               **({"reasoning_content": _reasoning_content}
                                                  if _reasoning_content else {})})
+
+                        # ── Auto-continue when plan has open steps ──
+                        # If the LLM emits pure text (no tool_call) while
+                        # the agent still has a plan with pending /
+                        # in_progress steps, it usually means the model is
+                        # doing "narrative stop" ("Now I will write…") but
+                        # forgot to actually call the next tool. Inject a
+                        # synthetic nudge and continue the loop instead of
+                        # waiting for the user to prod it again.
+                        try:
+                            _plan = getattr(self, "_current_plan", None)
+                            _plan_open = False
+                            if _plan and getattr(_plan, "status", "") == "active":
+                                from .agent_types import StepStatus as _SS
+                                for _s in _plan.steps:
+                                    if _s.status in (_SS.PENDING, _SS.IN_PROGRESS):
+                                        _plan_open = True
+                                        break
+                            # Rate-limit: at most N auto-continues per turn
+                            _ac_n = int(getattr(self, "_auto_continue_count", 0))
+                            _AC_MAX = 5
+                            _content_stripped = (content or "").strip()
+                            # Only auto-continue if content looks like a narrative
+                            # "I'm about to do X" (vs a real final answer). A real
+                            # final answer would typically be longer or contain
+                            # a concrete result word. Short narrative intent =
+                            # auto-continue candidate.
+                            _looks_narrative = (
+                                _content_stripped
+                                and len(_content_stripped) < 500
+                                and not _dup_abort
+                            )
+                            if (_plan_open and _looks_narrative
+                                    and _ac_n < _AC_MAX):
+                                self._auto_continue_count = _ac_n + 1
+                                logger.info(
+                                    "Agent %s: auto-continue #%d — text-only "
+                                    "reply with open plan steps, injecting "
+                                    "continue prompt",
+                                    self.id[:8], _ac_n + 1)
+                                self.messages.append({
+                                    "role": "user",
+                                    "content": (
+                                        "[SYSTEM 自动续跑] 你刚才只给出了"
+                                        "**叙述性预告**而没有实际动作。plan "
+                                        "里还有未完成的步骤。请**立刻**调用"
+                                        "下一个具体工具 (write_file/bash/"
+                                        "web_fetch/mcp_call) 或 plan_update "
+                                        "(start_step/complete_step/fail_step) "
+                                        "推进。不要再重复'现在开始 / Now I"
+                                        " will'类叙述。"
+                                    ),
+                                    "_dynamic": True,
+                                    "_source": "auto_continue",
+                                })
+                                # Do NOT break — re-enter the loop
+                                continue
+                        except Exception as _ac_err:
+                            logger.debug(
+                                "auto-continue skipped: %s", _ac_err)
+
+                        # No auto-continue path taken → actually stop this turn.
+                        # Reset the counter so next user-initiated turn starts fresh.
+                        self._auto_continue_count = 0
                         break
 
                     assistant_msg: dict = {"role": "assistant",
