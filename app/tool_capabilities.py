@@ -60,47 +60,66 @@ logger = logging.getLogger("tudou.capabilities")
 
 
 # ── CORE tier ───────────────────────────────────────────────────────
-# Shipped to every agent unconditionally. These are the tools that
-# constitute an agent's basic identity rather than an optional
-# capability — a filesystem-less agent, a web-less agent, or a
-# memoryless agent is not really the kind of assistant users expect.
+# Minimal set that stays on for EVERY agent regardless of granted skills.
+# Kept tiny (3 tools) because empty-CORE + no-skill agent would be
+# useless — but every "real" capability now goes behind a skill bundle
+# below. This is the safety floor, not the primary capability surface.
 CORE_TOOLS: frozenset[str] = frozenset({
-    # Filesystem read
-    "read_file", "search_files", "glob_files",
-    # Filesystem write + shell exec (core dev capability)
-    "write_file", "edit_file", "bash",
-    # Quality gate primitive — every agent should be able to verify its
-    # work. Block 2 Review loop depends on this being universally callable.
-    "run_tests",
-    # Data processing utilities
-    "datetime_calc", "json_process", "text_process",
-    # Web basics (search + read)
-    "web_search", "web_fetch",
-    # Memory and knowledge (agent identity)
-    "knowledge_lookup", "save_experience",
-    "share_knowledge", "learn_from_peers",
-    # UI visibility
-    "plan_update", "emit_ui_block",
-    # Structured baton-pass between agents (sprint-collab B). Core
-    # because every agent may finish a task and hand off — not a skill
-    # to opt into.
-    "emit_handoff",
-    # User scheduling interface ("remind me in 5 min")
-    "task_update",
-    # Inter-agent messaging (communication primitive)
-    "send_message",
-    # Must be core so granted skills are usable
+    # Plan state machine — without this, agent can't report progress.
+    # Can't sensibly gate behind a skill because planning is how skills
+    # coordinate; chicken-and-egg.
+    "plan_update",
+    # Skill introspection — lets the LLM discover what granted skills
+    # provide, essential bootstrap.
     "get_skill_guide",
-    # MCP bridge — MCP binding is its own authorization layer
+    # MCP bridge — MCP has its own auth layer (per-server binding).
     "mcp_call",
 })
 
 
 # ── SKILL-GATED tier ───────────────────────────────────────────────
 # { capability_skill_name: [tool_name, ...] }
-# An agent sees these tools only if the skill is in its granted_skills.
+# An agent sees these tools only if the skill is in its granted_skills
+# OR the skill is in the global capability defaults list (admin-wide).
 # Dict ordering preserved for reviewer readability.
+#
+# Design principle: bundle by FUNCTIONAL DOMAIN (what the tool does),
+# not by role (who uses it). "file-ops" is a bundle, "coder-tools" is
+# not — a researcher also reads files, a pm also writes reports.
 CAPABILITY_SKILLS: dict[str, list[str]] = {
+    # ── Core functional bundles (most agents want most of these) ──
+    "file-ops": [
+        "read_file", "write_file", "edit_file",
+        "search_files", "glob_files",
+    ],
+    "shell-ops": [
+        "bash", "run_tests",
+    ],
+    "web-ops": [
+        "web_search", "web_fetch",
+    ],
+    "memory-ops": [
+        "knowledge_lookup", "save_experience",
+        "share_knowledge", "learn_from_peers",
+        "memory_recall",
+    ],
+    "data-process": [
+        "datetime_calc", "json_process", "text_process",
+    ],
+    "ui-visibility": [
+        "emit_ui_block",
+    ],
+    "scheduling": [
+        "task_update",
+    ],
+    "messaging": [
+        "send_message", "ack_message", "reply_message",
+        "check_inbox",
+    ],
+    "handoff": [
+        "emit_handoff", "handoff_request", "team_create",
+    ],
+    # ── Specialty bundles (opt-in per agent) ──
     "project-management": [
         "submit_deliverable",
         "create_goal",
@@ -121,10 +140,6 @@ CAPABILITY_SKILLS: dict[str, list[str]] = {
     ],
     "http-client": [
         "http_request",
-    ],
-    "multi-agent": [
-        "handoff_request",
-        "team_create",
     ],
     "admin-ops": [
         "pip_install",
@@ -164,11 +179,36 @@ def is_core_tool(tool_name: str) -> bool:
 # so users who configured one already know where to look for the other.
 _DEFAULTS_FILENAME = "capability_defaults.json"
 
-# Factory default: no global capabilities. Admin explicitly opts each
-# one in via the UI (or by editing the file). We ship with NONE so
-# token savings are immediate — the opposite of "grant everything and
-# hope the admin revokes".
-_FACTORY_DEFAULT_CAPABILITIES: list[str] = []
+# Factory default: minimum functional bundles every agent needs to do
+# anything useful. CORE is only 3 tools (plan_update / get_skill_guide /
+# mcp_call) which is not enough — without these defaults, a fresh agent
+# can't even read a file. Admins override by writing capability_defaults.json.
+#
+# Rationale for each entry:
+#   file-ops     — read/write/edit are table-stakes; removing them leaves
+#                   the agent unable to inspect/modify anything.
+#   shell-ops    — many tasks end with 'run this' / 'test it'.
+#   web-ops      — search + fetch is basic research capability.
+#   memory-ops   — knowledge_lookup + save_experience are L3 learning loop.
+#   data-process — datetime_calc / json_process / text_process utilities.
+#   ui-visibility — emit_ui_block lets agent render rich UI in chat.
+#   scheduling   — task_update for reminders / deferred work.
+#   messaging    — send_message for inter-agent communication.
+#   handoff      — emit_handoff for workflow baton-pass.
+#
+# Total schema weight of these 9 bundles: ~16KB vs the old ~62KB full
+# dump — ~75% reduction on an agent with no extra skills granted.
+_FACTORY_DEFAULT_CAPABILITIES: list[str] = [
+    "file-ops",
+    "shell-ops",
+    "web-ops",
+    "memory-ops",
+    "data-process",
+    "ui-visibility",
+    "scheduling",
+    "messaging",
+    "handoff",
+]
 
 
 def _default_home() -> Path:
@@ -254,16 +294,22 @@ def filter_tools_by_capability(
     granted_skills: list[str] | None,
     global_defaults: list[str] | None = None,
 ) -> list[dict]:
-    """Apply the capability-tier filter.
+    """Apply the capability-tier filter — STRICT mode.
 
     Keeps a tool iff ANY of:
-      1. It is in CORE_TOOLS (always on).
+      1. It is in CORE_TOOLS (tiny irreducible set: plan_update /
+         get_skill_guide / mcp_call).
       2. Its gating capability is in ``global_defaults`` (admin-wide).
       3. Its gating capability is in ``granted_skills`` (per-agent).
-      4. It isn't classified at all (unknown-tool fail-open — admin
-         can classify later without breaking things).
 
-    If ``global_defaults`` is None, it's loaded from disk via
+    Previous behavior allowed "unknown tools" through fail-open; removed
+    because it leaked every new unclassified tool to every agent, growing
+    the schema payload uncontrolled over time.
+    New policy: if a tool exists in the registry but isn't classified
+    into ANY capability bundle, it does NOT ship to the LLM. The sanity-
+    check helper flags such drift so admins can classify at review time.
+
+    If ``global_defaults`` is None it's loaded from disk via
     ``load_global_default_capabilities()``. Pass an explicit empty list
     to disable the global layer in tests.
     """
@@ -278,9 +324,9 @@ def filter_tools_by_capability(
             continue
         cap = _TOOL_TO_CAPABILITY.get(name)
         if cap is None:
-            # Unknown tool — allow through. The admin can add it to the
-            # classification tables later if they want gating.
-            kept.append(t)
+            # Strict: unclassified tool → do NOT ship. This is intentional
+            # — admins must classify new tools into a capability bundle
+            # before agents see them, preventing silent payload growth.
             continue
         if cap in effective_caps:
             kept.append(t)
