@@ -782,8 +782,13 @@ function renderCurrentView() {
     }
     case 'nodes': {
       titleEl.textContent = t('page.nodes', 'Nodes');
-      // Topbar-actions "+ Connect Node" button removed per design pass.
-      actionsEl.innerHTML = '';
+      // Restore "+ Connect Node" topbar button (removed in an earlier
+      // design pass but users still need the entry to add remote nodes).
+      actionsEl.innerHTML =
+        '<button class="btn btn-primary btn-sm" onclick="showModal(\'add-node\')">'
+        + '<span class="material-symbols-outlined" style="font-size:16px">add</span> '
+        + t('action.connectNode', 'Connect Node')
+        + '</button>';
       renderNodes();
       break;
     }
