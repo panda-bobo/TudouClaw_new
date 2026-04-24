@@ -7807,7 +7807,7 @@ Write only the summary body. Do not include any preamble or prefix."""
 
     # ---- Stale step detection (emergency fix for "IDLE + in_progress" bug) ──
 
-    def _detect_stale_plan_steps(self, threshold_s: float = 120.0,
+    def _detect_stale_plan_steps(self, threshold_s: float = 180.0,
                                    emit_frames: bool = True) -> list[dict]:
         """Find plan steps that are in_progress but the agent isn't actually
         working on them.
@@ -7819,17 +7819,18 @@ Write only the summary body. Do not include any preamble or prefix."""
            isn't running. No time threshold needed.
 
         2. **agent.status == BUSY** AND step.status == IN_PROGRESS AND
-           step.started_at > threshold_s ago AND no new events in the
+           no new `tool_call` / `tool_result` / `message` events in the
            last threshold_s — the LLM or a tool call hung. Time threshold
-           protects against false positives during legit long operations.
+           protects against false positives during legit long operations
+           (a single long-running web_fetch / bash still emits the
+           initial tool_call event which resets the clock).
 
         Per user rule (a): this method does NOT mutate step state. It
         only detects and emits a warning frame to ProgressBus so the UI
         can surface the issue to a human, who picks mark_failed / skip
         / resume via dedicated API endpoints.
 
-        Returns a list of dicts describing each stale step (for tests
-        and for the caller to log/act on if it wants).
+        Returns a list of dicts describing each stale step.
         """
         plan = self._current_plan
         if plan is None or not plan.steps:
@@ -7843,17 +7844,29 @@ Write only the summary body. Do not include any preamble or prefix."""
         except Exception:
             agent_idle = str(getattr(self.status, "value", self.status)) == "idle"
 
-        # Most recent agent.events timestamp — proxy for "is anything
-        # actually happening". events is an in-memory list; we cap at
-        # 2000 elsewhere so len() is cheap.
-        latest_event_ts = 0.0
+        # Most recent "activity" timestamp — ANY of these count as the
+        # agent doing something right now, so we should NOT flag stale:
+        #   tool_call      — just fired a tool
+        #   tool_result    — tool returned
+        #   message        — LLM emitted a chunk
+        #   plan_update    — state machine transition
+        # Pure status pings / heartbeats don't count.
+        ACTIVITY_KINDS = {"tool_call", "tool_result", "message",
+                          "plan_update", "plan_step_update"}
+        latest_activity_ts = 0.0
         try:
             events = getattr(self, "events", None) or []
             if events:
-                for evt in reversed(events[-20:]):  # only scan recent
+                # Scan back further (60) — long tools may have started 30s
+                # ago but we want the emit timestamp, not the latest heartbeat
+                for evt in reversed(events[-60:]):
+                    kind = getattr(evt, "kind", "")
+                    if kind not in ACTIVITY_KINDS:
+                        continue
                     t = getattr(evt, "timestamp", 0.0) or 0.0
-                    if t > latest_event_ts:
-                        latest_event_ts = t
+                    if t > latest_activity_ts:
+                        latest_activity_ts = t
+                        break  # first match wins (already in reverse order)
         except Exception:
             pass
 
@@ -7863,18 +7876,20 @@ Write only the summary body. Do not include any preamble or prefix."""
             if s.status != StepStatus.IN_PROGRESS:
                 continue
             started = s.started_at or 0.0
-            age = now - started if started > 0 else 0.0
+            # "since_activity" is the ONE truth for user-visible "X 秒无活动".
+            # Prefer latest activity ts; fall back to step.started_at if no
+            # activity events yet (rare edge case).
+            anchor = latest_activity_ts if latest_activity_ts > 0 else started
+            since_activity = (now - anchor) if anchor > 0 else 0.0
 
             reason = ""
             if agent_idle:
                 # Signal 1 — always stale
                 reason = "agent IDLE with step in_progress"
-            elif started > 0 and age > threshold_s:
-                # Signal 2 — BUSY but no recent events
-                since_activity = now - latest_event_ts if latest_event_ts > 0 else age
-                if since_activity > threshold_s:
-                    reason = (f"no tool activity for {int(since_activity)}s "
-                              f"(threshold {int(threshold_s)}s)")
+            elif since_activity > threshold_s:
+                # Signal 2 — BUSY but no activity event in threshold window
+                reason = (f"无工具活动 {int(since_activity)}s "
+                          f"(阈值 {int(threshold_s)}s)")
 
             if not reason:
                 continue
@@ -7883,7 +7898,11 @@ Write only the summary body. Do not include any preamble or prefix."""
                 "step_id": s.id,
                 "title": s.title,
                 "started_at": started,
-                "stale_s": age,
+                # Report "since_activity" — the number users can act on —
+                # not "age" (age only tells you how long the step has been
+                # running, regardless of activity). This is what the UI
+                # shows as "此步骤已 X 无活动".
+                "stale_s": since_activity,
                 "reason": reason,
             }
             stale.append(stale_info)
@@ -7893,7 +7912,8 @@ Write only the summary body. Do not include any preamble or prefix."""
                     from .progress_bus import emit_step_stale
                     emit_step_stale(
                         plan_id=plan.id, step_id=s.id, agent_id=self.id,
-                        step_title=s.title, stale_s=age, reason=reason,
+                        step_title=s.title, stale_s=since_activity,
+                        reason=reason,
                     )
                 except Exception as _e:
                     logger.debug("stale-step frame emit failed: %s", _e)
@@ -7943,10 +7963,18 @@ Write only the summary body. Do not include any preamble or prefix."""
         return None
 
     def resume_step(self, step_id: str) -> Optional["ExecutionStep"]:
-        """Human clicks 'continue': reset step's started_at so the stale
-        detector's clock restarts. Does NOT change status — caller should
-        ensure agent is chatting / running so it can pick up where it
-        left off."""
+        """Human clicks '继续': reset the stale detector so the warning
+        disappears on the next poll.
+
+        Two moves:
+          1. step.started_at = now() — refreshes age
+          2. emit a synthetic `plan_step_update` event — refreshes the
+             `latest_activity_ts` used by _detect_stale_plan_steps, so
+             even with the new since-activity logic the warning clears.
+
+        Does NOT change status — caller should ensure agent is chatting /
+        running so it can actually pick up where it left off.
+        """
         plan = self._current_plan
         if plan is None:
             return None
@@ -7954,6 +7982,16 @@ Write only the summary body. Do not include any preamble or prefix."""
             if s.id == step_id:
                 if s.status == StepStatus.IN_PROGRESS:
                     s.started_at = time.time()
+                    # Inject an activity event so the stale detector's
+                    # latest_activity_ts moves to now on the next poll.
+                    try:
+                        self._log("plan_step_update", {
+                            "step_id": s.id,
+                            "action": "resume",
+                            "source": "human",
+                        })
+                    except Exception:
+                        pass
                 return s
         return None
 

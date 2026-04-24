@@ -2129,12 +2129,34 @@ function _clearAllStepsTimers() {
 // user navigates away (_clearAllStepsTimers).
 var _staleSteps = {};  // agentId → {stepId → {stale_s, reason, title}}
 
+// Post-action suppression window — after the user clicks 继续/跳过/失败
+// we hide the nudge for this step for 60s, even if the next poll still
+// computes stale. Prevents "I just clicked, why's it still there".
+var _staleSuppressUntil = {};  // "agentId:stepId" → epoch ms until which to hide
+
+function _suppressStaleUI(agentId, stepId, durationMs) {
+  _staleSuppressUntil[agentId + ':' + stepId] = Date.now() + (durationMs || 60000);
+}
+
+function _isStaleSuppressed(agentId, stepId) {
+  var until = _staleSuppressUntil[agentId + ':' + stepId] || 0;
+  if (until && Date.now() < until) return true;
+  if (until) delete _staleSuppressUntil[agentId + ':' + stepId];
+  return false;
+}
+
 async function _pollStale(agentId) {
   try {
+    // 180s threshold matches the backend default, aligned with
+    // _READ_TIMEOUT so a single long LLM/tool call doesn't trip stale.
     var r = await api('GET',
-      '/api/portal/agent/' + agentId + '/plan/stale?threshold_s=120');
+      '/api/portal/agent/' + agentId + '/plan/stale?threshold_s=180');
     var m = {};
-    (r.stale || []).forEach(function(s) { m[s.step_id] = s; });
+    (r.stale || []).forEach(function(s) {
+      // Skip anything the user just acted on
+      if (_isStaleSuppressed(agentId, s.step_id)) return;
+      m[s.step_id] = s;
+    });
     _staleSteps[agentId] = m;
   } catch (e) {
     // Silent — stale info is a soft UX hint, not business-critical
@@ -2333,9 +2355,10 @@ function renderExecutionSteps(agentId, plan) {
 async function _resumeStaleStep(agentId, stepId) {
   try {
     await api('POST', '/api/portal/agent/' + agentId + '/plan/step/' + stepId + '/resume', {});
-    // Reset stale state so warning vanishes immediately; next poll
-    // re-evaluates.
+    // Reset stale state so warning vanishes immediately; poll-silence
+    // window prevents the next poll from re-adding it.
     if (_staleSteps[agentId]) delete _staleSteps[agentId][stepId];
+    _suppressStaleUI(agentId, stepId);
     loadExecutionSteps(agentId);
   } catch (e) {
     alert('继续失败: ' + (e.message || e));
@@ -2349,6 +2372,7 @@ async function _skipStaleStep(agentId, stepId) {
     await api('POST', '/api/portal/agent/' + agentId + '/plan/step/' + stepId + '/mark_skipped',
                { reason: reason || 'human-skipped' });
     if (_staleSteps[agentId]) delete _staleSteps[agentId][stepId];
+    _suppressStaleUI(agentId, stepId);
     loadExecutionSteps(agentId);
   } catch (e) {
     alert('跳过失败: ' + (e.message || e));
@@ -2363,6 +2387,7 @@ async function _failStaleStep(agentId, stepId) {
     await api('POST', '/api/portal/agent/' + agentId + '/plan/step/' + stepId + '/mark_failed',
                { reason: reason || 'manually failed' });
     if (_staleSteps[agentId]) delete _staleSteps[agentId][stepId];
+    _suppressStaleUI(agentId, stepId);
     loadExecutionSteps(agentId);
   } catch (e) {
     alert('标记失败出错: ' + (e.message || e));
