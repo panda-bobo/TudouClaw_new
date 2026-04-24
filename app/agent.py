@@ -2098,6 +2098,90 @@ class Agent:
         """Return this agent's workspace folder (where MD files live)."""
         return self._get_agent_home() / "workspace"
 
+    # Workspace files the agent ITSELF produces during chats. Drives
+    # the "Recent workspace artifacts" injection in _build_dynamic_context
+    # so agent sees its own output without doing redundant fs tool calls.
+    _ARTIFACT_EXTS = (
+        ".pptx", ".docx", ".xlsx", ".pdf",
+        ".md", ".json", ".csv",
+        ".py", ".sh", ".html",
+        ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp",
+        ".mp4", ".mov", ".mp3", ".wav",
+        ".zip", ".tar", ".tar.gz", ".tgz",
+    )
+    # System / config files that are NOT agent deliverables.
+    _ARTIFACT_SKIP_NAMES = {
+        "Project.md", "Tasks.md", "Skills.md", "MCP.md",
+        "Scheduled.md", "ActiveThinking.md",
+    }
+    _ARTIFACT_SKIP_DIRS = {
+        "tool_outputs", "skills", "cache", "__pycache__",
+        ".shadow", ".git", "attachments",
+    }
+
+    def _build_recent_artifacts_context(self, max_files: int = 15) -> str:
+        """List recent deliverable-style files in agent workspace +
+        shared workspace. Injected into dynamic context so agent knows
+        what it has produced and won't re-search for its own files."""
+        from datetime import datetime
+        ws = self._get_agent_workspace()
+        shared_ws = getattr(self, "shared_workspace", "") or ""
+        roots: list[Path] = []
+        if ws.is_dir():
+            roots.append(ws)
+        if shared_ws and Path(shared_ws).is_dir() and \
+                str(Path(shared_ws).resolve()) != str(ws.resolve()):
+            roots.append(Path(shared_ws))
+
+        entries: list[tuple[float, Path, Path]] = []   # (mtime, abs, rel)
+        for root in roots:
+            for p in root.rglob("*"):
+                if not p.is_file():
+                    continue
+                try:
+                    rel = p.relative_to(root)
+                except ValueError:
+                    continue
+                # Skip system dirs
+                if any(part in self._ARTIFACT_SKIP_DIRS for part in rel.parts):
+                    continue
+                if p.name in self._ARTIFACT_SKIP_NAMES:
+                    continue
+                if p.name.startswith("."):
+                    continue
+                # Must be a recognizable deliverable extension
+                if not any(p.name.lower().endswith(ext) for ext in self._ARTIFACT_EXTS):
+                    continue
+                try:
+                    mtime = p.stat().st_mtime
+                except OSError:
+                    continue
+                entries.append((mtime, p, rel))
+
+        if not entries:
+            return ""
+        # Newest first, cap count
+        entries.sort(key=lambda t: t[0], reverse=True)
+        entries = entries[:max_files]
+
+        lines = [
+            "<workspace_artifacts>",
+            "# 当前 workspace 里**已有的交付物**（按修改时间倒序）。",
+            "# 用户要你处理/引用某文件时，**先查这个清单**，命中就直接用，",
+            "# 不要再 `web_fetch` / `read_file` 重复查询同一资料。",
+        ]
+        for mtime, abs_path, rel_path in entries:
+            ts = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+            try:
+                size_kb = abs_path.stat().st_size / 1024
+            except OSError:
+                size_kb = 0
+            lines.append(
+                f"- `{rel_path}` ({size_kb:.1f} KB, {ts})"
+            )
+        lines.append("</workspace_artifacts>")
+        return "\n".join(lines)
+
     def _effective_working_dir(self) -> Path:
         """Return the agent's effective working directory.
 
@@ -3142,6 +3226,19 @@ class Agent:
         # 2. Workspace files (MCP, Tasks, Scheduled — needed for tool usage)
         sched_ctx = self._get_scheduled_context()
         _try_add(sched_ctx)
+
+        # 2.5 Recent artifacts in workspace (deliverables agent produced).
+        # Without this, agent forgets files it created earlier in the same
+        # session and does wasteful web_fetch / read_file loops trying to
+        # re-source them. See user screenshot 2026-04-24 — agent claimed
+        # to be "trapped in file-read loop" because it couldn't find its
+        # own saudi_finance_cloud_compliance.pptx.
+        try:
+            artifacts_ctx = self._build_recent_artifacts_context()
+            if artifacts_ctx:
+                _try_add(artifacts_ctx)
+        except Exception as _ae:
+            logger.debug("recent-artifacts injection skipped: %s", _ae)
 
         # 3. Git context (with cooldown)
         now = time.time()
@@ -7829,18 +7926,17 @@ Write only the summary body. Do not include any preamble or prefix."""
         """Find plan steps that are in_progress but the agent isn't actually
         working on them.
 
-        Two staleness signals:
+        Both signals require the same threshold_s window — instant
+        flagging on IDLE+in_progress was generating false positives:
+        agent normally dips to IDLE briefly between assistant turns
+        while the LLM is finishing the previous message and hasn't
+        dispatched plan_update(complete_step) yet.
 
-        1. **agent.status == IDLE** AND step.status == IN_PROGRESS — this is
-           ALWAYS an inconsistency. Nothing can be happening if the agent
-           isn't running. No time threshold needed.
-
-        2. **agent.status == BUSY** AND step.status == IN_PROGRESS AND
-           no new `tool_call` / `tool_result` / `message` events in the
-           last threshold_s — the LLM or a tool call hung. Time threshold
-           protects against false positives during legit long operations
-           (a single long-running web_fetch / bash still emits the
-           initial tool_call event which resets the clock).
+        Signals (need `since_activity > threshold_s`):
+        1. **agent.status == IDLE** AND step.status == IN_PROGRESS
+           → the LLM finished talking but never updated the plan state.
+        2. **agent.status == BUSY** AND step.status == IN_PROGRESS
+           → tool_call / LLM hung mid-execution.
 
         Per user rule (a): this method does NOT mutate step state. It
         only detects and emits a warning frame to ProgressBus so the UI
@@ -7900,13 +7996,16 @@ Write only the summary body. Do not include any preamble or prefix."""
             since_activity = (now - anchor) if anchor > 0 else 0.0
 
             reason = ""
-            if agent_idle:
-                # Signal 1 — always stale
-                reason = "agent IDLE with step in_progress"
-            elif since_activity > threshold_s:
-                # Signal 2 — BUSY but no activity event in threshold window
-                reason = (f"无工具活动 {int(since_activity)}s "
-                          f"(阈值 {int(threshold_s)}s)")
+            if since_activity > threshold_s:
+                # Both IDLE and BUSY cases need the window to elapse before
+                # flagging — otherwise brief IDLE pauses between assistant
+                # messages trigger false positives.
+                if agent_idle:
+                    reason = (f"agent 闲置 {int(since_activity)}s 但 step "
+                              f"仍为 in_progress (阈值 {int(threshold_s)}s)")
+                else:
+                    reason = (f"无工具活动 {int(since_activity)}s "
+                              f"(阈值 {int(threshold_s)}s)")
 
             if not reason:
                 continue
