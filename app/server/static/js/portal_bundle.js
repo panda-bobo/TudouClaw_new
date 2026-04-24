@@ -19877,7 +19877,10 @@ async function loadPendingSkills() {
         + '暂无技能草稿。Agent 积累足够经验后会通过 propose_skill 工具自动生成。</div>';
       return;
     }
-    box.innerHTML = _pendingSkillsState.drafts.map(_renderDraftCard).join('');
+    box.innerHTML =
+      '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px">'
+      + _pendingSkillsState.drafts.map(_renderDraftCard).join('')
+      + '</div>';
   } catch (e) {
     box.innerHTML = '<div style="color:var(--error);padding:20px">加载失败: ' + esc(e.message || String(e)) + '</div>';
   }
@@ -19885,40 +19888,69 @@ async function loadPendingSkills() {
 
 function _renderDraftCard(d) {
   var statusColors = { draft: '#60a5fa', exported: '#a78bfa', approved: '#10b981', rejected: '#ef4444' };
+  var statusLabels = { draft: '草稿', exported: '已导出', approved: '已批准', rejected: '已拒绝' };
   var statusColor = statusColors[d.status] || '#94a3b8';
-  var runtimeBadge = d.runtime === 'python'
-    ? '<span style="padding:2px 6px;font-size:10px;background:rgba(59,130,246,0.15);color:#3b82f6;border-radius:10px">Python</span>'
-    : '<span style="padding:2px 6px;font-size:10px;background:rgba(16,185,129,0.15);color:#10b981;border-radius:10px">Markdown</span>';
+  var statusLabel = statusLabels[d.status] || d.status;
   var confPct = Math.round((d.confidence || 0) * 100);
   var confColor = confPct >= 80 ? '#10b981' : confPct >= 60 ? '#f59e0b' : '#ef4444';
   var codeCount = d.code_files ? Object.keys(d.code_files).length : 0;
-  var dateStr = d.created_at ? new Date(d.created_at * 1000).toLocaleString() : '';
+  var dateStr = d.created_at ? new Date(d.created_at * 1000).toLocaleDateString() : '';
+  // Source inference
+  var sourceLabel;
+  if (d.id && d.id.indexOf('-SUB-') > -1) sourceLabel = '🤖 Agent 提交';
+  else if (d.id && d.id.indexOf('-IMP-') > -1) sourceLabel = '📂 工作区导入';
+  else if (d.source_experiences && d.source_experiences.length) sourceLabel = '💡 ' + d.source_experiences.length + ' 经验';
+  else sourceLabel = '🔬 经验提炼';
+
+  // Emoji for skill — pick from name/runtime heuristically
+  var emoji;
+  var nameL = (d.name || '').toLowerCase();
+  if (d.runtime === 'python') emoji = '🐍';
+  else if (/ppt|slide|deck/.test(nameL)) emoji = '📊';
+  else if (/email|mail/.test(nameL)) emoji = '📧';
+  else if (/web|http|fetch/.test(nameL)) emoji = '🌐';
+  else if (/file|doc/.test(nameL)) emoji = '📄';
+  else if (/data|analy|chart/.test(nameL)) emoji = '📈';
+  else if (/screenshot|image/.test(nameL)) emoji = '📷';
+  else if (/video|media/.test(nameL)) emoji = '🎬';
+  else if (/git|code|repo/.test(nameL)) emoji = '💻';
+  else if (/test|verify|check/.test(nameL)) emoji = '✅';
+  else emoji = '⚡';
+
   var actions = '';
   if (d.status === 'draft' || d.status === 'exported') {
-    actions = '<button class="btn btn-sm" style="background:var(--primary);color:#fff" onclick="approveDraft(\'' + esc(d.id) + '\',\'' + esc(d.name) + '\')">批准</button>'
-      + '<button class="btn btn-sm" style="color:var(--error)" onclick="rejectDraft(\'' + esc(d.id) + '\',\'' + esc(d.name) + '\')">拒绝</button>';
+    actions = '<button class="btn btn-primary btn-sm" style="flex:1" onclick="event.stopPropagation();approveDraft(\'' + esc(d.id) + '\',\'' + esc(d.name) + '\')"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">check_circle</span> 批准</button>'
+      + '<button class="btn btn-sm" style="color:var(--error)" title="拒绝" onclick="event.stopPropagation();rejectDraft(\'' + esc(d.id) + '\',\'' + esc(d.name) + '\')"><span class="material-symbols-outlined" style="font-size:14px">close</span></button>';
+  } else {
+    actions = '<button class="btn btn-sm" style="flex:1" onclick="event.stopPropagation();showDraftDetail(\'' + esc(d.id) + '\')"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">visibility</span> 详情</button>';
   }
-  return '<div style="border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:10px;background:var(--surface)">'
-    + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'
-    + '  <div style="display:flex;align-items:center;gap:8px">'
-    + '    <span style="font-weight:600;font-size:15px">' + esc(d.name) + '</span>'
-    + '    <span style="padding:2px 8px;font-size:10px;border-radius:10px;background:' + statusColor + '22;color:' + statusColor + '">' + esc(d.status) + '</span>'
-    + '    ' + runtimeBadge
-    + '  </div>'
-    + '  <span style="font-size:11px;color:var(--text3)">' + esc(d.id) + '</span>'
+
+  var desc = esc(d.description || '').slice(0, 100);
+  if ((d.description || '').length > 100) desc += '…';
+
+  return (
+    '<div style="position:relative;border:1px solid var(--border);border-radius:12px;padding:16px;background:var(--surface);display:flex;flex-direction:column;gap:10px;cursor:pointer;transition:transform 0.15s,box-shadow 0.15s" '
+    +  'onclick="showDraftDetail(\'' + esc(d.id) + '\')" '
+    +  'onmouseenter="this.style.transform=\'translateY(-2px)\';this.style.boxShadow=\'0 4px 12px rgba(0,0,0,0.08)\'" '
+    +  'onmouseleave="this.style.transform=\'\';this.style.boxShadow=\'\'">'
+    +  '<span style="position:absolute;top:10px;right:10px;padding:2px 6px;font-size:10px;background:' + statusColor + '22;color:' + statusColor + ';border-radius:8px">' + esc(statusLabel) + '</span>'
+    +  '<div style="display:flex;align-items:flex-start;gap:12px">'
+    +    '<div style="font-size:32px;line-height:1;flex-shrink:0;padding-top:2px">' + emoji + '</div>'
+    +    '<div style="flex:1;min-width:0;padding-right:50px">'
+    +      '<div style="font-weight:700;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(d.name) + '</div>'
+    +      '<div style="font-size:10px;color:var(--text3);margin-top:2px">' + esc(d.role || 'general') + ' · ' + (d.runtime === 'python' ? 'Python' : 'Markdown') + '</div>'
+    +    '</div>'
+    +  '</div>'
+    +  '<div style="font-size:12px;color:var(--text2);line-height:1.5;min-height:36px">' + desc + '</div>'
+    +  '<div style="display:flex;align-items:center;justify-content:space-between;font-size:11px;color:var(--text3)">'
+    +    '<span title="置信度">🎯 <span style="color:' + confColor + ';font-weight:600">' + confPct + '%</span></span>'
+    +    '<span title="来源">' + sourceLabel + '</span>'
+    +    (codeCount ? '<span title="代码文件">📄 ' + codeCount + '</span>' : '')
+    +    '<span>' + esc(dateStr) + '</span>'
+    +  '</div>'
+    +  '<div style="display:flex;gap:6px;margin-top:auto">' + actions + '</div>'
     + '</div>'
-    + '<div style="font-size:13px;color:var(--text2);margin-bottom:8px">' + esc(d.description || '') + '</div>'
-    + '<div style="display:flex;gap:16px;font-size:12px;color:var(--text3);margin-bottom:10px">'
-    + '  <span>置信度: <span style="color:' + confColor + ';font-weight:600">' + confPct + '%</span></span>'
-    + '  <span>来源: ' + (d.id && d.id.indexOf('-SUB-') > -1 ? 'Agent 提交' : d.id && d.id.indexOf('-IMP-') > -1 ? 'Agent 工作区导入' : (d.source_experiences && d.source_experiences.length ? d.source_experiences.length + ' 条经验' : '经验提炼')) + '</span>'
-    + '  <span>角色: ' + esc(d.role || 'general') + '</span>'
-    + (codeCount ? '  <span>代码文件: ' + codeCount + ' 个</span>' : '')
-    + '  <span>' + esc(dateStr) + '</span>'
-    + '</div>'
-    + '<div style="display:flex;gap:8px;align-items:center">'
-    + '  <button class="btn btn-sm" onclick="showDraftDetail(\'' + esc(d.id) + '\')"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">visibility</span> 查看详情</button>'
-    + actions
-    + '</div></div>';
+  );
 }
 
 async function showDraftDetail(draftId) {
