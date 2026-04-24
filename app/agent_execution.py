@@ -23,30 +23,86 @@ logger = logging.getLogger("tudou.agent")
 
 
 def _text_similarity(a: str, b: str) -> float:
-    """Cheap bag-of-words similarity (Jaccard on normalized tokens).
+    """Character-ngram Jaccard similarity — works for CN + EN.
 
-    Used by the duplicate-output detector — we don't need precise NLP
-    similarity, just "is the LLM basically saying the same thing again?"
-    Ratio 0.0-1.0. Returns 0 for empty / tiny inputs so noise doesn't
-    trigger false positives.
+    Old version was whitespace-token Jaccard which silently died on
+    Chinese. New uses char 3-grams. Used for the "reply is near-identical"
+    check; complementary to _is_meta_promise below which catches the
+    "different wording, same empty promise" failure mode.
     """
     import re as _re
     if not a or not b:
         return 0.0
-    # Normalize: lowercase + collapse whitespace + drop punctuation
-    def _tok(s):
-        s = _re.sub(r"[^\w\u4e00-\u9fa5]+", " ", s.lower())
-        return set(t for t in s.split() if len(t) >= 2)
-    ta = _tok(a); tb = _tok(b)
-    if not ta or not tb:
+    def _norm(s: str) -> str:
+        return _re.sub(r"[^\w\u4e00-\u9fa5]+", "", s.lower())
+    na, nb = _norm(a), _norm(b)
+    if len(na) < 10 or len(nb) < 10:
         return 0.0
-    if len(ta) < 5 or len(tb) < 5:
+
+    def _ngrams(s: str, n: int = 3) -> set[str]:
+        return set(s[i:i + n] for i in range(len(s) - n + 1))
+
+    ga, gb = _ngrams(na, 3), _ngrams(nb, 3)
+    if not ga or not gb:
         return 0.0
-    inter = ta & tb
-    union = ta | tb
-    if not union:
-        return 0.0
-    return len(inter) / len(union)
+    return len(ga & gb) / len(ga | gb)
+
+
+# Meta-promise patterns — phrases that say "I'll do X" without actually
+# doing X. When the agent emits one of these AND makes no tool call AND
+# it happens 2+ times in a row, we're stuck in a commitment loop.
+# Match on norm'd form (no spaces, no punct) so wording variations still hit.
+_META_PROMISE_PATTERNS = (
+    # 中文
+    "交给我吧", "让我先看", "让我先回顾", "让我先找", "让我先查",
+    "我先看看", "我先回顾", "我先找找", "我来看看", "先找到",
+    "我先搞清楚", "我来重新", "好嘞交给我", "好的交给我",
+    "然后再写", "然后重新写", "然后我来", "之后再来",
+    # English
+    "letmefirst", "letmetake", "illtakecare", "illstartby",
+    "firstletme", "letmelookat", "letmecheckwhat",
+    # Typical self-narration vocab
+    "先了解", "先梳理", "先查看", "回顾一下",
+)
+
+
+def _is_meta_promise(content: str) -> bool:
+    """True if content reads as 'I'll do X' without concrete action.
+    Short (<200 char) messages that hit 2+ promise patterns AND have
+    no code block / file path / tool-y vocab are meta-promises."""
+    if not content:
+        return False
+    import re as _re
+    # Normalize: lowercase + strip spaces/punct (keep CJK + alphanum)
+    norm = _re.sub(r"[^\w\u4e00-\u9fa5]+", "", content.lower())
+    if len(norm) > 400:
+        # Long content is usually a real summary, not a meta-promise.
+        return False
+    # Rule out: message with concrete output (path / URL / code / error)
+    # is probably genuine.
+    cl = content.lower()
+    has_concrete_signal = any(s in cl for s in (
+        "```", "/workspace/", "http://", "https://", ".py", ".pptx",
+        ".md", ".json", "error", "traceback", "exception"
+    ))
+    if has_concrete_signal:
+        return False
+    # Count promise-pattern hits
+    hits = sum(1 for pat in _META_PROMISE_PATTERNS if pat in norm)
+    if hits == 0:
+        return False
+    # 1 hit → require the message to be short AND mention a "future"
+    # / "then" verb (说明是承诺而非执行). 2+ hits → strong signal.
+    if hits >= 2:
+        return True
+    # Single hit — extra guard: short (<150 char norm) + "然后" / "再"
+    # / "接下来" present → promise
+    if len(norm) < 150 and any(tok in norm for tok in (
+        "然后", "接下来", "再写", "再看", "再来", "之后", "最后",
+        "first", "then", "next", "afterthat"
+    )):
+        return True
+    return False
 
 
 class AgentExecutionMixin:
@@ -1020,48 +1076,54 @@ class AgentExecutionMixin:
                     try:
                         _prev = str(getattr(self, "_last_iter_content", "") or "")
                         _curr = str(content or "")
-                        if _prev and _curr and len(_curr) > 40:
-                            _sim = _text_similarity(_prev, _curr)
-                            if _sim >= 0.85:
-                                _dup_count = int(getattr(
-                                    self, "_dup_iter_count", 0)) + 1
-                                self._dup_iter_count = _dup_count
-                                _suppress_display = True
-                                logger.warning(
-                                    "Agent %s: duplicate narration "
-                                    "(similarity=%.2f, dup#%d, tool_calls=%d)",
-                                    self.id[:8], _sim, _dup_count,
-                                    len(tool_calls or []))
-                                if _dup_count == 1:
-                                    # First duplicate: inject corrective so
-                                    # the LLM's next iteration sees it.
-                                    _corrective = (
-                                        "[SYSTEM] 你刚才这一轮的回复和上一轮几乎一模一样。"
-                                        "请不要再重复输出'我的计划 / 现在开始执行第一步'这类文字。"
-                                        "下一轮必须做下面之一：\n"
-                                        "  (a) 基于上一轮 tool_result 说出结论或下一步（例如"
-                                        "'上次搜索得到 X，我现在查 Y'）；\n"
-                                        "  (b) 调 plan_update(action='create_plan', ...) 把计划"
-                                        "固化（带 llm_purpose 字段），或 plan_update(complete_step);\n"
-                                        "  (c) 直接调下一个 tool（web_search / read_file / bash / mcp_call 等）。\n"
-                                        "禁止再用 Markdown checkbox 列计划当作输出。"
-                                    )
-                                    self.messages.append({
-                                        "role": "system",
-                                        "content": _corrective,
-                                        "_dynamic": True,
-                                        "_source": "dup_guard",
-                                    })
-                                if _dup_count >= 2:
-                                    # 2nd duplicate — give up this turn and
-                                    # emit a user-facing warning (so the chat
-                                    # doesn't just go silent after suppress).
-                                    logger.error(
-                                        "Agent %s: 2 consecutive duplicates "
-                                        "— aborting turn", self.id[:8])
-                                    _dup_abort = True
-                            else:
-                                self._dup_iter_count = 0
+                        # Detector has two arms (either trips):
+                        #  1. High char-ngram similarity (classic duplicate)
+                        #  2. Meta-promise pattern + NO tool_calls (catches
+                        #     "I'll do X" loops where wording varies)
+                        _sim = _text_similarity(_prev, _curr) if _prev and _curr else 0.0
+                        _is_meta = (not tool_calls) and _is_meta_promise(_curr)
+                        _trip = (_curr and len(_curr) > 20
+                                 and (_sim >= 0.85 or _is_meta))
+                        if _trip:
+                            _dup_count = int(getattr(
+                                self, "_dup_iter_count", 0)) + 1
+                            self._dup_iter_count = _dup_count
+                            _suppress_display = True
+                            logger.warning(
+                                "Agent %s: duplicate/meta-promise "
+                                "(sim=%.2f, meta=%s, dup#%d, tool_calls=%d)",
+                                self.id[:8], _sim, _is_meta,
+                                _dup_count, len(tool_calls or []))
+                            if _dup_count == 1:
+                                # First dup: inject corrective so next iter sees it.
+                                _corrective = (
+                                    "[SYSTEM] 你刚才这一轮的回复没有实际动作 "
+                                    "(纯承诺 / 重复'我先看看 / 让我先…')。\n"
+                                    "下一轮必须做下面之一，不要再重复承诺：\n"
+                                    "  (a) 直接调一个**具体工具**（write_file / "
+                                    "read_file / bash / web_fetch / mcp_call），\n"
+                                    "  (b) 调 plan_update(create_plan/start_step/"
+                                    "complete_step/fail_step) 更新任务状态，\n"
+                                    "  (c) 如果真的不知道怎么做，返回一句明确提问"
+                                    "（15 字以内）向用户澄清。\n"
+                                    "**严禁**再输出'交给我吧 / 让我先 / 好的 我先…'"
+                                    "这类开场白而不做事。"
+                                )
+                                self.messages.append({
+                                    "role": "system",
+                                    "content": _corrective,
+                                    "_dynamic": True,
+                                    "_source": "dup_guard",
+                                })
+                            if _dup_count >= 2:
+                                # 2nd dup — give up this turn, emit user-facing warning
+                                logger.error(
+                                    "Agent %s: 2 consecutive meta-promise/"
+                                    "duplicates — aborting turn",
+                                    self.id[:8])
+                                _dup_abort = True
+                        else:
+                            self._dup_iter_count = 0
                         self._last_iter_content = _curr
                     except Exception as _dup_err:
                         logger.debug("dup-guard skipped: %s", _dup_err)

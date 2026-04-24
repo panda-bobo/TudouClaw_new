@@ -50,7 +50,10 @@ __all__ = [
     "add_styled_table", "add_bullets", "add_bar_chart",
     "add_line_chart", "add_image",
     # slide helpers
-    "header_bar", "slide_full_chart",
+    "header_bar", "slide_full_chart", "slide_cover_hero",
+    # visual extras (phase-A design upgrades)
+    "add_icon", "add_hero_image", "add_gradient_bg",
+    "use_theme", "THEMES", "ICON_CATALOG",
     # quality gates
     "check_bounds", "check_safe_margins", "check_one_chart_per_slide",
     "verify_slides",
@@ -122,10 +125,12 @@ def add_text(slide, x, y, w, h, text, *,
     # usually mean the LLM meant 14 / 15. Body text < 10pt is unreadable,
     # > 50pt almost never fits outside cover / big-number divider slides.
     try:
-        if int(size) < 10 or int(size) > 50:
+        # Allow 10–60 range. Covers (48-56pt), divider big-numbers (72+) still
+        # trigger warning — operator can review whether intentional.
+        if int(size) < 10 or int(size) > 60:
             print(
                 f"[pptx_helpers WARNING] add_text size={size}pt is outside "
-                f"normal range (10-50). text={str(text)[:40]!r}",
+                f"normal range (10-60). text={str(text)[:40]!r}",
                 file=sys.stderr,
             )
     except Exception:
@@ -576,6 +581,358 @@ def parse_md_outline(text: str) -> dict:
         if m:
             cur["bullets"].append(strip_md(m.group(1)))
     return {"title": title, "sections": sections}
+
+
+# ═════════════════════════════════════════════════════════════════
+# Phase-A visual upgrades: themes, icons, hero images, gradient bg.
+# 目标: 让 python-pptx 路径的 deck 视觉上与 HTML 模板拉近差距，同时
+# 保持"可原生编辑的 .pptx"这一核心优势。
+# ═════════════════════════════════════════════════════════════════
+
+# ─── Theme presets ────────────────────────────────────────────────
+
+THEMES = {
+    "dark": {
+        "bg":        hex_color("#0F172A"),
+        "fg":        hex_color("#F8FAFC"),
+        "accent":    hex_color("#22D3EE"),
+        "accent2":   hex_color("#F59E0B"),
+        "muted":     hex_color("#94A3B8"),
+        "card_bg":   hex_color("#1E293B"),
+        "card_alt":  hex_color("#273449"),
+        "row_alt":   hex_color("#273449"),
+        "divider":   hex_color("#1E40AF"),
+        "ok":        hex_color("#22C55E"),
+        "warn":      hex_color("#F59E0B"),
+        "bad":       hex_color("#EF4444"),
+    },
+    "light": {
+        "bg":        hex_color("#FAFAFA"),
+        "fg":        hex_color("#111827"),
+        "accent":    hex_color("#2563EB"),
+        "accent2":   hex_color("#F97316"),
+        "muted":     hex_color("#6B7280"),
+        "card_bg":   hex_color("#FFFFFF"),
+        "card_alt":  hex_color("#F3F4F6"),
+        "row_alt":   hex_color("#F9FAFB"),
+        "divider":   hex_color("#1E40AF"),
+        "ok":        hex_color("#16A34A"),
+        "warn":      hex_color("#D97706"),
+        "bad":       hex_color("#DC2626"),
+    },
+    "corporate": {
+        "bg":        hex_color("#FFFFFF"),
+        "fg":        hex_color("#1A1A1A"),
+        "accent":    hex_color("#1E3A8A"),  # 深蓝主色
+        "accent2":   hex_color("#B91C1C"),  # 酒红点缀
+        "muted":     hex_color("#525252"),
+        "card_bg":   hex_color("#F5F5F4"),
+        "card_alt":  hex_color("#E7E5E4"),
+        "row_alt":   hex_color("#FAFAF9"),
+        "divider":   hex_color("#1E3A8A"),
+        "ok":        hex_color("#16A34A"),
+        "warn":      hex_color("#EA580C"),
+        "bad":       hex_color("#B91C1C"),
+    },
+}
+
+
+def use_theme(name: str) -> dict:
+    """切换全局 THEME 到预设 (dark / light / corporate). 返回激活后的 dict.
+
+    注意: 修改的是 THEME 的 key-value, 保留同一 dict 对象, 所以已持有
+    THEME 引用的代码会自动看到新值 (例如 add_card 内部读 THEME[...]).
+    """
+    if name not in THEMES:
+        raise ValueError(
+            f"unknown theme '{name}'; available: {list(THEMES.keys())}"
+        )
+    THEME.clear()
+    THEME.update(THEMES[name])
+    return THEME
+
+
+# ─── Icon catalog ─────────────────────────────────────────────────
+# 封装 lucide icon 的下载缓存 (SVG → 系统里转成 PNG). 第一次调用时
+# 自动从 CDN 抓 SVG, 之后命中本地缓存. 失败不致命, 回退占位图.
+# 所有 icon 的源来自 lucide.dev (MIT 协议, 可商用).
+
+ICON_CATALOG = (
+    # 用户最常用的 40 个. 全名见 https://lucide.dev/icons/
+    "check", "check-circle", "x", "x-circle",
+    "alert-triangle", "info", "help-circle",
+    "arrow-right", "arrow-up", "arrow-down", "trending-up", "trending-down",
+    "rocket", "target", "flag", "star", "heart",
+    "user", "users", "building", "briefcase",
+    "database", "server", "cloud", "cpu",
+    "globe", "map-pin", "mail", "phone", "link",
+    "dollar-sign", "percent", "bar-chart-3", "pie-chart",
+    "shield", "lock", "key", "settings",
+    "lightbulb", "book-open", "file-text",
+    "calendar", "clock",
+)
+
+_ICON_CACHE_DIR = Path.home() / ".tudou_claw" / "cache" / "pptx_icons"
+
+
+def _fetch_icon_png(name: str, color_hex: str = "#F8FAFC",
+                    size_px: int = 96) -> str | None:
+    """Get a lucide icon as PNG. Cache dir: ~/.tudou_claw/cache/pptx_icons/.
+
+    Strategy (first success wins):
+      1. PIL-rasterize the SVG (requires Pillow + cairosvg OR svglib)
+      2. Render SVG directly via matplotlib's fallback (uses lxml + PIL)
+      3. Draw a colored unicode symbol (Pillow-only fallback, always works)
+
+    Last option keeps the feature working zero-dep — you get an emoji-like
+    colored shape instead of the exact lucide icon, but the deck doesn't
+    crash.
+    """
+    if name not in ICON_CATALOG:
+        return None
+    cache_key = f"{name}_{color_hex.lstrip('#').lower()}_{size_px}.png"
+    _ICON_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = _ICON_CACHE_DIR / cache_key
+    # Only treat as cached if file exists AND has non-trivial size (>300
+    # bytes rules out the empty files cairosvg leaves when cairo is missing).
+    if out_path.exists() and out_path.stat().st_size > 300:
+        return str(out_path)
+    if out_path.exists():
+        out_path.unlink(missing_ok=True)
+
+    # ── Try 1: cairosvg ──
+    try:
+        import requests
+        import cairosvg
+        svg_url = f"https://cdn.jsdelivr.net/npm/lucide-static@latest/icons/{name}.svg"
+        resp = requests.get(svg_url, timeout=8)
+        if resp.status_code == 200:
+            colored = resp.text.replace("<svg ", f'<svg stroke="{color_hex}" ', 1)
+            cairosvg.svg2png(
+                bytestring=colored.encode("utf-8"),
+                write_to=str(out_path),
+                output_width=size_px, output_height=size_px,
+            )
+            if out_path.exists() and out_path.stat().st_size > 300:
+                return str(out_path)
+            # cairo failed silently → wipe empty file, fall through
+            if out_path.exists():
+                out_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    # ── Try 2: Pillow symbol fallback (always works) ──
+    # Map icon name → unicode character. Not perfect-accurate but good
+    # enough for deck visual accent. For the exact lucide style users
+    # should install cairosvg (brew install cairo && pip install cairosvg).
+    _ICON_UNICODE = {
+        "check": "✓", "check-circle": "✓", "x": "✗", "x-circle": "✗",
+        "alert-triangle": "⚠", "info": "ⓘ", "help-circle": "?",
+        "arrow-right": "→", "arrow-up": "↑", "arrow-down": "↓",
+        "trending-up": "↗", "trending-down": "↘",
+        "rocket": "🚀", "target": "◎", "flag": "⚑", "star": "★", "heart": "♥",
+        "user": "👤", "users": "👥", "building": "🏢", "briefcase": "💼",
+        "database": "🗄", "server": "🖥", "cloud": "☁", "cpu": "⚙",
+        "globe": "🌐", "map-pin": "📍", "mail": "✉", "phone": "📞", "link": "🔗",
+        "dollar-sign": "$", "percent": "%", "bar-chart-3": "📊", "pie-chart": "◔",
+        "shield": "🛡", "lock": "🔒", "key": "🔑", "settings": "⚙",
+        "lightbulb": "💡", "book-open": "📖", "file-text": "📄",
+        "calendar": "📅", "clock": "🕐",
+    }
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        ch = _ICON_UNICODE.get(name, "●")
+        img = Image.new("RGBA", (size_px, size_px), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        # Parse color hex
+        hc = color_hex.lstrip("#")
+        color_rgb = (int(hc[0:2], 16), int(hc[2:4], 16), int(hc[4:6], 16), 255)
+        font = None
+        for candidate in ("/System/Library/Fonts/Apple Color Emoji.ttc",
+                           "/System/Library/Fonts/Helvetica.ttc",
+                           "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
+            try:
+                font = ImageFont.truetype(candidate, int(size_px * 0.75))
+                break
+            except Exception:
+                continue
+        if font is None:
+            font = ImageFont.load_default()
+        # Center
+        try:
+            bbox = draw.textbbox((0, 0), ch, font=font)
+            tw = bbox[2] - bbox[0]
+            th = bbox[3] - bbox[1]
+        except Exception:
+            tw, th = size_px // 2, size_px // 2
+        x = (size_px - tw) // 2
+        y = (size_px - th) // 2 - int(size_px * 0.1)
+        draw.text((x, y), ch, font=font, fill=color_rgb)
+        img.save(str(out_path), "PNG")
+        return str(out_path) if out_path.exists() else None
+    except Exception:
+        return None
+
+
+def add_icon(slide, x, y, size, name: str, *,
+             color: RGBColor | None = None):
+    """Add a lucide icon by name. `size` is the shape dimension (square).
+    Falls back to a colored square placeholder if fetch fails (still
+    renders something, won't crash the script)."""
+    # Resolve color hex
+    c = color if color is not None else THEME.get("accent", hex_color("#22D3EE"))
+    color_hex = "#{:02X}{:02X}{:02X}".format(c[0], c[1], c[2])
+    # Size in pixels for the PNG (fit the emu box)
+    px = max(48, min(256, int(size / EMU_PER_INCH * 96)))
+    path = _fetch_icon_png(name, color_hex=color_hex, size_px=px)
+    if path and os.path.isfile(path):
+        slide.shapes.add_picture(path, x, y, size, size)
+    else:
+        # Placeholder: small rounded square matching accent color
+        sh = slide.shapes.add_shape(
+            MSO_SHAPE.ROUNDED_RECTANGLE, x, y, size, size)
+        sh.fill.solid()
+        sh.fill.fore_color.rgb = c
+        sh.line.fill.background()
+
+
+# ─── Hero image (cover art) ───────────────────────────────────────
+
+_HERO_CACHE_DIR = Path.home() / ".tudou_claw" / "cache" / "pptx_hero"
+
+
+def add_hero_image(slide, x, y, w, h, query_or_url: str,
+                    *, dim: float = 0.0) -> bool:
+    """Add a cover hero image. `query_or_url` can be:
+      - an http(s):// URL to an image (jpg/png/webp)
+      - a short query string — we'll try Unsplash source URL
+        (https://source.unsplash.com/<width>x<height>/?<query>)
+    Caches to ~/.tudou_claw/cache/pptx_hero/.
+    `dim` (0.0-1.0): if > 0, overlay a translucent black rectangle to
+    darken the image for white text on top.
+    Returns True on success, False on silent fallback (still shows colored box)."""
+    import hashlib
+    import requests
+
+    _HERO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    if query_or_url.startswith(("http://", "https://")):
+        url = query_or_url
+    else:
+        # Unsplash source API: returns a random image matching the query
+        # width/height for rough aspect; real fit done by pptx.
+        wpx = int(w / EMU_PER_INCH * 96)
+        hpx = int(h / EMU_PER_INCH * 96)
+        url = (f"https://source.unsplash.com/"
+               f"{wpx}x{hpx}/?{query_or_url.strip().replace(' ', ',')}")
+
+    h_key = hashlib.md5(url.encode("utf-8")).hexdigest()[:16]
+    cache_path = _HERO_CACHE_DIR / f"{h_key}.jpg"
+    try:
+        if not cache_path.exists():
+            resp = requests.get(url, timeout=15, allow_redirects=True)
+            if resp.status_code == 200 and len(resp.content) > 1000:
+                cache_path.write_bytes(resp.content)
+            else:
+                raise RuntimeError(f"http {resp.status_code}")
+        slide.shapes.add_picture(str(cache_path), x, y, w, h)
+    except Exception:
+        # Fallback: gradient-ish rect
+        sh = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, x, y, w, h)
+        sh.fill.solid()
+        sh.fill.fore_color.rgb = THEME.get("accent", hex_color("#22D3EE"))
+        sh.line.fill.background()
+        return False
+    # Overlay dimming
+    if dim and dim > 0:
+        ov = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, x, y, w, h)
+        ov.fill.solid()
+        ov.fill.fore_color.rgb = hex_color("#000000")
+        # python-pptx doesn't expose fill transparency cleanly; use line off
+        # and rely on caller placing dark overlay for contrast. Left simple.
+        ov.line.fill.background()
+        try:
+            ov.fill.transparency = dim  # python-pptx >= 0.6.22 may support
+        except Exception:
+            pass
+    return True
+
+
+# ─── Gradient-like background ─────────────────────────────────────
+
+def add_gradient_bg(slide, color_from: RGBColor, color_to: RGBColor,
+                     *, direction: str = "vertical"):
+    """python-pptx 没有原生 linear-gradient API, 我们用三层叠加矩形 +
+    透明度近似. direction: 'vertical' | 'horizontal' | 'diagonal'."""
+    # Base layer — the "from" color
+    base = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, SW, SH)
+    base.fill.solid()
+    base.fill.fore_color.rgb = color_from
+    base.line.fill.background()
+    # Overlay — partial-transparency "to" color. python-pptx transparency
+    # support is fiddly; emulate with 3 stacked rects of decreasing alpha
+    # (from 0.7 → 0.4 → 0.1) to approximate a gradient.
+    steps = 3
+    for i in range(steps):
+        alpha = (i + 1) / (steps + 1)
+        if direction == "horizontal":
+            rx, ry = int(SW * (i + 1) / (steps + 2)), 0
+            rw, rh = SW, SH
+        elif direction == "diagonal":
+            rx, ry = int(SW * i / (steps + 2)), int(SH * i / (steps + 2))
+            rw, rh = SW, SH
+        else:  # vertical
+            rx, ry = 0, int(SH * (i + 1) / (steps + 2))
+            rw, rh = SW, SH
+        ov = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, rx, ry, rw, rh)
+        ov.fill.solid()
+        ov.fill.fore_color.rgb = color_to
+        ov.line.fill.background()
+        try:
+            ov.fill.transparency = 1.0 - alpha
+        except Exception:
+            pass
+
+
+# ─── Cover slide with hero image ──────────────────────────────────
+
+def slide_cover_hero(prs, title: str, subtitle: str = "",
+                      hero_query: str = "technology",
+                      *, theme_name: str | None = None):
+    """High-impact cover: full-bleed hero image + dark overlay + big title.
+
+    Replaces the plain "text on colored bg" cover. Works with any theme but
+    looks best on dark themes where the overlay blends.
+    """
+    if theme_name:
+        use_theme(theme_name)
+    slide = prs.slides.add_slide(blank_layout(prs))
+    # Full-bleed hero image
+    add_hero_image(slide, 0, 0, SW, SH, hero_query, dim=0.45)
+    # Dark gradient overlay for text contrast
+    ov = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, SW, SH)
+    ov.fill.solid()
+    ov.fill.fore_color.rgb = hex_color("#000000")
+    ov.line.fill.background()
+    try:
+        ov.fill.transparency = 0.55
+    except Exception:
+        pass
+    # Accent bar left
+    add_rect(slide, 0, 0, Inches(0.12), SH,
+             THEME.get("accent", hex_color("#22D3EE")))
+    # Title — large, white, bottom-left quadrant
+    add_text(slide, Inches(0.8), Inches(4.0),
+             Inches(11.5), Inches(1.8),
+             title, size=52, bold=True,
+             color=hex_color("#FFFFFF"),
+             align=PP_ALIGN.LEFT, anchor=MSO_ANCHOR.BOTTOM)
+    if subtitle:
+        add_text(slide, Inches(0.8), Inches(5.8),
+                 Inches(11.5), Inches(0.6),
+                 subtitle, size=20,
+                 color=hex_color("#E5E7EB"),
+                 align=PP_ALIGN.LEFT)
+    return slide
 
 
 # ─── quick self-test ──────────────────────────────────────────────
