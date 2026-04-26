@@ -2252,7 +2252,9 @@ def _proxy_chat(base_url: str, api_key: str,
                 stream: bool = False, model: str = "",
                 _provider_id: str = "",
                 tool_choice: dict | str | None = None,
-                temperature: float | None = None) -> dict | Generator:
+                temperature: float | None = None,
+                response_format: dict | None = None,
+                ) -> dict | Generator:
     """
     Handle proxy requests through Master node via WebSocket bus.
 
@@ -2343,7 +2345,9 @@ def _ollama_chat(base_url: str, api_key: str,
                  stream: bool = False, model: str = "",
                  _provider_id: str = "ollama",
                  tool_choice: dict | str | None = None,
-                 temperature: float | None = None) -> dict | Generator:
+                 temperature: float | None = None,
+                 response_format: dict | None = None,
+                 ) -> dict | Generator:
     """Ollama — 直接走 OpenAI 兼容端点 /v1/chat/completions。
 
     不维护独立的协议处理。Ollama 本身实现了完整的 OpenAI 兼容 API，
@@ -2355,6 +2359,7 @@ def _ollama_chat(base_url: str, api_key: str,
         model=model, _provider_id=_provider_id,
         tool_choice=tool_choice,
         temperature=temperature,
+        response_format=response_format,
     )
 
 
@@ -2394,7 +2399,9 @@ def _openai_chat(base_url: str, api_key: str,
                  stream: bool = False, model: str = "",
                  _provider_id: str = "openai",
                  tool_choice: dict | str | None = None,
-                 temperature: float | None = None) -> dict | Generator:
+                 temperature: float | None = None,
+                 response_format: dict | None = None,
+                 ) -> dict | Generator:
     url = base_url.rstrip("/")
     if not url.endswith("/chat/completions"):
         # Append /v1 only if no version path already present (e.g. /v1, /v3, /api/v3)
@@ -2445,6 +2452,16 @@ def _openai_chat(base_url: str, api_key: str,
     # tier routing passes -1.0 when unconfigured so we simply omit).
     if temperature is not None and temperature >= 0:
         payload["temperature"] = float(temperature)
+    # Structured output forcing — caller passes either:
+    #   {"type": "json_object"}                — any valid JSON
+    #   {"type": "json_schema",
+    #    "json_schema": {"name": ..., "schema": {...}, "strict": true}}
+    # OpenAI / DeepSeek / Doubao / Qwen all honour this. Local models
+    # (Ollama / LM Studio) often ignore it (best-effort). Tools and
+    # response_format are mutually exclusive for some providers; caller
+    # is responsible for picking one.
+    if response_format and isinstance(response_format, dict):
+        payload["response_format"] = response_format
     if valid_tools:
         payload["tools"] = valid_tools
         payload["stream"] = False
@@ -3082,7 +3099,20 @@ def _claude_chat(base_url: str, api_key: str,
                  stream: bool = False, model: str = "",
                  _provider_id: str = "claude",
                  tool_choice: dict | str | None = None,
-                 temperature: float | None = None) -> dict | Generator:
+                 temperature: float | None = None,
+                 response_format: dict | None = None,
+                 ) -> dict | Generator:
+    if response_format:
+        # Anthropic /v1/messages doesn't have a response_format field.
+        # Schema-forced output on Claude is achieved via tool-use:
+        # define a single tool with the schema and pass tool_choice
+        # forcing it. Caller is responsible for that pattern; we don't
+        # auto-convert here to avoid surprising tool side-effects.
+        logger.warning(
+            "_claude_chat: response_format is ignored on Anthropic — "
+            "use tool-use + tool_choice to force schema instead. "
+            "(See app.llm.build_schema_tool / force_schema_tool_choice.)",
+        )
     url = base_url.rstrip("/") + "/v1/messages"
     pool = get_connection_pool()
 
@@ -3660,6 +3690,7 @@ def _chat_with_fallback(messages: list[dict], tools: list[dict] | None = None,
                         provider_chain: list[ProviderEntry] | None = None,
                         tool_choice: dict | str | None = None,
                         temperature: float | None = None,
+                        response_format: dict | None = None,
                         ) -> dict | Generator[str, None, None]:
     """
     Internal function that tries providers in a fallback chain.
@@ -3694,7 +3725,8 @@ def _chat_with_fallback(messages: list[dict], tools: list[dict] | None = None,
                                            messages, tools=tools, stream=stream, model=model,
                                            _provider_id=entry.id,
                                            tool_choice=tool_choice,
-                                           temperature=temperature)
+                                           temperature=temperature,
+                                           response_format=response_format)
                 except ImportError:
                     pass
 
@@ -3708,7 +3740,8 @@ def _chat_with_fallback(messages: list[dict], tools: list[dict] | None = None,
             return handler(entry.base_url, entry.api_key,
                            msgs_to_send, tools=tools, stream=stream, model=model,
                            _provider_id=entry.id, tool_choice=tool_choice,
-                           temperature=temperature)
+                           temperature=temperature,
+                           response_format=response_format)
 
         except (requests.ConnectionError, requests.Timeout) as e:
             last_error = e
@@ -3740,11 +3773,81 @@ def _chat_with_fallback(messages: list[dict], tools: list[dict] | None = None,
     raise RuntimeError("No valid providers in fallback chain")
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Structured-output helpers (Phase 4 of prompt-pipeline cleanup)
+# ─────────────────────────────────────────────────────────────────────
+
+
+def make_json_object_response_format() -> dict:
+    """``{"type": "json_object"}`` — coerce model to emit valid JSON,no schema.
+
+    Use when the caller will parse JSON but doesn't have a schema to enforce.
+    OpenAI / DeepSeek / Doubao support; Anthropic ignores; Ollama best-effort.
+    """
+    return {"type": "json_object"}
+
+
+def make_json_schema_response_format(
+    name: str,
+    schema: dict,
+    strict: bool = True,
+) -> dict:
+    """OpenAI-format ``response_format`` for json_schema strict mode.
+
+    Args:
+        name:    schema 名(模型 prompt 里会引用,简单标识符即可)
+        schema:  JSON Schema dict(``{"type": "object", "properties": {...}, ...}``)
+        strict:  True → 拒绝任何不符合 schema 的输出(GPT-4o+ / DeepSeek-Chat 支持);
+                 False → 模型尽量遵守,但不强制
+
+    Returns the dict suitable for ``chat(response_format=...)``。
+    """
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": name,
+            "schema": schema,
+            "strict": strict,
+        },
+    }
+
+
+def build_schema_tool(name: str, schema: dict, description: str = "") -> dict:
+    """Anthropic-style schema-tool — 把 JSON Schema 包成"假工具"。
+
+    Anthropic 没有 ``response_format`` 字段;强制结构化输出的标准做法是
+    定义一个 schema 当 input_schema 的 tool,然后 ``tool_choice`` 强制
+    使用它。Claude 必须填这个 tool 的参数才能完成 turn。
+
+    Args:
+        name:        tool 名(给模型看的标识)
+        schema:      input JSON Schema
+        description: 给模型的简短描述(说明这个"工具"做什么)
+
+    Returns OpenAI/Anthropic 共用的 tool dict。配合
+    ``tool_choice={"type": "tool", "name": name}`` 使用。
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description or f"返回严格符合 {name} schema 的结构化数据。",
+            "parameters": schema,
+        },
+    }
+
+
+def force_schema_tool_choice(name: str) -> dict:
+    """跟 ``build_schema_tool`` 配套 — Anthropic 强制选 tool 的 tool_choice。"""
+    return {"type": "tool", "name": name}
+
+
 def chat(messages: list[dict], tools: list[dict] | None = None,
          stream: bool = False,
          provider: str = "", model: str = "",
          tool_choice: dict | str | None = None,
          temperature: float | None = None,
+         response_format: dict | None = None,
          ) -> dict | Generator[str, None, None]:
     """
     Send a chat request to an LLM backend with automatic fallback chain support.
@@ -3797,18 +3900,21 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
     return _chat_with_fallback(messages, tools=tools, stream=stream,
                                 model=mdl, provider_chain=provider_chain,
                                 tool_choice=tool_choice,
-                                temperature=temperature)
+                                temperature=temperature,
+                                response_format=response_format)
 
 
 def chat_no_stream(messages: list[dict], tools: list[dict] | None = None,
                    provider: str = "", model: str = "",
                    tool_choice: dict | str | None = None,
-                   temperature: float | None = None) -> dict:
+                   temperature: float | None = None,
+                   response_format: dict | None = None) -> dict:
     """Convenience: always returns a dict (no streaming)."""
     result = chat(messages, tools=tools, stream=False,
                   provider=provider, model=model,
                   tool_choice=tool_choice,
-                  temperature=temperature)
+                  temperature=temperature,
+                  response_format=response_format)
     assert isinstance(result, dict)
     # Post-process: some models return tool_calls embedded in content
     # rather than the standard ``message.tool_calls`` array (notably
