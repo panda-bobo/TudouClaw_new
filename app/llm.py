@@ -46,6 +46,120 @@ import copy
 
 logger = logging.getLogger("tudou.llm")
 token_logger = logging.getLogger("tudou.tokens")
+# Per-call payload composition. Different logger so users can tune
+# its level independently — set "tudou.tokens.breakdown" to DEBUG to
+# see every call, INFO to only see anomalies (>15K total or >5K growth).
+breakdown_logger = logging.getLogger("tudou.tokens.breakdown")
+
+
+# ── Token breakdown: what's in the actual outbound payload ─────────────
+# This measures `safe_messages` (post-sanitize, post-fold) — i.e. what
+# the wire actually carries. Categories sum to total_chars.
+_TOKEN_BREAKDOWN_HISTORY: dict = {}  # agent_id -> deque of last N totals
+_BREAKDOWN_HISTORY_KEEP = 30
+_BREAKDOWN_ANOMALY_TOTAL = 15000     # chars; ≈ 4K tokens
+_BREAKDOWN_ANOMALY_GROWTH = 5000     # chars added vs previous call
+
+
+def _measure_msg_chars(m: dict) -> int:
+    """Total character count of one OpenAI-style message."""
+    n = 0
+    c = m.get("content")
+    if isinstance(c, str):
+        n += len(c)
+    elif isinstance(c, list):
+        for p in c:
+            if isinstance(p, dict):
+                n += len(p.get("text", "") or "")
+                # multimodal parts: image_url etc — count the URL string
+                if "image_url" in p:
+                    iu = p["image_url"]
+                    n += len(iu.get("url", "")) if isinstance(iu, dict) else len(str(iu))
+            elif isinstance(p, str):
+                n += len(p)
+    for tc in (m.get("tool_calls") or []):
+        if isinstance(tc, dict):
+            fn = tc.get("function") or {}
+            if isinstance(fn, dict):
+                n += len(fn.get("name", "") or "")
+                args = fn.get("arguments", "")
+                n += len(args) if isinstance(args, str) else len(json.dumps(args, ensure_ascii=False, default=str))
+    return n
+
+
+def _log_payload_breakdown(safe_messages: list, tools: list | None,
+                             agent_id: str = "", model: str = "") -> None:
+    """Compute and log per-source token breakdown for one outbound payload."""
+    try:
+        sys_chars = 0
+        user_chars = 0
+        asst_text_chars = 0
+        asst_tool_call_chars = 0
+        tool_result_chars = 0
+        n_user = n_asst_text = n_asst_tc = n_tool = 0
+        total_tcs = 0
+
+        for m in safe_messages or []:
+            r = m.get("role", "")
+            mc = _measure_msg_chars(m)
+            if r == "system":
+                sys_chars += mc
+            elif r == "user":
+                user_chars += mc
+                n_user += 1
+            elif r == "assistant":
+                if m.get("tool_calls"):
+                    asst_tool_call_chars += mc
+                    n_asst_tc += 1
+                    total_tcs += len(m.get("tool_calls") or [])
+                else:
+                    asst_text_chars += mc
+                    n_asst_text += 1
+            elif r == "tool":
+                tool_result_chars += mc
+                n_tool += 1
+
+        history_chars = (user_chars + asst_text_chars
+                         + asst_tool_call_chars + tool_result_chars)
+        tools_chars = (
+            len(json.dumps(tools, ensure_ascii=False, default=str))
+            if tools else 0
+        )
+        total = sys_chars + history_chars + tools_chars
+
+        # Compute delta vs previous call for this agent
+        delta = 0
+        if agent_id:
+            history_deque = _TOKEN_BREAKDOWN_HISTORY.setdefault(agent_id, [])
+            if history_deque:
+                delta = total - history_deque[-1]
+            history_deque.append(total)
+            if len(history_deque) > _BREAKDOWN_HISTORY_KEEP:
+                history_deque.pop(0)
+
+        # Anomaly → INFO so users see it without enabling DEBUG
+        anomaly = (total > _BREAKDOWN_ANOMALY_TOTAL
+                   or delta > _BREAKDOWN_ANOMALY_GROWTH)
+        log_method = breakdown_logger.info if anomaly else breakdown_logger.debug
+
+        # Compact one-liner — searchable in logs
+        log_method(
+            "TOKEN-BREAKDOWN agent=%s model=%s total=%d "
+            "(sys=%d hist=%d tools=%d) "
+            "hist_split=[user=%d/%d asst_text=%d/%d asst_tc=%d/%d(%dtcs) tool=%d/%d] "
+            "delta=%+d",
+            (agent_id or "-")[:8], model,
+            total,
+            sys_chars, history_chars, tools_chars,
+            user_chars, n_user,
+            asst_text_chars, n_asst_text,
+            asst_tool_call_chars, n_asst_tc, total_tcs,
+            tool_result_chars, n_tool,
+            delta,
+        )
+    except Exception as _e:
+        # Never let diagnostics crash a real LLM call.
+        breakdown_logger.debug("breakdown computation failed: %s", _e)
 
 # HTTP timeouts for chat/completions requests.
 #   CONNECT — includes TCP handshake AND the time to flush the request body
@@ -77,31 +191,90 @@ _TOKEN_TOTALS: dict = {
     "total_in": 0,
     "total_out": 0,
     "calls": 0,
-    "by_model": {},   # key: f"{provider}/{model}" -> {"in":..., "out":..., "calls":...}
+    "cache_read_total": 0,    # tokens served from prompt cache (cheap path)
+    "cache_write_total": 0,   # tokens that wrote to prompt cache (Anthropic only;
+                              #   ~125% cost for that turn but pays back later)
+    "by_model": {},   # key: f"{provider}/{model}" -> {"in", "out", "calls",
+                      #                                  "cache_read", "cache_write"}
 }
-# 当前线程上下文：让 agent 调用 LLM 时把 agent_id 透传进来，
-# 这样 token 统计能落到具体 agent。
+
+
+def _extract_cache_tokens(usage: dict) -> tuple[int, int]:
+    """Provider-agnostic cache-token extraction from a usage dict.
+
+    Returns ``(cache_read, cache_write)``:
+
+      * Anthropic              ``cache_read_input_tokens`` / ``cache_creation_input_tokens``
+      * OpenAI / GPT-4o / mini ``prompt_tokens_details.cached_tokens`` (read only —
+                               OpenAI's prompt cache writes are free, no separate metric)
+      * DeepSeek               ``prompt_cache_hit_tokens`` (read; miss isn't a write)
+
+    Returns ``(0, 0)`` on missing / malformed usage.
+    """
+    if not isinstance(usage, dict):
+        return 0, 0
+    # Anthropic — explicit two-sided metric.
+    cr = int(usage.get("cache_read_input_tokens") or 0)
+    cw = int(usage.get("cache_creation_input_tokens") or 0)
+    if cr or cw:
+        return cr, cw
+    # DeepSeek — hit count, no separate write metric.
+    cr = int(usage.get("prompt_cache_hit_tokens") or 0)
+    if cr:
+        return cr, 0
+    # OpenAI standard (Nov 2024+) — nested under prompt_tokens_details.
+    details = usage.get("prompt_tokens_details")
+    if isinstance(details, dict):
+        cr = int(details.get("cached_tokens") or 0)
+        if cr:
+            return cr, 0
+    return 0, 0
+# 当前线程上下文：让 agent 调用 LLM 时把 agent_id / project_id /
+# meeting_id / chat_task_id 透传进来，token 统计按多维度归属。
+# 所有字段都是可选：只有 agent_id 一定会有（LLM 调用必然来自某 agent）;
+# project_id / meeting_id / chat_task_id 看调用场景而定。
 _TOKEN_CTX = threading.local()
 
 
-def set_token_context(agent_id: str = "", project_id: str = "") -> None:
-    """供 agent / project_chat 在调 LLM 之前调用，标记调用归属。"""
+def set_token_context(agent_id: str = "",
+                       project_id: str = "",
+                       meeting_id: str = "",
+                       chat_task_id: str = "") -> None:
+    """供 agent / project_chat / meeting_chat 在调 LLM 之前调用,
+    标记调用归属。按多层归属汇总 token: per-agent / per-task /
+    per-project / per-meeting."""
     _TOKEN_CTX.agent_id = agent_id
     _TOKEN_CTX.project_id = project_id
+    _TOKEN_CTX.meeting_id = meeting_id
+    _TOKEN_CTX.chat_task_id = chat_task_id
 
 
 def clear_token_context() -> None:
     _TOKEN_CTX.agent_id = ""
     _TOKEN_CTX.project_id = ""
+    _TOKEN_CTX.meeting_id = ""
+    _TOKEN_CTX.chat_task_id = ""
 
 
 def get_token_totals() -> dict:
-    """供 portal API 查询累计 token 使用。"""
+    """供 portal API 查询累计 token 使用。
+
+    新增 ``cache_*`` 字段 + ``cache_hit_rate`` (0-1):
+      cache_hit_rate = cache_read_total / total_in
+    高命中率 = system prompt prefix 切得稳;低命中率 = prefix 经常变,
+    每次都要重写缓存。可以据此判断是否该上"块化条件装入"那一层。
+    """
     with _TOKEN_LOCK:
+        total_in = _TOKEN_TOTALS["total_in"]
+        cr = _TOKEN_TOTALS.get("cache_read_total", 0)
+        cw = _TOKEN_TOTALS.get("cache_write_total", 0)
         return {
-            "total_in": _TOKEN_TOTALS["total_in"],
+            "total_in": total_in,
             "total_out": _TOKEN_TOTALS["total_out"],
             "calls": _TOKEN_TOTALS["calls"],
+            "cache_read_total": cr,
+            "cache_write_total": cw,
+            "cache_hit_rate": (cr / total_in) if total_in > 0 else 0.0,
             "by_model": dict(_TOKEN_TOTALS["by_model"]),
         }
 
@@ -110,23 +283,38 @@ def _log_token_usage(provider: str, model: str,
                       prompt_tokens: int = 0,
                       completion_tokens: int = 0,
                       stream: bool = False,
-                      payload_kb: float = 0.0) -> None:
+                      payload_kb: float = 0.0,
+                      cache_read: int = 0,
+                      cache_write: int = 0) -> None:
     """
     记录一次 LLM 调用的 token 用量。
     - 写到 tudou.tokens logger
     - 累加到全局计数器
     - 关联当前线程的 agent_id / project_id（若有）
+
+    ``cache_read`` / ``cache_write`` 是 prompt-cache 度量。``prompt_tokens``
+    是 provider 报告的总输入(已包含从缓存读的部分),``cache_read`` 是其
+    中"从缓存读"的字段;命中率 = cache_read / total_in。
     """
     p_in = int(prompt_tokens or 0)
     p_out = int(completion_tokens or 0)
+    cr = int(cache_read or 0)
+    cw = int(cache_write or 0)
     agent_id = getattr(_TOKEN_CTX, "agent_id", "") or ""
     project_id = getattr(_TOKEN_CTX, "project_id", "") or ""
+    meeting_id = getattr(_TOKEN_CTX, "meeting_id", "") or ""
+    chat_task_id = getattr(_TOKEN_CTX, "chat_task_id", "") or ""
 
-    token_logger.info(
+    # Per-call 日志降级到 DEBUG — 之前每次调用都刷屏,用户投诉"是不是没有聚合"。
+    # INFO 级改为聚合 rollup(见下),每 N 次或每 M 秒打一次。
+    cache_part = f" cache_r={cr} cache_w={cw}" if (cr or cw) else ""
+    token_logger.debug(
         "TOKEN provider=%s model=%s in=%d out=%d total=%d "
-        "stream=%s payload_kb=%.1f agent=%s project=%s",
+        "stream=%s payload_kb=%.1f agent=%s project=%s meeting=%s task=%s%s",
         provider, model, p_in, p_out, p_in + p_out,
-        stream, payload_kb, agent_id[:8], project_id[:8],
+        stream, payload_kb,
+        agent_id[:8], project_id[:8],
+        meeting_id[:8], chat_task_id[:8], cache_part,
     )
 
     key = f"{provider}/{model}"
@@ -134,32 +322,141 @@ def _log_token_usage(provider: str, model: str,
         _TOKEN_TOTALS["total_in"] += p_in
         _TOKEN_TOTALS["total_out"] += p_out
         _TOKEN_TOTALS["calls"] += 1
+        _TOKEN_TOTALS["cache_read_total"] = (
+            _TOKEN_TOTALS.get("cache_read_total", 0) + cr
+        )
+        _TOKEN_TOTALS["cache_write_total"] = (
+            _TOKEN_TOTALS.get("cache_write_total", 0) + cw
+        )
         bucket = _TOKEN_TOTALS["by_model"].setdefault(
-            key, {"in": 0, "out": 0, "calls": 0})
+            key, {"in": 0, "out": 0, "calls": 0,
+                  "cache_read": 0, "cache_write": 0})
         bucket["in"] += p_in
         bucket["out"] += p_out
         bucket["calls"] += 1
+        bucket["cache_read"] = bucket.get("cache_read", 0) + cr
+        bucket["cache_write"] = bucket.get("cache_write", 0) + cw
 
-    # 同时回写到 agent.stats 累计（如果能拿到 agent 实例）。
-    # 注意 _active_hub 是挂在 THIS module (app.llm) 的全局变量，
-    # 由 Hub.__init__ 启动时写入 (see hub/_core.py:143)。之前这里
-    # 错误地从 `app.hub` 读，导致永远拿不到 hub，agent 的 _token_stats
-    # 永远是 0 —— portal 上 TOKENS 显示 "0 / 0, 0 calls" 的 root cause。
-    if agent_id:
+    # 按维度写入 per-scope 累计器。每个目标对象维护自己的 _token_stats,
+    # 查询时 O(1) 读出。
+    def _accumulate(target):
+        if target is None:
+            return
+        stats = getattr(target, "_token_stats", None)
+        if stats is None:
+            stats = {"in": 0, "out": 0, "calls": 0,
+                     "cache_read": 0, "cache_write": 0,
+                     "by_model": {}}
+            try:
+                target._token_stats = stats
+            except Exception:
+                return
+        stats["in"] += p_in
+        stats["out"] += p_out
+        stats["calls"] += 1
+        stats["cache_read"] = stats.get("cache_read", 0) + cr
+        stats["cache_write"] = stats.get("cache_write", 0) + cw
+        bm = stats.setdefault("by_model", {})
+        b = bm.setdefault(key, {"in": 0, "out": 0, "calls": 0,
+                                "cache_read": 0, "cache_write": 0})
+        b["in"] += p_in
+        b["out"] += p_out
+        b["calls"] += 1
+        b["cache_read"] = b.get("cache_read", 0) + cr
+        b["cache_write"] = b.get("cache_write", 0) + cw
+
+    # 注意 _active_hub 是挂在 THIS module (app.llm) 的全局变量,由
+    # Hub.__init__ 启动时写入 (see hub/_core.py:143).
+    if agent_id or project_id or meeting_id or chat_task_id:
         try:
-            _h = _active_hub  # module-local global
-            if _h is not None and hasattr(_h, "agents"):
-                _ag = _h.agents.get(agent_id)
-                if _ag is not None:
-                    _stats = getattr(_ag, "_token_stats", None)
-                    if _stats is None:
-                        _stats = {"in": 0, "out": 0, "calls": 0}
-                        _ag._token_stats = _stats
-                    _stats["in"] += p_in
-                    _stats["out"] += p_out
-                    _stats["calls"] += 1
+            _h = _active_hub
+            if _h is not None:
+                # Agent
+                if agent_id and hasattr(_h, "agents"):
+                    _accumulate(_h.agents.get(agent_id))
+                # Project
+                if project_id and hasattr(_h, "projects"):
+                    _accumulate(_h.projects.get(project_id))
+                # Meeting
+                if meeting_id and hasattr(_h, "meetings"):
+                    _accumulate(_h.meetings.get(meeting_id))
+                # Chat task — looked up through the chat_task manager
+                if chat_task_id:
+                    try:
+                        from .chat_task import get_chat_task_manager
+                        mgr = get_chat_task_manager()
+                        task = mgr.get(chat_task_id) if mgr else None
+                        _accumulate(task)
+                    except Exception:
+                        pass
         except Exception:
             pass
+
+    # ── Rollup log (INFO) ── 每 10 次调用或每 30 秒，打一次当前 scope 的累计快照。
+    # 解决用户投诉"是不是没有聚合,还是很多条"。per-call 已降级到 DEBUG,这里补上
+    # 周期性的聚合 INFO。只对有 agent 归属的调用做,避免无主调用也刷屏。
+    if agent_id:
+        try:
+            _maybe_rollup_log(agent_id, project_id, meeting_id, chat_task_id)
+        except Exception:
+            pass
+
+
+# ── Rollup helper state ──
+# {(agent, project, meeting, task) -> {"calls_since":int, "last_ts":float}}
+_ROLLUP_STATE: dict = {}
+_ROLLUP_LOCK = threading.Lock()
+_ROLLUP_CALLS_THRESHOLD = 10   # flush每累计10次调用
+_ROLLUP_SECONDS_THRESHOLD = 30  # 或每30秒一次
+
+def _maybe_rollup_log(agent_id: str, project_id: str,
+                       meeting_id: str, chat_task_id: str) -> None:
+    """Periodically emit aggregated TOKEN-TOTAL log per scope."""
+    import time as _t
+    key = (agent_id, project_id, meeting_id, chat_task_id)
+    now = _t.time()
+    should_flush = False
+    with _ROLLUP_LOCK:
+        st = _ROLLUP_STATE.setdefault(key, {"calls_since": 0, "last_ts": now})
+        st["calls_since"] += 1
+        if (st["calls_since"] >= _ROLLUP_CALLS_THRESHOLD
+                or now - st["last_ts"] >= _ROLLUP_SECONDS_THRESHOLD):
+            should_flush = True
+            st["calls_since"] = 0
+            st["last_ts"] = now
+    if not should_flush:
+        return
+
+    # Pull current per-scope totals from the accumulator objects.
+    def _read(target):
+        if target is None:
+            return None
+        return getattr(target, "_token_stats", None)
+
+    _h = _active_hub
+    if _h is None:
+        return
+    parts = []
+    try:
+        if agent_id and hasattr(_h, "agents"):
+            s = _read(_h.agents.get(agent_id))
+            if s:
+                parts.append("agent=%s in=%d out=%d calls=%d" % (
+                    agent_id[:8], s["in"], s["out"], s["calls"]))
+        if project_id and hasattr(_h, "projects"):
+            s = _read(_h.projects.get(project_id))
+            if s:
+                parts.append("project=%s in=%d out=%d calls=%d" % (
+                    project_id[:8], s["in"], s["out"], s["calls"]))
+        if meeting_id and hasattr(_h, "meetings"):
+            s = _read(_h.meetings.get(meeting_id))
+            if s:
+                parts.append("meeting=%s in=%d out=%d calls=%d" % (
+                    meeting_id[:8], s["in"], s["out"], s["calls"]))
+    except Exception:
+        return
+    if parts:
+        token_logger.info("TOKEN-ROLLUP " + " | ".join(parts))
 
 # ---------------------------------------------------------------------------
 # Prompt Caching and Budget Management
@@ -347,7 +644,19 @@ _CODE_FENCE_RE = re.compile(
 )
 
 
-def _sanitize_messages_for_openai(messages: list[dict]) -> list[dict]:
+# ─────────────────────────────────────────────────────────────────────
+# LLM Provider Adapters — extracted to app/llm_providers.py
+# ─────────────────────────────────────────────────────────────────────
+from .llm_providers import (  # noqa: F401
+    LLMProvider, ProviderStrategy,
+    register_provider, resolve_strategy, _detect_provider_kind,
+    OpenAIProvider, AnthropicProvider, DeepSeekProvider, GLMProvider,
+    QwenProvider, VolcesProvider, OllamaProvider, LMStudioProvider,
+)
+
+
+def _sanitize_messages_for_openai(messages: list[dict],
+                                    target_url: str = "") -> list[dict]:
     """Sanitize messages for OpenAI-compatible APIs (LM Studio, Qwen, vLLM, Ollama, etc.).
 
     1. Merge multiple system messages into ONE (many local servers reject >1)
@@ -452,6 +761,39 @@ def _sanitize_messages_for_openai(messages: list[dict]) -> list[dict]:
                     }
                 fixed_tcs.append(ftc)
             clean["tool_calls"] = fixed_tcs
+
+        # ── Cross-provider invariants ───────────────────────────────────
+        # Some providers (GLM/智谱、Qwen) reject assistant messages where
+        # both `content` AND `tool_calls` are present-and-non-empty.
+        # OpenAI accepts both. Volces / DeepSeek accept either.
+        # Safe lowest-common-denominator: when an assistant has tool_calls,
+        # drop content if it's empty/whitespace; preserve it only when
+        # there's real text (then OpenAI is happy + GLM tolerates short text).
+        if (role == "assistant"
+                and clean.get("tool_calls")
+                and isinstance(clean.get("content"), str)
+                and not clean["content"].strip()):
+            clean.pop("content", None)
+
+        # Tool message content must be a string (some providers reject list).
+        if role == "tool" and not isinstance(clean.get("content"), str):
+            clean["content"] = _ensure_str(clean.get("content"))
+
+        # Drop empty user messages — every API rejects role:user, content:""
+        if role == "user":
+            _c = clean.get("content")
+            if _c is None:
+                continue
+            if isinstance(_c, str) and not _c.strip():
+                continue
+
+        # Drop fully-empty assistant messages (no content + no tool_calls).
+        # They can leak in from aborted streams / nudge rollback.
+        if role == "assistant":
+            _has_text = isinstance(clean.get("content"), str) and clean["content"].strip()
+            _has_tools = bool(clean.get("tool_calls"))
+            if not _has_text and not _has_tools:
+                continue
 
         sanitized.append(clean)
 
@@ -629,7 +971,53 @@ def _sanitize_messages_for_openai(messages: list[dict]) -> list[dict]:
         logger.info("Sanitizer: collapsed %d near-duplicate messages (%d → %d)",
                      collapsed_count, len(cleaned), len(deduped))
 
-    return deduped
+    # ── Apply provider adapter ─────────────────────────────────────
+    # Each LLM is its own self-contained adapter object. Resolution = one
+    # call; per-message transform = one method call per message. Adding a
+    # new LLM doesn't touch this code.
+    adapter = resolve_strategy(target_url)
+    # Fold first: providers with `max_tool_call_rounds` capped (e.g. GLM-
+    # 4.5-air) need older tool rounds collapsed into plain text BEFORE
+    # per-message field transforms run on the resulting messages.
+    pre_fold_n = len(deduped)
+    deduped = adapter.fold_excess_tool_rounds(deduped)
+    if len(deduped) != pre_fold_n:
+        logger.info(
+            "Sanitizer: %s folded tool rounds (%d → %d msgs, cap=%d)",
+            adapter.name, pre_fold_n, len(deduped),
+            adapter.max_tool_call_rounds,
+        )
+    for m in deduped:
+        adapter.transform_message(m)
+
+    # ── Final structural integrity pass ─────────────────────────────────
+    # Cross-provider invariants every OpenAI-compat API expects:
+    #   1. Conversation must contain at least one non-system message
+    #   2. Last message can be ANY role (system msg before tool result is OK)
+    #      but [system, system, ..., system] alone is rejected
+    #   3. Any leftover orphan tool message (passes pass 3 but ends up at
+    #      position [0] after dedup) → drop
+    #   4. After sanitization if no messages, raise so caller catches early
+    #      rather than getting opaque 400 from provider
+    final_pass = []
+    for i, m in enumerate(deduped):
+        # An orphan tool at the very start is invalid — every provider barfs.
+        if i == 0 and m.get("role") == "tool":
+            logger.warning("Sanitizer: dropped tool message at position 0 "
+                           "(no preceding assistant.tool_calls)")
+            continue
+        final_pass.append(m)
+
+    # Empty payload guard. Better to error fast than send empty messages.
+    has_non_system = any(m.get("role") != "system" for m in final_pass)
+    if not has_non_system:
+        # Don't raise — some scenarios (initial ping, system probe) are OK.
+        # Just log a hint and let the caller decide.
+        logger.warning(
+            "Sanitizer: payload has no user/assistant message after sanitization. "
+            "This may cause provider 400. Original count: %d", len(messages))
+
+    return final_pass
 
 
 def apply_prompt_cache(messages: list[dict], provider_kind: str) -> list[dict]:
@@ -1954,7 +2342,8 @@ def _ollama_chat(base_url: str, api_key: str,
                  messages: list[dict], tools: list[dict] | None = None,
                  stream: bool = False, model: str = "",
                  _provider_id: str = "ollama",
-                 tool_choice: dict | str | None = None) -> dict | Generator:
+                 tool_choice: dict | str | None = None,
+                 temperature: float | None = None) -> dict | Generator:
     """Ollama — 直接走 OpenAI 兼容端点 /v1/chat/completions。
 
     不维护独立的协议处理。Ollama 本身实现了完整的 OpenAI 兼容 API，
@@ -1965,6 +2354,7 @@ def _ollama_chat(base_url: str, api_key: str,
         messages, tools=tools, stream=stream,
         model=model, _provider_id=_provider_id,
         tool_choice=tool_choice,
+        temperature=temperature,
     )
 
 
@@ -2024,16 +2414,11 @@ def _openai_chat(base_url: str, api_key: str,
 
     # Sanitize messages: ensure all content fields are plain strings
     # (local models like Qwen/LM Studio reject list-type content with 400)
-    safe_messages = _sanitize_messages_for_openai(messages)
-
-    # DeepSeek thinking-mode models REQUIRE prior reasoning_content to be
-    # replayed. For every other provider, send-side strip the field —
-    # some strict APIs (e.g. some OpenAI-compat shims) reject unknown
-    # assistant fields. Detection: URL host contains 'deepseek'.
-    if "deepseek" not in url.lower():
-        for m in safe_messages:
-            if m.get("role") == "assistant" and "reasoning_content" in m:
-                m.pop("reasoning_content", None)
+    # Pass URL so the sanitizer can apply provider-specific quirks (the
+    # only place that knows about provider differences). Caller stays
+    # provider-agnostic — switching providers requires zero call-site
+    # changes.
+    safe_messages = _sanitize_messages_for_openai(messages, target_url=url)
 
     valid_tools = _validate_tools(tools)
 
@@ -2069,6 +2454,19 @@ def _openai_chat(base_url: str, api_key: str,
         # providers default to 1024–2048 tokens which causes truncation
         # (finish_reason=length) and empty arguments.
         payload.setdefault("max_tokens", 16384)
+        # Encourage parallel tool calling — model returns multiple
+        # tool_calls in ONE assistant message when calls are independent.
+        # Only send the field for providers that recognize it; GLM/zhipu
+        # 400s on unknown fields ("messages 参数非法").
+        if resolve_strategy(url).supports_parallel_tool_calls_param:
+            payload["parallel_tool_calls"] = True
+        # Per-call payload breakdown (system / history / tools split).
+        # Anomaly threshold logs at INFO; everything else at DEBUG.
+        _log_payload_breakdown(
+            safe_messages, valid_tools,
+            agent_id=getattr(_TOKEN_CTX, "agent_id", "") or "",
+            model=model,
+        )
         # Plan D: forced tool_choice — when caller detects a handoff
         # trigger, lock the model to the handoff_request tool so it
         # cannot fabricate a fake result in plain text.
@@ -2144,17 +2542,102 @@ def _openai_chat(base_url: str, api_key: str,
                 logger.error(
                     "OpenAI-compat %d error (model=%s, url=%s): %s",
                     resp.status_code, model, url, err_msg)
+                # Dump the offending payload's message shape so we can debug
+                # "messages 参数非法" / "invalid messages" errors. ERROR level
+                # so it shows up without enabling DEBUG.
+                try:
+                    _shape = []
+                    for _idx, _m in enumerate(payload.get("messages", [])):
+                        _r = _m.get("role")
+                        _entry = {"i": _idx, "role": _r}
+                        _c = _m.get("content")
+                        if _c is None:
+                            _entry["content"] = None
+                        elif isinstance(_c, list):
+                            _entry["content_kind"] = "list[" + ",".join(
+                                str(p.get("type")) if isinstance(p, dict)
+                                else type(p).__name__
+                                for p in _c
+                            ) + "]"
+                        elif isinstance(_c, str):
+                            _entry["content_len"] = len(_c)
+                            if not _c.strip():
+                                _entry["content_empty"] = True
+                        else:
+                            _entry["content_type"] = type(_c).__name__
+                        if "tool_calls" in _m:
+                            tcs = _m.get("tool_calls")
+                            if tcs is None:
+                                _entry["tool_calls"] = "None"
+                            elif not tcs:
+                                _entry["tool_calls"] = "[]"
+                            else:
+                                _entry["tool_calls_n"] = len(tcs)
+                                # arguments shape
+                                first = tcs[0] if tcs else {}
+                                if isinstance(first, dict):
+                                    _id = first.get("id") or ""
+                                    _entry["tc0_id"] = (str(_id)[:14] or "<empty>")
+                                    fn = first.get("function", {})
+                                    if isinstance(fn, dict):
+                                        _entry["tc0_name"] = fn.get("name", "?")
+                                        _entry["tc0_args_type"] = type(
+                                            fn.get("arguments")).__name__
+                        if "tool_call_id" in _m:
+                            _tcid = _m.get("tool_call_id") or ""
+                            _entry["tool_call_id"] = (str(_tcid)[:14] or "<empty>")
+                        for _k in ("name", "reasoning_content"):
+                            if _k in _m:
+                                _entry[_k + "_present"] = True
+                        # Surface any non-standard keys the sanitizer missed
+                        _known = {"role", "content", "tool_calls",
+                                  "tool_call_id", "name", "reasoning_content",
+                                  "refusal"}
+                        _extra = sorted(set(_m.keys()) - _known)
+                        if _extra:
+                            _entry["extra_keys"] = _extra
+                        _shape.append(_entry)
+                    logger.error("400 payload shape (n=%d): %s",
+                                 len(_shape), _shape)
+                    # Top-level payload keys (tools array length, etc.)
+                    _top = {}
+                    for _tk, _tv in payload.items():
+                        if _tk == "messages":
+                            continue
+                        if isinstance(_tv, list):
+                            _top[_tk] = f"list[{len(_tv)}]"
+                            if _tk == "tools" and _tv:
+                                _t0 = _tv[0]
+                                if isinstance(_t0, dict):
+                                    _fn = _t0.get("function", {})
+                                    _top["tools[0].name"] = (
+                                        _fn.get("name") if isinstance(_fn, dict) else "?")
+                        elif isinstance(_tv, (str, int, float, bool)):
+                            _top[_tk] = _tv if not isinstance(_tv, str) else _tv[:60]
+                        else:
+                            _top[_tk] = type(_tv).__name__
+                    logger.error("400 payload top-level: %s", _top)
+                    # Full GLM/zhipu response body — they often name the bad field.
+                    try:
+                        logger.error("400 response body: %s", resp.text[:2000])
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
                 resp.raise_for_status()
         data = resp.json()
         # ── Token usage logging ──
         try:
             _usage = data.get("usage") or {}
+            _cr, _cw = _extract_cache_tokens(_usage)
             _log_token_usage(
                 provider=_provider_id or "openai",
                 model=model,
                 prompt_tokens=_usage.get("prompt_tokens", 0),
                 completion_tokens=_usage.get("completion_tokens", 0),
                 stream=False,
+                cache_read=_cr,
+                cache_write=_cw,
             )
         except Exception as _te:
             logger.debug("token usage log failed: %s", _te)
@@ -2328,12 +2811,7 @@ def _openai_stream_events(base_url: str, api_key: str,
     }
 
     messages = _apply_model_directives(messages, model)
-    safe_messages = _sanitize_messages_for_openai(messages)
-    # Same reasoning_content gating as non-stream path (see chat_no_stream)
-    if "deepseek" not in url.lower():
-        for m in safe_messages:
-            if m.get("role") == "assistant" and "reasoning_content" in m:
-                m.pop("reasoning_content", None)
+    safe_messages = _sanitize_messages_for_openai(messages, target_url=url)
     valid_tools = _validate_tools(tools)
 
     payload: dict = {
@@ -2350,6 +2828,15 @@ def _openai_stream_events(base_url: str, api_key: str,
         payload["tools"] = valid_tools
         # Give tool args enough room — write_file/edit_file produce large JSON.
         payload.setdefault("max_tokens", 16384)
+        # Parallel tool calling — opt-in per provider (see non-stream path).
+        if resolve_strategy(url).supports_parallel_tool_calls_param:
+            payload["parallel_tool_calls"] = True
+        # Stream-path breakdown — same logger as non-stream.
+        _log_payload_breakdown(
+            safe_messages, valid_tools,
+            agent_id=getattr(_TOKEN_CTX, "agent_id", "") or "",
+            model=model,
+        )
 
     session = pool.get_session(_provider_id)
     max_retries = pool.max_retries
@@ -2362,6 +2849,8 @@ def _openai_stream_events(base_url: str, api_key: str,
         finish_reason: str | None = None
         input_tokens = 0
         output_tokens = 0
+        cache_read_stream = 0
+        cache_write_stream = 0
         first_event_yielded = False
 
         try:
@@ -2462,6 +2951,10 @@ def _openai_stream_events(base_url: str, api_key: str,
                         output_tokens = usage.get(
                             "completion_tokens",
                             output_tokens) or output_tokens
+                        cr_stream, cw_stream = _extract_cache_tokens(usage)
+                        if cr_stream or cw_stream:
+                            cache_read_stream = cr_stream
+                            cache_write_stream = cw_stream
 
                 # Stream ended — finalise any accumulated tool_calls
                 for idx in sorted(tool_states.keys()):
@@ -2504,6 +2997,8 @@ def _openai_stream_events(base_url: str, api_key: str,
                             prompt_tokens=input_tokens,
                             completion_tokens=output_tokens,
                             stream=True,
+                            cache_read=cache_read_stream,
+                            cache_write=cache_write_stream,
                         )
                     except Exception as _te:
                         logger.debug("token usage log failed: %s", _te)
@@ -2733,17 +3228,18 @@ def _claude_chat(base_url: str, api_key: str,
         # ── Token usage logging ──
         try:
             _u = data.get("usage") or {}
+            _cr, _cw = _extract_cache_tokens(_u)
             _log_token_usage(
                 provider=_provider_id or "claude",
                 model=model,
                 prompt_tokens=_u.get("input_tokens", 0),
                 completion_tokens=_u.get("output_tokens", 0),
                 stream=False,
+                cache_read=_cr,
+                cache_write=_cw,
             )
             # Cache observability — surface hit/miss + savings so users can
             # tell whether TUDOU_ANTHROPIC_CACHE is actually working.
-            _cr = _u.get("cache_read_input_tokens", 0) or 0
-            _cw = _u.get("cache_creation_input_tokens", 0) or 0
             if _cr or _cw:
                 # Cache read costs ~10% of normal; cache write ~125%.
                 # Rough saved-tokens estimate: read * 0.9 - write * 0.25
@@ -2951,6 +3447,8 @@ def _claude_stream_events(base_url: str, api_key: str,
         current_tool_buf: list[str] = []
         input_tokens = 0
         output_tokens = 0
+        cache_read_stream = 0
+        cache_write_stream = 0
         stop_reason: str | None = None
         first_event_yielded = False
 
@@ -2994,6 +3492,13 @@ def _claude_stream_events(base_url: str, api_key: str,
                         usage = msg.get("usage") or {}
                         input_tokens = usage.get(
                             "input_tokens", 0) or input_tokens
+                        # Anthropic emits cache_*_input_tokens here, not in
+                        # message_delta. message_start fires once, so we just
+                        # capture and don't accumulate.
+                        cr_evt, cw_evt = _extract_cache_tokens(usage)
+                        if cr_evt or cw_evt:
+                            cache_read_stream = cr_evt
+                            cache_write_stream = cw_evt
 
                     elif etype == "content_block_start":
                         block = event.get("content_block") or {}
@@ -3080,6 +3585,8 @@ def _claude_stream_events(base_url: str, api_key: str,
                             prompt_tokens=input_tokens,
                             completion_tokens=output_tokens,
                             stream=True,
+                            cache_read=cache_read_stream,
+                            cache_write=cache_write_stream,
                         )
                     except Exception as _te:
                         logger.debug("token usage log failed: %s", _te)
@@ -3303,7 +3810,83 @@ def chat_no_stream(messages: list[dict], tools: list[dict] | None = None,
                   tool_choice=tool_choice,
                   temperature=temperature)
     assert isinstance(result, dict)
+    # Post-process: some models return tool_calls embedded in content
+    # rather than the standard ``message.tool_calls`` array (notably
+    # GLM-4.5-air emits ``<arg_key>...<arg_value>...`` XML inline).
+    # The V2 tool_parsers package already knows how to recognise this
+    # pattern; we route through it here so V1 chat sees a normalized
+    # OpenAI-shaped dict regardless of provider quirks.
+    try:
+        result = _postprocess_xml_tool_calls(result, model=model)
+    except Exception as _pe:
+        logger.debug("xml tool_call postprocess skipped: %s", _pe)
     return result
+
+
+def _postprocess_xml_tool_calls(result: dict, *, model: str = "") -> dict:
+    """If ``result.message.content`` contains XML tool_call markup but
+    ``message.tool_calls`` is empty/missing, run V2 ParserRegistry.
+    Returns the (possibly modified) result dict.
+    """
+    if not isinstance(result, dict):
+        return result
+    msg = result.get("message")
+    if not isinstance(msg, dict):
+        return result
+    content = msg.get("content") or ""
+    if not isinstance(content, str) or not content:
+        return result
+    # Cheap pre-check — if no XML tool markup and no JSON-in-content
+    # signals, skip the heavier parser path.
+    needs_parse = (
+        "<tool_call>" in content
+        or ("<arg_key>" in content and "<arg_value>" in content)
+        or ("<function" in content and "<parameter" in content)
+    )
+    if not needs_parse:
+        return result
+    # If the message already has tool_calls AND no XML in content,
+    # nothing to do. Otherwise run the parser.
+    if msg.get("tool_calls"):
+        # Strip the XML markup from content so the chat UI doesn't
+        # double-render (it'll show the structured tool_calls instead).
+        msg["content"] = _strip_xml_tool_markup(content)
+        return result
+    try:
+        from .v2.bridges.tool_parsers import get_registry
+    except Exception:
+        return result
+    registry = get_registry()
+    parser = registry.resolve(model or "")
+    try:
+        normalized = parser.parse(msg)
+    except Exception as _e:
+        logger.debug("V2 parser failed for model=%s: %s", model, _e)
+        return result
+    try:
+        normalized_dict = normalized.to_openai_dict()
+    except Exception:
+        return result
+    if isinstance(normalized_dict, dict):
+        # Replace just the assistant message; keep envelope keys
+        result["message"] = normalized_dict
+    return result
+
+
+def _strip_xml_tool_markup(content: str) -> str:
+    """Remove ``<tool_call>...</tool_call>`` blocks (and bare
+    ``<arg_key>/<arg_value>`` runs from GLM-style emissions) from
+    chat content so the rendered text doesn't show raw XML."""
+    if not content:
+        return content
+    # Standard wrapped form
+    cleaned = re.sub(r"<tool_call>[\s\S]*?</tool_call>", "", content)
+    # GLM stray runs (no wrapper, just arg_key/arg_value pairs)
+    cleaned = re.sub(
+        r"(?:<arg_key>[\s\S]*?</arg_key>\s*<arg_value>[\s\S]*?</arg_value>\s*)+",
+        "", cleaned,
+    )
+    return cleaned.strip() or content   # never return empty when there was content
 
 
 # ---------------------------------------------------------------------------
