@@ -1664,6 +1664,25 @@ body {
       <label>Custom Instructions</label>
       <textarea id="ea-prompt" rows="3" placeholder="Additional instructions..."></textarea>
     </div>
+    <!-- Tool Permissions (allowed_tools / denied_tools) -->
+    <div id="ea-tools-section" style="margin:12px 0;padding:14px;background:var(--surface2);border-radius:10px;border:1px solid var(--border-light)">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <span class="material-symbols-outlined" style="font-size:18px;color:var(--primary)">security</span>
+        <span style="font-weight:600;font-size:13px">工具权限 Tool Permissions</span>
+        <button type="button" onclick="_eaToolsPresetAll()" class="btn btn-ghost btn-sm" style="margin-left:auto;font-size:11px">全选所有工具</button>
+        <button type="button" onclick="_eaToolsPresetMinimal()" class="btn btn-ghost btn-sm" style="font-size:11px">最小集</button>
+        <button type="button" onclick="_eaToolsPresetReadonly()" class="btn btn-ghost btn-sm" style="font-size:11px">只读</button>
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-bottom:8px;line-height:1.5">
+        勾选 = 允许调用。核心工具 (memory_recall / knowledge_lookup / plan_update / get_skill_guide) 无论是否勾选都会自动放行。
+      </div>
+      <div id="ea-tools-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:6px;max-height:240px;overflow-y:auto;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:8px">
+        <!-- filled by _eaRenderToolsGrid() -->
+      </div>
+      <div style="margin-top:8px;font-size:11px;color:var(--text3)">
+        <span id="ea-tools-summary">—</span>
+      </div>
+    </div>
     <!-- RAG Knowledge Base Configuration -->
     <div id="ea-rag-section" style="margin:12px 0;padding:14px;background:var(--surface2);border-radius:10px;border:1px solid var(--border-light)">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">

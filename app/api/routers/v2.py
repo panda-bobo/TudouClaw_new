@@ -331,6 +331,46 @@ async def clone_from_v1(
     }
 
 
+@router.post("/agents/migrate_all_from_v1", status_code=200)
+async def migrate_all_from_v1(
+    body: dict = Body(default={}),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """One-shot bulk migration: register a V2 shell for every V1 agent
+    that doesn't already have one. Idempotent — re-running is safe.
+
+    Returns counts of {migrated, skipped (already had V2), failed}.
+    """
+    from app.hub import get_active_hub
+    hub = get_active_hub()
+    if hub is None:
+        raise _err("NO_HUB", "Hub not initialized", 500)
+
+    store = get_store()
+    migrated, skipped, failed = [], [], []
+    for v1_agent in list(getattr(hub, "agents", {}).values()):
+        try:
+            if store.get_agent(v1_agent.id) is not None:
+                skipped.append(v1_agent.id)
+                continue
+            v2_agent = AgentV2.clone_from_v1(v1_agent.id, store=store)
+            migrated.append({"id": v1_agent.id, "name": v1_agent.name})
+        except Exception as e:
+            failed.append({"id": v1_agent.id, "error": f"{type(e).__name__}: {e}"})
+
+    return {
+        "ok": True,
+        "summary": {
+            "migrated": len(migrated),
+            "skipped": len(skipped),
+            "failed": len(failed),
+        },
+        "migrated": migrated,
+        "skipped": skipped,
+        "failed": failed,
+    }
+
+
 # ── tasks ─────────────────────────────────────────────────────────────
 
 

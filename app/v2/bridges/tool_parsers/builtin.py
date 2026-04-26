@@ -226,6 +226,99 @@ def _dig(obj, dotted: str):
     return cur
 
 
+# ── 4. GLMArgKVParser ─────────────────────────────────────────────────
+
+
+@dataclass
+class GLMArgKVParser(ToolCallParser):
+    """Parse GLM-style XML tool_call with ``<arg_key>/<arg_value>`` pairs.
+
+    Example content emitted by GLM-4.5-air::
+
+        <tool_call>
+        <arg_key>name</arg_key><arg_value>read_file</arg_value>
+        <arg_key>path</arg_key><arg_value>x.md</arg_value>
+        </tool_call>
+
+    Or sometimes without the wrapper::
+
+        <arg_key>name</arg_key><arg_value>edit_file</arg_value>...
+
+    First ``<arg_key>name</arg_key>`` (case-insensitive) becomes the
+    function name; remaining pairs become the arguments dict.
+    """
+
+    name: str = "glm_arg_kv"
+    strip_content: bool = True
+
+    _block_pat: re.Pattern = field(init=False, repr=False, compare=False)
+    _pair_pat:  re.Pattern = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self):
+        # A "block" of consecutive arg_key/arg_value pairs (with or
+        # without enclosing <tool_call> wrapper).
+        self._block_pat = re.compile(
+            r"(?:<tool_call>\s*)?"
+            r"((?:<arg_key>[\s\S]*?</arg_key>\s*<arg_value>[\s\S]*?</arg_value>\s*)+)"
+            r"(?:</tool_call>)?",
+            re.IGNORECASE,
+        )
+        self._pair_pat = re.compile(
+            r"<arg_key>([\s\S]*?)</arg_key>\s*<arg_value>([\s\S]*?)</arg_value>",
+            re.IGNORECASE,
+        )
+
+    def parse(self, raw_message: dict) -> NormalizedMessage:
+        base = OpenAIPassthroughParser().parse(raw_message)
+        # If provider already gave us tool_calls, only clean stray XML
+        # markup from content and return.
+        if base.tool_calls:
+            cleaned = self._strip(base.content)
+            return NormalizedMessage(
+                role=base.role, content=cleaned,
+                tool_calls=list(base.tool_calls),
+            )
+
+        content = base.content or ""
+        if "<arg_key>" not in content:
+            return base
+
+        tcs: list[dict] = []
+        for m in self._block_pat.finditer(content):
+            inner = m.group(1)
+            pairs = self._pair_pat.findall(inner)
+            if not pairs:
+                continue
+            name = ""
+            args: dict = {}
+            for k, v in pairs:
+                k_norm = k.strip()
+                v_norm = v.strip()
+                if not name and k_norm.lower() == "name":
+                    name = v_norm
+                else:
+                    args[k_norm] = v_norm
+            if not name:
+                continue
+            tcs.append(_coerce_tool_call(name=name, arguments=args))
+
+        if not tcs:
+            return base
+
+        cleaned = self._strip(content) if self.strip_content else content
+        return NormalizedMessage(
+            role=base.role, content=cleaned, tool_calls=tcs,
+        )
+
+    def _strip(self, content: str) -> str:
+        if not content:
+            return content
+        # Drop the parsed blocks from content so chat doesn't show
+        # raw XML to the user.
+        out = self._block_pat.sub("", content)
+        return out.strip()
+
+
 # ── registry of parser classes by name ────────────────────────────────
 
 
@@ -233,6 +326,7 @@ BUILTIN_CLASSES: dict[str, type] = {
     "OpenAIPassthroughParser": OpenAIPassthroughParser,
     "XMLTagJSONParser":        XMLTagJSONParser,
     "JSONOnlyParser":          JSONOnlyParser,
+    "GLMArgKVParser":          GLMArgKVParser,
 }
 
 
@@ -240,5 +334,6 @@ __all__ = [
     "OpenAIPassthroughParser",
     "XMLTagJSONParser",
     "JSONOnlyParser",
+    "GLMArgKVParser",
     "BUILTIN_CLASSES",
 ]

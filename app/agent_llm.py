@@ -732,6 +732,21 @@ class AgentLLMMixin:
                         continue
         except Exception:
             pass
+        # ── Granted-skills roster freshness (Nov 2026) ──────────────
+        # Static prompt now includes a skills roster (see
+        # _build_granted_skills_roster). Grant/revoke should bust the
+        # cache; include a sorted "id@version" digest.
+        try:
+            from .skills.engine import get_registry as _get_skill_registry
+            _reg = _get_skill_registry()
+            if _reg is not None:
+                _ilist = _reg.list_for_agent(self.id)
+                _sig = ",".join(sorted(
+                    f"{i.id}@{getattr(i.manifest, 'version', '')}"
+                    for i in _ilist))
+                parts.append(f"skills:{_sig}")
+        except Exception:
+            pass
         return hashlib.md5("|".join(parts).encode()).hexdigest()
 
     def _build_static_system_prompt(self) -> str:

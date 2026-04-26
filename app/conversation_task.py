@@ -63,11 +63,13 @@ logger = logging.getLogger("tudou.conversation_task")
 # ── Status tags (loose strings so JSON persistence is trivial) ─────────
 
 class ConversationTaskStatus:
-    RUNNING   = "running"    # agent is actively working
-    PAUSED    = "paused"     # server restarted / user closed tab; resumable
-    DONE      = "done"       # agent reported completion
-    FAILED    = "failed"     # unrecoverable error
-    CANCELLED = "cancelled"  # user aborted
+    RUNNING        = "running"        # agent is actively working
+    PAUSED         = "paused"         # server restarted / user closed tab; resumable
+    AWAITING_USER  = "awaiting_user"  # agent finished its last step;
+                                      # task closes only after user confirms
+    DONE           = "done"           # user confirmed completion
+    FAILED         = "failed"         # unrecoverable error
+    CANCELLED      = "cancelled"      # user aborted / discarded
 
 
 # ── Dataclasses ────────────────────────────────────────────────────────
@@ -228,14 +230,21 @@ class ConversationTaskStore:
         return out
 
     def list_resumable(self, agent_id: str = "") -> list[ConversationTask]:
-        """Tasks in RUNNING or PAUSED — candidates for M4 resume.
+        """Tasks the user might want to act on:
+            - RUNNING       (still in progress, but user may want to abort/check)
+            - PAUSED        (server restart, resumable)
+            - AWAITING_USER (agent done its part, awaits user confirm)
+            - FAILED        (errored out, user may retry or discard)
 
-        ``agent_id`` empty → global scan (startup recovery). Otherwise
-        restrict to that agent.
+        ``agent_id`` empty → global scan (startup recovery / login banner).
+        Otherwise restrict to that agent.
         """
-        q = "SELECT data FROM conversation_tasks WHERE status IN (?, ?)"
+        q = ("SELECT data FROM conversation_tasks "
+             "WHERE status IN (?, ?, ?, ?)")
         args: list = [ConversationTaskStatus.RUNNING,
-                      ConversationTaskStatus.PAUSED]
+                      ConversationTaskStatus.PAUSED,
+                      ConversationTaskStatus.AWAITING_USER,
+                      ConversationTaskStatus.FAILED]
         if agent_id:
             q += " AND agent_id = ?"
             args.append(agent_id)

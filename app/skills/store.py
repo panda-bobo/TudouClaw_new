@@ -480,6 +480,16 @@ class SkillStore:
                         )
                     if entry is None:
                         continue
+                    # Honor soft-disable marker file. Entry stays in catalog
+                    # but `metadata.disabled = True` so the UI can filter
+                    # it out of the default list.
+                    try:
+                        if os.path.isfile(os.path.join(dirpath, ".disabled")):
+                            md = entry.metadata or {}
+                            md["disabled"] = True
+                            entry.metadata = md
+                    except OSError:
+                        pass
                     # dedupe: author/name, later catalog dirs override earlier
                     found[entry.id] = entry
             # ── Deduplicate by skill name ──
@@ -644,6 +654,71 @@ class SkillStore:
             entry.installed = False
             entry.installed_id = ""
         return ok
+
+    def disable_entry(self, entry_id: str, disabled: bool = True) -> bool:
+        """Soft-disable a catalog entry. The skill stays on disk and can
+        be re-enabled later, but the UI hides it from the default list and
+        agents can no longer be granted it.
+
+        Persisted in the catalog entry annotation file so the flag survives
+        restarts. To restore, call with disabled=False.
+        """
+        entry = self.get_entry(entry_id)
+        if entry is None:
+            return False
+        # entry.metadata is the place to stash UI-level flags; rescan
+        # preserves it via _meta.json (or annotation store, depending on
+        # source). Simplest reliable approach: write a sibling marker
+        # file `.disabled` next to manifest.yaml / SKILL.md.
+        try:
+            from pathlib import Path
+            base = Path(entry.catalog_path)
+            marker = base / ".disabled"
+            if disabled:
+                marker.touch()
+            elif marker.exists():
+                marker.unlink()
+            # Reflect in in-memory entry too so list endpoints see it.
+            entry.metadata = entry.metadata or {}
+            entry.metadata["disabled"] = bool(disabled)
+            return True
+        except Exception:
+            return False
+
+    def delete_catalog_entry(self, entry_id: str) -> bool:
+        """Hard-delete: remove the catalog directory from disk entirely.
+        If installed, uninstall first. Cannot be undone — caller MUST
+        confirm with the user. Returns True on success.
+        """
+        entry = self.get_entry(entry_id)
+        if entry is None:
+            return False
+        # Uninstall first if currently installed
+        if entry.installed and self._registry is not None:
+            try:
+                self._registry.uninstall(entry.installed_id)
+            except Exception:
+                pass
+        # Remove the catalog directory
+        try:
+            from pathlib import Path
+            import shutil
+            p = Path(entry.catalog_path)
+            if p.exists() and p.is_dir():
+                # Sanity check: refuse to delete obviously dangerous paths
+                # (only allow under known catalog roots)
+                ok_root = any(
+                    str(p).startswith(str(r))
+                    for r in self.catalog_dirs
+                )
+                if not ok_root:
+                    return False
+                shutil.rmtree(p)
+            # Drop from in-memory list
+            self._entries = [e for e in self._entries if e.id != entry_id]
+            return True
+        except Exception:
+            return False
 
     # ── Grant/revoke (with independent-agent pointer file) ──
 

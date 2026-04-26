@@ -63,6 +63,43 @@ def _stream_chat_to_response(llm_mod, messages: list[dict],
         tool_order: list[str] = []  # preserve arrival order
         stop_reason = "end_turn"
 
+        # ── Token breakdown (DEBUG) — 回答"为什么 in 还是 23k 那么多" ──
+        # 把本次请求的几大组件各自字符数打一行, 方便用户定位 bloat 来源。
+        # 4 chars ≈ 1 token (英文),中文约 1.5-2 chars/token,这里只记字符数。
+        try:
+            import json as _json, logging as _lg
+            _bk = _lg.getLogger("tudou.tokens")
+            if _bk.isEnabledFor(_lg.DEBUG):
+                _sys_chars = 0
+                _tool_res_chars = 0
+                _user_asst_chars = 0
+                _tool_calls_chars = 0
+                for _m in messages:
+                    _r = _m.get("role")
+                    _c = _m.get("content") or ""
+                    if isinstance(_c, list):
+                        _c = _json.dumps(_c, ensure_ascii=False)
+                    _sz = len(str(_c))
+                    if _r == "system":
+                        _sys_chars += _sz
+                    elif _r == "tool":
+                        _tool_res_chars += _sz
+                    else:
+                        _user_asst_chars += _sz
+                    # tool_calls 也计一下
+                    _tcs = _m.get("tool_calls") or []
+                    if _tcs:
+                        _tool_calls_chars += len(
+                            _json.dumps(_tcs, ensure_ascii=False))
+                _tools_chars = len(_json.dumps(tools or [], ensure_ascii=False))
+                _bk.debug(
+                    "BREAKDOWN messages=%d system=%d user/asst=%d tool_results=%d "
+                    "tool_calls=%d tools_schema=%d (chars, ~4 chars/token)",
+                    len(messages), _sys_chars, _user_asst_chars,
+                    _tool_res_chars, _tool_calls_chars, _tools_chars)
+        except Exception:
+            pass
+
         for ev in llm_mod.chat_stream_events(
                 messages, tools=tools,
                 provider=provider, model=model,
@@ -195,16 +232,36 @@ def _text_similarity(a: str, b: str) -> float:
 # it happens 2+ times in a row, we're stuck in a commitment loop.
 # Match on norm'd form (no spaces, no punct) so wording variations still hit.
 _META_PROMISE_PATTERNS = (
-    # 中文
+    # 中文 — 经典承诺前缀
     "交给我吧", "让我先看", "让我先回顾", "让我先找", "让我先查",
     "我先看看", "我先回顾", "我先找找", "我来看看", "先找到",
     "我先搞清楚", "我来重新", "好嘞交给我", "好的交给我",
     "然后再写", "然后重新写", "然后我来", "之后再来",
-    # English
+    # 中文 — 新增,覆盖实际 bug report 里的 5 种变体
+    "好的马上", "好的我来", "好的我先", "让我先",
+    "我来读取", "我来完成", "我来发送", "我来检查", "我来写",
+    "马上发送", "马上读取", "马上开始", "马上调用",
+    "先确认", "先读取", "先检查", "先获取", "先调用", "先整理",
+    "接下来我", "接下来发送", "接下来读取",
+    # English — promise prefixes
     "letmefirst", "letmetake", "illtakecare", "illstartby",
     "firstletme", "letmelookat", "letmecheckwhat",
+    "illstart", "illgo", "illread", "illsend", "illcheck",
+    "letmeread", "letmesend", "letmecheck",
     # Typical self-narration vocab
     "先了解", "先梳理", "先查看", "回顾一下",
+)
+
+# 强信号集合: 命中任意一条就视为 meta-promise, 不再要求 future token 配合。
+# 这些短语单独出现就足够说明"只说不做"的倾向 —— 比如"好的我来 <做点事>"
+# 后面不管怎么写,都是在承诺而不是执行 (真执行会直接调工具,没这段引导语)。
+_META_PROMISE_STRONG = (
+    "好的我来", "好的我先", "好的马上",
+    "让我先", "我先看看", "我先查看", "我先梳理", "我先了解",
+    "我来为你", "我来帮你", "我来给你",
+    "好嘞交给我", "好的交给我", "交给我吧",
+    "letmestart", "letmefirst", "illtake", "illstart", "illgo",
+    "letmelookat", "letmecheckwhat",
 )
 
 
@@ -222,28 +279,45 @@ def _is_meta_promise(content: str) -> bool:
         return False
     # Rule out: message with concrete output (path / URL / code / error)
     # is probably genuine.
+    # Note (Nov 2026): 原来简单 substring 命中 ".pptx" / ".md" 会把提到文件
+    # 扩展名的承诺消息放过 (例如 "然后将 PPTX 作为附件发出" 本身没 . 但如果
+    # 有 "report.pptx" 就会被误判成"已经有产出")。改用 regex 要求前后紧挨
+    # 字母数字字符,确保是真文件名 (`\w+\.pptx\b`),而非碎碎念里抽象提到。
     cl = content.lower()
-    has_concrete_signal = any(s in cl for s in (
-        "```", "/workspace/", "http://", "https://", ".py", ".pptx",
-        ".md", ".json", "error", "traceback", "exception"
-    ))
-    if has_concrete_signal:
+    if ("```" in cl or "/workspace/" in cl
+            or "http://" in cl or "https://" in cl
+            or "error" in cl or "traceback" in cl or "exception" in cl):
         return False
+    # File-extension signal: require `<word>.<ext>` not bare `.ext`
+    if _re.search(
+        r"\w+\.(?:py|pptx?|md|json|ya?ml|csv|xlsx?|html?|txt|log)\b",
+        cl
+    ):
+        return False
+    # Strong-signal: any one of these = meta-promise outright.
+    for strong in _META_PROMISE_STRONG:
+        if strong in norm:
+            return True
     # Count promise-pattern hits
     hits = sum(1 for pat in _META_PROMISE_PATTERNS if pat in norm)
     if hits == 0:
         return False
-    # 1 hit → require the message to be short AND mention a "future"
-    # / "then" verb (说明是承诺而非执行). 2+ hits → strong signal.
+    # 2+ hits → strong signal.
     if hits >= 2:
         return True
-    # Single hit — extra guard: short (<150 char norm) + "然后" / "再"
-    # / "接下来" present → promise
-    if len(norm) < 150 and any(tok in norm for tok in (
-        "然后", "接下来", "再写", "再看", "再来", "之后", "最后",
-        "first", "then", "next", "afterthat"
-    )):
-        return True
+    # Single weak hit — require short msg + future-verb token.
+    # 扩充 future tokens 列表: 原先只有"再写/再看/再来"漏掉了"再落/再做/再议"
+    # 等自由搭配;改用"再" 作为子串,但排除"再次"类非 promise 用法。
+    if len(norm) < 150:
+        future_hit = any(tok in norm for tok in (
+            "然后", "接下来", "之后", "最后",
+            "first", "then", "next", "afterthat"
+        ))
+        # "再X" 类承诺 (再写/再做/再说/再落/再开始) — 只要有"再"且附近不是"再次"
+        if not future_hit and "再" in norm and "再次" not in norm:
+            future_hit = True
+        if future_hit:
+            return True
     return False
 
 
@@ -589,10 +663,16 @@ class AgentExecutionMixin:
                 "system" for system messages
         """
         # ── Token logging context: 让本次 chat 内所有 LLM 调用 ──
-        # ── 都能归属到这个 agent，token 统计才能落到 agent.stats ──
+        # ── 都能归属到 agent + 所属 project + 来源 meeting —— ──
+        # ── token 统计才能分别落到 agent.stats / project.stats / ──
+        # ── meeting.stats 。 ──
         from . import llm
         try:
-            llm.set_token_context(agent_id=self.id, project_id="")
+            llm.set_token_context(
+                agent_id=self.id,
+                project_id=getattr(self, "project_id", "") or "",
+                meeting_id=getattr(self, "source_meeting_id", "") or "",
+            )
         except Exception:
             pass
 
@@ -702,6 +782,16 @@ class AgentExecutionMixin:
                     self._auto_continue_count = 0
             except Exception:
                 pass
+            # Reset per-turn read_file dedup cache so a follow-up turn
+            # can re-read a file (its content may have changed since
+            # last turn). Within the same turn, dedup still kicks in
+            # to break the read_file loop pattern observed in audit
+            # logs (30+ identical reads on one outline file).
+            if source != "auto_continue":
+                try:
+                    self._read_file_turn_cache = {}
+                except Exception:
+                    pass
             msg = {"role": "user", "content": _msg_content, "source": source}
             self.messages.append(msg)
             self._log("message", {"role": "user", "content": _user_text[:500], "source": source})
@@ -2145,6 +2235,11 @@ class AgentExecutionMixin:
                     elif evt.kind == "error":
                         task.push_event({"type": "error",
                                          "content": evt.data.get("error", "")})
+                    elif evt.kind == "retract_last_assistant":
+                        task.push_event({
+                            "type": "retract_last_assistant",
+                            "reason": evt.data.get("reason", ""),
+                        })
                     elif evt.kind == "handoff_sent":
                         # 3-state handoff handshake: ⏳ pending
                         task.push_event({

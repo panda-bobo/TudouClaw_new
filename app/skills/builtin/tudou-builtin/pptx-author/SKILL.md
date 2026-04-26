@@ -16,30 +16,243 @@ metadata:
   tier: official
 ---
 
-# pptx-author — 用 python-pptx 脚本生成 PPT（替代 create_pptx_advanced）
+# pptx-author — 用模板系统生成 PPT (推荐) 或手写脚本 (兜底)
 
-## ⚠️ 防幻觉 — 先读这一段
+## 🛑 禁止行为 (会被一票拒绝)
 
-**这个 skill 没有任何 CLI 脚本**。不存在 `md2pptx.sh` / `md2pptx.py` /
-`convert.sh` / `md_to_pptx` / `pptx_gen.py` / 任何类似的 one-shot 转换命令。
-也**不要** `ls` / `find` 去找这些 —— 找了也只会浪费轮次然后回到这里。
+写脚本时如果你的代码以这种开头:
 
-目录只有两个文件：
+```python
+from pptx import Presentation       # ❌ 你绕过了模板系统
+prs = Presentation()                 # ❌
+prs.slide_layouts[6]                 # ❌  自己 add_shape 拼版
+```
+
+**立即停止重写**。这是"路径 B 手写脚本",**只有路径 A 不覆盖你需要的版式时才走**。
+绝大多数 PPT (封面 + 章节 + 三栏 + 时间线 + 对比 + 数据 + Q&A 收尾) 都被
+路径 A 的 15 个版式 × 10 套主题完全覆盖。
+
+## ✅ 正确的开头 (路径 A)
+
+```python
+from pptx import Presentation
+from _template_loader import render_from_md, list_themes, list_layouts
+
+prs = Presentation()
+prs.slide_width  = 12192000   # 16:9 (13.33")
+prs.slide_height =  6858000
+
+# 选主题 (一次决定所有 slide 的视觉)
+THEME = "corporate"   # 或 navy_gold / minimal / tech_dark / ...
+
+# 渲染每页 — 全部用模板
+render_from_md(prs, f"{THEME}/T01_cover", params={"title": "...", "subtitle": "..."})
+render_from_md(prs, f"{THEME}/T04_section_divider", params={"no": "01", "heading": "..."})
+render_from_md(prs, f"{THEME}/T02_three_column", params={"title": "...", "columns": [...]})
+# ... 更多 slide,全用 render_from_md
+
+prs.save("report.pptx")
+```
+
+只有当 15 个版式都不合适 (比如要嵌入 Excel 透视图这种特殊场景),**才**回落到
+"路径 B 手写脚本",并在脚本注释里写明"路径 A 不覆盖,故 fallback"。
+
+## ⚠️ 防幻觉 — 别去找不存在的工具
+
+**这个 skill 没有任何 CLI 脚本**。不存在 `md2pptx.sh` / `convert.sh` 这些。
+**不要** `ls` / `find` 去找 — 找了也只是浪费轮次。
+
+目录只有两个文件:
 
 ```
 pptx-author/
-├── SKILL.md           ← 你现在读的这份
-└── _pptx_helpers.py   ← python-pptx 的封装库（函数导入用）
+├── SKILL.md             ← 你现在读的这份
+├── _template_loader.py  ← 路径 A 的模板渲染引擎 (导入 render_from_md)
+└── _pptx_helpers.py     ← 路径 B 的 python-pptx 封装 (路径 A 不够时才用)
 ```
 
-**工作流（没有捷径）**：
-1. 你自己写一段 python 脚本（`build_report.py` 或类似）
-2. 首行用 `from _pptx_helpers import *`（bash 工具已注入 PYTHONPATH）
-3. `bash` 工具跑 `python build_report.py`
-4. `bash` 工具跑 `python -c "from _pptx_helpers import verify_slides; verify_slides('out.pptx')"`
+**工作流(主路径 A,没有捷径)**:
+1. 写一段 python 脚本 (例如 `build_report.py`)
+2. 首行 `from _template_loader import render_from_md`
+3. 用 render_from_md 调每个版式
+4. `prs.save("report.pptx")` + 跑脚本验证
 
-用户说"把这份 md 转成 PPT"，正确动作是**立刻开始写 python 脚本**（可以用
-`parse_md_outline` 解析 md 结构），**不是**去找转换工具。
+---
+
+## 🎨 两条生成路径：模板系统 vs 手写脚本
+
+从 v2 开始这个 skill 支持两种工作流,**优先用 A**：
+
+### A. 模板系统（推荐）—— MD 模板 + 主题 + 参数
+
+用预置的 **5 套视觉主题** × **5 种版式** 快速拼页,只填参数,不用自己布局。
+每一页都经过 verify_slides 校验过布局规范,不会越界/空白/title-only。
+
+```python
+# 你在 bash 跑的脚本 —— 这是完整的最小示例
+from _pptx_helpers import new_deck, verify_slides
+from _template_loader import render_from_md, list_themes, list_layouts, describe_layout
+
+prs = new_deck()
+
+# 1. 封面
+render_from_md(prs, "corporate/T01_cover", params={
+    "title": "2026 年度经营分析",
+    "subtitle": "从增长质量到价值创造：三大关键发现",
+    "tag": "2026 Q2 | 经营分析报告",
+})
+
+# 2. 章节分隔
+render_from_md(prs, "corporate/T04_section_divider", params={
+    "no": "02",
+    "heading": "增长质量诊断",
+    "subtitle": "结构、效率与可持续性三维评估",
+})
+
+# 3. 2×2 要求网格
+render_from_md(prs, "corporate/T06_requirement_grid", params={
+    "title": "四大核心能力",
+    "cells": [
+        {"icon": "shield", "heading": "安全合规", "body": "全流程合规接入,端到端加密保护。"},
+        {"icon": "chart",  "heading": "实时监控", "body": "全域指标秒级聚合,异常自动告警。"},
+        {"icon": "zap",    "heading": "自动响应", "body": "预设策略自动执行,人机协同闭环。"},
+        {"icon": "users",  "heading": "统一治理", "body": "单一管理入口,多团队权限清晰隔离。"},
+    ],
+})
+
+# 4. 垂直时间线
+render_from_md(prs, "corporate/T09_vertical_timeline", params={
+    "title": "三步实施路径",
+    "steps": [
+        {"heading": "规划期", "body": "明确目标、团队与预算 (4-6 周)"},
+        {"heading": "试点期", "body": "3-5 个业务场景验证 (2 个月)"},
+        {"heading": "推广期", "body": "全量迁移并建立治理体系 (6-9 个月)"},
+    ],
+})
+
+# 5. 收尾
+render_from_md(prs, "corporate/T19_qa_closing", params={
+    "title": "Q & A",
+    "cta": "主动构建 — 赢得确定性",
+    "contact": "2026 Q2 | contact@example.com",
+})
+
+prs.save("out.pptx")
+verify_slides("out.pptx")
+```
+
+### 10 套视觉主题（只需换前缀 `{theme_id}/T**` 即可切换）
+
+**商业/专业类**
+| theme_id | 风格 | 主色 | 最合适场景 |
+|---|---|---|---|
+| `corporate` | 深蓝 + 橙,稳重专业 | `#1E3A5F` + `#E86C3A` | 咨询 / 战略 / 管理汇报 |
+| `navy_gold` | 海军蓝 + 金,低调奢华 | `#0A2540` + `#C9A960` | 投资 / 路演 / 并购 / 财富管理 |
+| `minimal` | 黑白极简 | `#000000` + 灰阶 | 产品 / 设计 / Keynote 风 |
+| `editorial` | 米底 + 深棕,杂志风 | `#1F2937` + `#92400E` | 长研究 / 学术 / 出版物 |
+
+**科技/创意类**
+| theme_id | 风格 | 主色 | 最合适场景 |
+|---|---|---|---|
+| `tech_dark` | 近黑底 + 霓虹青 | `#0A0A0A` + `#06B6D4` | AI/ML 发布 / 开发者大会 / Keynote |
+| `fresh_mint` | 薄荷 + 珊瑚,轻快 | `#10B981` + `#F97066` | 初创 / DevRel / SaaS |
+| `vibrant_purple` | 亮紫 + 珊瑚粉,鲜艳 | `#7C3AED` + `#EC4899` | 创意公司 / 设计工作室 / 艺术 |
+
+**特定场景**
+| theme_id | 风格 | 主色 | 最合适场景 |
+|---|---|---|---|
+| `academic` | 浅灰 + 深蓝 + serif | `#1E3A8A` + `#991B1B` | 论文答辩 / 学术汇报 / 教学 |
+| `news_red` | 经典红 + 深炭灰,强烈张力 | `#B91C1C` + `#F59E0B` | 新闻简报 / 品牌快报 / 媒体 / 体育 |
+| `eco_green` | 深林绿 + 大地棕,厚重自然 | `#166534` + `#78350F` | 环保 / ESG / 可再生能源 / 农林 |
+
+不确定用哪个? 调 `list_themes()` 看完整描述。快速选择参考:
+- 严谨正式 → `corporate` / `navy_gold` / `academic` / `editorial`
+- 轻快现代 → `fresh_mint` / `vibrant_purple` / `minimal`
+- 视觉冲击 → `tech_dark` / `news_red`
+- 专属场景 → `eco_green` (ESG) / `academic` (学术)
+
+### 8 种版式（按场景选）
+
+| 版式 id | 用途 | 参数要点 |
+|---|---|---|
+| `T01_cover` | 封面 / 首页 | `title`, (`subtitle`), (`tag`) |
+| `T02_three_column` | **恰好 3 个**并列要点 (三大支柱) | `title`, `columns[3].{icon,heading,body}` |
+| `T04_section_divider` | 章节分隔页 (大数字 + 标题) | `no`, `heading`, (`subtitle`) |
+| `T06_requirement_grid` | **恰好 4 个**并列要点 2×2 网格 | `title`, `cells[4].{icon,heading,body}` |
+| `T09_vertical_timeline` | 3-5 步流程 / 阶段 / 路线图 | `title`, `steps[3-5].{(no),heading,body}` |
+| `T10_comparison` | A vs B / Before vs After 对比 | `title`, `left.{label,items}`, `right.{label,items}`, (`vs_text`) |
+| `T15_chart_page` | 大图表 + 底部 takeaway | `title`, (`subtitle`), (`takeaway`)；然后 agent 往占位区 `(0.5, 1.3, 12.3, 4.8)` 插 chart |
+| `T19_qa_closing` | 报告收尾 / Q&A 页 | `title`, (`cta`), (`contact`) |
+
+需要详细参数约束(字段长度上限等)? 调 `describe_layout("T06_requirement_grid")`
+返回完整 JSON schema。
+
+### 选版式决策树（速查）
+
+- **封面** → T01；**章节分隔** → T04；**收尾** → T19
+- **3 个并列要点** → T02
+- **4 个并列要点,2×2 网格** → T06
+- **A vs B / Before vs After 对比** → T10
+- **3-5 步有顺序的流程** → T09
+- **需要强调 1 张图表 + 结论** → T15 (然后自己 add_bar_chart 填入占位区)
+- **5+ 个要点 / 表格对比** → 回落到"路径 B. 手写脚本" (用 `add_card` / `add_styled_table`)
+
+### 不知道用哪套主题? 直接问
+
+```python
+from _template_loader import recommend_theme
+
+# 输入用户对任务的描述,返回打分排名的前 3 个主题
+recommend_theme("帮我做 AI 大模型发布会 PPT")
+# → [{"id":"tech_dark","score":4,"matched":["AI","模型","大模型","ai"], ...},
+#    {"id":"minimal","score":1, "matched":["发布会"], ...}]
+```
+
+匹配机制: 每个主题在 `theme.yaml` 里声明了 `tags` 和 `trigger_keywords`,
+函数对查询做**substring 命中计数**,命中最多的排第一。如果返回第一个
+`score >= 2`,直接用。`score == 0` 说明查询很泛,不强推某套,你可以按场景判断或问用户。
+
+### 混用: 模板 + 手写脚本同一份 .pptx
+
+模板调用就是往 prs 加 slide,和你 `prs.slides.add_slide(blank)` 自己加的没区别。
+**可以任意混用**:用模板搭整体骨架,遇到模板不覆盖的场景 (比如要放一张大柱状图)
+就在同一个脚本里用 helper 手写一页,最后统一 save + verify。
+
+### B. 手写脚本 — 仅审批后可用
+
+> ⚠️ **路径 B 不再是默认 fallback。** 在写任何 `from pptx import` /
+> `from _pptx_helpers import` 的自定义脚本前,必须先用
+> `propose_skill` 工具向用户说明:为什么 15 layouts × 10 themes 不够,
+> 你打算手写哪几页,期望产出什么。**等用户在 portal 批准后**才能动手。
+> 不批准就只能用路径 A,信息不够就拆成多页或问用户。
+
+**强制流程 (违反 = 步骤直接 fail_step)**:
+
+1. 先认真过一遍 layout × 主题组合 — 大多数场景路径 A 已覆盖:
+   - 封面 / 章节 / 收尾 → T01/T04/T19
+   - 三栏 / 四宫格 / 6 卡片 → T02/T06/T23
+   - 时间线 / 流程 → T09/T26
+   - 对比 → T10
+   - KPI 大数字 / 引言 / 表格 → T24/T25/T20
+   - 图文混排 → T21/T22
+2. 路径 A 不够时,**先调** `propose_skill(name="custom-pptx-X", description="为什么需要 + 计划做什么", reason="...")`
+3. 等用户在 portal 审批返回 OK
+4. 才能写自定义 python-pptx 脚本(用 `_pptx_helpers` 里的 helper)
+
+**审批被拒时**: 拆需求,看能不能用现有 layout 多页组合达成。比如
+"5 个并列卡 (T06 只支持 4)" → 拆成 T06(前 4) + T01(总结第 5) 的 2 页方案。
+
+### 什么时候才"必须"路径 B (审批通常会 OK)
+
+- 用户明确给的独特设计稿,任何主题/layout 都对不上
+- 真的需要 native chart (柱状图/折线图,模板系统当前不支持)
+- 复杂自定义对比页 (≥3 列并排)
+
+### 什么时候**不**该走路径 B
+
+- ❌ "我想多放 1 个 KPI" → 拆成 2 页 T24
+- ❌ "颜色我想换一下" → 试 10 个主题全部
+- ❌ "标题我想往左移一点" → 模板的位置就是规范的,不要偏
 
 ---
 

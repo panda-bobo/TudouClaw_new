@@ -22,3 +22,42 @@ import os as _os
 
 USER_HOME = _os.path.expanduser("~")
 DEFAULT_DATA_DIR = _os.path.join(USER_HOME, ".tudou_claw")
+
+# ── Suppress tqdm progress bars globally (Nov 2026) ────────────────────
+# chromadb → sentence-transformers → .encode(show_progress_bar=True) by
+# default, which floods logs with
+#   Batches: 100%|████| 1/1 [00:00<00:00, 89.93it/s]
+# one line per embedding batch. Users reported it drowns real signal.
+# We monkey-patch tqdm.__init__ to force disable=True globally so every
+# tqdm instance created after this point (including the ones inside
+# sentence-transformers) is silent.
+# Escape hatch: TUDOU_TQDM=1 keeps tqdm alive (debugging).
+if _os.environ.get("TUDOU_TQDM", "0") != "1":
+    try:
+        from functools import partialmethod as _pm
+        # tqdm has MULTIPLE concrete classes and `tqdm.auto.tqdm` is usually
+        # a DIFFERENT object from `tqdm.tqdm` (it picks notebook/asyncio/std
+        # at import time). sentence-transformers does
+        # `from tqdm.autonotebook import trange` → hits auto, bypasses std.
+        # So we patch every known tqdm class.
+        import tqdm as _tqdm
+        import tqdm.std as _tqdm_std   # noqa
+        import tqdm.auto as _tqdm_auto  # noqa
+        import tqdm.autonotebook as _tqdm_ann  # noqa
+        import tqdm.asyncio as _tqdm_ai  # noqa
+        _candidates = []
+        for _mod, _attr in [
+            (_tqdm, "tqdm"), (_tqdm_std, "tqdm"),
+            (_tqdm_auto, "tqdm"), (_tqdm_ann, "tqdm"),
+            (_tqdm_ai, "tqdm_asyncio"),
+        ]:
+            _c = getattr(_mod, _attr, None)
+            if _c is not None and _c not in _candidates:
+                _candidates.append(_c)
+        for _cls in _candidates:
+            try:
+                _cls.__init__ = _pm(_cls.__init__, disable=True)
+            except Exception:
+                pass
+    except Exception:
+        pass

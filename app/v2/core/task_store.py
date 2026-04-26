@@ -407,6 +407,7 @@ class TaskStore:
             tools=list(caps_d.get("tools", [])),
             llm_tier=caps_d.get("llm_tier", "default"),
             denied_tools=list(caps_d.get("denied_tools", [])),
+            llm_slots=dict(caps_d.get("llm_slots") or {}),
         )
         agent = AgentV2(
             id=r["id"],

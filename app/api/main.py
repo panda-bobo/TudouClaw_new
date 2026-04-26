@@ -33,26 +33,15 @@ logger = logging.getLogger("tudouclaw.api")
 
 
 # ---------------------------------------------------------------------------
-# uvicorn access-log filter — drop routine polling noise
+# uvicorn access-log filter — drop ALL 2xx responses
 # ---------------------------------------------------------------------------
-# Frontend polls /api/portal/state + /api/portal/projects every ~15s. With
-# default uvicorn config each 200 shows up as an INFO line, drowning out real
-# signal (errors, state-changing POSTs, slow calls). Filter: drop 2xx logs
-# for a whitelist of polling endpoints; keep 4xx/5xx for any URL; keep any
-# non-poll URL at all status codes.
+# User requested: "200状态就不用报了，只报异常的就行". Successful requests
+# don't need a log line; only 3xx/4xx/5xx are worth seeing.
+#
+# Escape hatches:
+#   - TUDOU_LOG_ACCESS=1          keep all access lines (debug mode)
+#   - TUDOU_LOG_ACCESS_KEEP=a,b   comma-sep path substrings to keep even on 2xx
 
-_POLL_NOISE_PATHS = (
-    "/api/portal/state",
-    "/api/portal/projects",
-    "/api/portal/tasks",
-    "/api/portal/agents",
-    "/api/portal/health",
-    "/api/portal/stats",
-    "/api/portal/admin/me",
-    "/api/portal/inbox/unread",
-    "/api/portal/meetings/active",
-    "/health",
-)
 # Compiled regex matches the uvicorn access format:
 #   'host:port - "METHOD /path HTTP/1.1" STATUS'
 _ACCESS_RE = re.compile(
@@ -61,13 +50,27 @@ _ACCESS_RE = re.compile(
 
 
 class _AccessNoiseFilter(logging.Filter):
-    """Drop uvicorn.access INFO lines for routine polling endpoints at 2xx.
-    Override via env TUDOU_LOG_ACCESS=1 to keep everything (debugging)."""
+    """Drop uvicorn.access lines for ALL 2xx responses.
+
+    User requirement: "200状态就不用报了，只报异常的就行" —
+    successful requests don't need log lines; only anomalies (3xx redirects,
+    4xx client errors, 5xx server errors) are worth seeing.
+
+    Env controls:
+      TUDOU_LOG_ACCESS=1          keep all access lines (debug mode)
+      TUDOU_LOG_ACCESS_KEEP=a,b,c comma-sep substrings; any access line whose
+                                  path contains one of these is ALWAYS kept
+                                  even on 2xx (for investigating a specific
+                                  endpoint)
+    """
 
     def __init__(self):
         super().__init__()
         import os as _os
         self._verbose = _os.environ.get("TUDOU_LOG_ACCESS", "0") == "1"
+        keep = _os.environ.get("TUDOU_LOG_ACCESS_KEEP", "") or ""
+        self._keep_substrings = tuple(
+            s.strip() for s in keep.split(",") if s.strip())
 
     def filter(self, record: logging.LogRecord) -> bool:
         if self._verbose:
@@ -79,22 +82,16 @@ class _AccessNoiseFilter(logging.Filter):
         m = _ACCESS_RE.search(msg)
         if not m:
             return True
-        method = m.group("method")
         path = m.group("path")
         status = int(m.group("status"))
-        # Always keep errors (4xx / 5xx) so real problems stay visible.
-        if status >= 400:
+        # Keep ANY non-2xx — errors, redirects, rate-limit, etc. 都是信号。
+        if status < 200 or status >= 300:
             return True
-        # Only filter GET/HEAD — POST/PUT/PATCH/DELETE on these paths are
-        # state-changing operations and must remain visible.
-        if method not in ("GET", "HEAD"):
-            return True
-        # Strip query string for whitelist match
-        path = path.split("?", 1)[0]
-        for noise in _POLL_NOISE_PATHS:
-            if path == noise or path.startswith(noise + "/"):
-                return False  # drop
-        return True
+        # 2xx — drop by default. Escape hatch: user-configured substrings.
+        for sub in self._keep_substrings:
+            if sub and sub in path:
+                return True
+        return False  # drop all other 2xx
 
 
 # Install filter as early as possible — uvicorn.access logger is created

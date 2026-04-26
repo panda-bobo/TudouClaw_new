@@ -46,6 +46,12 @@ _GARBAGE_PATTERNS = [
     re.compile(r"步骤完成无异常"),
     # Pure open bracket / single char / empty-ish content
     re.compile(r"^[\[\](){},，。.;；\s]*$"),
+    # Nov 2026: more LLM template noise
+    re.compile(r"无法确定.{0,20}缺少日期"),
+    re.compile(r"\[日期\]\s*无法"),
+    re.compile(r"\[未知日期\]"),
+    re.compile(r"缺少日期.*关键信息"),
+    re.compile(r"状态已?更新.{0,5}无失败"),
 ]
 _MIN_USEFUL_LEN = 15  # excluding preference category
 

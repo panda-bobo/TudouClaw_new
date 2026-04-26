@@ -1279,34 +1279,36 @@ class SelfImprovementEngine:
 
     def build_experience_context(self, task_hint: str = "",
                                   limit: int = 15) -> str:
-        """Build experience context string for agent system prompt injection."""
+        """Build experience index for agent system prompt injection.
+
+        Inject ONLY titles (scene + priority + usage stats), not full
+        bodies. Agent calls ``knowledge_lookup(kind="experience", ...)``
+        to fetch full content when it actually needs to apply one.
+        Returns "" when the library is empty for this role — saves the
+        ~200-char header that would otherwise be pure waste.
+        """
         if not self.enabled:
             return ""
 
-        lines = [
-            "# 经验库 (Experience Library)",
-            f"角色: {self.role} | 已导入经验: {len(self.imported_experience_ids)} 条",
-            "",
-            "## 使用规则",
-            "1. 每次决策前，优先调用高优先级、高成功率的经验",
-            "2. 严格遵循行动规则，规避禁忌规则",
-            "3. 任务完成后自动复盘，生成新经验",
-            "4. 标注「本次调用经验：XXX」",
-            "",
-        ]
-
-        # Get relevant experiences
+        # Get candidate experiences (title-level only)
         if task_hint:
             exps = self.library.search(self.role, scene=task_hint, limit=limit)
         else:
             exps = self.library.import_to_agent(self.role, limit=limit)
 
-        if exps:
-            lines.append("## 可用经验")
-            for e in exps:
-                lines.append(e.to_prompt_text())
-                lines.append("")
+        if not exps:
+            return ""
 
+        lines = [
+            f"# 经验库索引 — role={self.role} ({len(exps)} 条;"
+            " 调 knowledge_lookup 取详情)",
+        ]
+        for e in exps:
+            scene = (e.scene or "")[:50] or "(无标题)"
+            stats = f"✓{e.success_count}/✗{e.fail_count}"
+            lines.append(
+                f"- [{e.id}] {scene} (priority={e.priority}, {stats})"
+            )
         return "\n".join(lines)
 
     # ---- Quality evaluation (evolution goals) ----

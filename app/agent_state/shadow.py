@@ -442,6 +442,11 @@ class ShadowRecorder:
         return {
             "id": aid,
             "url": url,
+            # `path` exposed for portal UI features that need to pass the
+            # raw filesystem path back to the backend (e.g. the /pptx-preview
+            # endpoint that converts .pptx → slide thumbnails). Only set for
+            # local files; remote URLs have no path.
+            "path": "" if is_http else v,
             "filename": md.get("filename") or art.label or aid,
             "label": art.label or md.get("filename") or aid,
             "kind": art.kind.value,

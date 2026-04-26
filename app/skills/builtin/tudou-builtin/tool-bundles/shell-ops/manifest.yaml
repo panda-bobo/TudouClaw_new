@@ -4,7 +4,7 @@ description:
   zh-CN: 执行 bash 命令、跑测试。需要谨慎,有副作用。
   en: shell & tests — core tool bundle, auto-granted to all new agents by default.
 author: tudou-builtin
-runtime: declarative
+runtime: markdown
 entry: SKILL.md
 tags:
   - tool-bundle

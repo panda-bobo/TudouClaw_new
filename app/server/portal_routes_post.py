@@ -75,13 +75,22 @@ def _get_custom_presets_path() -> Path:
 def _save_custom_role_presets():
     """Persist current ROLE_PRESETS to disk so they survive restarts."""
     from ..agent import ROLE_PRESETS, AgentProfile
-    from dataclasses import asdict
+    from dataclasses import asdict, is_dataclass
     out = {}
     for k, v in ROLE_PRESETS.items():
         entry = dict(v)
-        prof = entry.get("profile")
-        if prof and hasattr(prof, "__dataclass_fields__"):
-            entry["profile"] = asdict(prof)
+        # Convert any nested dataclass to dict. Old code only did `profile`,
+        # but `_v2_preset` (a RolePresetV2 instance, see role_preset_v2.py)
+        # also gets injected by preset_to_legacy_dict() and can't be JSON-
+        # serialized directly.
+        for fk in list(entry.keys()):
+            fv = entry[fk]
+            if is_dataclass(fv):
+                try:
+                    entry[fk] = asdict(fv)
+                except Exception:
+                    # Fall back: drop the field rather than crash the whole save
+                    entry.pop(fk, None)
         out[k] = entry
     try:
         fp = _get_custom_presets_path()

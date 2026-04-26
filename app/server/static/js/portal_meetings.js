@@ -1,6 +1,67 @@
 // ============ Meetings Tab (群聊会议) ============
 
 // ---------- Meeting list ----------
+// Round-table strip renderer.
+// Shows each participant as a colored avatar circle; the most-recent
+// speaker (last assistant message in m.messages) gets a pulsing ring.
+// Clicking an avatar inserts an @mention into the input draft.
+function _renderMeetingRoundTable(mid, m, agList) {
+  var host = document.getElementById('mtg-roundtable-' + mid);
+  if (!host) return;
+  var participants = m.participants || [];
+  if (!participants.length) {
+    host.innerHTML = '<span style="color:var(--text3);font-size:11px">'
+      + '会议尚无参会者</span>';
+    return;
+  }
+  // Find latest speaker (skip user/system, take last agent message)
+  var latestAgentId = '';
+  var msgs = m.messages || [];
+  for (var i = msgs.length - 1; i >= 0; i--) {
+    var x = msgs[i];
+    if (x && x.role === 'assistant' && x.agent_id) {
+      latestAgentId = x.agent_id;
+      break;
+    }
+  }
+  var COLORS = ['#6366f1','#22c55e','#f59e0b','#ef4444','#8b5cf6',
+                 '#06b6d4','#ec4899','#14b8a6'];
+  var html = participants.map(function(pid, idx) {
+    var ag = agList.find(function(a){return a.id===pid;});
+    var name = ag ? ag.name : pid.substring(0,8);
+    var role = ag ? (ag.role||'') : '';
+    var initial = (name||'?')[0];
+    var color = COLORS[idx % COLORS.length];
+    var speaking = (pid === latestAgentId);
+    var label = speaking ? '<span style="color:#22c55e">● 发言中</span>'
+                          : '<span style="color:var(--text3)">' + esc(role || '参会') + '</span>';
+    return ''
+      + '<div class="mtg-rt-avatar' + (speaking ? ' speaking' : '') + '" '
+      + 'title="' + esc(name) + (role ? ' · ' + esc(role) : '') + '" '
+      + 'onclick="_mtgInsertMention(\'' + mid + '\',\'' + esc(name).replace(/'/g, "\\'") + '\')">'
+      + '<div class="mtg-rt-circle" style="width:38px;height:38px;border-radius:50%;'
+      + 'background:' + color + ';color:white;display:flex;align-items:center;'
+      + 'justify-content:center;font-size:15px;font-weight:700">'
+      + esc(initial) + '</div>'
+      + '<div style="font-size:10px;font-weight:600;color:var(--text);'
+      + 'max-width:60px;overflow:hidden;text-overflow:ellipsis;'
+      + 'white-space:nowrap">' + esc(name) + '</div>'
+      + '<div style="font-size:9px;line-height:1">' + label + '</div>'
+      + '</div>';
+  }).join('');
+  host.innerHTML = html;
+}
+
+// Helper: when user clicks a round-table avatar, push an @mention
+// into the draft input.
+function _mtgInsertMention(mid, name) {
+  var inp = document.getElementById('mtg-msg-input');
+  if (!inp) return;
+  var prefix = inp.value.endsWith(' ') || inp.value === '' ? '' : ' ';
+  inp.value = inp.value + prefix + '@' + name + ' ';
+  inp.focus();
+}
+
 async function renderMeetingsTab() {
   var c = document.getElementById('content');
   c.innerHTML =
@@ -300,6 +361,15 @@ async function openMeetingDetail(mid) {
 
           // == Center: Chat / Discussion ==
           '<div style="flex:1;display:flex;flex-direction:column;min-width:0">' +
+            // Round-table strip — agent avatars at the top of the chat
+            // pane, with the most recent speaker highlighted (pulse +
+            // ring). Mirrors OfficeClaw's "experts in a room" visual
+            // so users can tell who's talking at a glance instead of
+            // scanning every message header.
+            '<div id="mtg-roundtable-' + mid + '" class="mtg-roundtable" '
+            + 'style="display:flex;gap:14px;padding:10px 18px;'
+            + 'border-bottom:1px solid rgba(255,255,255,0.04);'
+            + 'overflow-x:auto;flex-shrink:0;align-items:center"></div>' +
             // Messages scrollable area
             '<div id="mtg-chat-scroll" style="flex:1;overflow-y:auto;padding:12px 18px">' +
               msgHtml +
@@ -329,7 +399,13 @@ async function openMeetingDetail(mid) {
           '</div>' +
         '</div>' +
       '</div>' +
-      '<style>@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}</style>';
+      '<style>'
+      + '@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}'
+      + '@keyframes mtgSpeakerPulse{0%,100%{box-shadow:0 0 0 4px rgba(99,102,241,0.35)}50%{box-shadow:0 0 0 8px rgba(99,102,241,0.1)}}'
+      + '.mtg-rt-avatar{position:relative;display:flex;flex-direction:column;align-items:center;gap:4px;flex-shrink:0;cursor:pointer;transition:transform 0.15s}'
+      + '.mtg-rt-avatar:hover{transform:translateY(-2px)}'
+      + '.mtg-rt-avatar.speaking .mtg-rt-circle{animation:mtgSpeakerPulse 1.4s infinite}'
+      + '</style>';
 
     // -- Post-render: restore user's draft if there was one --
     if (_prevDraft) {
@@ -340,6 +416,13 @@ async function openMeetingDetail(mid) {
           try { _newDraftEl.focus(); _newDraftEl.setSelectionRange(_prevSelStart, _prevSelEnd); } catch(_e) {}
         }
       }
+    }
+
+    // -- Post-render: render round-table avatar strip --
+    try {
+      _renderMeetingRoundTable(mid, m, _agList);
+    } catch (_rte) {
+      console.log('[meetingDetail] roundtable render failed', _rte);
     }
 
     // -- Post-render: scroll to bottom --

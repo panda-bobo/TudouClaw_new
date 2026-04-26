@@ -28,8 +28,15 @@ class Capabilities:
     skills: list[str] = field(default_factory=list)        # skill_id list
     mcps: list[str] = field(default_factory=list)          # mcp_binding_id list
     tools: list[str] = field(default_factory=list)         # built-in tool names
-    llm_tier: str = "default"                              # resolver decides model
+    llm_tier: str = "default"                              # resolver decides model (legacy)
     denied_tools: list[str] = field(default_factory=list)  # hard blocklist
+    # ── 5-slot LLM routing (default + 4 function slots) ──
+    # Stored as {slot_name: "provider_id/model_name"} for JSON simplicity.
+    # Slots: default / analysis / reasoning / coding / multimodal.
+    # Empty slots fall back to default at call time (see LLMRouter).
+    # Co-exists with llm_tier above during the V1→V2 migration window:
+    # router prefers slots when populated, falls back to llm_tier otherwise.
+    llm_slots: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -98,6 +105,7 @@ class AgentV2:
             "mcps":   [{"id": mid, "binding_id": ""} for mid in self.capabilities.mcps],
             "tools":  list(self.capabilities.tools),
             "llm_tier": self.capabilities.llm_tier,
+            "llm_slots": dict(self.capabilities.llm_slots or {}),
             "denied_tools": list(self.capabilities.denied_tools),
             "frozen_at": time.time(),
         }

@@ -594,11 +594,9 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "send_message",
             "description": (
-                "Send a structured message to another agent. Prefer the envelope fields (`summary` + `key_fields` + `artifact_refs`) over dumping a long `content` — the recipient's inbox injection renders envelopes compactly (~300 tokens) whereas raw content gets trimmed on-arrival.\n"
-                "Use when: sharing status / broadcasting a finding / pinging a teammate without blocking.\n"
-                "Not for: task handoffs where you expect a blocking result (use handoff_request). Not for scheduling (use task_update). Saying 'I will tell X to do Y' in prose is not equivalent — you must actually call this tool.\n"
-                "Output: confirmation 'Message sent to NAME (ID)' + envelope summary + inbox id.\n"
-                "GOTCHA: (1) no delivery guarantee — best-effort; the receiver sees it in their inbox. For work that MUST be picked up, use handoff_request. (2) If you put a 5KB report in `content`, the recipient only sees a preview; save it to a file first and pass the path in `artifact_refs` instead."
+                "Send a structured message to another agent's inbox. "
+                "Use envelope (summary/key_fields/artifact_refs) over long content. "
+                "For blocking handoffs use handoff_request; for scheduled tasks use task_update."
             ),
             "parameters": {
                 "type": "object",
@@ -638,11 +636,10 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "handoff_request",
             "description": (
-                "Transfer a task to another agent with a 3-state visible handshake: pending → acknowledged → completed. BLOCKING.\n"
-                "Use when: handing off work you expect a result from — coder → tester for verification, researcher → writer for drafting, planner → executor for implementation.\n"
-                "Not for: FYI broadcasts (use send_message). Not for parallel independent work (use team_create). Not for tasks you want to run in the background while you continue (this call blocks).\n"
-                "Output: the receiver's completion result + badge state (✅) visible to the user.\n"
-                "GOTCHA: blocks the caller until the receiver finishes or times out (default 600s). Include expected_output in the call — 'return a list of failing tests' — otherwise the receiver may return something you cannot use."
+                "BLOCKING task transfer with 3-state handshake (pending → acknowledged → completed). "
+                "Caller blocks until receiver returns or 600s timeout. "
+                "For FYI broadcasts use send_message; for parallel independent work use team_create. "
+                "Always include expected_output."
             ),
             "parameters": {
                 "type": "object",
@@ -677,11 +674,10 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "task_update",
             "description": (
-                "Create, update, complete, or list entries in the shared task queue. Also registers recurring / delayed tasks with the scheduler for automatic execution.\n"
-                "Use when: user asks 'create a task / reminder', 'every day at 9am', 'in 5 minutes do X', 'mark task ABC done'. For ad-hoc visible planning use plan_update instead.\n"
-                "Not for: your own execution steps visible to the user (use plan_update — a UI checklist). Not for messaging between agents (use send_message / handoff_request).\n"
-                "Output: task_id + schedule confirmation (with next_run time if recurring). Scheduled tasks auto-fire at the configured time.\n"
-                "GOTCHA: recurrence_spec format matters — daily='HH:MM', weekly='DOW HH:MM' (SUN|MON|...), monthly='D HH:MM'. Agents already running inside a scheduled job get scheduler-registration BLOCKED (to prevent duplicate-job loops)."
+                "Create/update/complete/list shared task queue entries; "
+                "registers recurring or delayed tasks with the scheduler. "
+                "recurrence_spec: daily='HH:MM', weekly='DOW HH:MM', monthly='D HH:MM'. "
+                "For your visible execution checklist use plan_update."
             ),
             "parameters": {
                 "type": "object",
@@ -789,11 +785,9 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "reply_message",
             "description": (
-                "Reply to an inbox message with an optional structured envelope (summary / key_fields / artifact_refs). Automatically preserves the original thread_id and sets reply_to.\n"
-                "Use when: responding to a specific message — answering a question, acknowledging a handoff, returning a result. Preferred over send_message when there's a specific message you're responding to.\n"
-                "Not for: unrelated new pings (use send_message). Not for marking done without responding (use ack_message).\n"
-                "Output: confirmation with the new inbox id + thread id.\n"
-                "GOTCHA: (1) you can only reply to messages addressed to YOU. (2) Prefer summary+key_fields over a long content body — downstream agents get a compact render and can read_file artifacts for detail."
+                "Reply to an inbox message (preserves thread_id). "
+                "Use envelope (summary/key_fields/artifact_refs) over long content. "
+                "For unrelated new pings use send_message; to silently mark done use ack_message."
             ),
             "parameters": {
                 "type": "object",
@@ -837,25 +831,10 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "plan_update",
             "description": (
-                "Render a live, visible execution checklist. Also drives the agent's own "
-                "understanding of 'which step am I on' — plan state is injected into your "
-                "prompt every turn.\n"
-                "\n"
-                "Use when: BEFORE starting any task with 3+ steps. Skip for single-step tasks "
-                "(overhead not worth it).\n"
-                "\n"
-                "Each step MUST carry an `acceptance` field — one short sentence naming the "
-                "concrete artifact or state that proves the step is done (e.g. 'report.pptx "
-                "created with ≥5 slides in $AGENT_WORKSPACE', 'email sent with message_id "
-                "in mcp_call result'). Vague acceptances like '完成报告' are NOT acceptable "
-                "— they're the root cause of agents faking completion.\n"
-                "\n"
-                "When completing a step, `result_summary` must reference whether the "
-                "acceptance was satisfied. Don't just say 'done'; say 'generated report.pptx "
-                "with 7 slides, opened OK via python-pptx'.\n"
-                "\n"
-                "Not for: background tasks (use task_update). Not for describing plans in "
-                "prose only — the checklist IS the plan; the tool call IS the commitment."
+                "Live execution checklist for tasks with 3+ steps. "
+                "Each step needs `acceptance` (concrete artifact/state proving done — "
+                "vague '完成报告' is rejected). complete_step's result_summary must "
+                "reference the acceptance. For background/scheduled tasks use task_update."
             ),
             "parameters": {
                 "type": "object",
@@ -1161,7 +1140,69 @@ TOOL_DEFINITIONS: list[dict] = [
             },
         },
     },
-    # ---- Experience persistence ----
+    # ---- Wiki ingest (V2 Karpathy-pattern: markdown wiki layer) ----
+    # Replaces save_experience long-term. Writes a markdown page with
+    # structured front-matter into the wiki layer; agent retrieves via
+    # knowledge_lookup. Each scope has an auto-maintained index.md.
+    {
+        "type": "function",
+        "function": {
+            "name": "wiki_ingest",
+            "description": (
+                "★ PRIMARY tool for saving any reusable knowledge / experience / "
+                "methodology / template the agent learns or distills. "
+                "Writes a markdown page to the wiki layer (auto-indexed, "
+                "queryable via knowledge_lookup, injected into future role "
+                "prompts as a title-only index). "
+                "kinds: experience (scene + rules) | methodology (workflow / "
+                "steps) | template (writing pattern) | pattern (recurring "
+                "logic) | reference (specs / wiki). "
+                "scope: omit for role-scoped; pass scope='global' for "
+                "cross-role sharing. "
+                "Use this INSTEAD of save_experience (deprecated)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": ["experience", "methodology",
+                                 "template", "pattern", "reference"],
+                        "description": "Page kind. experience=lessons; methodology=how-tos; template=writing/structure; pattern=recurring logic; reference=specs/standards.",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Human-readable title (used for slug + index).",
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Full markdown body. Self-contained — readers won't have other context.",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional tags for search.",
+                    },
+                    "scope": {
+                        "type": "string",
+                        "description": "Empty (default) → role-scoped; 'global' → shared across roles.",
+                    },
+                    "sources": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional: source paths/URLs that informed this page.",
+                    },
+                    "related": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional: related page slugs (e.g. 'experience/saudi-cloud').",
+                    },
+                },
+                "required": ["kind", "title", "body"],
+            },
+        },
+    },
+    # ---- Experience persistence (legacy; use wiki_ingest going forward) ----
     # NOTE: 经验条目(experience) 写入 experience_library 对应角色分桶。
     # 当经验积累到一定程度, agent 可通过 propose_skill 工具提议将经验
     # 锻造为技能(skill), 提交管理员审批后正式导入技能商店。
@@ -1170,11 +1211,12 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "save_experience",
             "description": (
-                "Persist a retrospective or active-learning finding into the calling agent's role-based experience library.\n"
-                "Use when: you just completed a task and learned something reusable — a do/don't rule, a scene-anchored playbook, a mistake to avoid. Typically after a bug fix, a feature completion, or a failed attempt.\n"
-                "Not for: sharing knowledge with all agents (use share_knowledge — that is the global KB). Not for random chat-log content (be selective — experiences inject into future system prompts).\n"
-                "Output: 'Experience saved' confirmation with id/role/priority/scene summary. The entry is immediately eligible for role-based injection into future agents' system prompts.\n"
-                "GOTCHA: role defaults to caller's role — do NOT save generic 'python tips' to a specific role bucket. After accumulating >=3 similar high-success experiences on a topic, call propose_skill to crystallize them."
+                "[DEPRECATED — use `wiki_ingest` instead]. "
+                "Legacy tool kept for back-compat only. New code MUST call "
+                "wiki_ingest(kind='experience', title, body) which writes a "
+                "markdown page to the wiki layer. Calling save_experience "
+                "now writes to the legacy JSON store that is no longer "
+                "auto-injected into prompts."
             ),
             "parameters": {
                 "type": "object",
@@ -1244,19 +1286,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "knowledge_lookup",
             "description": (
-                "Search the knowledge base (shared enterprise pool AND/OR the private expert KB bound to this agent).\n"
-                "Use when: user asks for facts / figures / specs / rules / processes that should come from authoritative documents, not your own reasoning.\n"
-                "Not for: role-specific experiences (experience library is injected via system prompt). Not for skill guides (get_skill_guide).\n"
-                "Output: JSON. For expert-KB hits: {status:'success', entries:[{content, source_file, heading_path, chunk_index, ...}], usage_guidance}. For shared entries with exact title: {status:'success', entry}. Otherwise {status:'partial', matches} or {status:'not_found'}.\n"
-                "RULES when using the returned content:\n"
-                "  1. CITE every factual claim with [source_file §heading_path] or [title #chunk_index] — LLM output without citation is NOT acceptable for expert-KB questions.\n"
-                "  2. Reason ONLY from the retrieved content. Do NOT extrapolate, merge with your parametric knowledge, or invent numbers/names/sections that aren't in the chunks.\n"
-                "  3. If entries don't directly answer, say 『知识库中未找到直接答案』 and state what additional material would be needed. NEVER fabricate.\n"
-                "  4. For aggregate queries ('how many?', 'list all…') DO NOT reuse mode=search — it only sees 8 chunks. Use mode=count (exact scan) or mode=list (inventory) instead.\n"
-                "MODES (Pack v3):\n"
-                "  - mode=\"search\" (default): top-k retrieval with content; best for factual questions answerable from a few chunks.\n"
-                "  - mode=\"count\":  programmatic scan grouping every chunk by source_file. Use for 『有多少』『总共』『多少个…验收用例』. Optional `query` filters by substring match. Returns exact counts — no LLM math required, just repeat them.\n"
-                "  - mode=\"list\":   flat metadata list (titles + chunk_index + heading_path + source_file; NO content). Use for 『列出所有文档』『目录』『知识库都有什么』. Capped at 200 rows."
+                "Search KB (shared + agent's expert pool). "
+                "ONE-SHOT per turn: pack all keywords into a single query (second call rejected). "
+                "Modes: search (top-k content, default), count (exact aggregate by source_file), "
+                "list (metadata inventory, no content). "
+                "Cite hits as [source_file §heading_path]; reason only from retrieved content."
             ),
             "parameters": {
                 "type": "object",
@@ -1284,11 +1318,10 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "memory_recall",
             "description": (
-                "Query YOUR OWN (agent-private) long-term memory before doing fresh research.\n"
-                "Use when: about to web_search / fetch a URL / re-analyze a topic you MIGHT have seen before — a recent high-confidence memory lets you skip costly exploration and go straight to action.\n"
-                "Not for: cross-role reference material (use knowledge_lookup). Not for current turn's chat history (just reread messages).\n"
-                "Output: top-K matching facts ranked by similarity, each with category / content / age_days / confidence / id. Empty result = explore fresh; then save_experience afterward.\n"
-                "GOTCHA: memories age. If a hit is >30 days old or contradicts what you're about to observe, verify and save_experience with the correction — the similarity-refresh layer will supersede the outdated entry automatically."
+                "Query YOUR OWN agent-private long-term memory. "
+                "ONE-SHOT per turn: pack all keywords in one query (second call rejected). "
+                "Returns top-K facts by similarity; check before fresh web_search/fetch. "
+                "For cross-role reference use knowledge_lookup."
             ),
             "parameters": {
                 "type": "object",
@@ -1716,12 +1749,9 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "get_skill_guide",
             "description": (
-                "Load a granted SKILL's guide. TWO modes: brief (default, ~200 tokens, headings + file list) vs verbose (full body, 2k-5k tokens).\n"
-                "Use when: you need to USE a granted local skill. Start with brief — if you only need to know the skill's shape / scripts / args, you're done. Only re-call with brief=false when you need the full step-by-step body.\n"
-                "Not for: searching/discovering skills (granted skills are already in your system prompt). Not for registering new skills (use submit_skill). "
-                "**NOT for MCP servers — MCPs are NOT skills.** To list bound MCP servers use `mcp_call(list_mcps=true)`; to invoke use `mcp_call(mcp_id, tool, arguments)`. Passing an MCP name here will return 'skill not found'.\n"
-                "Output (brief): skill name + skill_dir + runtime + description + ancillary files + section headings. Output (verbose): same + full SKILL.md body.\n"
-                "GOTCHA: the returned skill_dir is where scripts live — cd there first before running any bash. Prefer brief mode; it's ~10x cheaper on tokens."
+                "Load a granted skill's guide. brief mode (default, ~200 tokens) vs "
+                "verbose (full body). cd to returned skill_dir before running scripts. "
+                "NOT for MCP — use mcp_call. NOT for registering — use submit_skill."
             ),
             "parameters": {
                 "type": "object",
@@ -1927,17 +1957,9 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "emit_ui_block",
             "description": (
-                "Render an interactive UI block inline in the chat — a choice card (buttons) or a checklist.\n"
-                "Use when: asking the user to pick among concrete options ('Continue / Revert / Show diff?'), "
-                "or surfacing a to-do list for the user to tick off as work progresses.\n"
-                "Not for: free-form yes/no questions (just ask in prose — the user will reply). "
-                "Not for plain progress tracking (use plan_update — visible to user as execution steps). "
-                "Not for sharing artifacts (files auto-render via artifact_refs).\n"
-                "Output: renders a card in the chat. kind='choice' → user click sends a follow-up message "
-                "with the option label as text. kind='checklist' → display-only, no feedback loop.\n"
-                "GOTCHA: at most 8 choice options / 20 checklist items (above that the UI is unwieldy — "
-                "narrow the question). Option/item IDs must be unique within the block. Do NOT follow up "
-                "emit_ui_block with another prose question — the user sees both as separate prompts."
+                "Render an interactive UI block (choice buttons or checklist) inline in chat. "
+                "Max 8 choices / 20 checklist items; unique item IDs. "
+                "For free-form Q use prose; for execution steps use plan_update."
             ),
             "parameters": {
                 "type": "object",
@@ -1997,15 +2019,9 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "emit_handoff",
             "description": (
-                "Emit a structured handoff when finishing a task that another agent will pick up next.\n"
-                "Use when: you just finished an assignment in a meeting/project and want the NEXT agent "
-                "to see exactly what got done + what to do next, without scrolling the whole discussion.\n"
-                "Not for: casual status updates (use send_message or reply normally). "
-                "Not for: your OWN continuation — this is a baton pass to a different agent.\n"
-                "Output: renders a handoff card in the chat AND is ingested into the next agent's system "
-                "prompt so they see summary/deliverable/highlights/followups at the top.\n"
-                "GOTCHA: emit AT MOST ONE handoff per task completion. Keep summary to one paragraph. "
-                "followups must have {for: agent_name_or_role, task: concrete_next_step}."
+                "Structured baton-pass to the next agent (summary + deliverable + followups). "
+                "AT MOST ONE per task completion. "
+                "For status updates use send_message; for blocking handoffs use handoff_request."
             ),
             "parameters": {
                 "type": "object",
@@ -2145,6 +2161,7 @@ from .tools_split.knowledge import (  # noqa: E402,F401
     _tool_share_knowledge,
     _tool_learn_from_peers,
     _tool_memory_recall,
+    _tool_wiki_ingest,
 )
 
 # Media tools — pptx and video creation.
@@ -2222,6 +2239,7 @@ _TOOL_FUNCS: dict[str, callable] = {
     "memory_recall": _tool_memory_recall,
     "share_knowledge": _tool_share_knowledge,
     "learn_from_peers": _tool_learn_from_peers,
+    "wiki_ingest": _tool_wiki_ingest,
     # UI-block tools (choice buttons / checklist). Handler validates;
     # agent_execution.py emits the ui_block event after.
     "emit_ui_block": _tool_emit_ui_block,

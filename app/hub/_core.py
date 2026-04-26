@@ -1647,20 +1647,42 @@ class Hub:
         n = counts.get(_plan_id, 0)
         if n >= self._STUCK_WATCHDOG_MAX_WAKES:
             return
-        counts[_plan_id] = n + 1
         # Pick the step to nudge: prefer the one already in-progress;
         # otherwise the first pending.
         target = next((s for s in open_steps
                        if s.status == StepStatus.IN_PROGRESS), None) \
                  or open_steps[0]
+
+        # ── Final atomic re-check before sending the wake ─────────
+        # Between the initial guard above and this point, another
+        # thread (the agent's chat loop, a manual UI action, a
+        # plan_update call) may have completed the plan or the target
+        # step. If so, sending the wake would be a false reminder —
+        # exactly the "state sync issue" users see in the chat history
+        # when "已结束的任务又提醒".
+        plan_now = getattr(agent, "_current_plan", None)
+        if plan_now is None or getattr(plan_now, "status", "") != "active":
+            return
+        target_now = next((s for s in plan_now.steps if s.id == target.id), None)
+        if target_now is None or target_now.status not in (
+                StepStatus.PENDING, StepStatus.IN_PROGRESS):
+            return
+        still_open = [s for s in plan_now.steps
+                      if s.status in (StepStatus.PENDING,
+                                       StepStatus.IN_PROGRESS)]
+        if not still_open:
+            return
+        # Only after passing the final check do we consume a wake count.
+        counts[_plan_id] = n + 1
+
         msg = (
             "[SYSTEM · 唤醒] 你的当前任务还有未完成步骤，但你已经空闲了 "
             f"{int(now - last_update)} 秒。\n"
-            f"计划：{plan.task_summary[:120]}\n"
-            f"剩余开放步骤：{len(open_steps)}\n"
-            f"下一步（id={target.id}）：{target.title}\n"
-            f"acceptance：{(target.acceptance or '')[:200]}\n"
-            f"请调 plan_update(action='start_step', step_id='{target.id}') "
+            f"计划：{plan_now.task_summary[:120]}\n"
+            f"剩余开放步骤：{len(still_open)}\n"
+            f"下一步（id={target_now.id}）：{target_now.title}\n"
+            f"acceptance：{(target_now.acceptance or '')[:200]}\n"
+            f"请调 plan_update(action='start_step', step_id='{target_now.id}') "
             "然后继续执行。如果你判断任务已经交付或无法推进，请调 "
             "plan_update(action='complete_step' 或 'fail_step') 收尾，而不是静止。\n"
             f"这是自动唤醒 #{n + 1}，最多 {self._STUCK_WATCHDOG_MAX_WAKES} 次。"
@@ -1668,7 +1690,7 @@ class Hub:
         logger.warning(
             "Hub watchdog: waking stuck agent %s — plan '%s' has %d open "
             "steps, idle for %.0fs (wake #%d)",
-            agent.id[:8], plan.task_summary[:40], len(open_steps),
+            agent.id[:8], plan_now.task_summary[:40], len(still_open),
             now - last_update, n + 1)
         try:
             self.supervisor.chat_async(agent.id, msg,

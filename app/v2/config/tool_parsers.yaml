@@ -56,7 +56,20 @@ parsers:
       close_tag: "[/TOOL_CALLS]"
       strip_content: true
 
-  # ── GLM-4 function_call JSON ──────────────────────────────────
+  # ── GLM-4.5+ XML arg_key/arg_value emission ───────────────────
+  # GLM-4.5-air (and other 4.5+ variants on Z.AI / open.bigmodel)
+  # emits tool calls inline as ``<arg_key>name</arg_key><arg_value>
+  # tool_name</arg_value>...`` instead of a structured tool_calls
+  # array. Listed BEFORE the broader ``glm-4*`` rule so 4.5+ matches
+  # the more specific parser first.
+  - match: "glm-4.5*"
+    class: GLMArgKVParser
+  - match: "glm-4.[6-9]*"
+    class: GLMArgKVParser
+  - match: "glm-5*"
+    class: GLMArgKVParser
+
+  # ── GLM-4 (pre-4.5) function_call JSON ────────────────────────
   - match: "glm-4*"
     class: JSONOnlyParser
     config:

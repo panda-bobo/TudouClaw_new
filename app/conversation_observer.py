@@ -250,13 +250,26 @@ def _on_tool_result(agent_id: str, data: dict, chat_task_id: str) -> None:
 
 def mark_done(agent_id: str, chat_task_id: str = "",
               failed: bool = False) -> None:
-    """Flip the task to DONE / FAILED. Called when the chat-task
-    manager reports the underlying ChatTask closed."""
+    """Called when the underlying ChatTask closes. NOT a final terminal —
+    we move to AWAITING_USER so the user gets to confirm "this task is
+    really done" before flipping to DONE.
+
+    On success, also writes:
+      - L2 episodic memory (the WORKING memory: full task process —
+        original request + all steps + tool counts + final state)
+      - L3 task_log fact (a SUMMARY: "2026-04-25 完成 X 任务")
+
+    Behaviour:
+      - failure path → FAILED (terminal, but still resumable from banner)
+      - success path → AWAITING_USER (waits for user to click "确认完成"
+                       in the UI; the resume banner shows it as
+                       "待确认完成" alongside paused tasks)
+    """
     task = _find_active_task(agent_id, chat_task_id)
     if task is None:
         return
     task.status = (ConversationTaskStatus.FAILED if failed
-                   else ConversationTaskStatus.DONE)
+                   else ConversationTaskStatus.AWAITING_USER)
     task.completed_at = time.time()
     # Close any lingering running step.
     for s in task.steps:
@@ -264,3 +277,118 @@ def mark_done(agent_id: str, chat_task_id: str = "",
             s.status = "done" if not failed else "skipped"
             s.completed_at = time.time()
     _get_store().save(task)
+
+    # ── L2 / L3 memory write-back (only on successful completion) ───
+    # Failed tasks intentionally NOT written — keeps memory clean of
+    # "I tried to X but failed" noise. User can resume from banner if
+    # they want to retry.
+    if failed:
+        return
+    try:
+        _write_task_to_memory(task)
+    except Exception as e:
+        logger.debug("memory write-back skipped for task %s: %s",
+                     task.id, e)
+
+
+def _write_task_to_memory(task: ConversationTask) -> None:
+    """Persist a completed ConversationTask to L2 (working) + L3 (summary).
+
+    L2 EpisodicEntry: full task process — what was the request, what plan
+    steps were executed, what tools were called. Useful for "remind me
+    how I did X last time" lookups.
+
+    L3 task_log fact: 1-line summary "2026-04-25 完成「Title」(N steps)"
+    so the agent can answer "what tasks did I do recently" without scanning
+    L2 in detail. task_log facts get higher priority than intent/rule but
+    lower than contact/preference (see _CATEGORY_PRIORITY).
+    """
+    try:
+        from .core.memory import (
+            get_memory_manager, EpisodicEntry, SemanticFact,
+        )
+    except Exception as e:
+        logger.debug("memory module not available: %s", e)
+        return
+    mm = get_memory_manager()
+    if mm is None:
+        return
+
+    # Build human-readable summary of the work done
+    done_steps = [s for s in (task.steps or []) if s.status == "done"]
+    skipped_steps = [s for s in (task.steps or []) if s.status == "skipped"]
+
+    # Collect tool usage stats across all steps
+    tool_count_by_name: dict = {}
+    for s in (task.steps or []):
+        for tc in (s.tool_calls or []):
+            n = tc.get("name", "?")
+            tool_count_by_name[n] = tool_count_by_name.get(n, 0) + 1
+    tools_used = sorted(tool_count_by_name.items(),
+                         key=lambda kv: -kv[1])[:8]
+
+    # ── L2: episodic working memory ─────────────────────────────────
+    summary_parts = [
+        f"[任务: {task.title or task.intent[:40]}]",
+        f"原始请求: {(task.intent or '')[:300]}",
+    ]
+    if done_steps:
+        summary_parts.append(f"已完成 {len(done_steps)} 步:")
+        for i, s in enumerate(done_steps[:10], 1):
+            summary_parts.append(f"  {i}. {s.goal[:80]}")
+        if len(done_steps) > 10:
+            summary_parts.append(f"  ... 共 {len(done_steps)} 步")
+    if skipped_steps:
+        summary_parts.append(f"跳过/失败 {len(skipped_steps)} 步")
+    if tools_used:
+        tools_str = ", ".join(f"{n}×{c}" for n, c in tools_used)
+        summary_parts.append(f"工具调用: {tools_str}")
+    summary_text = "\n".join(summary_parts)
+
+    keywords = []
+    # First few words of title + main tools
+    if task.title:
+        keywords.extend(task.title.split()[:3])
+    keywords.extend(n for n, _ in tools_used[:3])
+    keywords_str = ",".join(set(keywords))[:200]
+
+    try:
+        ep = EpisodicEntry(
+            agent_id=task.agent_id,
+            summary=summary_text,
+            keywords=keywords_str,
+            turn_start=0,
+            turn_end=len(task.steps or []),
+            message_count=len(task.steps or []),
+        )
+        mm.save_episodic(ep)
+        logger.info("L2 episodic written: agent=%s task=%s (%d chars)",
+                    task.agent_id[:8], task.id, len(summary_text))
+    except Exception as e:
+        logger.debug("L2 save failed for task %s: %s", task.id, e)
+
+    # ── L3: task_log summary fact ───────────────────────────────────
+    # 1-line, human-readable, dated. Agent can recall "what did I do
+    # on 2026-04-25" by querying L3 with category=task_log.
+    try:
+        date_str = time.strftime("%Y-%m-%d", time.localtime(task.completed_at))
+        title = task.title or (task.intent or "")[:40]
+        n_done = len(done_steps)
+        n_total = len(task.steps or [])
+        tools_short = ",".join(n for n, _ in tools_used[:3]) or "—"
+        log_content = (
+            f"[{date_str}] 完成「{title}」 "
+            f"(步骤 {n_done}/{n_total}; 工具: {tools_short})"
+        )
+        fact = SemanticFact(
+            agent_id=task.agent_id,
+            category="task_log",
+            content=log_content,
+            source=f"conversation_task:{task.id}",
+            confidence=0.95,    # 任务真完成了, 高置信度
+        )
+        mm.save_fact(fact)
+        logger.info("L3 task_log written: agent=%s %s",
+                    task.agent_id[:8], log_content[:80])
+    except Exception as e:
+        logger.debug("L3 task_log save failed for task %s: %s", task.id, e)

@@ -4,7 +4,7 @@ description:
   zh-CN: 结构化 baton-pass —— 把任务交给下一个 agent。
   en: handoff — core tool bundle, auto-granted to all new agents by default.
 author: tudou-builtin
-runtime: declarative
+runtime: markdown
 entry: SKILL.md
 tags:
   - tool-bundle

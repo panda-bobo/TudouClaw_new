@@ -173,7 +173,84 @@ def _tool_web_fetch(url: str, max_length: int = 5000, **_: Any) -> str:
     if len(text) > max_length:
         text = text[:max_length] + f"\n\n... (truncated at {max_length} characters)"
 
+    # ── Quality observation (Nov 2026) ───────────────────────────────
+    # If fetched content looks like a login wall / paywall / near-empty
+    # page, append an [OBSERVATION] block telling the agent what we see.
+    # Agent decides whether to save_experience and remember the domain.
+    # NO hardcoded blacklist — agent learns over time via experience lib,
+    # which is auto-injected into same-role agents' system prompts.
+    obs = _detect_low_value_content(text, url)
+    if obs:
+        text = text + "\n\n" + obs
+
     return f"[Content from {url}]\n\n{text}"
+
+
+# ── Low-value page detector ──────────────────────────────────────────
+# Heuristic only — no fixed domain list. Returns an [OBSERVATION] block
+# that primes the agent to save_experience if it judges this domain
+# fundamentally unusable for crawling. Pure "nudge", not enforcement.
+
+_LOGIN_WALL_PHRASES = (
+    "please log in", "sign in to continue", "log in to read",
+    "login required", "subscribe to read", "subscription required",
+    "为提供更好的浏览体验", "请登录后查看", "请登录后继续", "登录后访问",
+    "需要登录后查看", "scan the qr code to log in",
+)
+
+
+def _detect_low_value_content(text: str, url: str) -> str:
+    """Return an [OBSERVATION] block if fetched content looks unusable.
+
+    Triggers:
+      - text shorter than 400 chars (mostly nav / paywall)
+      - any login-wall phrase in first 5KB
+      - >=3 occurrences of "login"/"sign in"/"登录" in short content
+    """
+    if not text:
+        return ""
+    sample = text.lower()[:5000]
+    n = len(text)
+
+    triggers: list[str] = []
+
+    if n < 400:
+        triggers.append(f"内容长度仅 {n} 字符,可能是导航壳或登录墙")
+    for phrase in _LOGIN_WALL_PHRASES:
+        if phrase in sample:
+            triggers.append(f"页面含 '{phrase}'")
+            break
+    if n < 1500:
+        signin_count = (sample.count("sign in") + sample.count("login")
+                        + sample.count("登录"))
+        if signin_count >= 3:
+            triggers.append(f"短内容中出现 {signin_count} 次登录提示")
+
+    if not triggers:
+        return ""
+
+    try:
+        domain = urllib.parse.urlparse(url).netloc.lower()
+    except Exception:
+        domain = url
+
+    return (
+        "[OBSERVATION — fetch 质量异常]\n"
+        f"- URL: {url}\n"
+        f"- 域名: {domain}\n"
+        f"- 触发原因: {'; '.join(triggers)}\n"
+        "\n"
+        "如果你判断 **该域名总体不适合 web_fetch** (而非偶发),建议沉淀经验:\n"
+        "  save_experience(\n"
+        "    scene='使用 web_search/web_fetch 做调研',\n"
+        f"    core_knowledge='{domain} 类站点对爬虫不友好/需登录/含付费墙',\n"
+        f"    taboo_rules=['不要 web_fetch {domain} 下的页面,优先在搜索结果里跳过这个域'],\n"
+        "    priority='medium'\n"
+        "  )\n"
+        "下次同 role 的所有 agent 都会自动收到这条经验,启动时注入 system prompt,\n"
+        "再做 web_search 时看到这个域名你就会自然跳过。\n"
+        "如果只是单次失败 (网络抖动/单页问题), 不必沉淀,换个 URL 即可。"
+    )
 
 
 # ── web_screenshot ───────────────────────────────────────────────────

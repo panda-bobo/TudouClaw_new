@@ -159,9 +159,16 @@ def _tool_get_skill_guide(**arguments) -> str:
             result_parts.append("")
 
         if brief:
-            # Brief mode: just list the headings so the LLM knows what
-            # sections the full guide has; it can re-call with verbose=true
-            # if it actually needs a specific section.
+            # Brief mode: list the headings so the LLM knows the
+            # structure, PLUS the first ~1800 chars of the body so any
+            # quick-start API / examples / mandatory workflow at the
+            # top of SKILL.md are visible immediately.
+            #
+            # Without the body preview, the LLM saw only headings and
+            # often took shortcuts (observed: agent skipped the
+            # template system in pptx-author and hand-rolled python-
+            # pptx code, ignoring 15 layouts × 10 themes available via
+            # the documented render_from_md API).
             headings = []
             for line in (body or "").splitlines():
                 s = line.rstrip()
@@ -176,9 +183,21 @@ def _tool_get_skill_guide(**arguments) -> str:
                 for h in headings:
                     result_parts.append(f"  {h}")
                 result_parts.append("")
+                # Top of SKILL.md verbatim — captures the "must do this"
+                # opening section that creators put first by convention.
+                head_chars = 1800
+                head_preview = (body or "")[:head_chars].rstrip()
+                if head_preview:
+                    result_parts.append("**起始正文** (前 ~1800 字):")
+                    result_parts.append("")
+                    result_parts.append(head_preview)
+                    if len(body or "") > head_chars:
+                        result_parts.append("…")
+                    result_parts.append("")
                 result_parts.append(
                     f"_brief mode: full guide is {len(body)} chars; "
-                    "pass brief=false to load._"
+                    "pass brief=false to load if you need details past "
+                    "the head._"
                 )
             else:
                 # No headings → fallback to a 400-char head preview.

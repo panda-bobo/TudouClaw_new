@@ -14,6 +14,27 @@ logger = logging.getLogger("tudouclaw.api.skills")
 router = APIRouter(prefix="/api/portal", tags=["skills"])
 
 
+@router.get("/tools")
+async def list_tool_catalog(
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Return the full tool catalog as OpenAI function-calling schemas.
+
+    Powers the agent Settings modal "工具权限" section so new tools
+    automatically appear as checkboxes. Returns unfiltered catalog —
+    per-agent allow/deny lists are applied at execution time.
+    """
+    try:
+        from ... import tools as _tools_mod
+        if hasattr(_tools_mod, "tool_registry"):
+            defs = _tools_mod.tool_registry.get_definitions()
+            return {"tools": defs, "count": len(defs)}
+        return {"tools": [], "count": 0}
+    except Exception as e:
+        logger.exception("list_tool_catalog failed")
+        raise HTTPException(500, str(e))
+
+
 def _get_skill_or_404(hub, skill_id: str):
     """Get skill package or raise 404."""
     try:
@@ -410,6 +431,22 @@ async def manage_skill_store(
         if action == "uninstall":
             entry_id = body.get("entry_id", "")
             ok = store.uninstall_entry(entry_id)
+            store.scan()
+            return {"ok": ok}
+
+        if action == "disable":
+            # Soft-disable: skill stays on disk, hidden from default list.
+            entry_id = body.get("entry_id", "")
+            disabled = bool(body.get("disabled", True))
+            ok = store.disable_entry(entry_id, disabled=disabled)
+            store.scan()
+            return {"ok": ok, "disabled": disabled}
+
+        if action == "delete_catalog":
+            # Hard-delete: removes the catalog directory + uninstalls if
+            # currently installed. NOT recoverable — caller must confirm.
+            entry_id = body.get("entry_id", "")
+            ok = store.delete_catalog_entry(entry_id)
             store.scan()
             return {"ok": ok}
 
@@ -834,3 +871,504 @@ async def reject_pending_skill(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# PPTX theme gallery — portal UI support for the pptx-author skill's
+# template system. Exposes 3 endpoints:
+#   GET  /api/portal/pptx-themes                list 10 themes + previews
+#   GET  /api/portal/pptx-themes/{id}/preview   serve PNG (inline)
+#   POST /api/portal/pptx-themes/recommend      {query} → top-3 matches
+# ---------------------------------------------------------------------------
+
+def _load_pptx_loader():
+    """Lazy-import _template_loader from the pptx-author skill dir."""
+    import importlib.util
+    from pathlib import Path
+    skill_dir = (Path(__file__).parents[2]
+                 / "skills" / "builtin" / "tudou-builtin" / "pptx-author")
+    loader_path = skill_dir / "_template_loader.py"
+    if not loader_path.exists():
+        raise HTTPException(503, "pptx-author skill not installed")
+    # Importlib with a namespaced name to avoid polluting sys.modules globally.
+    spec = importlib.util.spec_from_file_location(
+        "_tudou_pptx_loader", str(loader_path))
+    mod = importlib.util.module_from_spec(spec)
+    # pptx-author's _template_loader does `from _pptx_helpers import ...` at
+    # render time, so make sure skill dir is on sys.path.
+    import sys as _sys
+    if str(skill_dir) not in _sys.path:
+        _sys.path.insert(0, str(skill_dir))
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@router.get("/pptx-themes")
+async def list_pptx_themes(
+    user: CurrentUser = Depends(get_current_user),
+):
+    """List all PPTX themes with preview URLs."""
+    try:
+        mod = _load_pptx_loader()
+        themes = mod.list_themes()
+        for t in themes:
+            t["preview_url"] = f"/api/portal/pptx-themes/{t['id']}/preview.png"
+        layouts = mod.list_layouts()
+        return {"themes": themes, "layouts": layouts, "count": len(themes)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("list_pptx_themes failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/pptx-themes/{theme_id}/preview.png")
+async def get_pptx_theme_preview(
+    theme_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Serve a theme's preview PNG (generates on first access if missing)."""
+    from pathlib import Path
+    from fastapi.responses import FileResponse
+    try:
+        mod = _load_pptx_loader()
+        skill_dir = (Path(__file__).parents[2]
+                     / "skills" / "builtin" / "tudou-builtin" / "pptx-author")
+        preview_path = (skill_dir / "templates" / "themes"
+                        / theme_id / "preview.png")
+        if not preview_path.exists():
+            # Regenerate on demand if missing.
+            mod.generate_theme_preview(theme_id, force=True)
+        if not preview_path.exists():
+            raise HTTPException(404, f"preview for '{theme_id}' not found")
+        return FileResponse(
+            str(preview_path),
+            media_type="image/png",
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("get_pptx_theme_preview failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/pptx-layouts")
+async def list_pptx_layouts(
+    user: CurrentUser = Depends(get_current_user),
+):
+    """List all PPTX layouts with showcase preview URLs.
+
+    Each layout exposes:
+      - id / name / category / summary / when_to_use
+      - in_showcase: True if it's one of the 3 layouts rendered for
+        per-theme preview thumbnails
+
+    Response shape::
+        {
+          "layouts": [
+            {"id": "T01_cover", "name": "...", ...,
+             "preview_url": "/api/portal/pptx-layouts/T01_cover/preview.png?theme=corporate"},
+            ...
+          ],
+          "showcase_layouts": ["T01_cover", "T24_kpi_metrics", "T26_process_flow"],
+          "count": 15,
+        }
+    """
+    try:
+        mod = _load_pptx_loader()
+        layouts = mod.list_layouts()
+        showcase = set(getattr(mod, "PREVIEW_SHOWCASE_LAYOUTS", ()))
+        for L in layouts:
+            L["in_showcase"] = L["id"] in showcase
+            # Default preview against the corporate theme; the UI can
+            # swap by adding ?theme=<name> to the URL.
+            L["preview_url"] = (
+                f"/api/portal/pptx-layouts/{L['id']}/preview.png"
+            )
+        return {
+            "layouts": layouts,
+            "showcase_layouts": list(showcase),
+            "count": len(layouts),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("list_pptx_layouts failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/pptx-layouts/{layout_id}/preview.png")
+async def get_pptx_layout_preview(
+    layout_id: str,
+    theme: str = "corporate",
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Serve a layout × theme preview PNG (generates on first access).
+
+    Query param ``theme`` defaults to ``corporate``. Generated PNG is
+    cached at ``templates/_shared/.previews/<theme>/<layout_id>.png``.
+    """
+    from pathlib import Path
+    from fastapi.responses import FileResponse
+    try:
+        mod = _load_pptx_loader()
+        skill_dir = (Path(__file__).parents[2]
+                     / "skills" / "builtin" / "tudou-builtin" / "pptx-author")
+        preview_path = (skill_dir / "templates" / "_shared"
+                        / ".previews" / theme / f"{layout_id}.png")
+        if not preview_path.exists():
+            mod.generate_layout_preview(layout_id, theme, force=True)
+        if not preview_path.exists():
+            raise HTTPException(
+                404,
+                f"preview for layout '{layout_id}' theme '{theme}' not found",
+            )
+        return FileResponse(
+            str(preview_path),
+            media_type="image/png",
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("get_pptx_layout_preview failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/pptx-themes/recommend")
+async def recommend_pptx_theme(
+    body: dict = Body(...),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Recommend top-3 themes for a user query.
+
+    Request:  {"query": "AI 大模型发布会", "top_k": 3}
+    Response: {"results": [{"id","name","score","matched","description"}, ...]}
+    """
+    q = str(body.get("query") or "").strip()
+    top_k = int(body.get("top_k") or 3)
+    if not q:
+        raise HTTPException(400, "query required")
+    try:
+        mod = _load_pptx_loader()
+        results = mod.recommend_theme(q, top_k=top_k)
+        return {"query": q, "results": results}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("recommend_pptx_theme failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/pptx-themes/{theme_id}/demo")
+async def list_pptx_theme_demo(
+    theme_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """List pre-rendered demo slides for a theme.
+
+    Returns URLs for each slide_N.png and the full .pptx download path.
+    """
+    from pathlib import Path
+    try:
+        mod = _load_pptx_loader()  # validate pptx-author is installed
+        skill_dir = (Path(__file__).parents[2]
+                     / "skills" / "builtin" / "tudou-builtin" / "pptx-author")
+        demo_dir = skill_dir / "templates" / "themes" / theme_id / "demo"
+        if not demo_dir.exists():
+            raise HTTPException(404, f"demo for '{theme_id}' not found")
+        slides = sorted(demo_dir.glob("slide_*.png"),
+                        key=lambda p: int(p.stem.split("_")[1]))
+        return {
+            "theme_id": theme_id,
+            "slide_count": len(slides),
+            "slides": [
+                {
+                    "index": int(p.stem.split("_")[1]),
+                    "url": f"/api/portal/pptx-themes/{theme_id}/demo/{p.name}",
+                }
+                for p in slides
+            ],
+            "pptx_url": f"/api/portal/pptx-themes/{theme_id}/demo.pptx",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("list_pptx_theme_demo failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/pptx-themes/{theme_id}/demo/{filename}")
+async def get_pptx_demo_slide(
+    theme_id: str,
+    filename: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Serve an individual demo slide PNG."""
+    from pathlib import Path
+    from fastapi.responses import FileResponse
+    # Prevent path traversal
+    if "/" in filename or "\\" in filename or not filename.endswith(".png"):
+        raise HTTPException(400, "bad filename")
+    skill_dir = (Path(__file__).parents[2]
+                 / "skills" / "builtin" / "tudou-builtin" / "pptx-author")
+    fp = skill_dir / "templates" / "themes" / theme_id / "demo" / filename
+    if not fp.exists():
+        raise HTTPException(404, "not found")
+    return FileResponse(
+        str(fp), media_type="image/png",
+        headers={"Cache-Control": "public, max-age=3600"})
+
+
+@router.get("/pptx-themes/{theme_id}/demo.pptx")
+async def download_pptx_demo(
+    theme_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Download the full demo .pptx file (so user can open in PowerPoint)."""
+    from pathlib import Path
+    from fastapi.responses import FileResponse
+    skill_dir = (Path(__file__).parents[2]
+                 / "skills" / "builtin" / "tudou-builtin" / "pptx-author")
+    fp = skill_dir / "templates" / "themes" / theme_id / "demo.pptx"
+    if not fp.exists():
+        raise HTTPException(404, "not found")
+    return FileResponse(
+        str(fp),
+        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        filename=f"{theme_id}_demo.pptx",
+    )
+
+
+@router.post("/file-preview")
+async def preview_file(
+    body: dict = Body(...),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Render a preview for common document formats.
+
+    Supported:
+      - .md / .markdown / .txt → raw text (frontend renders via
+                                   _renderSimpleMarkdown for .md/.markdown,
+                                   or <pre> for .txt)
+      - .docx                  → simplified HTML (headings, paragraphs,
+                                   lists, tables) via python-docx
+      - .pdf                   → recommend <iframe src=url> (no server work)
+      - .pptx                  → point to /pptx-preview
+
+    Request:  {"path": "/abs/path/to/file"}
+    Response: {"kind":"markdown","text":"..."} | {"kind":"html","html":"..."}
+               | {"kind":"iframe","url":"..."} | {"kind":"unsupported"}
+    """
+    from pathlib import Path
+    path = str(body.get("path") or "").strip()
+    if not path:
+        raise HTTPException(400, "path required")
+    p = Path(path)
+    if not p.exists() or not p.is_file():
+        raise HTTPException(404, f"file not found: {path}")
+
+    # Prevent huge files (>10 MB) from blowing up the response.
+    try:
+        sz = p.stat().st_size
+    except Exception:
+        sz = 0
+    if sz > 10 * 1024 * 1024:
+        raise HTTPException(413, f"file too large: {sz} bytes (limit 10MB)")
+
+    suffix = p.suffix.lower()
+
+    # ── Markdown / plain text ──
+    if suffix in (".md", ".markdown", ".txt", ".log"):
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            raise HTTPException(500, f"read failed: {e}")
+        kind = "markdown" if suffix in (".md", ".markdown") else "text"
+        return {
+            "kind": kind,
+            "text": text,
+            "filename": p.name,
+            "size": sz,
+        }
+
+    # ── DOCX → HTML ──
+    if suffix == ".docx":
+        try:
+            from docx import Document
+        except ImportError:
+            raise HTTPException(503, "python-docx not installed")
+        try:
+            doc = Document(str(p))
+        except Exception as e:
+            raise HTTPException(500, f"docx parse failed: {e}")
+
+        import html as _html
+        parts: list[str] = []
+        # Walk document body in order. python-docx's `paragraphs` / `tables`
+        # give flat lists — to preserve order we iterate over the body XML.
+        from docx.oxml.ns import qn
+        body = doc.element.body
+        p_tag = qn("w:p")
+        tbl_tag = qn("w:tbl")
+
+        # Build a map of (paragraph_xml_element → Paragraph) and
+        # (table_xml_element → Table) for lookup.
+        p_map = {para._element: para for para in doc.paragraphs}
+        t_map = {tbl._element: tbl for tbl in doc.tables}
+
+        def _render_para(para):
+            style = (para.style.name if para.style else "") or ""
+            raw_text = para.text or ""
+            if not raw_text.strip() and not style.startswith("Heading"):
+                return "<br>"
+            # Decide tag
+            tag = "p"
+            lvl = 0
+            if style.startswith("Heading"):
+                try:
+                    lvl = int(style.split()[-1])
+                    lvl = max(1, min(6, lvl))
+                    tag = f"h{lvl}"
+                except Exception:
+                    tag = "h2"
+            elif style in ("List Paragraph", "List Bullet"):
+                return f"<li>{_html.escape(raw_text)}</li>"
+            # runs may have bold / italic
+            pieces: list[str] = []
+            for run in para.runs:
+                rtext = _html.escape(run.text or "")
+                if not rtext:
+                    continue
+                if run.bold:
+                    rtext = f"<strong>{rtext}</strong>"
+                if run.italic:
+                    rtext = f"<em>{rtext}</em>"
+                pieces.append(rtext)
+            inner = "".join(pieces) or _html.escape(raw_text)
+            return f"<{tag}>{inner}</{tag}>"
+
+        def _render_table(tbl):
+            rows_html = []
+            for row in tbl.rows:
+                cells_html = []
+                for cell in row.cells:
+                    txt = _html.escape(cell.text or "")
+                    cells_html.append(f"<td>{txt}</td>")
+                rows_html.append("<tr>" + "".join(cells_html) + "</tr>")
+            return ("<table style='border-collapse:collapse;"
+                    "border:1px solid #ccc;margin:8px 0'>"
+                    + "".join(rows_html) + "</table>")
+
+        in_list = False
+        for child in body.iterchildren():
+            if child.tag == p_tag and child in p_map:
+                rendered = _render_para(p_map[child])
+                if rendered.startswith("<li>"):
+                    if not in_list:
+                        parts.append("<ul>")
+                        in_list = True
+                    parts.append(rendered)
+                else:
+                    if in_list:
+                        parts.append("</ul>")
+                        in_list = False
+                    parts.append(rendered)
+            elif child.tag == tbl_tag and child in t_map:
+                if in_list:
+                    parts.append("</ul>")
+                    in_list = False
+                parts.append(_render_table(t_map[child]))
+        if in_list:
+            parts.append("</ul>")
+
+        # Basic HTML wrapper with modest styling. Table cells get simple
+        # border/padding for readability. No inline JS.
+        html_body = "\n".join(parts)
+        return {
+            "kind": "html",
+            "html": html_body,
+            "filename": p.name,
+            "size": sz,
+        }
+
+    # ── PDF → iframe (delegate to browser native viewer) ──
+    if suffix == ".pdf":
+        # Provide the attachment URL so frontend can iframe it. Portal has
+        # an attachment endpoint that serves arbitrary paths with auth.
+        import urllib.parse as _url
+        attach_url = "/api/portal/attachment?path=" + _url.quote(str(p))
+        return {
+            "kind": "iframe",
+            "url": attach_url,
+            "filename": p.name,
+            "size": sz,
+        }
+
+    # ── PPTX → delegate to existing /pptx-preview ──
+    if suffix == ".pptx":
+        return {
+            "kind": "delegate",
+            "delegate_to": "/api/portal/pptx-preview",
+            "filename": p.name,
+            "size": sz,
+        }
+
+    return {
+        "kind": "unsupported",
+        "suffix": suffix,
+        "filename": p.name,
+        "size": sz,
+    }
+
+
+@router.post("/pptx-preview")
+async def preview_arbitrary_pptx(
+    body: dict = Body(...),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Convert any .pptx file into slide PNG thumbnails. General-purpose
+    endpoint for previewing agent-produced PPT files.
+
+    Request:  {"path": "/abs/path/to/file.pptx", "width": 640}
+    Response: {"slides": [{"index":1,"data_url":"data:image/png;base64,..."},...]}
+    """
+    import base64
+    from pathlib import Path
+    import tempfile, os as _os, shutil
+
+    path = str(body.get("path") or "").strip()
+    width = int(body.get("width") or 640)
+    if not path:
+        raise HTTPException(400, "path required")
+    p = Path(path)
+    if not p.exists() or not p.is_file():
+        raise HTTPException(404, f"file not found: {path}")
+    if p.suffix.lower() != ".pptx":
+        raise HTTPException(400, "only .pptx supported")
+
+    tmp_dir = tempfile.mkdtemp(prefix="pptx_preview_")
+    try:
+        mod = _load_pptx_loader()
+        pngs = mod.pptx_to_pngs(str(p), tmp_dir, width=width, force=True)
+        out = []
+        for i, png_path in enumerate(pngs, start=1):
+            with open(png_path, "rb") as fh:
+                b = base64.b64encode(fh.read()).decode("ascii")
+            out.append({
+                "index": i,
+                "data_url": "data:image/png;base64," + b,
+            })
+        return {"slide_count": len(out), "slides": out,
+                "source_file": str(p)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("preview_arbitrary_pptx failed")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass

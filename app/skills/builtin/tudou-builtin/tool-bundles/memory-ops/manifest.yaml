@@ -4,7 +4,7 @@ description:
   zh-CN: 检索知识库、保存经验、跨 agent 共享。
   en: memory ops — core tool bundle, auto-granted to all new agents by default.
 author: tudou-builtin
-runtime: declarative
+runtime: markdown
 entry: SKILL.md
 tags:
   - tool-bundle

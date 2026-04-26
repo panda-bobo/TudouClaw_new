@@ -146,10 +146,22 @@ class SandboxPolicy:
         for allowed in self.allowed_dirs:
             if res_str == allowed or res_str.startswith(allowed + os.sep):
                 return (True, "")
+        # Compute a hint: what relative path the caller probably meant.
+        # If they passed an absolute path that starts with '/' but a same-
+        # named file would land under root, suggest the relative form.
+        try:
+            basename = os.path.basename(path) or path
+        except Exception:
+            basename = path
+        hint = ""
+        if path.startswith("/") or path.startswith("\\"):
+            hint = (f" Did you mean a relative path? "
+                    f"Try '{basename}' (lands in workspace root) "
+                    f"or 'workspace/{basename}' instead of '{path}'.")
         return (False,
                 f"Sandbox violation: '{path}' escapes jail root '{self.root}'. "
                 f"All file access must stay inside the agent's working directory "
-                f"or authorized workspaces.")
+                f"or authorized workspaces.{hint}")
 
     def safe_path(self, path: str) -> Path:
         """Resolve a path relative to the sandbox root. Raises on escape."""

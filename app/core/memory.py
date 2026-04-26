@@ -1295,16 +1295,18 @@ class MemoryManager:
     _CATEGORY_PRIORITY = {
         "contact":    -2,  # 📇 联系方式 — 邮箱/手机/地址等结构化身份, 最顶
         "preference": -1,  # 👤 用户画像 — 长期风格/禁忌/个性
-        "intent":      0,  # 🎯 任务意图
-        "rule":        1,  # 📏 经验规则
-        "reasoning":   2,  # 🧠 决策逻辑
-        "reflection":  3,  # 💡 反思改进
-        "outcome":     4,  # ✅ 执行结果
+        "task_log":    0,  # 📋 任务完成日志 — "X 月 X 日完成了 Y 任务"
+        "intent":      1,  # 🎯 任务意图
+        "rule":        2,  # 📏 经验规则
+        "reasoning":   3,  # 🧠 决策逻辑
+        "reflection":  4,  # 💡 反思改进
+        "outcome":     5,  # ✅ 执行结果
     }
 
     _CATEGORY_LABELS = {
         "contact":    "📇 联系方式",
         "preference": "👤 偏好",
+        "task_log":   "📋 任务日志",
         "intent":     "🎯 意图",
         "rule":       "📏 规则",
         "reasoning":  "🧠 决策",
@@ -1339,8 +1341,8 @@ class MemoryManager:
 
     # Canonical categories — the set we emit for new writes.
     CANONICAL_CATEGORIES = (
-        "contact", "preference", "intent", "rule",
-        "reasoning", "reflection", "outcome",
+        "contact", "preference", "task_log",
+        "intent", "rule", "reasoning", "reflection", "outcome",
     )
 
     # Always-inject categories (bypass top-K retrieval limit in
@@ -1713,19 +1715,69 @@ class MemoryManager:
             for fd in facts_data:
                 if not isinstance(fd, dict) or not fd.get("content"):
                     continue
+
+                # ── Quality gate (Nov 2026) ──────────────────────
+                # Reject low-value facts BEFORE saving:
+                #  1. content too short (<10 chars) — no real info
+                #  2. content matches "无法/未知/不确定/缺少..." — LLM said it
+                #     couldn't extract but still wrote a row
+                #  3. category is `action_plan` / `general` / 任何 non-canonical
+                #     — these are noise, only canonical categories survive
+                #  4. content starts with "[步骤" / "[步骤2]" — plan step text
+                #     leaking into facts (this is L2 territory, not L3)
+                content_str = str(fd.get("content", "")).strip()
+                if len(content_str) < 10:
+                    continue
+                content_lower = content_str.lower()
+                _BAD_PHRASES = (
+                    "无法确定", "无法分析", "未知日期", "[未知日期]",
+                    "[日期] 无法", "[日期]无法",
+                    "缺少日期", "缺少最终结果", "缺少关键信息",
+                    "状态已更新无失败", "无失败原因",
+                    "执行了该步骤", "状态已更新, 无失败",
+                    "operation completed", "status updated, no failure",
+                )
+                if any(p in content_str for p in _BAD_PHRASES):
+                    logger.debug(
+                        "extract_facts rejected (template-noise): %s",
+                        content_str[:60])
+                    continue
+                # Plan step leakage: facts like "[步骤2] 生成K线图表" are not
+                # facts, they're plan items. Drop them.
+                if content_str.startswith("[步骤") or content_str.startswith("[Step "):
+                    logger.debug(
+                        "extract_facts rejected (plan-step leak): %s",
+                        content_str[:60])
+                    continue
+                # Category whitelist: only canonical categories accepted.
+                # action_plan / general / unknown → drop entirely.
+                cat = fd.get("category", "")
+                if cat not in self.CANONICAL_CATEGORIES:
+                    logger.debug(
+                        "extract_facts rejected (bad category=%r): %s",
+                        cat, content_str[:60])
+                    continue
+                # Confidence floor: <0.5 means LLM itself doesn't trust it.
+                conf = float(fd.get("confidence", 0.7) or 0.7)
+                if conf < 0.5:
+                    logger.debug(
+                        "extract_facts rejected (low confidence %.2f): %s",
+                        conf, content_str[:60])
+                    continue
+
                 # 去重：检查是否已有相似事实
                 # 优先使用向量搜索去重 (语义相似度更准)，否则用 FTS5 + 词汇重叠
                 if self._check_chromadb_available():
                     existing = self.search_facts_vector(
-                        agent_id, fd["content"], top_k=1,
+                        agent_id, content_str, top_k=1,
                     )
                 else:
                     existing = self.search_facts(
-                        agent_id, fd["content"], top_k=1,
+                        agent_id, content_str, top_k=1,
                     )
-                if existing and self._is_similar(existing[0].content, fd["content"]):
+                if existing and self._is_similar(existing[0].content, content_str):
                     # 更新已有事实
-                    existing[0].content = fd["content"]
+                    existing[0].content = content_str
                     existing[0].updated_at = time.time()
                     self.save_fact(existing[0])
                     saved_facts.append(existing[0])
@@ -1733,10 +1785,10 @@ class MemoryManager:
 
                 fact = SemanticFact(
                     agent_id=agent_id,
-                    category=fd.get("category", "general"),
-                    content=fd["content"],
+                    category=cat,
+                    content=content_str,
                     source=f"conversation:{time.strftime('%Y-%m-%d %H:%M')}",
-                    confidence=fd.get("confidence", 0.7),
+                    confidence=conf,
                 )
                 self.save_fact(fact)
                 saved_facts.append(fact)

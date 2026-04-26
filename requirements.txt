@@ -51,6 +51,14 @@ passlib[bcrypt]>=1.7          # Password hashing (bcrypt backend)
 # websockets>=12.0            # WebSocket-based MCP transport
 # sse-starlette>=1.6          # SSE transport for MCP (requires starlette)
 
+# ── State machine for task graph ──────────────────────────────
+# LangGraph: ONLY used for the task state machine in
+# app/graph/. We do NOT pull in langchain agents / chains /
+# prompt-templates / memory — those overlap with our own
+# abstractions. Just StateGraph + ToolNode + SqliteSaver.
+langgraph>=0.2,<0.3
+langgraph-checkpoint-sqlite>=2,<3        # separate package since 0.2
+
 # ── Development & Testing ────────────────────────────────────
 # pytest>=8.0
 # pytest-asyncio>=0.23

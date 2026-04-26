@@ -4,7 +4,7 @@ description:
   zh-CN: 给其他 agent / 频道发消息、收消息。
   en: messaging — core tool bundle, auto-granted to all new agents by default.
 author: tudou-builtin
-runtime: declarative
+runtime: markdown
 entry: SKILL.md
 tags:
   - tool-bundle

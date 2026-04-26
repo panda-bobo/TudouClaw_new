@@ -4,7 +4,7 @@ description:
   zh-CN: 读写文件、搜索、目录遍历 — 基础文件系统能力。
   en: file ops — core tool bundle, auto-granted to all new agents by default.
 author: tudou-builtin
-runtime: declarative
+runtime: markdown
 entry: SKILL.md
 tags:
   - tool-bundle

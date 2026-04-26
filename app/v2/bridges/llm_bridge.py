@@ -48,31 +48,59 @@ def call_llm(
     tier: str = "default",
     agent_provider: str = "",
     agent_model: str = "",
-    max_tokens: int = 4096,   # noqa: ARG001 — V1 provider handles per-call
-    stream: bool = False,     # noqa: ARG001 — V2 executor is always non-stream
+    agent_slots: Any = None,        # AgentLLMSlots — preferred input
+    function: str = "",              # explicit slot hint (analysis/coding/...)
+    phase: str = "",                 # current 6-phase name
+    signals: Any = None,             # dict for LLMRouter classify
+    max_tokens: int = 4096,          # noqa: ARG001
+    stream: bool = False,            # noqa: ARG001
 ) -> dict:
     """Call the resolved LLM and return a normalised assistant message.
 
-    Resolution priority:
-      1. Explicit ``tier`` → ``llm_tier_routing.resolve_tier``
-      2. Agent's own ``(provider, model)`` passed in via
-         ``agent_provider`` / ``agent_model`` kwargs (NEW fallback —
-         keeps tier="default" calls working when the admin hasn't
-         mapped "default" in llm_tiers.json)
-      3. V1 global default (now typically unset, see config.yaml)
+    Resolution priority (PRD §10.5.1 + V2 5-slot extension):
+      1. ``agent_slots`` + ``function/phase/signals`` → ``LLMRouter.pick``
+         (the new V2 routing layer; preferred when slots are populated).
+      2. Explicit ``tier`` → ``llm_tier_routing.resolve_tier`` (legacy).
+      3. ``agent_provider/agent_model`` kwargs (V1-shaped fallback).
+      4. V1 global default (config.yaml).
+
+    Slots take precedence over tier — operators populate the 5-slot
+    binding via the agent UI (default + analysis/reasoning/coding/
+    multimodal), and the router picks the appropriate slot per call.
+    Empty slots fall back to tier; empty tier falls back to agent_*.
 
     Return shape::
 
         {"role": "assistant", "content": str, "tool_calls": list[dict]}
-
-    Never returns a streaming generator — the V2 executor drives turns
-    explicitly.
     """
-    provider, model = _resolve_tier(tier)
+    provider, model = "", ""
 
-    # Tier didn't resolve → use the agent's own LLM instead of falling
-    # through to V1 config.yaml default (which may be intentionally
-    # empty so that agents without a bound LLM fail fast).
+    # 1. New: V2 5-slot routing (when slots provided)
+    if agent_slots is not None:
+        try:
+            from .llm_router import get_router
+            decision = get_router().pick(
+                agent_slots,
+                explicit_function=function,
+                phase=phase,
+                signals=signals,
+            )
+            if decision.binding.is_set():
+                provider, model = (
+                    decision.binding.provider, decision.binding.model,
+                )
+                logger.debug(
+                    "LLMRouter: %s → %s (%s)",
+                    decision.slot, decision.binding.to_str(), decision.reason,
+                )
+        except Exception as _re:
+            logger.debug("LLMRouter pick failed: %s", _re)
+
+    # 2. Tier-based fallback
+    if not provider or not model:
+        provider, model = _resolve_tier(tier)
+
+    # 3. Agent's own (provider, model) kwargs
     if not provider or not model:
         if agent_provider and agent_model:
             provider, model = agent_provider, agent_model

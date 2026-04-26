@@ -961,21 +961,73 @@ async def send_chat(
     # chat request, so turns never inherit stale state.
     agent._rag_only_mode = bool(body.get("rag_only", False))
 
-    # ── /new slash flag: skip chat history for THIS turn ──
-    # Frontend's `/new <msg>` sets skip_history=true. Backend stashes it
-    # on the agent as a transient flag (re-stamped every request — NEVER
-    # sticky) so the LLM loop's message-builder can strip self.messages.
-    # Persistent chat record is unaffected — this only changes what goes
-    # into the outbound LLM request for this one turn.
-    agent._skip_history_once = bool(body.get("skip_history", False))
+    # ── /new slash flag: persistently start a fresh chat ──
+    # Frontend's `/new <msg>` sets skip_history=true. Persistent semantic:
+    # this WIPES messages + abandons any active plan + saves the agent
+    # before the new user message gets appended below. Without this,
+    # users observed exit/re-enter restoring the cleared history (because
+    # the old behavior only set a transient one-turn flag).
+    if bool(body.get("skip_history", False)):
+        try:
+            agent.clear()
+            hub._save_agents()
+        except Exception as _ce:
+            logger.warning(
+                "/new clear+save failed for %s: %s",
+                agent.id[:8], _ce,
+            )
+        # Keep the per-turn flag too — clear() runs synchronously above
+        # so messages are already wiped, but the flag is harmless and
+        # keeps the LLM loop's "skip history this turn" path consistent.
+        agent._skip_history_once = True
+    else:
+        agent._skip_history_once = False
 
     # Route through supervisor (handles both isolated and in-process)
     task = hub.supervisor.chat_async(agent.id, chat_content, source="admin")
+
+    # ── ConversationTask record (复杂任务的持久化恢复) ─────────────
+    # 用户消息触发 complexity classifier → 复杂任务时,在 SQLite 创建一条
+    # ConversationTask 记录(agent_id / intent / chat_task_id / status=RUNNING)。
+    # 重启或断线后这条记录还在,前端 banner 能弹出"上次未完成,是否继续"。
+    # observer hook (agent.py:2529) 会监听 plan_update / tool_call 事件,
+    # 自动写入 step status / current_step_idx。最终 message 触发 mark_done。
+    conv_task_id = ""
+    try:
+        if isinstance(chat_content, str) and chat_content.strip():
+            from app.chat_complexity_classifier import classify
+            _verdict = classify(chat_content)
+            if _verdict.get("route") == "v2":   # 复杂度门槛通过
+                from app.conversation_task import (
+                    ConversationTask, ConversationTaskStatus,
+                    get_store as _get_ct_store,
+                )
+                _ct_store = _get_ct_store()
+                _ct = ConversationTask(
+                    agent_id=agent.id,
+                    intent=chat_content if isinstance(chat_content, str)
+                           else (user_msg or "(multimodal)"),
+                    title=((chat_content if isinstance(chat_content, str)
+                            else user_msg or "(multimodal)")[:40]
+                           + ("…" if len(str(chat_content)) > 40 else "")),
+                    status=ConversationTaskStatus.RUNNING,
+                    chat_task_id=task.id,
+                    created_by=getattr(user, "username", "") or "admin",
+                )
+                _ct_store.save(_ct)
+                conv_task_id = _ct.id
+                logger.info("ConversationTask created: id=%s agent=%s",
+                            _ct.id, agent.id[:8])
+    except Exception as _ct_err:
+        logger.debug("ConversationTask creation skipped: %s", _ct_err)
+
     resp: dict = {
         "task_id": task.id,
         "status": task.status.value,
         "attachments_saved": saved_refs,
     }
+    if conv_task_id:
+        resp["conversation_task_id"] = conv_task_id
     if v2_suggestion:
         resp["v2_suggestion"] = v2_suggestion
     return resp
@@ -1360,6 +1412,51 @@ async def create_agent(
             hub._save_agents()
         except Exception as e:
             logger.warning("persona apply failed: %s", e)
+
+    # ── V2 state-machine shadow registration ──────────────────────
+    # By default register every new V1 agent in the V2 store so it
+    # gets the 6-phase state-machine ("状态机") badge / capabilities
+    # without an extra step. Operator can opt out with
+    # ``enable_state_machine: false`` in the create body.
+    if agent and body.get("enable_state_machine", True):
+        try:
+            from ...v2.agent.agent_v2 import AgentV2, Capabilities
+            from ...v2.agent.llm_slots import slots_from_v1_agent
+            from ...v2.core.task_store import get_store as _v2_store
+            store = _v2_store()
+            if store.get_agent(agent.id) is None:
+                # Map V1 fields onto V2 schema. Skill IDs / MCP IDs / tool
+                # names live on the V1 agent already; tier_models stays on
+                # ProviderEntry — V2 reads it on llm_bridge call.
+                _slots = slots_from_v1_agent(agent).to_dict()
+                v2_caps = Capabilities(
+                    skills=list(getattr(agent, "granted_skills", []) or []),
+                    mcps=[],
+                    tools=[],
+                    llm_tier=str(getattr(agent.profile, "llm_tier", "") or "default"),
+                    denied_tools=[],
+                    llm_slots=_slots,
+                )
+                v2_agent = AgentV2.create(
+                    id=agent.id,
+                    name=agent.name,
+                    role=agent.role,
+                    v1_agent_id=agent.id,
+                    capabilities=v2_caps,
+                    task_template_ids=[],
+                    working_directory=getattr(agent, "working_dir", "") or "",
+                )
+                store.save_agent(v2_agent)
+                logger.info(
+                    "V2 shadow registration: %s (%s) → V2 store",
+                    agent.id[:8], agent.name,
+                )
+        except Exception as e:
+            # Non-fatal — V1 agent is fully usable even if V2 shell fails.
+            logger.warning(
+                "V2 shadow registration failed for %s: %s",
+                agent.id[:8], e,
+            )
 
     return agent.to_dict() if agent else {}
 
@@ -2252,3 +2349,149 @@ async def update_agent_goals(
         pass
 
     return {"ok": True, "goals": agent.evolution_goals}
+
+
+# ── Conversation task: resumable list ────────────────────────────────
+# Used by the portal login banner to show "你有 N 个未完成的任务" prompt.
+# Frontend polls this every page load (see portal_bundle.js:555).
+# Migrated from legacy portal_routes_get.py.
+
+@router.get("/conversation-tasks/resumable")
+async def list_resumable_conversation_tasks(
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Return paused conversation tasks across all agents."""
+    try:
+        from ...conversation_task import get_store as _get_ct_store
+        from ...server.portal_routes_get import _ct_compact
+        ct_store = _get_ct_store()
+        tasks = ct_store.list_resumable("")
+        return {
+            "tasks": [_ct_compact(t) for t in tasks],
+            "count": len(tasks),
+        }
+    except Exception as e:
+        logger.warning("resumable list failed: %s", e)
+        return {"tasks": [], "count": 0}
+
+
+@router.post("/conversation-task/{task_id}/resume")
+async def resume_conversation_task(
+    task_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Resume a paused/failed ConversationTask.
+
+    Builds a 'continue' prompt from the task's done/pending steps and
+    posts it as a fresh user message into the agent's chat. Agent picks
+    up from the first un-finished step.
+    """
+    try:
+        from ...conversation_task import (
+            get_store as _get_ct_store,
+            ConversationTaskStatus,
+            build_resume_prompt,
+        )
+    except Exception as e:
+        raise HTTPException(500, f"conversation_task unavailable: {e}")
+
+    ct_store = _get_ct_store()
+    ct = ct_store.get(task_id)
+    if ct is None:
+        raise HTTPException(404, "conversation task not found")
+    # Allow resume from paused/failed but not from running/done/cancelled
+    if ct.status not in {ConversationTaskStatus.PAUSED,
+                          ConversationTaskStatus.FAILED}:
+        raise HTTPException(409, f"task is {ct.status} — cannot resume")
+    agent = hub.get_agent(ct.agent_id)
+    if agent is None:
+        raise HTTPException(404, f"agent {ct.agent_id[:8]} not found")
+    try:
+        resume_msg = build_resume_prompt(ct)
+        new_chat = hub.supervisor.chat_async(agent.id, resume_msg, source="admin")
+        ct.chat_task_id = new_chat.id
+        ct.status = ConversationTaskStatus.RUNNING
+        ct_store.save(ct)
+        logger.info("ConversationTask resumed: ct=%s new_chat=%s",
+                    task_id, new_chat.id)
+    except Exception as e:
+        logger.warning("conversation-task resume failed: %s", e)
+        raise HTTPException(500, str(e))
+
+    return {
+        "ok": True,
+        "task_id": new_chat.id,
+        "conversation_task_id": ct.id,
+        "agent_id": ct.agent_id,
+    }
+
+
+@router.post("/conversation-task/{task_id}/discard")
+async def discard_conversation_task(
+    task_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """User chose 'don't continue' — mark the task cancelled.
+
+    Keeps the row for audit / history, but it no longer shows up in the
+    resumable banner. To delete entirely use DELETE /conversation-task/{id}.
+    """
+    try:
+        from ...conversation_task import (
+            get_store as _get_ct_store,
+            ConversationTaskStatus,
+        )
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    ct_store = _get_ct_store()
+    ct = ct_store.get(task_id)
+    if ct is None:
+        raise HTTPException(404, "conversation task not found")
+    ct.status = ConversationTaskStatus.CANCELLED
+    ct_store.save(ct)
+    return {"ok": True, "conversation_task_id": ct.id, "status": ct.status}
+
+
+@router.delete("/conversation-task/{task_id}")
+async def delete_conversation_task(
+    task_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Hard-delete a ConversationTask row. Used by 'dismiss' after discard."""
+    try:
+        from ...conversation_task import get_store as _get_ct_store
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    ok = _get_ct_store().delete(task_id)
+    return {"ok": bool(ok)}
+
+
+@router.post("/conversation-task/{task_id}/confirm-done")
+async def confirm_conversation_task_done(
+    task_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """User confirms the task is fully completed → flip to DONE.
+
+    The agent reaches AWAITING_USER automatically when the chat finishes,
+    but staying there forever lets the user audit + verify before closing.
+    Only AWAITING_USER → DONE here; running tasks must finish naturally first.
+    """
+    try:
+        from ...conversation_task import (
+            get_store as _get_ct_store,
+            ConversationTaskStatus,
+        )
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    ct_store = _get_ct_store()
+    ct = ct_store.get(task_id)
+    if ct is None:
+        raise HTTPException(404, "conversation task not found")
+    if ct.status != ConversationTaskStatus.AWAITING_USER:
+        raise HTTPException(409,
+            f"task is {ct.status} — only awaiting_user can be confirmed done")
+    ct.status = ConversationTaskStatus.DONE
+    ct_store.save(ct)
+    return {"ok": True, "conversation_task_id": ct.id, "status": ct.status}

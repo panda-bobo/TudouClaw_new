@@ -4,7 +4,7 @@ description:
   zh-CN: 搜索网页、抓取内容。研究类任务必备。
   en: web ops — core tool bundle, auto-granted to all new agents by default.
 author: tudou-builtin
-runtime: declarative
+runtime: markdown
 entry: SKILL.md
 tags:
   - tool-bundle

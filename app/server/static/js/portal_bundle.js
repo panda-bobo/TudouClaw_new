@@ -638,26 +638,240 @@ function _renderResumeBannerOverflow(overflowCount) {
     'padding-top:6px;text-align:center">+ ' + overflowCount + ' more</div>';
 }
 
-async function _resumeConversationTask(taskId) {
+// Show modal with task details and let user choose: 继续 / 放弃
+function _showResumeConfirm(task) {
+  var existing = document.getElementById('resume-confirm-modal');
+  if (existing) existing.remove();
+
+  var steps = task.steps || [];
+  var done = steps.filter(function(s){ return s.status === 'done'; });
+  var pending = steps.filter(function(s){ return s.status !== 'done'; });
+
+  // Build inner HTML in pieces — no nested map() inside string concat.
+  var intentText = (task.intent || task.title || '').slice(0, 600);
+  if ((task.intent || '').length > 600) intentText += '…';
+
+  var doneRows = done.map(function(s){
+    return '<div style="font-size:12px;color:var(--text2);padding:2px 8px;'
+      + 'border-left:2px solid #10b981;margin:2px 0">'
+      + esc((s.goal || '').slice(0, 80))
+      + '</div>';
+  }).join('');
+
+  var pendingRows = pending.slice(0, 5).map(function(s){
+    var hint = s.tool_hint
+      ? ' <span style="color:var(--text3);font-size:10px">(' + esc(s.tool_hint) + ')</span>'
+      : '';
+    return '<div style="font-size:12px;color:var(--text);padding:2px 8px;'
+      + 'border-left:2px solid #f59e0b;margin:2px 0">'
+      + esc((s.goal || '').slice(0, 80))
+      + hint
+      + '</div>';
+  }).join('');
+  if (pending.length > 5) {
+    pendingRows += '<div style="font-size:11px;color:var(--text3);padding-left:8px">... +'
+      + (pending.length - 5) + ' 更多</div>';
+  }
+
+  var stepsBlock = '';
+  if (steps.length) {
+    stepsBlock = '<div style="margin-bottom:8px;font-size:12px;color:var(--text2)">进度: <b>'
+      + done.length + ' / ' + steps.length + '</b> 步已完成</div>';
+    if (done.length) {
+      stepsBlock += '<div style="margin-bottom:8px">'
+        + '<div style="font-size:11px;color:#10b981;margin-bottom:4px">✓ 已完成</div>'
+        + doneRows + '</div>';
+    }
+    if (pending.length) {
+      stepsBlock += '<div style="margin-bottom:8px">'
+        + '<div style="font-size:11px;color:#f59e0b;margin-bottom:4px">○ 待完成</div>'
+        + pendingRows + '</div>';
+    }
+  } else {
+    stepsBlock = '<div style="color:var(--text3);font-size:12px;margin-bottom:12px">(暂无计划步骤)</div>';
+  }
+
+  // Header text + icon + status badge vary by status
+  var headerIcon = '⏸';
+  var headerTitle = '上次任务未完成';
+  var headerSub = '是否继续从断点处推进?';
+  var statusBadge = '';
+  if (task.status === 'awaiting_user') {
+    headerIcon = '✅';
+    headerTitle = 'Agent 已交付';
+    headerSub = '请确认是否完成,如需修改请放弃后重新发起';
+    statusBadge = '<span style="display:inline-block;padding:2px 8px;font-size:10px;'
+      + 'background:rgba(16,185,129,0.15);color:#10b981;border-radius:8px;margin-left:6px">'
+      + 'agent 已交付 · 待确认</span>';
+  } else if (task.status === 'failed') {
+    headerIcon = '⚠️';
+    headerTitle = '任务执行出错';
+    headerSub = '可以从断点重新尝试,或放弃此任务';
+    statusBadge = '<span style="display:inline-block;padding:2px 8px;font-size:10px;'
+      + 'background:rgba(239,68,68,0.15);color:#ef4444;border-radius:8px;margin-left:6px">'
+      + '出错中断</span>';
+  } else if (task.status === 'running') {
+    headerIcon = '⏳';
+    headerTitle = '任务正在执行';
+    headerSub = '可以查看当前进度';
+    statusBadge = '<span style="display:inline-block;padding:2px 8px;font-size:10px;'
+      + 'background:rgba(59,130,246,0.15);color:#3b82f6;border-radius:8px;margin-left:6px">'
+      + '运行中</span>';
+  } else {
+    statusBadge = '<span style="display:inline-block;padding:2px 8px;font-size:10px;'
+      + 'background:rgba(245,158,11,0.15);color:#f59e0b;border-radius:8px;margin-left:6px">'
+      + '已暂停</span>';
+  }
+
+  var headerBlock = '<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">'
+    + '<span style="font-size:24px">' + headerIcon + '</span>'
+    + '<div style="flex:1">'
+    + '<h3 style="margin:0;font-size:16px;font-weight:700">'
+    +   esc(headerTitle) + statusBadge + '</h3>'
+    + '<div style="color:var(--text3);font-size:12px;margin-top:2px">'
+    +   esc(headerSub) + '</div>'
+    + '</div></div>';
+
+  var intentBlock = '<div style="background:var(--surface);border:1px solid var(--border);'
+    + 'border-radius:8px;padding:12px;margin-bottom:12px">'
+    + '<div style="font-size:11px;color:var(--text3);margin-bottom:6px">原始请求</div>'
+    + '<div style="font-size:13px;color:var(--text);line-height:1.5;'
+    + 'max-height:150px;overflow-y:auto;white-space:pre-wrap">'
+    + esc(intentText)
+    + '</div></div>';
+
+  // Button row depends on task.status:
+  //   awaiting_user → "确认完成" / "放弃" / "关闭"
+  //   running       → only "关闭" (task still in flight)
+  //   paused/failed → "继续" / "放弃" / "取消"
+  var btnRow;
+  if (task.status === 'awaiting_user') {
+    btnRow = '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:18px">'
+      + '<button class="btn btn-ghost btn-sm" onclick="_resumeConfirmCancel()">关闭</button>'
+      + '<button class="btn btn-ghost btn-sm" style="color:var(--error)" '
+      +   'onclick="_resumeConfirmDiscard(\'' + esc(task.id) + '\')">放弃</button>'
+      + '<button class="btn btn-primary btn-sm" '
+      +   'onclick="_resumeConfirmComplete(\'' + esc(task.id) + '\')">✓ 确认完成</button>'
+      + '</div>';
+  } else if (task.status === 'running') {
+    btnRow = '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:18px">'
+      + '<button class="btn btn-primary btn-sm" onclick="_resumeConfirmCancel()">关闭</button>'
+      + '</div>';
+  } else {
+    btnRow = '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:18px">'
+      + '<button class="btn btn-ghost btn-sm" onclick="_resumeConfirmCancel()">取消</button>'
+      + '<button class="btn btn-ghost btn-sm" style="color:var(--error)" '
+      +   'onclick="_resumeConfirmDiscard(\'' + esc(task.id) + '\')">放弃此任务</button>'
+      + '<button class="btn btn-primary btn-sm" '
+      +   'onclick="_resumeConfirmContinue(\'' + esc(task.id) + '\')">▶ 继续</button>'
+      + '</div>';
+  }
+
+  var modal = document.createElement('div');
+  modal.id = 'resume-confirm-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);'
+    + 'z-index:10001;display:flex;align-items:center;justify-content:center;padding:20px';
+  modal.innerHTML = '<div style="background:var(--bg);border:1px solid var(--border);'
+    + 'border-radius:12px;padding:24px;max-width:560px;width:96%;max-height:88vh;overflow:auto">'
+    + headerBlock + intentBlock + stepsBlock + btnRow
+    + '</div>';
+
+  document.body.appendChild(modal);
+  // Click outside to cancel
+  modal.addEventListener('click', function(e){
+    if (e.target === modal) _resumeConfirmCancel();
+  });
+}
+
+function _resumeConfirmCancel() {
+  var m = document.getElementById('resume-confirm-modal');
+  if (m) m.remove();
+}
+
+async function _resumeConfirmContinue(taskId) {
+  var btn = document.querySelector('#resume-confirm-modal .btn-primary');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '正在恢复…';
+  }
   try {
     var r = await api('POST',
       '/api/portal/conversation-task/' + taskId + '/resume');
     if (r && r.task_id) {
-      // Success — refresh banner + task queue
+      _resumeConfirmCancel();
       _checkResumableTasks();
-      if (currentAgent && typeof window.loadConversationTasksIntoQueue === 'function') {
-        window.loadConversationTasksIntoQueue(currentAgent);
+      // Switch to that agent's chat to watch the resumed task
+      if (r.agent_id && typeof window.showAgentView === 'function') {
+        try { window.showAgentView(r.agent_id, null); } catch(e){}
       }
+      if (window._toast) window._toast('已恢复任务,Agent 正在续跑', 'success');
     } else {
-      alert('继续失败：' + (r && r.error ? r.error : 'unknown error'));
+      alert('继续失败: ' + (r && r.error ? r.error : 'unknown'));
+      if (btn) { btn.disabled = false; btn.textContent = '▶ 继续'; }
     }
   } catch (e) {
-    alert('继续失败：' + e.message);
+    alert('继续失败: ' + e.message);
+    if (btn) { btn.disabled = false; btn.textContent = '▶ 继续'; }
+  }
+}
+
+async function _resumeConfirmDiscard(taskId) {
+  if (!confirm('确认放弃这个任务? 不会删除历史聊天,只是不再续跑。')) return;
+  try {
+    // Mark as cancelled (status), then delete the row
+    await fetch('/api/portal/conversation-task/' + taskId + '/discard', {
+      method: 'POST', credentials: 'same-origin',
+    });
+    await fetch('/api/portal/conversation-task/' + taskId, {
+      method: 'DELETE', credentials: 'same-origin',
+    });
+    _resumeConfirmCancel();
+    _checkResumableTasks();
+  } catch (e) {
+    alert('放弃失败: ' + e.message);
+  }
+}
+
+async function _resumeConfirmComplete(taskId) {
+  // User confirms the task is fully done — flips AWAITING_USER → DONE
+  // and removes it from the resume banner. History stays in chat for audit.
+  try {
+    var r = await api('POST',
+      '/api/portal/conversation-task/' + taskId + '/confirm-done');
+    if (r && r.ok) {
+      _resumeConfirmCancel();
+      _checkResumableTasks();
+      if (window._toast) window._toast('已确认完成', 'success');
+    } else {
+      alert('确认失败: ' + (r && r.error ? r.error : 'unknown'));
+    }
+  } catch (e) {
+    alert('确认失败: ' + e.message);
+  }
+}
+
+// Banner buttons now open the confirm dialog instead of acting directly.
+async function _resumeConversationTask(taskId) {
+  // Look up the task in the cached banner data
+  try {
+    var r = await api('GET', '/api/portal/conversation-tasks/resumable');
+    var task = (r && r.tasks || []).find(function(t){ return t.id === taskId; });
+    if (!task) {
+      alert('任务记录不存在');
+      return;
+    }
+    _showResumeConfirm(task);
+  } catch (e) {
+    alert('无法加载任务详情: ' + e.message);
   }
 }
 
 async function _dismissConversationTask(taskId) {
+  if (!confirm('确认丢弃此任务?')) return;
   try {
+    await fetch('/api/portal/conversation-task/' + taskId + '/discard', {
+      method: 'POST', credentials: 'same-origin',
+    });
     await fetch('/api/portal/conversation-task/' + taskId, {
       method: 'DELETE', credentials: 'same-origin',
     });
@@ -667,6 +881,10 @@ async function _dismissConversationTask(taskId) {
 
 window._resumeConversationTask = _resumeConversationTask;
 window._dismissConversationTask = _dismissConversationTask;
+window._resumeConfirmCancel = _resumeConfirmCancel;
+window._resumeConfirmContinue = _resumeConfirmContinue;
+window._resumeConfirmDiscard = _resumeConfirmDiscard;
+window._resumeConfirmComplete = _resumeConfirmComplete;
 
 async function refreshSidebar() {
   // Lightweight refresh: update agent status in sidebar without re-rendering current view
@@ -1938,7 +2156,7 @@ function _renderEventLogFilterChips(agentId) {
 // Pretty-print one event line with per-kind formatting.
 function _formatEventLogEntry(e) {
   var color = _EVENT_KIND_COLORS[e.kind] || 'var(--text3)';
-  var time = new Date(e.timestamp * 1000).toLocaleTimeString();
+  var time = _formatTs(e.timestamp);
   var content;
   var d = e.data || {};
   if (e.kind === 'tool_call') {
@@ -2029,7 +2247,7 @@ async function loadInterAgentMessages(agentId) {
     el.innerHTML = interAgentEvents.slice(-20).reverse().map(function(e) {
       var fromAgent = (e.data && e.data.from_agent_name) || agentName((e.data && e.data.from_agent) || '') || 'Unknown Agent';
       var content = (e.data && e.data.content) || JSON.stringify(e.data||{});
-      var time = new Date(e.timestamp * 1000).toLocaleTimeString();
+      var time = _formatTs(e.timestamp);
       var msgType = (e.data && e.data.msg_type) || 'message';
       var typeLabel = msgType === 'task' ? '📋' : msgType === 'request' ? '❓' : '💬';
 
@@ -2677,10 +2895,78 @@ function _renderSimpleMarkdown(text, agentId) {
       return prefix + html;
     }
   );
+  // GLM-4.5-air XML-style tool_call leaked into content. The model
+  // sometimes emits the call as raw `<arg_key>name</arg_key>
+  // <arg_value>...` chunks instead of a structured tool_calls array,
+  // and our chat layer renders it as text. Recognise the pattern and
+  // collapse it into a compact one-liner so the bubble stops showing
+  // a wall of XML to the user. The actual tool_call (if any) was
+  // already executed via the parser layer; this is purely cosmetic.
+  if (/&lt;arg_key&gt;[\s\S]+&lt;arg_value&gt;/i.test(s)) {
+    // Try to extract the first arg_key/value pair as a label
+    var firstK = s.match(/&lt;arg_key&gt;([^&]+)&lt;\/arg_key&gt;/);
+    var firstV = s.match(/&lt;arg_value&gt;([^&]+)&lt;\/arg_value&gt;/);
+    var hint = '';
+    if (firstK && firstV) {
+      hint = ' · ' + firstK[1] + '=' + firstV[1].slice(0, 60);
+    }
+    s = s.replace(
+      /(?:&lt;arg_key&gt;[\s\S]*?&lt;\/?arg_value&gt;\s*)+(?:&lt;\/tool_call&gt;)?/gi,
+      '<span style="font-family:monospace;font-size:11px;color:var(--text3);'
+      + 'background:var(--surface2);padding:2px 6px;border-radius:3px">'
+      + '⚙️ tool_call' + hint + '</span>'
+    );
+  }
   // Code blocks: ```lang\n...\n```
   s = s.replace(/```(\w*)\n([\s\S]*?)```/g, function(m,lang,code){
+    var lines = code.split('\n').length;
+    // Long code blocks (≥30 lines) get wrapped in <details> so they
+    // don't dominate the chat. Short blocks render as before.
+    if (lines >= 30) {
+      return ('<details class="chat-codeblock-fold"><summary style="cursor:pointer;'
+        + 'color:var(--text2);font-size:11px;user-select:none;padding:4px 0">'
+        + '📄 代码 ' + lines + ' 行 · 点击展开</summary>'
+        + '<pre><code class="lang-'+lang+'">' + code + '</code></pre>'
+        + '</details>');
+    }
     return '<pre><code class="lang-'+lang+'">' + code + '</code></pre>';
   });
+  // Auto-detect bare code (no fence): a contiguous run of ≥30 lines
+  // that looks like source — has 'from'/'import'/'def'/'function'/
+  // 'class'/leading-spaces patterns AND is not all natural language.
+  // Wraps in a folded code block so a 1500-line python paste doesn't
+  // turn the chat into a wall of text.
+  s = s.replace(
+    /(^|\n)((?:[ \t]{0,4}(?:from |import |def |class |function |const |let |var |if |for |while |return |@\w|#!)[^\n]*\n){3,})/g,
+    function(match, prefix, block) {
+      // Extend block to include all subsequent indented / continuation
+      // lines (rough heuristic — the regex grabbed the "obvious" code
+      // lines, this captures the body that follows).
+      return match;   // initial detection only — full grab below
+    }
+  );
+  // More robust pass: find any pre-existing <pre> would have been done
+  // already; here we fold *very long* unfenced runs that smell like code.
+  // Simple heuristic: 30+ lines where a majority start with whitespace
+  // or contain typical syntactic punctuation density.
+  s = s.replace(
+    /((?:^|\n)(?:[ \t]+[^\n]+\n){15,})/g,
+    function(block) {
+      var inner = block.replace(/^\n/, '');
+      var lines = inner.split('\n');
+      // Count "code-ish" hits: starts with whitespace + has special char
+      var codeHits = 0;
+      lines.forEach(function(l) {
+        if (/^[ \t]+\S/.test(l) && /[(){}\[\]=:;]/.test(l)) codeHits++;
+      });
+      if (codeHits < lines.length * 0.5) return block;   // not code, leave alone
+      var n = lines.length;
+      return '\n<details class="chat-codeblock-fold"><summary style="cursor:pointer;'
+        + 'color:var(--text2);font-size:11px;user-select:none;padding:4px 0">'
+        + '📄 检测到 ' + n + ' 行代码 · 点击展开</summary>'
+        + '<pre><code>' + inner + '</code></pre></details>\n';
+    }
+  );
   // Inline code: `...`
   s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
   // Headers: ### text (process before inline formatting)
@@ -2808,6 +3094,46 @@ function _formatChatTime(ts) {
   var day = String(d.getDate()).padStart(2, '0');
   return mon + '-' + day + ' ' + hh + ':' + mm;
 }
+
+// Universal timestamp formatter — used everywhere a raw epoch (seconds OR ms)
+// would otherwise leak into the UI as "1777095793.659766".
+// Accepts: number (epoch s/ms), numeric string, ISO string, Date, falsy → ''.
+// Output: standard "YYYY-MM-DD HH:MM:SS" in local time.
+function _formatTs(ts) {
+  if (ts === null || ts === undefined || ts === '') return '';
+  var d;
+  if (ts instanceof Date) {
+    d = ts;
+  } else {
+    var n = Number(ts);
+    if (!isNaN(n) && n > 0) {
+      // Heuristic: epoch < 10^11 = seconds, ≥ 10^11 = milliseconds
+      d = new Date(n < 1e11 ? n * 1000 : n);
+    } else {
+      // Try ISO string parse
+      d = new Date(String(ts));
+    }
+  }
+  if (!d || isNaN(d.getTime())) return String(ts);
+  var pad = function(x){ return String(x).padStart(2, '0'); };
+  return d.getFullYear() + '-'
+    + pad(d.getMonth() + 1) + '-'
+    + pad(d.getDate()) + ' '
+    + pad(d.getHours()) + ':'
+    + pad(d.getMinutes()) + ':'
+    + pad(d.getSeconds());
+}
+
+// Date-only variant (no time).
+function _formatDate(ts) {
+  var s = _formatTs(ts);
+  return s ? s.split(' ')[0] : '';
+}
+
+// Expose globally so any inline template / module can call it.
+window._formatTs = _formatTs;
+window._formatDate = _formatDate;
+window._formatChatTime = _formatChatTime;
 
 function addChatBubble(agentId, role, text, timestamp) {
   const el = document.getElementById('chat-msgs-'+agentId);
@@ -3058,6 +3384,41 @@ function _renderFileCard(ref) {
     body.appendChild(meta);
   }
   a.appendChild(body);
+  // Preview button — for supported document types (md/pdf/docx/pptx).
+  // Opens an inline preview modal so user can see the content without
+  // downloading. Inserted BEFORE the action glyph so clicks don't bubble
+  // to the anchor's download navigation.
+  var lowerName = String(name || '').toLowerCase();
+  var localPath = ref.path || '';
+  var previewKind = ''; // md|pdf|docx|pptx
+  if (localPath) {
+    if (lowerName.endsWith('.md') || lowerName.endsWith('.markdown')) previewKind = 'md';
+    else if (lowerName.endsWith('.pdf')) previewKind = 'pdf';
+    else if (lowerName.endsWith('.docx')) previewKind = 'docx';
+    else if (lowerName.endsWith('.pptx')) previewKind = 'pptx';
+    else if (lowerName.endsWith('.txt') || lowerName.endsWith('.log')) previewKind = 'text';
+  }
+  if (previewKind) {
+    var prev = document.createElement('button');
+    prev.type = 'button';
+    prev.className = 'chat-file-card-preview-btn';
+    var kindLabel = {md:'Markdown', pdf:'PDF', docx:'Word', pptx:'PPT', text:'文本'}[previewKind] || '文档';
+    prev.title = '预览 ' + kindLabel + ' (不用下载)';
+    prev.innerHTML = '<span class="material-symbols-outlined" style="font-size:18px">preview</span>';
+    prev.style.cssText = 'margin-left:6px;padding:4px 6px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--primary);cursor:pointer;display:inline-flex;align-items:center';
+    prev.onclick = function(ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (previewKind === 'pptx' && typeof window.previewPptxFile === 'function') {
+        window.previewPptxFile(localPath, name);
+      } else if (typeof window.previewFile === 'function') {
+        window.previewFile(localPath, name, previewKind);
+      } else {
+        alert('预览功能未就绪');
+      }
+    };
+    a.appendChild(prev);
+  }
   // action glyph — visual hint for inline vs download
   var action = document.createElement('span');
   action.className = 'material-symbols-outlined chat-file-card-action';
@@ -3130,14 +3491,68 @@ async function attachHistoricalFileCards(agentId) {
     }
   }
 
-  // Orphans (files that exist in deliverable_dir but were never
-  // mentioned in any tool_result OR assistant prose) are intentionally
-  // NOT shown — dumping them on the last bubble pollutes the chat with
-  // workspace meta files (Tasks.md, Project.md, ...). They remain
-  // available via the persistent file list endpoint if needed.
+  // Orphans = files in workspace not referenced by any turn's
+  // tool_result/prose. The original heuristic dropped them entirely
+  // because Tasks.md / Project.md / agent.json etc. would pollute the
+  // chat. But that also dropped real deliverables (PPTX from a bash
+  // build script) — those have NO tool_result mention because the
+  // bash subprocess wrote the file directly.
+  //
+  // New rule: orphans whose extension is a "deliverable kind" AND name
+  // is NOT a known meta file get attached to the LATEST assistant
+  // bubble. PPTX/DOCX/XLSX/PDF/MP4/PNG etc. are real outputs by
+  // definition; meta files (Tasks.md, Project.md, MCP.md, Skills.md,
+  // Scheduled.md, agent.json) stay hidden.
+  // Orphans, filtered to "real deliverables produced THIS turn":
+  //   1. extension is in deliverable whitelist
+  //   2. basename is not a known workspace meta file
+  //   3. produced_at >= the task's start timestamp (-30s grace)
+  // Without filter (3), reopening an agent later would attach EVERY
+  // historical PPTX in the workspace to the latest bubble — wrong.
   var orphans = data.orphans || [];
+  var DELIVERABLE_EXTS = {
+    '.pptx': 1, '.docx': 1, '.xlsx': 1, '.pdf':  1,
+    '.csv':  1, '.html': 1, '.zip':  1, '.tar':  1,
+    '.png':  1, '.jpg':  1, '.jpeg': 1, '.gif':  1,
+    '.svg':  1, '.webp': 1,
+    '.mp4':  1, '.mov':  1, '.webm': 1,
+    '.mp3':  1, '.wav':  1,
+  };
+  var META_BASENAMES = {
+    'Tasks.md': 1, 'Project.md': 1, 'MCP.md': 1,
+    'Skills.md': 1, 'Scheduled.md': 1, 'AGENT.md': 1,
+    'agent.json': 1, 'README.md': 1,
+  };
+  var taskStartTs = (window._currentTaskStart || {})[agentId] || 0;
+  var realOrphans = orphans.filter(function(o) {
+    var name = (o && (o.filename || o.name || o.id || '')) || '';
+    if (META_BASENAMES[name]) return false;
+    var dot = name.lastIndexOf('.');
+    if (dot < 0) return false;
+    var ext = name.slice(dot).toLowerCase();
+    if (DELIVERABLE_EXTS[ext] !== 1) return false;
+    if (taskStartTs > 0) {
+      var ts = o.produced_at || 0;
+      if (typeof ts === 'string') ts = parseFloat(ts) || 0;
+      // Allow 30s grace before task_started_at (clock skew + write
+      // happening just before the very first event of the turn).
+      if (ts > 0 && ts < taskStartTs - 30) return false;
+    }
+    return true;
+  });
+  if (realOrphans.length && bubbles.length) {
+    var lastBubble = bubbles[bubbles.length - 1];
+    try {
+      _appendFileCards(lastBubble, realOrphans);
+      attached += realOrphans.length;
+    } catch (e) {
+      console.log('[fileCards] orphan attach failed', e);
+    }
+  }
   console.log('[fileCards] attached', attached, 'cards across',
-              turns.length, 'turns; ignored', orphans.length, 'orphans');
+              turns.length, 'turns;',
+              realOrphans.length, 'real-deliverable orphans attached;',
+              (orphans.length - realOrphans.length), 'meta orphans skipped');
 }
 
 function _appendFileCards(msgDiv, refs) {
@@ -3759,6 +4174,15 @@ async function sendAgentMsg(agentId) {
     // Chat tasks are now created inline via classifier + plan extraction
     // (see M1/M2); no user action required.
 
+    // Track this turn's start time so attachHistoricalFileCards can
+    // filter orphan files to "produced this turn" only — without it,
+    // re-opening a chat would attach every historical PPTX in the
+    // workspace to the latest bubble.
+    try {
+      window._currentTaskStart = window._currentTaskStart || {};
+      window._currentTaskStart[agentId] = Date.now() / 1000;
+    } catch(e) {}
+
     await _streamTaskEvents(agentId, result.task_id, thinkDiv, progressBar);
     refreshSidebar();
   } catch(e) {
@@ -3797,7 +4221,26 @@ function _createProgressBar(agentId) {
       '</div>' +
       '<div style="flex:1;min-width:0">' +
         '<span class="chat-progress-phase" id="chat-progress-phase-'+agentId+'" style="font-size:12px;color:var(--text2)">Preparing...</span>' +
-        '<div id="tool-log-'+agentId+'" class="tool-activity-log" style="margin-top:6px;max-height:120px;overflow-y:auto;font-size:11px;line-height:1.6;color:var(--text3,#999);scrollbar-width:thin"></div>' +
+        // ── Collapsed tool-call summary chip ──
+        // OfficeClaw-style: shows "✓ 已调用工具 N 次" with a count
+        // and a triangle to expand the full per-tool log. Default
+        // collapsed so chat doesn\'t turn into a scroll-fest of
+        // ▸ read_file / ▸ web_search / ... entries.
+        '<div id="tool-summary-'+agentId+'" class="tool-call-summary" '
+          + 'style="display:none;margin-top:6px;font-size:11px;'
+          + 'cursor:pointer;color:var(--text3);user-select:none" '
+          + 'onclick="_toggleToolLog(\''+agentId+'\')">' +
+          '<span style="color:var(--success,#3a8e44)">✓</span> ' +
+          '<span class="tool-summary-text" id="tool-summary-text-'+agentId+'">'
+            + '已调用工具 0 次</span> ' +
+          '<span class="tool-summary-arrow" id="tool-summary-arrow-'+agentId+'" '
+            + 'style="display:inline-block;transition:transform 0.2s">▸</span>' +
+        '</div>' +
+        '<div id="tool-log-'+agentId+'" class="tool-activity-log" '
+          + 'style="display:none;margin-top:4px;max-height:160px;'
+          + 'overflow-y:auto;font-size:11px;line-height:1.6;'
+          + 'color:var(--text3,#999);scrollbar-width:thin;'
+          + 'border-left:2px solid var(--border,#444);padding-left:8px"></div>' +
       '</div>' +
       '<button class="chat-progress-abort" id="chat-progress-abort-'+agentId+'" onclick="_abortTask(\''+agentId+'\')" title="Stop task">✕</button>' +
     '</div>';
@@ -3873,12 +4316,52 @@ function _extractPrimaryArg(argsStr) {
   return '';
 }
 
+// Show / hide the per-tool-call detail log. Triggered by clicking the
+// "已调用工具 N 次" chip; arrow rotates 90° when expanded.
+function _toggleToolLog(agentId) {
+  var log = document.getElementById('tool-log-' + agentId);
+  var arrow = document.getElementById('tool-summary-arrow-' + agentId);
+  if (!log) return;
+  var open = log.style.display !== 'none';
+  log.style.display = open ? 'none' : 'block';
+  if (arrow) arrow.style.transform = open ? '' : 'rotate(90deg)';
+}
+
+// Per-agent rolling tally of tool-name → count, used to render the
+// chip's "read_file ×3, web_search ×2" subtitle.
+var _toolCallTally = {};
+
+function _refreshToolSummary(agentId) {
+  var summary = document.getElementById('tool-summary-' + agentId);
+  var txt = document.getElementById('tool-summary-text-' + agentId);
+  if (!summary || !txt) return;
+  var tally = _toolCallTally[agentId] || {};
+  var names = Object.keys(tally);
+  if (!names.length) { summary.style.display = 'none'; return; }
+  summary.style.display = '';
+  var total = 0;
+  names.forEach(function(n){ total += tally[n]; });
+  // Subtitle: top-3 tools by count, e.g. "read_file ×3, web_search ×2"
+  names.sort(function(a, b){ return tally[b] - tally[a]; });
+  var top = names.slice(0, 3).map(function(n){
+    return tally[n] > 1 ? n + ' ×' + tally[n] : n;
+  }).join(', ');
+  if (names.length > 3) top += ', …';
+  txt.textContent = '已调用工具 ' + total + ' 次 — ' + top;
+}
+
 function _appendToolCall(agentId, toolName, args) {
   var log = document.getElementById('tool-log-'+agentId);
   if (!log) return;
   if (!_toolLogCounter[agentId]) _toolLogCounter[agentId] = 0;
   _toolLogCounter[agentId]++;
   var idx = _toolLogCounter[agentId];
+
+  // Tally update — drives the collapsed summary chip.
+  if (!_toolCallTally[agentId]) _toolCallTally[agentId] = {};
+  var nameKey = toolName || 'unknown';
+  _toolCallTally[agentId][nameKey] = (_toolCallTally[agentId][nameKey] || 0) + 1;
+  _refreshToolSummary(agentId);
 
   var entry = document.createElement('div');
   entry.id = 'tool-entry-'+agentId+'-'+idx;
@@ -4476,8 +4959,71 @@ function _updateProgress(agentId, progress, phase) {
 
 function _removeProgressBar(agentId) {
   var bar = document.getElementById('chat-progress-'+agentId);
-  if(bar && bar.parentNode) bar.remove();
+  if (!bar) {
+    delete _toolLogCounter[agentId];
+    delete _toolCallTally[agentId];
+    return;
+  }
+  // ── Demote to a static "完成深度思考" record card ──
+  // Was: bar.remove() → users couldn't see what tools ran.
+  // Now: rip out the live working-robot UI but KEEP the tool-call
+  // chip + detail log so the conversation history shows a permanent
+  // "✓ 已调用工具 N 次" entry the user can click to expand later.
+  // OfficeClaw-style. If no tools were called this turn, remove
+  // entirely (nothing to preserve).
+  var tally = _toolCallTally[agentId];
+  var hasTools = tally && Object.keys(tally).length > 0;
+  if (!hasTools) {
+    bar.remove();
+    delete _toolLogCounter[agentId];
+    delete _toolCallTally[agentId];
+    return;
+  }
+  // Strip animated robot + working text + abort button; keep the
+  // collapsed chip + detail log. New id so a future turn starts a
+  // fresh progress bar without colliding.
+  var summary = document.getElementById('tool-summary-'+agentId);
+  var log = document.getElementById('tool-log-'+agentId);
+  // Build the static container — a plain div in chat flow.
+  var card = document.createElement('div');
+  card.className = 'chat-tool-record';
+  card.style.cssText = 'padding:6px 8px;margin:4px 0;'
+    + 'border-left:3px solid var(--success,#3a8e44);'
+    + 'background:var(--surface2,rgba(0,0,0,0.03));'
+    + 'border-radius:4px;font-size:11px;color:var(--text3)';
+  if (summary) {
+    // Detach + re-id so a new progress bar can use the original id
+    summary.id = 'tool-summary-record-' + Date.now();
+    summary.style.display = '';
+    summary.style.marginTop = '0';
+    var arrow = summary.querySelector('.tool-summary-arrow');
+    if (arrow) arrow.style.transform = '';
+    card.appendChild(summary);
+  }
+  if (log) {
+    var newLogId = 'tool-log-record-' + Date.now();
+    log.id = newLogId;
+    log.style.display = 'none';
+    card.appendChild(log);
+    // Re-wire summary click to toggle the renamed log
+    if (summary) {
+      summary.onclick = (function(lid){
+        return function(){
+          var l = document.getElementById(lid);
+          if (!l) return;
+          var open = l.style.display !== 'none';
+          l.style.display = open ? 'none' : 'block';
+          var a = this.querySelector('.tool-summary-arrow');
+          if (a) a.style.transform = open ? '' : 'rotate(90deg)';
+        };
+      })(newLogId);
+    }
+  }
+  // Insert the static card into the chat flow at the same position
+  bar.parentNode.insertBefore(card, bar);
+  bar.remove();
   delete _toolLogCounter[agentId];
+  delete _toolCallTally[agentId];
 }
 
 async function _abortTask(agentId) {
@@ -4644,9 +5190,43 @@ async function _streamTaskEvents(agentId, taskId, thinkDiv, progressBar) {
               // Update time label with final timestamp
               if (evt.timestamp) msgDiv._timestamp = evt.timestamp;
             } else if(evt.type==='thinking') {
-              if (msgDiv) { msgDiv = null; fullText = ''; }
-              // Update progress bar phase text instead of separate thinkDiv
+              // text_delta 创建的气泡如果一直没真实内容,在 thinking 信号到来时
+              // 整个 row 都要删掉 (头像+气泡+操作栏),不只是 .chat-msg。
+              // DOM 结构: .chat-msg-row > [.chat-msg-avatar, .chat-msg(=msgDiv 父级)]
+              // 之前只删 .chat-msg 留下头像和 row 容器, 形成"空头像列"的视觉残留。
+              if (msgDiv) {
+                var trimmed = (fullText || '').trim();
+                if (!trimmed || trimmed.length < 3) {
+                  try {
+                    // 优先找 row (assistant 走 row 包装), 找不到 fallback 到
+                    // chat-msg, 都没找到再 fallback 到 msgDiv 本身
+                    var rowEl = msgDiv.closest ? msgDiv.closest('.chat-msg-row') : null;
+                    var msgEl = msgDiv.closest ? msgDiv.closest('.chat-msg') : null;
+                    if (rowEl) rowEl.remove();
+                    else if (msgEl) msgEl.remove();
+                    else msgDiv.remove();
+                  } catch(e) {}
+                }
+                msgDiv = null;
+                fullText = '';
+              }
               _updateProgress(agentId, 0, evt.content || '发言中…');
+            } else if(evt.type==='retract_last_assistant') {
+              // Backend detected the just-streamed text as a meta-promise.
+              // Remove the entire row (avatar + bubble + actions) so no
+              // visual residue is left.
+              if (msgDiv) {
+                try {
+                  var rowEl = msgDiv.closest ? msgDiv.closest('.chat-msg-row') : null;
+                  var msgEl = msgDiv.closest ? msgDiv.closest('.chat-msg') : null;
+                  if (rowEl) rowEl.remove();
+                  else if (msgEl) msgEl.remove();
+                  else msgDiv.remove();
+                } catch(e) {}
+                msgDiv = null;
+                fullText = '';
+              }
+              _updateProgress(agentId, 0, '🔁 检测到空承诺,已自动抑制');
             } else if(evt.type==='tool_call') {
               // Show tool name in progress bar + append to tool log
               _updateProgress(agentId, 0, '🔧 ' + esc(evt.name||''));
@@ -4667,8 +5247,21 @@ async function _streamTaskEvents(agentId, taskId, thinkDiv, progressBar) {
             } else if(evt.type==='artifact_refs') {
               // Phase-2 envelope injection: render FileCard widgets for
               // every artifact produced during this assistant turn.
-              if (!msgDiv) { msgDiv = addChatBubble(agentId, 'assistant', ''); }
-              try { _appendFileCards(msgDiv, evt.refs || []); } catch(e) {}
+              var _mdAttached = msgDiv && msgDiv.isConnected;
+              try {
+                console.log('[artifact_refs]',
+                  'refs=', (evt.refs || []).length,
+                  'msgDiv=', !!msgDiv,
+                  'msgDiv.isConnected=', _mdAttached);
+              } catch(_le) {}
+              // If we have a stale msgDiv reference (detached from DOM
+              // because thinking/retract removed the row but our pointer
+              // still points at the old element), make a fresh bubble.
+              if (!msgDiv || !_mdAttached) {
+                msgDiv = addChatBubble(agentId, 'assistant', '');
+              }
+              try { _appendFileCards(msgDiv, evt.refs || []); }
+              catch(e) { console.warn('[artifact_refs] render failed', e); }
             } else if(evt.type==='ui_block') {
               // Sprint 3.1: interactive choice card or display-only checklist.
               if (!msgDiv) { msgDiv = addChatBubble(agentId, 'assistant', ''); }
@@ -4861,7 +5454,7 @@ async function loadAgentEvents(agentId) {
       <div class="event-log">
         ${(data.events||[]).map(e => `
           <div class="event-item">
-            <span class="time">${new Date(e.timestamp*1000).toLocaleTimeString()}</span>
+            <span class="time">${_formatTs(e.timestamp)}</span>
             <span class="kind ${e.kind}">${e.kind}</span>
             <span class="data">${esc(JSON.stringify(e.data).slice(0,200))}</span>
           </div>
@@ -5205,7 +5798,7 @@ function renderAudit() {
       <tbody>
         ${(auditLog||[]).slice().reverse().map(row => `
           <tr>
-            <td>${new Date(row.timestamp*1000).toLocaleString()}</td>
+            <td>${_formatTs(row.timestamp)}</td>
             <td>${esc(row.action)}</td>
             <td>${esc(row.actor)}</td>
             <td>${esc(row.role)}</td>
@@ -5232,7 +5825,7 @@ async function loadAuditLog() {
     if (!tbody) return;
     tbody.innerHTML = (auditLog||[]).map(row => `
       <tr>
-        <td>${new Date(row.timestamp*1000).toLocaleString()}</td>
+        <td>${_formatTs(row.timestamp)}</td>
         <td>${esc(row.action)}</td>
         <td>${esc(row.actor)}</td>
         <td>${esc(row.role)}</td>
@@ -5272,8 +5865,8 @@ async function loadTokens() {
           <div style="font-weight:600;margin-bottom:4px">${esc(t.name)} ${adminLabel}</div>
           <div class="token-id">ID: ${esc(t.token_id)}</div>
           <div style="font-size:11px;color:var(--text3);margin-top:4px">
-            Role: ${esc(t.role)} · Created: ${new Date(t.created_at*1000).toLocaleDateString()} ·
-            Last used: ${t.last_used ? new Date(t.last_used*1000).toLocaleDateString() : 'Never'} ·
+            Role: ${esc(t.role)} · Created: ${_formatDate(t.created_at)} ·
+            Last used: ${t.last_used ? _formatDate(t.last_used) : 'Never'} ·
             ${t.active ? '<span class="tag tag-green">Active</span>' : '<span class="tag tag-red">Revoked</span>'}
           </div>
         </div>
@@ -5376,7 +5969,7 @@ function renderNodes(container) {
       '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:20px">' +
         '<div style="background:var(--bg);border-radius:8px;padding:10px 12px;text-align:center"><div style="font-size:18px;font-weight:800;font-family:\'Plus Jakarta Sans\',sans-serif">' + agentCount + '</div><div style="font-size:9px;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-top:2px">Agents</div></div>' +
         '<div style="background:var(--bg);border-radius:8px;padding:10px 12px;text-align:center"><div style="font-size:18px;font-weight:800;font-family:\'Plus Jakarta Sans\',sans-serif;color:' + (isOnline ? 'var(--success)' : 'var(--error)') + '">' + (isOnline ? '●' : '○') + '</div><div style="font-size:9px;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-top:2px">Status</div></div>' +
-        '<div style="background:var(--bg);border-radius:8px;padding:10px 12px;text-align:center"><div style="font-size:18px;font-weight:800;font-family:\'Plus Jakarta Sans\',sans-serif">' + (n.last_seen ? new Date(n.last_seen * 1000).toLocaleTimeString() : '-') + '</div><div style="font-size:9px;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-top:2px">Last Seen</div></div>' +
+        '<div style="background:var(--bg);border-radius:8px;padding:10px 12px;text-align:center"><div style="font-size:18px;font-weight:800;font-family:\'Plus Jakarta Sans\',sans-serif">' + (n.last_seen ? _formatTs(n.last_seen) : '-') + '</div><div style="font-size:9px;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-top:2px">Last Seen</div></div>' +
       '</div>' +
       // Config deploy status bar
       '<div id="node-config-' + esc(n.node_id) + '" style="margin-bottom:16px;display:none"></div>' +
@@ -5524,7 +6117,7 @@ async function loadNodeConfigStatus(nodeId) {
         '<span class="material-symbols-outlined" style="font-size:14px;color:' + sc + '">' + si + '</span>' +
         '<span style="color:var(--text2);font-weight:600">' + esc(d.agent_id || '-').substr(0, 8) + '</span>' +
         '<span style="color:' + sc + ';font-weight:700">' + d.status + '</span>' +
-        '<span style="color:var(--text3);margin-left:auto">' + new Date(d.created_at * 1000).toLocaleTimeString() + '</span>' +
+        '<span style="color:var(--text3);margin-left:auto">' + _formatTs(d.created_at) + '</span>' +
         (d.error ? '<span style="color:var(--error)" title="' + esc(d.error) + '">⚠</span>' : '') +
       '</div>';
     });
@@ -5668,7 +6261,7 @@ function _renderOfficeMessages() {
         '<span style="font-weight:700;color:var(--text)">' + esc(fromName) + '</span>' +
         '<span class="material-symbols-outlined" style="font-size:12px;color:var(--text3)">arrow_forward</span>' +
         '<span style="font-weight:700;color:var(--text)">' + esc(toName) + '</span>' +
-        '<span style="margin-left:auto;font-size:10px;color:var(--text3)">' + new Date(m.timestamp * 1000).toLocaleTimeString() + '</span>' +
+        '<span style="margin-left:auto;font-size:10px;color:var(--text3)">' + _formatTs(m.timestamp) + '</span>' +
         '<span style="font-size:10px;color:' + statusColor + ';font-weight:700">' + esc(m.status) + '</span>' +
       '</div>' +
       '<div style="color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc((m.content || '').slice(0, 200)) + '</div>' +
@@ -7070,8 +7663,8 @@ async function renderScheduler() {
     const agentName = (agents.find(a=>a.id===job.agent_id)||{}).name||job.agent_id;
     const statusIcon = job.enabled ? (job.last_status==='success'?'check_circle':job.last_status==='failed'?'error':'pending') : 'pause_circle';
     const statusColor = job.enabled ? (job.last_status==='success'?'var(--success)':job.last_status==='failed'?'var(--danger)':'var(--muted)') : 'var(--muted)';
-    const nextRun = job.next_run_at ? new Date(job.next_run_at*1000).toLocaleString() : '-';
-    const lastRun = job.last_run_at ? new Date(job.last_run_at*1000).toLocaleString() : 'Never';
+    const nextRun = job.next_run_at ? _formatTs(job.next_run_at) : '-';
+    const lastRun = job.last_run_at ? _formatTs(job.last_run_at) : 'Never';
 
     html += '<div class="card" style="position:relative">';
     html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">';
@@ -7327,7 +7920,7 @@ async function viewJobHistory(jobId) {
   } else {
     html += '<table class="table" style="font-size:12px"><thead><tr><th>Time</th><th>Status</th><th>Duration</th><th>Result</th></tr></thead><tbody>';
     records.forEach(r => {
-      const started = new Date(r.started_at*1000).toLocaleString();
+      const started = _formatTs(r.started_at);
       const dur = r.completed_at ? ((r.completed_at - r.started_at).toFixed(1)+'s') : 'running';
       const statusBadge = r.status==='success'?'badge-primary':r.status==='failed'?'badge badge-danger':'badge';
       html += '<tr><td>'+started+'</td><td><span class="badge '+statusBadge+'">'+r.status+'</span></td><td>'+dur+'</td><td style="max-width:300px;overflow:hidden;text-overflow:ellipsis">'+(r.result||r.error||'-').substring(0,200)+'</td></tr>';
@@ -9246,7 +9839,7 @@ async function showAnalysisPanel(agentId) {
       html += '<div style="font-size:13px;font-weight:600">' + statusIcon + ' ' + esc(a.task_id) + '</div>';
       html += '<div style="display:flex;align-items:center;gap:8px">';
       html += '<span style="font-size:12px;color:' + ratingColor + ';font-weight:700">' + '★'.repeat(a.auto_rating) + '<span style="color:var(--text3)">' + '★'.repeat(5-a.auto_rating) + '</span></span>';
-      html += '<span style="font-size:10px;color:var(--text3)">' + new Date(a.analyzed_at*1000).toLocaleString() + '</span>';
+      html += '<span style="font-size:10px;color:var(--text3)">' + _formatTs(a.analyzed_at) + '</span>';
       html += '</div></div>';
       html += '<div style="font-size:11px;color:var(--text2);margin-bottom:6px">' + esc(a.execution_note) + '</div>';
       html += '<div style="display:flex;gap:12px;font-size:10px;color:var(--text3)">';
@@ -10742,6 +11335,135 @@ function _eaCollectRagCollectionIds() {
   return ids;
 }
 
+// ── Tool permission editor (used inside editAgentProfile modal) ──
+// Master list: all tools the agent could possibly have. Populated from
+// the first call to _eaFetchToolCatalog and reused afterwards.
+window._eaToolCatalog = null;
+
+// Tool names that are ALWAYS available (matches _INFRA_TOOLS in
+// _execute_tool_with_policy). Displayed but disabled/checked.
+window._eaInfraTools = [
+  'memory_recall', 'knowledge_lookup', 'save_experience',
+  'get_skill_guide', 'plan_update', 'complete_step',
+];
+
+async function _eaFetchToolCatalog() {
+  if (window._eaToolCatalog) return window._eaToolCatalog;
+  try {
+    // Any agent's schemas work as catalog — pick current agent.
+    var aid = window._currentEditAgentId;
+    var r = await api('GET', '/api/portal/tools');
+    if (r && Array.isArray(r.tools)) {
+      window._eaToolCatalog = r.tools.map(function(t){
+        return {
+          name: (t.function && t.function.name) || t.name || '',
+          description: (t.function && t.function.description) || t.description || '',
+        };
+      }).filter(function(t){ return t.name; });
+      return window._eaToolCatalog;
+    }
+  } catch(e){}
+  // Fallback hardcoded list if /api/portal/tools unavailable
+  window._eaToolCatalog = [
+    'read_file','write_file','edit_file','search_files','glob_files',
+    'bash','run_tests','web_search','web_fetch',
+    'memory_recall','knowledge_lookup','save_experience',
+    'get_skill_guide','plan_update','complete_step',
+    'send_message','task_update','mcp_call','team_create',
+    'handoff_request','ack_message','reply_message','check_inbox',
+    'emit_ui_block','emit_handoff',
+    'datetime_calc','json_process','text_process',
+  ].map(function(n){ return {name:n, description:''}; });
+  return window._eaToolCatalog;
+}
+
+async function _eaRenderToolsGrid(allowed, denied) {
+  var grid = document.getElementById('ea-tools-grid');
+  if (!grid) return;
+  var catalog = await _eaFetchToolCatalog();
+  var allowSet = new Set(allowed || []);
+  var denySet = new Set(denied || []);
+  var isWhitelistMode = (allowed || []).length > 0;
+  var infraSet = new Set(window._eaInfraTools);
+
+  grid.innerHTML = catalog.slice().sort(function(a,b){
+    return a.name.localeCompare(b.name);
+  }).map(function(t){
+    var isInfra = infraSet.has(t.name);
+    var isDenied = denySet.has(t.name);
+    var isAllowed = !isDenied && (!isWhitelistMode || allowSet.has(t.name) || isInfra);
+    var checked = isAllowed ? 'checked' : '';
+    var disabled = isInfra ? 'disabled' : '';
+    var badge = isInfra
+      ? '<span style="font-size:9px;padding:1px 4px;background:rgba(99,102,241,0.15);color:var(--primary);border-radius:4px;margin-left:4px">核心</span>'
+      : '';
+    return (
+      '<label style="display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:4px;cursor:'+(isInfra?'default':'pointer')+';font-size:12px;background:'+(isAllowed?'rgba(16,185,129,0.08)':'transparent')+'" title="'+esc(t.description.slice(0,120))+'">'
+      + '<input type="checkbox" '+checked+' '+disabled+' data-tool="'+esc(t.name)+'" onchange="_eaToolsChanged()">'
+      + '<span style="font-family:Menlo,monospace;font-size:11px">'+esc(t.name)+'</span>'
+      + badge
+      + '</label>'
+    );
+  }).join('');
+  _eaToolsChanged();
+}
+
+function _eaToolsChanged() {
+  var boxes = document.querySelectorAll('#ea-tools-grid input[type=checkbox]');
+  var checked = 0, total = boxes.length;
+  boxes.forEach(function(b){ if (b.checked) checked++; });
+  var sum = document.getElementById('ea-tools-summary');
+  if (sum) sum.textContent = checked + ' / ' + total + ' 个工具已勾选';
+  // Update row highlight
+  boxes.forEach(function(b){
+    var lbl = b.closest('label');
+    if (!lbl) return;
+    lbl.style.background = b.checked ? 'rgba(16,185,129,0.08)' : 'transparent';
+  });
+}
+
+function _eaToolsPresetAll() {
+  document.querySelectorAll('#ea-tools-grid input[type=checkbox]').forEach(function(b){
+    if (!b.disabled) b.checked = true;
+  });
+  _eaToolsChanged();
+}
+function _eaToolsPresetMinimal() {
+  var infraSet = new Set(window._eaInfraTools);
+  var minimalSet = new Set(['read_file','write_file','edit_file','search_files','glob_files','bash','web_search','web_fetch']);
+  document.querySelectorAll('#ea-tools-grid input[type=checkbox]').forEach(function(b){
+    var name = b.getAttribute('data-tool');
+    if (b.disabled) return;
+    b.checked = minimalSet.has(name);
+  });
+  _eaToolsChanged();
+}
+function _eaToolsPresetReadonly() {
+  var readSet = new Set(['read_file','search_files','glob_files','web_search','web_fetch']);
+  document.querySelectorAll('#ea-tools-grid input[type=checkbox]').forEach(function(b){
+    var name = b.getAttribute('data-tool');
+    if (b.disabled) return;
+    b.checked = readSet.has(name);
+  });
+  _eaToolsChanged();
+}
+
+// Returns {allowed_tools: [...], denied_tools: [...]} from current checkbox state.
+// Semantic: treat checked = allowed, unchecked = denied. Infra tools are
+// omitted from both lists since they bypass the check in backend anyway.
+function _eaCollectToolPolicy() {
+  var infraSet = new Set(window._eaInfraTools);
+  var allowed = [], denied = [];
+  document.querySelectorAll('#ea-tools-grid input[type=checkbox]').forEach(function(b){
+    var name = b.getAttribute('data-tool');
+    if (!name || infraSet.has(name)) return;
+    if (b.checked) allowed.push(name);
+    else denied.push(name);
+  });
+  return { allowed_tools: allowed, denied_tools: denied };
+}
+
+
 async function editAgentProfile(agentId) {
   const agent = agents.find(a => a.id === agentId);
   if (!agent) return;
@@ -10843,6 +11565,10 @@ async function editAgentProfile(agentId) {
   }
 
   window._currentEditAgentId = agentId;
+  // Populate tool permission grid (async; non-blocking to show the modal)
+  try {
+    _eaRenderToolsGrid(prof.allowed_tools || [], prof.denied_tools || []);
+  } catch(e) { console.warn('tools grid render failed:', e); }
   showModal('edit-agent');
 }
 
@@ -10931,6 +11657,13 @@ async function saveAgentProfile() {
       rag_mode: (document.getElementById('ea-rag-mode') || {}).value || 'shared',
       rag_collection_ids: _eaCollectRagCollectionIds(),
     };
+
+    // Merge tool permission state from the new UI (nov 2026)
+    try {
+      var _policy = _eaCollectToolPolicy();
+      payload.allowed_tools = _policy.allowed_tools;
+      payload.denied_tools = _policy.denied_tools;
+    } catch(e) { console.warn('tool policy collect failed:', e); }
 
     console.log('saveAgentProfile payload:', agentId, payload);
     const result = await api('POST', '/api/portal/agent/' + agentId + '/profile', payload);
@@ -11071,7 +11804,7 @@ async function loadChannelEvents() {
     <div style="padding:6px 0;border-bottom:1px solid var(--border)">
       <div style="display:flex;justify-content:space-between">
         <span style="color:${e.direction==='inbound'?'var(--accent)':'var(--green)'}">${e.direction==='inbound'?'⬇':'⬆'} ${esc(e.platform)}</span>
-        <span style="color:var(--text3);font-size:11px">${new Date(e.timestamp*1000).toLocaleTimeString()}</span>
+        <span style="color:var(--text3);font-size:11px">${_formatTs(e.timestamp)}</span>
       </div>
       <div style="color:var(--text2);margin-top:2px">${esc(e.sender||'system')}: ${esc((e.text||'').slice(0,100))}</div>
       ${e.reply ? '<div style="color:var(--green);margin-top:2px">↳ '+esc(e.reply.slice(0,100))+'</div>' : ''}
@@ -11564,7 +12297,7 @@ async function renderProjectDetail(projId) {
           var statusIcon = m.status==='confirmed'?'✅':m.status==='completed'?'☑️':m.status==='rejected'?'❌':m.status==='in_progress'?'⏳':'○';
           var ag = agents.find(function(a){ return a.id === m.responsible_agent_id; });
           var responsible = ag ? ag.name : (m.responsible_agent_id||'—');
-          var dueDate = m.due_date ? new Date(m.due_date).toLocaleDateString() : '—';
+          var dueDate = m.due_date ? _formatDate(m.due_date) : '—';
           var actions = '';
           if (m.status === 'completed') {
             // Agent 已声明完成，等待 admin 确认
@@ -13356,7 +14089,7 @@ async function siLoadPlanBoard() {
       var meta = _siStateMeta(p.state);
       var expCount = (p.new_experiences || []).length;
       var tsSecs = p.completed_at || p.started_at || p.queued_at || p.created_at || 0;
-      var tsStr = tsSecs ? new Date(tsSecs * 1000).toLocaleString() : '-';
+      var tsStr = tsSecs ? _formatTs(tsSecs) : '-';
 
       // Header row
       html += '<div class="card" style="padding:12px 16px;margin-bottom:10px;cursor:pointer;border-left:3px solid '+meta.color+'" onclick="var d=this.querySelector(\'.si-plan-detail\');if(d)d.style.display=d.style.display===\'none\'?\'block\':\'none\'">';
@@ -13463,7 +14196,7 @@ async function siLoadInsights() {
     }
     var html = '';
     data.insights.forEach(function(ins, idx) {
-      var ts = ins.created_at ? new Date(ins.created_at * 1000).toLocaleString() : '';
+      var ts = ins.created_at ? _formatTs(ins.created_at) : '';
       var expCount = (ins.new_experiences && ins.new_experiences.length) || 0;
       html += '<div style="padding:10px 12px;border-radius:8px;background:var(--surface2);margin-bottom:8px'+(idx===0?';border-left:3px solid var(--primary)':'')+'">';
       html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">';
@@ -13547,7 +14280,7 @@ async function siLoadHistory() {
     }
     var html = '';
     items.forEach(function(item) {
-      var ts = item.created_at ? new Date(item.created_at * 1000).toLocaleString() : '';
+      var ts = item.created_at ? _formatTs(item.created_at) : '';
       var icon = item.type === 'retrospective' ? 'replay' : 'school';
       var color = item.type === 'retrospective' ? '#FF9800' : '#4CAF50';
       html += '<div style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border-light)">';
@@ -14744,7 +15477,7 @@ async function renderMeetingsTab() {
     listEl.innerHTML = list.map(function(m){
       var statusColor = m.status==='active'?'#22c55e':m.status==='scheduled'?'var(--primary)':m.status==='closed'?'var(--text3)':'#ef4444';
       var statusLabel = m.status==='active'?'进行中':m.status==='scheduled'?'待开始':m.status==='closed'?'已结束':'已取消';
-      var ts = m.created_at ? new Date(m.created_at*1000).toLocaleString() : '';
+      var ts = m.created_at ? _formatTs(m.created_at) : '';
       var partAvatars = (m.participants||[]).slice(0,5).map(function(pid){
         var ag = (window._cachedAgents||agents||[]).find(function(a){return a.id===pid;});
         var nm = ag ? (ag.name||'?')[0] : '?';
@@ -14828,7 +15561,7 @@ var _mtgPollTimer = null;
 function _mtgBuildMessagesHtml(m, mid) {
   var refs = [];
   var html = (m.messages || []).map(function(x, _i) {
-    var ts = x.created_at ? new Date(x.created_at * 1000).toLocaleTimeString() : '';
+    var ts = x.created_at ? _formatTs(x.created_at) : '';
     var anchor = 'mtg-msg-card-' + mid + '-' + _i;
     refs.push({
       anchor: anchor,
@@ -16041,8 +16774,8 @@ async function loadTaskCenter() {
       var statusIcon = enabled
         ? (job.last_status==='success'?'✅':job.last_status==='failed'?'❌':'⏱')
         : '⏸';
-      var nextRun = job.next_run_at ? new Date(job.next_run_at*1000).toLocaleString() : '-';
-      var lastRun = job.last_run_at ? new Date(job.last_run_at*1000).toLocaleString() : '从未';
+      var nextRun = job.next_run_at ? _formatTs(job.next_run_at) : '-';
+      var lastRun = job.last_run_at ? _formatTs(job.last_run_at) : '从未';
       var targetLine = '';
       if (kind === 'workflow') {
         var wfName = wfNameById[job.workflow_id] || job.workflow_id || '(未指定)';
@@ -17434,7 +18167,7 @@ function showAgentMemoryView(aid) {
             + '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:'+lvlColor+'20;color:'+lvlColor+'">Level '+lvl+' '+lvlLabel+'</span>'
             + '<span style="font-size:10px;color:var(--text3)">Turn '+esc(String(ep.turn_start||'?'))+'-'+esc(String(ep.turn_end||'?'))+'</span>'
             + '<span style="font-size:10px;color:var(--text3)">'+esc(String(ep.message_count||0))+' msgs</span>'
-            + '<span style="font-size:10px;color:var(--text3);margin-left:auto">'+esc(String(ep.created_at||'').slice(0,19))+'</span>'
+            + '<span style="font-size:10px;color:var(--text3);margin-left:auto">'+esc(_formatTs(ep.created_at))+'</span>'
           + '</div>'
           + '<div style="font-size:11px;color:var(--text2);white-space:pre-wrap;max-height:80px;overflow:auto">'+esc(ep.summary||'')+'</div>'
           + (ep.keywords ? '<div style="margin-top:4px;font-size:10px;color:var(--text3)">关键词: '+esc(ep.keywords)+'</div>' : '')
@@ -17461,7 +18194,7 @@ function showAgentMemoryView(aid) {
           + '<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">'
             + '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:'+catColor+'20;color:'+catColor+'">'+esc(catLabel)+'</span>'
             + '<span style="font-size:10px;color:var(--text3)">置信度 '+conf+'%</span>'
-            + '<span style="font-size:10px;color:var(--text3);margin-left:auto">'+esc(String(f.created_at||'').slice(0,19))+'</span>'
+            + '<span style="font-size:10px;color:var(--text3);margin-left:auto">'+esc(_formatTs(f.created_at))+'</span>'
           + '</div>'
           + '<div style="font-size:11px;color:var(--text2)">'+esc(f.content||'')+'</div>'
           + '</div>';
@@ -17698,8 +18431,36 @@ async function loadSkillStore() {
       box.innerHTML = '<div style="padding:20px;text-align:center">目录为空。把 SKILL.md 或 manifest.yaml 放到 data/skill_catalog/ 下再点"重新扫描"。</div>';
       return;
     }
+    // ── Category inference (tag-based heuristic) ──
+    // 每个 skill 落到一个类目；豆腐块按类目分段渲染
+    function _skillCategory(e) {
+      var bt = (e.metadata && e.metadata.bundle_type) || '';
+      var tags = (e.tags || []).map(function(t){return String(t).toLowerCase();}).join(' ');
+      var name = (e.name || '').toLowerCase();
+      var all = tags + ' ' + name;
+      if (bt === 'capability' || /tool-?bundle/.test(tags)) return {key:'bundle', label:'🧰 工具包 Tool Bundles', order:0};
+      if (/ppt|pptx|doc|docx|excel|xlsx|office|word/.test(all)) return {key:'office', label:'📊 办公文档 Office', order:1};
+      if (/web|http|browser|search|crawl|scrape/.test(all)) return {key:'web', label:'🌐 网络 Web', order:2};
+      if (/memory|knowledge|rag|l3|embed/.test(all)) return {key:'memory', label:'🧠 记忆 Memory', order:3};
+      if (/data|finance|stock|akshare|baostock|chart|plot|csv|json/.test(all)) return {key:'data', label:'📈 数据分析 Data', order:4};
+      if (/image|screenshot|audio|video|voice|tts|ocr|media/.test(all)) return {key:'media', label:'🖼️ 多媒体 Media', order:5};
+      if (/message|chat|notify|email|sms|slack/.test(all)) return {key:'msg', label:'💬 消息通讯 Messaging', order:6};
+      if (/schedule|cron|time|timer/.test(all)) return {key:'sched', label:'⏰ 调度 Scheduling', order:7};
+      if (/mcp|integration|connector|api/.test(all)) return {key:'integ', label:'🔌 集成 Integration', order:8};
+      if (/code|coding|lint|test|debug|compile/.test(all)) return {key:'code', label:'💻 编码 Coding', order:9};
+      return {key:'other', label:'🎨 其他 Other', order:99};
+    }
+    // Group entries by inferred category
+    var groups = {};      // key -> {label, order, entries:[]}
+    _skillStoreState.entries.forEach(function(e){
+      var c = _skillCategory(e);
+      if (!groups[c.key]) groups[c.key] = {label:c.label, order:c.order, entries:[]};
+      groups[c.key].entries.push(e);
+    });
+    // Sort categories by defined order
+    var orderedKeys = Object.keys(groups).sort(function(a,b){return groups[a].order - groups[b].order;});
     // 豆腐块 grid — responsive, 3-4 per row depending on viewport
-    var cards = _skillStoreState.entries.map(function(e){
+    function _renderCard(e){
       var srcColor = e.source === 'official' ? '#10b981'
                    : e.source === 'maintainer' ? '#a78bfa'
                    : e.source === 'community' ? '#60a5fa'
@@ -17708,13 +18469,31 @@ async function loadSkillStore() {
       var annBadge = (ann && ann.notes && ann.notes.length)
         ? '<span title="本地笔记" style="padding:1px 5px;font-size:10px;background:rgba(251,191,36,0.15);color:#f59e0b;border-radius:8px;margin-left:4px">💡'+ann.notes.length+'</span>'
         : '';
+      // Special-case: pptx-author skill gets a "🎨 主题画廊" shortcut button.
+      // Clicking it opens a modal with 10 visual theme previews + a keyword-
+      // based theme recommender. No effect on other skills.
+      var pptxThemeBtn = '';
+      if (e.name === 'pptx-author' || e.id === 'pptx-author') {
+        pptxThemeBtn = '<button class="btn btn-sm" title="浏览 10 套 PPT 主题预览" onclick="event.stopPropagation();openPptxThemeGallery()">🎨</button>';
+      }
+      // Three lifecycle actions per skill:
+      //   uninstall   — remove the install (skill keeps in catalog)
+      //   disable     — soft-hide (catalog file kept, can re-enable)
+      //   delete      — hard-delete catalog directory (cannot undo)
+      var disabled = !!(e.metadata && e.metadata.disabled);
       var actions = '';
       if (e.installed) {
         actions = '<button class="btn btn-sm" style="flex:1" onclick="event.stopPropagation();openGrantModal(\''+esc(e.installed_id)+'\',\''+esc(e.name)+'\')"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">badge</span> 授权</button>'
+                + pptxThemeBtn
                 + '<button class="btn btn-sm" title="笔记" onclick="event.stopPropagation();openAnnotateModal(\''+esc(e.installed_id)+'\',\''+esc(e.name)+'\')">📝</button>'
-                + '<button class="btn btn-sm" title="卸载" style="color:var(--error)" onclick="event.stopPropagation();uninstallStoreEntry(\''+esc(e.id)+'\')"><span class="material-symbols-outlined" style="font-size:14px">delete</span></button>';
+                + '<button class="btn btn-sm" title="卸载 (保留目录)" style="color:var(--warning,#f59e0b)" onclick="event.stopPropagation();uninstallStoreEntry(\''+esc(e.id)+'\')"><span class="material-symbols-outlined" style="font-size:14px">remove_circle</span></button>'
+                + '<button class="btn btn-sm" title="彻底删除目录" style="color:var(--error)" onclick="event.stopPropagation();deleteCatalogEntry(\''+esc(e.id)+'\',\''+esc(e.name)+'\')"><span class="material-symbols-outlined" style="font-size:14px">delete_forever</span></button>';
       } else {
-        actions = '<button class="btn btn-primary btn-sm" style="flex:1" onclick="event.stopPropagation();installStoreEntry(\''+esc(e.id)+'\')"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">download</span> 安装</button>';
+        var disableLabel = disabled ? '恢复' : '失效';
+        var disableIcon = disabled ? 'visibility' : 'visibility_off';
+        actions = '<button class="btn btn-primary btn-sm" style="flex:1" onclick="event.stopPropagation();installStoreEntry(\''+esc(e.id)+'\')"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">download</span> 安装</button>'
+                + '<button class="btn btn-sm" title="'+disableLabel+'" onclick="event.stopPropagation();toggleDisableCatalogEntry(\''+esc(e.id)+'\','+(!disabled)+')"><span class="material-symbols-outlined" style="font-size:14px">'+disableIcon+'</span></button>'
+                + '<button class="btn btn-sm" title="彻底删除目录" style="color:var(--error)" onclick="event.stopPropagation();deleteCatalogEntry(\''+esc(e.id)+'\',\''+esc(e.name)+'\')"><span class="material-symbols-outlined" style="font-size:14px">delete_forever</span></button>';
       }
       // Icon: from manifest metadata.emoji if present, else first char or 📦
       var emoji = (e.metadata && e.metadata.emoji) || e.icon || '';
@@ -17752,10 +18531,24 @@ async function loadSkillStore() {
         +  '<div style="display:flex;gap:6px;margin-top:auto">'+actions+'</div>'
         + '</div>'
       );
+    }
+    // Render: one <section> per category with its own grid
+    var sections = orderedKeys.map(function(k){
+      var g = groups[k];
+      var grid = g.entries.map(_renderCard).join('');
+      return (
+        '<section style="margin-bottom:20px">'
+        + '<div style="display:flex;align-items:baseline;gap:8px;margin:4px 2px 10px;padding-bottom:6px;border-bottom:1px solid var(--border)">'
+        +   '<h3 style="margin:0;font-size:14px;font-weight:600">'+esc(g.label)+'</h3>'
+        +   '<span style="font-size:11px;color:var(--text3)">'+g.entries.length+' 个</span>'
+        + '</div>'
+        + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px">'
+        +   grid
+        + '</div>'
+        + '</section>'
+      );
     }).join('');
-    box.innerHTML =
-      '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px">'
-      + cards + '</div>';
+    box.innerHTML = sections;
   } catch(err) {
     box.innerHTML = '<div style="color:var(--error);padding:20px">加载失败: '+esc(String(err))+'</div>';
   }
@@ -17783,6 +18576,526 @@ async function uninstallStoreEntry(entryId) {
     if (r && r.ok) loadSkillStore();
     else alert('卸载失败');
   } catch(e) { alert('卸载失败: '+e); }
+}
+
+// Soft-disable: hide from default list but keep on disk
+async function toggleDisableCatalogEntry(entryId, disable) {
+  var verb = disable ? '失效' : '恢复';
+  try {
+    var r = await api('POST', '/api/portal/skill-store',
+      {action:'disable', entry_id: entryId, disabled: !!disable});
+    if (r && r.ok) {
+      loadSkillStore();
+      if (window._toast) window._toast(verb + '成功', 'success');
+    } else {
+      alert(verb + '失败');
+    }
+  } catch(e) { alert(verb + '失败: '+e); }
+}
+
+// Hard-delete: remove the catalog directory entirely. Asks twice.
+async function deleteCatalogEntry(entryId, entryName) {
+  var confirmMsg = '⚠️ 彻底删除技能 "' + entryName + '" 的目录？\n'
+    + '此操作不可撤销 — 文件会从磁盘删除。\n'
+    + '如果只是暂时不用,改用"失效"按钮。';
+  if (!confirm(confirmMsg)) return;
+  // Double-confirm for irreversible action
+  var second = prompt('请输入技能名 "' + entryName + '" 以确认删除:');
+  if (second !== entryName) {
+    if (second !== null) alert('名称不匹配,已取消。');
+    return;
+  }
+  try {
+    var r = await api('POST', '/api/portal/skill-store',
+      {action:'delete_catalog', entry_id: entryId});
+    if (r && r.ok) {
+      loadSkillStore();
+      if (window._toast) window._toast('已彻底删除', 'success');
+    } else {
+      alert('删除失败 — 检查路径是否在 catalog 根目录下');
+    }
+  } catch(e) { alert('删除失败: '+e); }
+}
+
+window.toggleDisableCatalogEntry = toggleDisableCatalogEntry;
+window.deleteCatalogEntry = deleteCatalogEntry;
+
+// ── PPTX Theme Gallery (pptx-author skill only) ──────────────────────────
+// Shows 10 theme preview thumbnails + a keyword-based recommender. Agent
+// can use any theme id in `render_from_md(prs, "<theme_id>/T<NN>_..." ...)`.
+var _pptxThemeState = { themes: [], layouts: [], highlighted: {} };
+
+async function openPptxThemeGallery() {
+  // Create modal shell
+  var modal = document.createElement('div');
+  modal.id = 'pptx-theme-gallery-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center';
+  modal.innerHTML =
+    '<div style="background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:24px;max-width:1200px;width:96%;max-height:92vh;overflow:auto">'
+    + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">'
+    +   '<h3 style="margin:0">🎨 PPT 主题画廊 · 10 套视觉风格</h3>'
+    +   '<button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'pptx-theme-gallery-modal\').remove()">✕</button>'
+    + '</div>'
+    + '<div id="pptx-recommend-box" style="display:flex;gap:8px;align-items:center;margin-bottom:12px;padding:10px 12px;background:var(--surface);border:1px solid var(--border);border-radius:8px">'
+    +   '<span style="font-size:18px">🔍</span>'
+    +   '<input id="pptx-recommend-query" placeholder="描述你的 PPT (如: AI 发布会 / 并购路演 / ESG 报告) —— 自动推荐主题" '
+    +      'style="flex:1;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:13px" '
+    +      'oninput="_pptxRecommendDebounced()">'
+    +   '<span id="pptx-recommend-status" style="font-size:11px;color:var(--text3)">输入关键词</span>'
+    + '</div>'
+    + '<div style="display:flex;gap:8px;margin-bottom:12px;border-bottom:1px solid var(--border)">'
+    +   '<button id="pptx-tab-themes"  class="btn btn-sm" onclick="_switchPptxTab(\'themes\')" '
+    +           'style="border-radius:6px 6px 0 0">主题视图 (10 套)</button>'
+    +   '<button id="pptx-tab-layouts" class="btn btn-sm btn-ghost" onclick="_switchPptxTab(\'layouts\')" '
+    +           'style="border-radius:6px 6px 0 0">版式视图 (15 个)</button>'
+    + '</div>'
+    + '<div id="pptx-theme-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px"></div>'
+    + '<div id="pptx-layout-grid" style="display:none;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px"></div>'
+    + '<div id="pptx-layouts-ref" style="margin-top:20px;padding:14px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:12px"></div>'
+    + '</div>';
+  document.body.appendChild(modal);
+
+  // Load themes
+  try {
+    var data = await api('GET', '/api/portal/pptx-themes');
+    _pptxThemeState.themes = data.themes || [];
+    _pptxThemeState.layouts = data.layouts || [];
+    _pptxThemeState.highlighted = {};
+    _renderPptxThemeGrid();
+    _renderPptxLayoutRef();
+  } catch(e) {
+    document.getElementById('pptx-theme-grid').innerHTML =
+      '<div style="color:var(--error);padding:20px">加载失败: '+esc(String(e))+'</div>';
+  }
+}
+
+// Tab switcher between theme view and layout view.
+function _switchPptxTab(which) {
+  var themeBtn  = document.getElementById('pptx-tab-themes');
+  var layoutBtn = document.getElementById('pptx-tab-layouts');
+  var themeGrid  = document.getElementById('pptx-theme-grid');
+  var layoutGrid = document.getElementById('pptx-layout-grid');
+  if (!themeGrid || !layoutGrid) return;
+  if (which === 'layouts') {
+    themeBtn.classList.add('btn-ghost');
+    layoutBtn.classList.remove('btn-ghost');
+    themeGrid.style.display = 'none';
+    layoutGrid.style.display = 'grid';
+    if (!layoutGrid.dataset.loaded) {
+      _loadPptxLayoutGrid();
+      layoutGrid.dataset.loaded = '1';
+    }
+  } else {
+    themeBtn.classList.remove('btn-ghost');
+    layoutBtn.classList.add('btn-ghost');
+    themeGrid.style.display = 'grid';
+    layoutGrid.style.display = 'none';
+  }
+}
+
+// Layout grid: list all 15 layouts, each card shows 3 theme previews
+// (corporate / tech_dark / minimal — picked as visual range).
+async function _loadPptxLayoutGrid() {
+  var grid = document.getElementById('pptx-layout-grid');
+  if (!grid) return;
+  grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;'
+    + 'color:var(--text3);padding:30px">⏳ 加载中...</div>';
+  try {
+    var data = await api('GET', '/api/portal/pptx-layouts');
+  } catch (e) {
+    grid.innerHTML = '<div style="grid-column:1/-1;color:var(--error);'
+      + 'padding:20px">加载失败: ' + esc(String(e)) + '</div>';
+    return;
+  }
+  var layouts = data.layouts || [];
+  if (!layouts.length) {
+    grid.innerHTML = '<div style="grid-column:1/-1;padding:20px">'
+      + '没有可用版式</div>';
+    return;
+  }
+  // Each layout: card with name + 3 mini-previews (3 themes)
+  var SAMPLE_THEMES = ['corporate', 'tech_dark', 'minimal'];
+  grid.innerHTML = layouts.map(function(L){
+    var nameZh = L.name_zh || L.name || L.id;
+    var summary = L.summary || '';
+    var inShow = L.in_showcase
+      ? '<span style="position:absolute;top:8px;right:8px;padding:2px 8px;'
+        + 'background:var(--success,#3a8e44);color:white;font-size:10px;'
+        + 'border-radius:10px;font-weight:600">SHOWCASE</span>'
+      : '';
+    var thumbs = SAMPLE_THEMES.map(function(theme){
+      var url = '/api/portal/pptx-layouts/' + encodeURIComponent(L.id)
+        + '/preview.png?theme=' + encodeURIComponent(theme);
+      return '<div style="flex:1;min-width:0">'
+        + '<img src="' + esc(url) + '" alt="' + esc(theme) + '" '
+        + 'loading="lazy" '
+        + 'style="width:100%;aspect-ratio:16/9;object-fit:cover;'
+        + 'border-radius:4px;border:1px solid var(--border-light);'
+        + 'background:#f5f5f5;cursor:pointer" '
+        + 'onclick="_enlargePptxSlide(\'' + esc(url) + '\')">'
+        + '<div style="font-size:9px;color:var(--text3);text-align:center;'
+        + 'margin-top:2px">' + esc(theme) + '</div>'
+        + '</div>';
+    }).join('');
+    var copyArgs = "'" + esc(L.id) + "'";
+    return '<div style="position:relative;border:1px solid var(--border);'
+      + 'border-radius:10px;padding:12px;background:var(--surface);'
+      + 'transition:transform 0.12s,box-shadow 0.12s" '
+      + 'onmouseenter="this.style.transform=\'translateY(-2px)\';'
+      + 'this.style.boxShadow=\'0 4px 12px rgba(0,0,0,0.1)\'" '
+      + 'onmouseleave="this.style.transform=\'\';this.style.boxShadow=\'\'">'
+      + inShow
+      + '<div style="display:flex;justify-content:space-between;'
+      + 'align-items:baseline;margin-bottom:8px">'
+      +   '<div style="font-weight:700;font-size:14px">' + esc(nameZh) + '</div>'
+      +   '<code style="font-size:10px;color:var(--text3);'
+      + 'font-family:Menlo,monospace">' + esc(L.id) + '</code>'
+      + '</div>'
+      + '<div style="font-size:11px;color:var(--text2);line-height:1.5;'
+      + 'min-height:34px;margin-bottom:10px">'
+      + esc((summary || '').slice(0, 100))
+      + '</div>'
+      + '<div style="display:flex;gap:4px;margin-bottom:10px">' + thumbs + '</div>'
+      + '<div style="display:flex;gap:6px">'
+      +   '<button class="btn btn-sm" style="flex:1" '
+      + 'onclick="_copyLayoutSnippet(' + copyArgs + ')" '
+      + 'title="复制 render_from_md 调用片段"><span class="material-symbols-outlined" '
+      + 'style="font-size:13px;vertical-align:middle">content_copy</span> '
+      + '复制代码</button>'
+      + '</div>'
+      + '</div>';
+  }).join('');
+}
+
+// Copy a render_from_md snippet for a chosen layout id.
+function _copyLayoutSnippet(layoutId) {
+  var snippet = "render_from_md(prs, \"corporate/" + layoutId + "\", params={\n"
+    + "    # 用 describe_layout(\"" + layoutId + "\") 看完整参数 schema\n"
+    + "    \"title\": \"...\",\n"
+    + "})";
+  try {
+    navigator.clipboard.writeText(snippet);
+    if (typeof toast === 'function') toast('已复制 render_from_md 片段');
+    else console.log('Copied:', snippet);
+  } catch (e) {
+    console.warn('clipboard write failed', e);
+  }
+}
+
+function _renderPptxThemeGrid() {
+  var grid = document.getElementById('pptx-theme-grid');
+  if (!grid) return;
+  grid.innerHTML = _pptxThemeState.themes.map(function(t){
+    var hi = _pptxThemeState.highlighted[t.id];
+    var border = hi
+      ? '2px solid var(--primary);box-shadow:0 0 0 3px rgba(99,102,241,0.15)'
+      : '1px solid var(--border)';
+    var badge = hi
+      ? '<span style="position:absolute;top:8px;right:8px;padding:2px 8px;background:var(--primary);color:white;font-size:10px;border-radius:10px;font-weight:600">推荐 · '+hi.score+'</span>'
+      : '';
+    var matched = (hi && hi.matched && hi.matched.length)
+      ? '<div style="margin-top:6px;font-size:10px;color:var(--primary)">匹配: '+hi.matched.map(esc).join(' · ')+'</div>'
+      : '';
+    var tags = (t.tags || []).slice(0,4).map(function(x){
+      return '<span style="padding:1px 6px;font-size:10px;background:rgba(99,102,241,0.1);color:var(--primary);border-radius:6px;margin-right:4px">'+esc(x)+'</span>';
+    }).join('');
+    return (
+      '<div style="position:relative;border:'+border+';border-radius:10px;padding:12px;background:var(--surface);transition:transform 0.12s,box-shadow 0.12s" '
+      +  'onmouseenter="this.style.transform=\'translateY(-2px)\'" onmouseleave="this.style.transform=\'\'" >'
+      +  badge
+      +  '<img src="'+esc(t.preview_url)+'" alt="'+esc(t.name)+'" '
+      +       'style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:6px;border:1px solid var(--border-light);background:#f5f5f5">'
+      +  '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:10px">'
+      +    '<div style="font-weight:700;font-size:14px">'+esc(t.name)+'</div>'
+      +    '<code style="font-size:11px;color:var(--text3);font-family:Menlo,monospace">'+esc(t.id)+'</code>'
+      +  '</div>'
+      +  '<div style="font-size:11px;color:var(--text2);margin-top:4px;line-height:1.5;min-height:34px">'+esc((t.description||'').slice(0,120))+'</div>'
+      +  '<div style="margin-top:8px">'+tags+'</div>'
+      +  matched
+      +  '<div style="display:flex;gap:6px;margin-top:10px">'
+      +    '<button class="btn btn-sm" style="flex:1" onclick="_copyPptxSnippet(\''+esc(t.id)+'\')" title="复制这套主题的 python 示例代码到剪贴板"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:middle">content_copy</span> 复制代码</button>'
+      +    '<button class="btn btn-sm" style="flex:1" onclick="_viewPptxDemo(\''+esc(t.id)+'\',\''+esc(t.name)+'\')" title="查看这套主题的 8 页 demo 缩略图"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:middle">preview</span> 查看 demo</button>'
+      +  '</div>'
+      + '</div>'
+    );
+  }).join('');
+}
+
+// ── Demo slides lightbox (shown when clicking "查看 demo" on a theme card) ──
+async function _viewPptxDemo(themeId, themeName) {
+  var old = document.getElementById('pptx-demo-modal');
+  if (old) old.remove();
+
+  var modal = document.createElement('div');
+  modal.id = 'pptx-demo-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:10001;display:flex;flex-direction:column;padding:24px;overflow:auto';
+  modal.innerHTML =
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;color:white">'
+    +   '<div>'
+    +     '<h3 style="margin:0;font-size:18px">📺 ' + esc(themeName) + ' · 完整 demo</h3>'
+    +     '<div style="font-size:12px;opacity:0.7;margin-top:4px">id: <code>'+esc(themeId)+'</code> · 缩略图为 PIL 简化渲染，实际细节见下方 .pptx</div>'
+    +   '</div>'
+    +   '<div style="display:flex;gap:8px">'
+    +     '<a class="btn btn-sm" href="/api/portal/pptx-themes/'+esc(themeId)+'/demo.pptx" download style="text-decoration:none"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">download</span> 下载 .pptx</a>'
+    +     '<button class="btn btn-sm" onclick="document.getElementById(\'pptx-demo-modal\').remove()">✕ 关闭</button>'
+    +   '</div>'
+    + '</div>'
+    + '<div id="pptx-demo-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px"></div>';
+  document.body.appendChild(modal);
+
+  try {
+    var data = await api('GET', '/api/portal/pptx-themes/' + encodeURIComponent(themeId) + '/demo');
+    var grid = document.getElementById('pptx-demo-grid');
+    if (!data.slides || !data.slides.length) {
+      grid.innerHTML = '<div style="color:white;padding:20px">demo 尚未生成</div>';
+      return;
+    }
+    grid.innerHTML = data.slides.map(function(s){
+      return (
+        '<div style="background:white;border-radius:6px;overflow:hidden;cursor:pointer" onclick="_enlargePptxSlide(\''+esc(s.url)+'\')">'
+        + '<img src="'+esc(s.url)+'" alt="slide '+s.index+'" style="width:100%;aspect-ratio:16/9;object-fit:contain;background:#f5f5f5">'
+        + '<div style="padding:6px 10px;font-size:11px;color:var(--text2);background:#f9f9f9;border-top:1px solid #eee">Slide '+s.index+' / '+data.slide_count+'</div>'
+        + '</div>'
+      );
+    }).join('');
+  } catch(e) {
+    document.getElementById('pptx-demo-grid').innerHTML =
+      '<div style="color:#fca5a5;padding:20px">加载 demo 失败: '+esc(String(e))+'</div>';
+  }
+}
+
+function _enlargePptxSlide(url) {
+  var old = document.getElementById('pptx-slide-lightbox');
+  if (old) old.remove();
+  var lb = document.createElement('div');
+  lb.id = 'pptx-slide-lightbox';
+  lb.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.92);z-index:10002;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:40px';
+  lb.innerHTML = '<img src="'+esc(url)+'" style="max-width:100%;max-height:100%;object-fit:contain;border-radius:4px;box-shadow:0 4px 20px rgba(0,0,0,0.5)">';
+  lb.onclick = function(){ lb.remove(); };
+  document.body.appendChild(lb);
+}
+
+// Preview an arbitrary pptx path (e.g., agent-produced file in workspace).
+// Takes the full file path, gets a data: URL back for each slide, renders
+// in a modal. Exposed as window.previewPptxFile for on-demand usage.
+async function previewPptxFile(pptxPath, title) {
+  var old = document.getElementById('pptx-file-preview-modal');
+  if (old) old.remove();
+
+  var modal = document.createElement('div');
+  modal.id = 'pptx-file-preview-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:10001;display:flex;flex-direction:column;padding:24px;overflow:auto';
+  modal.innerHTML =
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;color:white">'
+    +   '<div>'
+    +     '<h3 style="margin:0;font-size:16px">📺 ' + esc(title || '预览 PPT') + '</h3>'
+    +     '<div style="font-size:11px;opacity:0.7;margin-top:4px;font-family:Menlo,monospace">'+esc(pptxPath)+'</div>'
+    +   '</div>'
+    +   '<button class="btn btn-sm" onclick="document.getElementById(\'pptx-file-preview-modal\').remove()">✕ 关闭</button>'
+    + '</div>'
+    + '<div id="pptx-file-preview-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px">'
+    +   '<div style="color:white;padding:20px;text-align:center">正在渲染…</div>'
+    + '</div>';
+  document.body.appendChild(modal);
+
+  try {
+    var data = await api('POST', '/api/portal/pptx-preview', {path: pptxPath, width: 480});
+    var grid = document.getElementById('pptx-file-preview-grid');
+    if (!data) {
+      grid.innerHTML = '<div style="color:#fca5a5;padding:20px">后端无响应 — 请检查 uvicorn 是否重启</div>';
+      return;
+    }
+    if (!data.slides || !data.slides.length) {
+      // Helpful diagnostics — show what backend actually returned
+      grid.innerHTML =
+        '<div style="color:white;padding:20px">'
+        + '<div style="font-size:16px;margin-bottom:10px">⚠️ 没有拿到页面</div>'
+        + '<div style="font-size:12px;opacity:0.8;margin-bottom:8px">后端返回 slide_count=' + (data.slide_count || 0) + '</div>'
+        + '<div style="font-size:11px;opacity:0.6;font-family:Menlo,monospace;background:rgba(0,0,0,0.3);padding:10px;border-radius:4px;white-space:pre-wrap">'
+        + esc(JSON.stringify(data, null, 2).slice(0, 600))
+        + '</div>'
+        + '<div style="font-size:11px;margin-top:10px;opacity:0.7">常见原因: 后端 skills 路径配置错误,uvicorn 未重启加载新代码,或 _template_loader.py 加载失败。</div>'
+        + '</div>';
+      return;
+    }
+    grid.innerHTML = data.slides.map(function(s){
+      return (
+        '<div style="background:white;border-radius:6px;overflow:hidden;cursor:pointer" onclick="_enlargePptxSlide(\''+esc(s.data_url)+'\')">'
+        + '<img src="'+esc(s.data_url)+'" alt="slide '+s.index+'" style="width:100%;aspect-ratio:16/9;object-fit:contain;background:#f5f5f5">'
+        + '<div style="padding:6px 10px;font-size:11px;color:var(--text2);background:#f9f9f9;border-top:1px solid #eee">Slide '+s.index+' / '+data.slide_count+'</div>'
+        + '</div>'
+      );
+    }).join('');
+  } catch(e) {
+    // Distinguish 503 (service unavailable — usually means loader path wrong)
+    // from other errors, and show the raw message so user can debug.
+    var msg = String((e && e.message) || e);
+    var hint = '';
+    if (/503|unavailable|not installed/i.test(msg)) {
+      hint = '<div style="font-size:12px;margin-top:10px;opacity:0.8">提示: 后端找不到 pptx-author skill 模块。通常是 uvicorn 未重启加载新代码,或 _template_loader.py 路径错误。</div>';
+    } else if (/404/.test(msg)) {
+      hint = '<div style="font-size:12px;margin-top:10px;opacity:0.8">提示: 文件路径不存在或无权访问。</div>';
+    } else if (/413/.test(msg) || /too large/i.test(msg)) {
+      hint = '<div style="font-size:12px;margin-top:10px;opacity:0.8">提示: 文件超过 10 MB 预览上限。</div>';
+    }
+    document.getElementById('pptx-file-preview-grid').innerHTML =
+      '<div style="color:#fca5a5;padding:20px">'
+      + '<div style="font-size:14px;margin-bottom:6px">预览失败</div>'
+      + '<div style="font-size:12px;font-family:Menlo,monospace;opacity:0.8">'+esc(msg)+'</div>'
+      + hint
+      + '</div>';
+  }
+}
+window.previewPptxFile = previewPptxFile;
+
+// ── Generic document preview (md / pdf / docx / txt) ──────────────────
+// Opens a modal with rendered content. Fetches via /api/portal/file-preview
+// which returns {kind, text|html|url} depending on the format.
+async function previewFile(filePath, title, expectedKind) {
+  var old = document.getElementById('doc-preview-modal');
+  if (old) old.remove();
+
+  var modal = document.createElement('div');
+  modal.id = 'doc-preview-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.8);z-index:10001;display:flex;flex-direction:column;padding:24px;overflow:auto';
+  var kindLabelMap = {md:'📝 Markdown', pdf:'📄 PDF', docx:'📘 Word', text:'📄 Text'};
+  var titleLabel = (expectedKind && kindLabelMap[expectedKind]) || '📄 文档预览';
+  modal.innerHTML =
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;color:white">'
+    +   '<div>'
+    +     '<h3 style="margin:0;font-size:16px">' + titleLabel + ' · ' + esc(title || filePath.split(/[/\\\\]/).pop()) + '</h3>'
+    +     '<div style="font-size:11px;opacity:0.6;margin-top:4px;font-family:Menlo,monospace">'+esc(filePath)+'</div>'
+    +   '</div>'
+    +   '<button class="btn btn-sm" onclick="document.getElementById(\'doc-preview-modal\').remove()">✕ 关闭</button>'
+    + '</div>'
+    + '<div id="doc-preview-body" style="flex:1;background:white;border-radius:8px;padding:24px;overflow:auto;min-height:400px">正在加载…</div>';
+  document.body.appendChild(modal);
+
+  try {
+    var data = await api('POST', '/api/portal/file-preview', {path: filePath});
+    var body = document.getElementById('doc-preview-body');
+    if (!body) return;
+    if (data.kind === 'markdown') {
+      // Reuse existing markdown renderer — same style as chat bubbles.
+      body.innerHTML = '<div class="md-preview">' + _renderSimpleMarkdown(data.text || '', null) + '</div>';
+      body.style.padding = '32px 48px';
+      body.style.lineHeight = '1.7';
+      body.style.color = '#1a1a1a';
+    } else if (data.kind === 'text') {
+      // Plain text — <pre> for monospace / wrap
+      var pre = document.createElement('pre');
+      pre.style.cssText = 'white-space:pre-wrap;word-break:break-word;font-family:Menlo,Monaco,monospace;font-size:12px;margin:0;color:#1a1a1a';
+      pre.textContent = data.text || '';
+      body.innerHTML = '';
+      body.appendChild(pre);
+    } else if (data.kind === 'html') {
+      // Server-rendered docx HTML — trust it (we generated it ourselves).
+      body.innerHTML = '<div class="docx-preview">' + data.html + '</div>';
+      body.style.padding = '32px 48px';
+      body.style.lineHeight = '1.6';
+      body.style.color = '#1a1a1a';
+    } else if (data.kind === 'iframe') {
+      // PDF: browser-native viewer via iframe.
+      body.style.padding = '0';
+      body.innerHTML = '<iframe src="'+esc(data.url)+'" style="width:100%;height:80vh;border:0;border-radius:8px" title="'+esc(title||'pdf')+'"></iframe>';
+    } else if (data.kind === 'delegate') {
+      // Server asked us to route to another endpoint (e.g. pptx → previewPptxFile)
+      body.innerHTML = '<div style="padding:20px">此文件类型请使用专门预览入口。</div>';
+    } else if (data.kind === 'unsupported') {
+      body.innerHTML = '<div style="padding:20px;color:#666">不支持的格式: <code>'+esc(data.suffix||'?')+'</code></div>';
+    } else {
+      body.innerHTML = '<div style="padding:20px;color:#666">返回格式异常</div>';
+    }
+  } catch(e) {
+    var body2 = document.getElementById('doc-preview-body');
+    if (body2) {
+      body2.innerHTML = '<div style="color:#b91c1c;padding:20px">加载失败: '+esc(String(e))+'</div>';
+    }
+  }
+}
+window.previewFile = previewFile;
+
+function _renderPptxLayoutRef() {
+  var box = document.getElementById('pptx-layouts-ref');
+  if (!box) return;
+  var rows = _pptxThemeState.layouts.map(function(l){
+    return '<tr>'
+      + '<td style="padding:4px 10px 4px 0"><code style="font-family:Menlo,monospace;color:var(--primary)">'+esc(l.id)+'</code></td>'
+      + '<td style="padding:4px 10px 4px 0;font-weight:600">'+esc(l.name_zh || l.name)+'</td>'
+      + '<td style="padding:4px 0;color:var(--text2)">'+esc(l.summary||'')+'</td>'
+      + '</tr>';
+  }).join('');
+  box.innerHTML =
+    '<div style="font-weight:600;margin-bottom:6px">📐 可用版式（所有主题共享）</div>'
+    + '<table style="width:100%;font-size:11px;line-height:1.6">' + rows + '</table>';
+}
+
+var _pptxRecommendTimer = null;
+function _pptxRecommendDebounced() {
+  clearTimeout(_pptxRecommendTimer);
+  _pptxRecommendTimer = setTimeout(_pptxRecommend, 350);
+}
+
+async function _pptxRecommend() {
+  var q = (document.getElementById('pptx-recommend-query') || {}).value || '';
+  q = q.trim();
+  var status = document.getElementById('pptx-recommend-status');
+  if (!q) {
+    _pptxThemeState.highlighted = {};
+    _renderPptxThemeGrid();
+    if (status) status.textContent = '输入关键词';
+    return;
+  }
+  if (status) status.textContent = '正在匹配…';
+  try {
+    var r = await api('POST', '/api/portal/pptx-themes/recommend', {query: q, top_k: 3});
+    _pptxThemeState.highlighted = {};
+    (r.results || []).forEach(function(x){
+      if (x.score > 0) _pptxThemeState.highlighted[x.id] = x;
+    });
+    _renderPptxThemeGrid();
+    var hits = Object.keys(_pptxThemeState.highlighted).length;
+    if (status) status.textContent = hits ? (hits + ' 个匹配') : '无关键词命中';
+  } catch(e) {
+    if (status) status.textContent = '请求失败';
+  }
+}
+
+function _copyPptxSnippet(themeId) {
+  var snippet =
+    'from pptx.util import Inches\n' +
+    'from _pptx_helpers import new_deck, verify_slides\n' +
+    'from _template_loader import render_from_md\n\n' +
+    'prs = new_deck()\n\n' +
+    '# 封面\n' +
+    'render_from_md(prs, "' + themeId + '/T01_cover", params={\n' +
+    '    "title": "标题",\n' +
+    '    "subtitle": "副标题",\n' +
+    '    "tag": "2026 Q2 | 报告",\n' +
+    '})\n\n' +
+    '# 3 列要点\n' +
+    'render_from_md(prs, "' + themeId + '/T02_three_column", params={\n' +
+    '    "title": "三大支柱",\n' +
+    '    "columns": [\n' +
+    '        {"icon":"users", "heading":"...", "body":"..."},\n' +
+    '        {"icon":"zap",   "heading":"...", "body":"..."},\n' +
+    '        {"icon":"shield","heading":"...", "body":"..."},\n' +
+    '    ],\n' +
+    '})\n\n' +
+    '# 收尾\n' +
+    'render_from_md(prs, "' + themeId + '/T19_qa_closing", params={\n' +
+    '    "title": "Q & A",\n' +
+    '    "cta": "核心主张",\n' +
+    '    "contact": "contact@example.com",\n' +
+    '})\n\n' +
+    'prs.save("out.pptx")\n' +
+    'verify_slides("out.pptx")\n';
+  navigator.clipboard.writeText(snippet).then(function(){
+    if (window._toast) window._toast('已复制 ' + themeId + ' 示例代码', 'success');
+    else alert('已复制 ' + themeId + ' 示例代码');
+  }).catch(function(e){
+    alert('复制失败: ' + e);
+  });
 }
 
 // ── Local Path Import Modal ──
@@ -19894,7 +21207,7 @@ function _renderDraftCard(d) {
   var confPct = Math.round((d.confidence || 0) * 100);
   var confColor = confPct >= 80 ? '#10b981' : confPct >= 60 ? '#f59e0b' : '#ef4444';
   var codeCount = d.code_files ? Object.keys(d.code_files).length : 0;
-  var dateStr = d.created_at ? new Date(d.created_at * 1000).toLocaleDateString() : '';
+  var dateStr = d.created_at ? _formatDate(d.created_at) : '';
   // Source inference
   var sourceLabel;
   if (d.id && d.id.indexOf('-SUB-') > -1) sourceLabel = '🤖 Agent 提交';
