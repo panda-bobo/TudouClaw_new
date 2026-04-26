@@ -24,16 +24,166 @@ SAFE_ENV_KEYS = frozenset({
 
 # Patterns that indicate secrets in strings
 _SECRET_PATTERNS = [
-    re.compile(r'sk-[a-zA-Z0-9]{20,}'),           # OpenAI-style
-    re.compile(r'sk-ant-api[a-zA-Z0-9-]{20,}'),    # Anthropic
-    re.compile(r'ghp_[a-zA-Z0-9]{36}'),             # GitHub PAT
-    re.compile(r'gho_[a-zA-Z0-9]{36}'),             # GitHub OAuth
-    re.compile(r'glpat-[a-zA-Z0-9-]{20,}'),         # GitLab
-    re.compile(r'Bearer\s+[a-zA-Z0-9._-]{20,}'),    # Bearer tokens
-    re.compile(r'[a-f0-9]{64}'),                     # 64-char hex (API keys)
-    re.compile(r'-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY'),  # Private keys
+    # ── API keys / LLM tokens ────────────────────────────────────
+    re.compile(r'sk-[a-zA-Z0-9]{20,}'),                  # OpenAI-style
+    re.compile(r'sk-proj-[A-Za-z0-9_\-]{20,}'),          # OpenAI project key
+    re.compile(r'sk-ant-api[a-zA-Z0-9-]{20,}'),          # Anthropic
+    re.compile(r'sk-ant-[A-Za-z0-9_\-]{20,}'),           # Anthropic generic
+    # ── GitHub family (added evolver coverage: ghu_ ghs_ pat_) ──
+    re.compile(r'ghp_[a-zA-Z0-9]{36,}'),
+    re.compile(r'gho_[a-zA-Z0-9]{36,}'),
+    re.compile(r'ghu_[a-zA-Z0-9]{36,}'),
+    re.compile(r'ghs_[a-zA-Z0-9]{36,}'),
+    re.compile(r'github_pat_[A-Za-z0-9_]{22,}'),
+    # ── Cloud providers ────────────────────────────────────────
+    re.compile(r'AKIA[0-9A-Z]{16}'),                     # AWS access key id
+    re.compile(r'AccountKey=[^;\s]+', re.IGNORECASE),    # Azure storage
+    re.compile(r'client_secret=[A-Za-z0-9~._\-]{8,}', re.IGNORECASE),
+    re.compile(r'instrumentationkey=[0-9a-fA-F-]{20,}', re.IGNORECASE),
+    # ── Other ecosystems ──────────────────────────────────────
+    re.compile(r'glpat-[a-zA-Z0-9-]{20,}'),              # GitLab
+    re.compile(r'npm_[A-Za-z0-9]{36,}'),                 # npm
+    re.compile(r'xox[baprsv]-[A-Za-z0-9-]{10,}'),        # Slack tokens
+    # Discord bot token (3 base64url segments, leading [MNO])
+    re.compile(r'\b[MNO][A-Za-z0-9_\-]{23,}\.[A-Za-z0-9_\-]{6}\.[A-Za-z0-9_\-]{27,}\b'),
+    # ── JWT (header.payload.signature) ────────────────────────
+    re.compile(r'eyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]{20,}'),
+    # ── Generic auth headers / passwords ──────────────────────
+    re.compile(r'Bearer\s+[a-zA-Z0-9._\-~+/]{20,}=*'),
+    re.compile(r'token[=:]\s*["\']?[A-Za-z0-9._\-~+/]{16,}["\']?', re.IGNORECASE),
+    re.compile(r'api[_-]?key[=:]\s*["\']?[A-Za-z0-9._\-~+/]{16,}["\']?', re.IGNORECASE),
+    re.compile(r'secret[=:]\s*["\']?[A-Za-z0-9._\-~+/]{16,}["\']?', re.IGNORECASE),
     re.compile(r'password["\s:=]+\S{6,}', re.IGNORECASE),
+    # ── Long opaque hex (often API keys) ──────────────────────
+    re.compile(r'[a-f0-9]{64}'),
+    # ── Private keys (RSA / EC / DSA / OPENSSH) ───────────────
+    re.compile(r'-----BEGIN\s+(?:RSA\s+|EC\s+|DSA\s+|OPENSSH\s+)?PRIVATE\s+KEY-----[\s\S]*?-----END\s+(?:RSA\s+|EC\s+|DSA\s+|OPENSSH\s+)?PRIVATE\s+KEY-----'),
+    # ── Basic auth credentials in URLs (keep schema + host) ──
+    re.compile(r'(?<=://)[^@\s]+:[^@\s]+(?=@)'),
 ]
+
+
+# ── Leak scanners (detection without destructive replacement) ──
+# Each returns (type, suggested_env_var_for_replacement) so the caller
+# can produce actionable remediation hints, not just "found a leak".
+# Ported from evolver's sanitize.js LEAK_SCANNERS table.
+_LEAK_SCANNERS: list[tuple[str, "re.Pattern", str]] = [
+    ("api_key",   re.compile(r'sk-[A-Za-z0-9]{20,}'),                "OPENAI_API_KEY"),
+    ("api_key",   re.compile(r'sk-proj-[A-Za-z0-9_\-]{20,}'),         "OPENAI_API_KEY"),
+    ("api_key",   re.compile(r'sk-ant-[A-Za-z0-9_\-]{20,}'),          "ANTHROPIC_API_KEY"),
+    ("aws_key",   re.compile(r'AKIA[0-9A-Z]{16}'),                    "AWS_ACCESS_KEY_ID"),
+    ("github",    re.compile(r'ghp_[A-Za-z0-9]{36,}'),                "GITHUB_TOKEN"),
+    ("github",    re.compile(r'github_pat_[A-Za-z0-9_]{22,}'),        "GITHUB_TOKEN"),
+    ("npm",       re.compile(r'npm_[A-Za-z0-9]{36,}'),                "NPM_TOKEN"),
+    ("slack",     re.compile(r'xox[baprsv]-[A-Za-z0-9-]{10,}'),       "SLACK_TOKEN"),
+    ("jwt",       re.compile(r'eyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]{20,}'), "JWT_TOKEN"),
+    ("azure",     re.compile(r'AccountKey=[^;\s]+', re.IGNORECASE),   "AZURE_STORAGE_KEY"),
+    ("azure",     re.compile(r'client_secret=[A-Za-z0-9~._\-]{8,}', re.IGNORECASE), "AZURE_CLIENT_SECRET"),
+    ("azure",     re.compile(r'instrumentationkey=[0-9a-fA-F-]{20,}', re.IGNORECASE), "APPINSIGHTS_INSTRUMENTATIONKEY"),
+    ("discord",   re.compile(r'\b[MNO][A-Za-z0-9_\-]{23,}\.[A-Za-z0-9_\-]{6}\.[A-Za-z0-9_\-]{27,}\b'), "DISCORD_TOKEN"),
+    ("bearer",    re.compile(r'Bearer\s+[A-Za-z0-9._\-~+/]{20,}=*'),  "AUTH_TOKEN"),
+    ("private_key", re.compile(r'-----BEGIN\s+(?:RSA\s+|EC\s+|DSA\s+|OPENSSH\s+)?PRIVATE\s+KEY-----'), "PRIVATE_KEY_PATH"),
+    # Database connection strings with embedded credentials
+    ("db_url",    re.compile(r'(?:mongodb|postgres|postgresql|mysql|redis|amqp)://[^\s"\',;)\}\]]{10,}', re.IGNORECASE), "DATABASE_URL"),
+    # Local filesystem paths (privacy — agent traces shouldn't leak operator's home)
+    ("local_path", re.compile(r'/home/[a-zA-Z0-9_.\-]+/'),            "HOME"),
+    ("local_path", re.compile(r'/Users/[a-zA-Z0-9_.\-]+/'),           "HOME"),
+    ("local_path", re.compile(r'[A-Z]:\\Users\\[a-zA-Z0-9_.\-]+\\'), "USERPROFILE"),
+    # Internal IP ranges (RFC1918)
+    ("internal_ip", re.compile(r'\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})(?::\d{2,5})?\b'), "SERVICE_HOST"),
+    # SSH targets (user@host)
+    ("ssh_target", re.compile(r'[a-zA-Z0-9_.\-]+@(?:(?:\d{1,3}\.){3}\d{1,3}|[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})'), "SSH_HOST"),
+    # Generic password assignments
+    ("password",  re.compile(r'password[=:]\s*["\']?[^\s"\',;)\}\]]{6,}["\']?', re.IGNORECASE), "PASSWORD"),
+    # Basic auth in URLs (full match)
+    ("basic_auth", re.compile(r'://[^@\s:]+:[^@\s]+@'),               "SERVICE_URL"),
+]
+
+
+# Env vars never worth flagging as leaks — universal shell vars
+# whose values are not really sensitive.
+_ENV_SCAN_SKIP_KEYS = frozenset({
+    "PATH", "HOME", "SHELL", "TERM", "LANG", "USER", "LOGNAME",
+    "PWD", "OLDPWD", "SHLVL", "HOSTNAME", "DISPLAY", "EDITOR",
+    "PAGER", "LESS", "LS_COLORS", "COLORTERM", "TERM_PROGRAM",
+    "XDG_SESSION_ID", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
+    "SSH_AUTH_SOCK", "SSH_AGENT_PID", "_",
+    # Tudou-specific noise
+    "TUDOU_DATA_DIR", "TUDOU_HOST", "TUDOU_PORT",
+})
+
+
+def scan_for_leaks(content: str) -> dict:
+    """Scan content for sensitive patterns WITHOUT modifying it.
+
+    Returns ``{"found": bool, "leaks": [{"type", "value", "suggestion"}, ...]}``
+    where each leak's ``value`` is truncated to 60 chars for safe
+    logging. ``suggestion`` is the env-var name the operator should
+    use instead of hardcoding.
+
+    Use this when you want to *detect* leaks (e.g. blocking a
+    wiki_ingest with embedded keys, alerting in CI) rather than
+    silently rewriting them via ``strip_secrets``.
+    """
+    if not isinstance(content, str) or not content:
+        return {"found": False, "leaks": []}
+    leaks: list[dict] = []
+    seen: set = set()
+    for typ, pattern, suggest in _LEAK_SCANNERS:
+        for m in pattern.finditer(content):
+            val = m.group(0)
+            key = (typ, val)
+            if key in seen:
+                continue
+            seen.add(key)
+            display = val if len(val) <= 60 else val[:57] + "..."
+            leaks.append({
+                "type": typ,
+                "value": display,
+                "suggestion": "os.environ['" + suggest + "']",
+            })
+    return {"found": bool(leaks), "leaks": leaks}
+
+
+def detect_env_value_leaks(content: str) -> list[dict]:
+    """Reverse detect: any process env vars whose VALUE appears
+    verbatim in ``content``? If so, the operator hardcoded it
+    instead of reading os.environ.
+
+    Skips short values (<8 chars) and universal shell vars to keep
+    false positives low.
+    """
+    if not isinstance(content, str) or not content:
+        return []
+    import os as _os
+    leaks: list[dict] = []
+    for k, v in _os.environ.items():
+        if not v or len(v) < 8:
+            continue
+        if k in _ENV_SCAN_SKIP_KEYS:
+            continue
+        if v in content:
+            display = v if len(v) <= 60 else v[:57] + "..."
+            leaks.append({
+                "type": "env_value_leak",
+                "env_key": k,
+                "value": display,
+                "suggestion": "os.environ['" + k + "']",
+            })
+    return leaks
+
+
+def full_leak_check(content: str) -> dict:
+    """Combined pattern-based scan + env value reverse detection.
+
+    Use before sending content to external services (wiki_ingest,
+    LangSmith trace, hub upload) to surface anything sensitive that
+    needs cleaning up FIRST, rather than leaking and apologising.
+    """
+    scan = scan_for_leaks(content)
+    env_leaks = detect_env_value_leaks(content)
+    all_leaks = list(scan["leaks"]) + env_leaks
+    return {"found": bool(all_leaks), "leaks": all_leaks}
 
 def filter_env_for_mcp(env: dict) -> dict:
     """Filter environment variables, keeping only safe ones + explicitly configured ones."""
