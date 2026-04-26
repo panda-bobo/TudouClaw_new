@@ -1015,17 +1015,33 @@ class RAGProviderRegistry:
 
     def _ingest_remote(self, provider: RAGProviderEntry, collection: str,
                        documents: list[dict]) -> int:
+        # Public entry: never raises (caller expects int). Inner closure
+        # is wrapped in @retry so transient ConnectionError / Timeout
+        # gets up to 3 attempts before we surface the silent-fail.
         import requests
+        from .resilience import retry as _retry
         url = f"{provider.base_url}/api/rag/ingest"
-        try:
+
+        @_retry(max_attempts=3, base_delay=1.0, max_delay=10.0,
+                retryable_exceptions=(requests.RequestException,))
+        def _do_post() -> int:
             resp = requests.post(url, json={
                 "collection": collection, "documents": documents,
             }, headers=self._remote_headers(provider), timeout=30)
+            if resp.status_code >= 500:
+                # Retryable upstream error — raise so @retry sees it.
+                raise requests.RequestException(
+                    f"upstream {resp.status_code} from {url}"
+                )
             if resp.status_code != 200:
+                # 4xx (auth / bad request) — not worth retrying.
                 logger.warning("Remote RAG ingest failed (%s): %d",
                                provider.name, resp.status_code)
                 return 0
             return resp.json().get("count", 0)
+
+        try:
+            return _do_post()
         except Exception as e:
             logger.warning("Remote RAG ingest error (%s): %s", provider.name, e)
             return 0
