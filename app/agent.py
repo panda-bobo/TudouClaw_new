@@ -1953,6 +1953,29 @@ class Agent:
     role_success_count: int = 0
     role_fail_count: int = 0
     role_last_success_at: float = 0.0  # for "recent activity" surfacing
+    # ── Preprocessor (small local LLM) — per-agent opt-in ─────────────
+    # Empty preprocessor_model = disabled. When set (e.g. "qwen2.5:3b-instruct"),
+    # the preprocessor bridge fires at 3 fixed nodes:
+    #   ① first-turn task setup
+    #   ② task decomposition (propose_decomposition)
+    #   ③ prompt optimization
+    # ``preprocessor_modes`` further selects which behaviours run at
+    # node ①: "optimize_prompt" rewrites the system prompt for the task,
+    # "task_understanding" emits recommended params (tier, RAG, decomp).
+    preprocessor_model: str = ""
+    preprocessor_modes: list[str] = field(default_factory=list)
+    # Optional endpoint URL — defaults to Ollama (http://localhost:11434).
+    # Set to e.g. "http://127.0.0.1:10240" for MLX-LM server. Both speak
+    # OpenAI-compat /v1/chat/completions.
+    preprocessor_endpoint: str = ""
+    # Optional fallback chain. Each entry is "model" or "model@endpoint".
+    # Tried in order when the primary fails (timeout / HTTP error). When
+    # ALL entries fail, bridge returns ok=False and caller falls back to
+    # the original non-preprocessor path — so worst case is "no benefit",
+    # never broken behaviour. Example:
+    #   ["gemma4:e4b@http://localhost:11434",
+    #    "qwen2.5:3b-instruct@http://localhost:11434"]
+    preprocessor_fallback: list[str] = field(default_factory=list)
     granted_skills: list[str] = field(default_factory=list)  # Skill IDs granted to this agent
     created_at: float = field(default_factory=time.time)
     # --- src integration ---
@@ -2064,6 +2087,11 @@ class Agent:
             "robot_avatar": self.robot_avatar,
             "channel_ids": self.channel_ids,
             "granted_skills": list(self.granted_skills),
+            # Preprocessor settings (per-agent opt-in for small local LLM)
+            "preprocessor_model": self.preprocessor_model,
+            "preprocessor_modes": list(self.preprocessor_modes or []),
+            "preprocessor_endpoint": self.preprocessor_endpoint,
+            "preprocessor_fallback": list(self.preprocessor_fallback or []),
             "created_at": self.created_at,
             # --- src integration: persist memory ---
             "session_id": self.session_id,
@@ -2146,6 +2174,10 @@ class Agent:
             robot_avatar=d.get("robot_avatar", ""),
             channel_ids=d.get("channel_ids", []),
             granted_skills=list(d.get("granted_skills", []) or []),
+            preprocessor_model=str(d.get("preprocessor_model", "") or ""),
+            preprocessor_modes=list(d.get("preprocessor_modes", []) or []),
+            preprocessor_endpoint=str(d.get("preprocessor_endpoint", "") or ""),
+            preprocessor_fallback=list(d.get("preprocessor_fallback", []) or []),
             evolution_goals=list(d.get("evolution_goals", []) or []),
             created_at=d.get("created_at", time.time()),
             # --- src integration: restore memory ---
@@ -2279,6 +2311,11 @@ class Agent:
             "granted_skills": list(self.granted_skills),
             "bound_prompt_packs": self.bound_prompt_packs,
             "active_skill_count": len(self._active_skill_ids),
+            # --- Preprocessor (small local LLM) ---
+            "preprocessor_model": self.preprocessor_model,
+            "preprocessor_modes": list(self.preprocessor_modes or []),
+            "preprocessor_endpoint": self.preprocessor_endpoint,
+            "preprocessor_fallback": list(self.preprocessor_fallback or []),
             # --- Role Growth Path (角色成长路径) ---
             "growth_path": self.growth_path.get_summary() if self.growth_path else None,
             # --- Execution Analyzer (最近分析) ---
@@ -3689,12 +3726,16 @@ class Agent:
 
         result = "\n".join(parts)
 
-        # Prepend system prompts (unified: global + scene-based).
-        # Goes at the very top so per-agent persona/system_prompt can still
-        # override tone/identity in later sections.
-        system_prompts_text = self._get_scene_prompts_text()
-        if system_prompts_text:
-            result = system_prompts_text + "\n\n" + result
+        # NOTE (2026-04-28 dedup): the previous prepend of
+        # ``self._get_scene_prompts_text()`` was a literal duplicate of the
+        # SETTINGS section that ``compose_full_prompt`` already emits via
+        # ``build_settings_block(role)``. The two functions read the same
+        # ``scene_prompts`` config and wrap it in the same
+        # ``<system_prompt name="...">`` tags — net effect was that every
+        # agent's static prompt carried its scene_prompts TWICE (cost
+        # ~1,223 tokens per call on the typical 4,892-char block). Removing
+        # the prepend keeps semantics: persona still comes AFTER settings
+        # inside ``compose_full_prompt`` so persona-level overrides win.
 
         # ── B (Nov 2026): granted-skills roster ─────────────────────────
         # Short one-line-per-skill list so the LLM knows its toolkit
@@ -3708,10 +3749,56 @@ class Agent:
         except Exception as _rerr:
             logger.debug("granted skills roster build failed: %s", _rerr)
 
+        # ── Preprocessor: optimize_prompt phase ────────────────────────
+        # If this agent has preprocessor_model configured AND
+        # "optimize_prompt" mode is on AND the static prompt is large
+        # enough to benefit (≥ 5000 chars), run the prompt through the
+        # small local LLM to compress redundancy. The optimized version
+        # gets cached via the same hash, so subsequent calls reuse it
+        # at zero cost. Failures silently fall back to the original —
+        # this can never break the chat path.
+        try:
+            from .preprocessing import bridge as _prep_bridge
+            if (_prep_bridge.is_enabled(self)
+                    and "optimize_prompt" in _prep_bridge.get_modes(self)
+                    and len(result) >= 5000):
+                # 30s timeout: large system prompts (10-30K chars) need
+                # ~10-25s on 3B-class models. Subsequent calls hit the LRU
+                # cache (~0ms). TODO: pre-warm async at agent startup so
+                # first chat doesn't pay the latency hit.
+                _t0 = time.time()
+                _res = _prep_bridge.invoke(
+                    self,
+                    kind="prompt_optimize",
+                    payload={"prompt": result},
+                    timeout_s=30.0,
+                )
+                _elapsed_ms = int((time.time() - _t0) * 1000)
+                if _res.ok and isinstance(_res.value, dict):
+                    _optimized = _res.value.get("prompt") or ""
+                    _saved = int(_res.value.get("saved_tokens") or 0)
+                    if _optimized and len(_optimized) < len(result):
+                        logger.info(
+                            "preprocessor.optimize_prompt agent=%s "
+                            "%d→%d chars (saved ~%d tokens, %dms, cache_hit=%s)",
+                            self.id, len(result), len(_optimized),
+                            _saved, _elapsed_ms, _res.cache_hit,
+                        )
+                        result = _optimized
+                else:
+                    logger.debug(
+                        "preprocessor.optimize_prompt skipped agent=%s reason=%s",
+                        self.id, _res.skip_reason,
+                    )
+        except Exception as _pe:
+            logger.debug(
+                "preprocessor.optimize_prompt failed (non-fatal): %s", _pe,
+            )
+
         self._cached_static_prompt = result
         self._static_prompt_hash = current_hash
-        logger.debug("Static system prompt rebuilt (hash=%s, len=%d, sys_prompts=%d)",
-                     current_hash[:8], len(result), len(system_prompts_text))
+        logger.debug("Static system prompt rebuilt (hash=%s, len=%d)",
+                     current_hash[:8], len(result))
 
         # ── Phase 2b dry-run hook ───────────────────────────────────
         # When TUDOU_PROMPT_V2_DRYRUN=1, also compute the v2 declarative
@@ -4032,6 +4119,40 @@ class Agent:
             except Exception as _se:
                 logger.debug("skill prompt injection failed: %s", _se)
 
+        # 9. Structured context bundle via budget allocator (#4 wired-in).
+        #    Replaces the ad-hoc "_build_shared_context_summary" path with
+        #    the formal 5-section allocator (task_state / upstream_dependencies
+        #    / decisions / knowledge / history_summary) — each section gets
+        #    its own hard token budget so no single section can starve the
+        #    others. Same per-agent personalization (handoffs to me, Q&A
+        #    to me) is preserved.
+        #
+        #    Solo agents (no project_id) get an empty bundle → zero overhead.
+        if total_chars < max_dynamic_chars:
+            try:
+                from .shared_context import get_agent_context
+                # Budget for THIS section: 40% of the remaining dynamic budget
+                # (caps the bundle so plan_state / intent / memory still fit).
+                _remaining = max_dynamic_chars - total_chars
+                _bundle_budget_chars = int(_remaining * 0.40)
+                _bundle_budget_tokens = max(200, _bundle_budget_chars // 4)
+                _bundle = get_agent_context(
+                    agent_id=self.id,
+                    project_id=getattr(self, "project_id", "") or "",
+                    intent=current_query[:300] if current_query else "",
+                    role=self.role or "",
+                    budget=_bundle_budget_tokens,
+                )
+                if _bundle and _bundle.rendered:
+                    _try_add(_bundle.rendered, "structured_context")
+                    # Stash per-section breakdown for observability log
+                    try:
+                        self._dynamic_bundle_breakdown = _bundle.section_breakdown()
+                    except Exception:
+                        pass
+            except Exception as _sce:
+                logger.debug("structured context bundle failed: %s", _sce)
+
         if not parts:
             return ""
         result = "\n\n".join(parts)
@@ -4145,11 +4266,85 @@ class Agent:
             if self.messages[i].get("_dynamic"):
                 self.messages.pop(i)
 
-    def _inject_dynamic_context(self, messages: list[dict], current_query: str = "") -> list[dict]:
-        """Inject dynamic context into a COPY of messages for sending to LLM.
+    def _build_shared_context_summary(self) -> str:
+        """Per-agent shared-context block: project state + meeting state +
+        handoffs/Q&A directed at me.
 
-        Dynamic context is appended at the END (right before the last user
-        message) so the prefix stays stable for KV cache reuse.
+        Returns "" when agent is neither in a project nor in a meeting
+        (so solo conversational agents pay zero overhead). Capped at
+        ~1800 chars total via the underlying summary helpers.
+
+        Fed into ``_build_dynamic_context``, which gets prepended into
+        the LAST user message by ``_inject_dynamic_context`` — NOT a
+        separate system message. Two reasons:
+          * Avoids stacking a 4th system msg on top of static + step
+            framing + verify retry (dilutes attention, confuses
+            "stable rule" vs "current state" semantics).
+          * KV cache stays hot — only the last user message grows.
+        """
+        project_id = (getattr(self, "project_id", "") or "").strip()
+        meeting_id = (getattr(self, "meeting_id", "") or "").strip()
+        if not project_id and not meeting_id:
+            return ""
+        blocks: list[str] = []
+        # ─ Project summary
+        if project_id:
+            try:
+                from .shared_context import get_shared_context_store
+                store = get_shared_context_store()
+                proj_md = store.project_summary_markdown(project_id)
+                if proj_md:
+                    blocks.append(proj_md)
+                # Per-agent: handoffs to me + open questions to me
+                handoffs_to_me = store.list_handoffs(
+                    project_id=project_id, dst_agent=self.id,
+                    status="pending", limit=5,
+                )
+                if handoffs_to_me:
+                    lines = ["[给我的待处理 handoff]"]
+                    for h in handoffs_to_me:
+                        refs = ", ".join(h.get("artifact_refs") or []) or "无"
+                        summary = (h.get("summary") or "").replace("\n", " ")[:80]
+                        lines.append(
+                            f"- 来自 {h['src_agent']}: {h['intent']}"
+                            + (f"\n  refs: {refs}" if refs != "无" else "")
+                            + (f"\n  备注: {summary}" if summary else "")
+                        )
+                    blocks.append("\n".join(lines))
+                qs_to_me = store.list_pending_questions(
+                    project_id=project_id, asked_to=self.id,
+                    status="open", limit=3,
+                )
+                if qs_to_me:
+                    lines = ["[等我回答的问题]"]
+                    for q in qs_to_me:
+                        question = (q.get("question") or "").replace("\n", " ")[:120]
+                        lines.append(f"- 来自 {q.get('asked_by','?')}: {question}")
+                    blocks.append("\n".join(lines))
+            except Exception as e:
+                logger.debug("project summary block failed: %s", e)
+        # ─ Meeting summary (in-memory, ephemeral)
+        if meeting_id:
+            try:
+                from .meeting_summary import meeting_summary_markdown
+                meet_md = meeting_summary_markdown(meeting_id, viewer_agent_id=self.id)
+                if meet_md:
+                    blocks.append(meet_md)
+            except Exception as e:
+                logger.debug("meeting summary block failed: %s", e)
+        return "\n\n".join(blocks)
+
+    def _inject_dynamic_context(self, messages: list[dict], current_query: str = "") -> list[dict]:
+        """Inject dynamic context by **prepending into the LAST user
+        message** (NOT as a separate system msg).
+
+        Why user-role + prepend (changed 2026-04-28):
+          * Avoids stacking a 4th system msg on top of static + step
+            framing + verify retry — dilutes attention, confuses
+            "stable rule" vs "current state" semantics.
+          * KV cache stays hot — only the LAST user message grows.
+          * Dynamic context = "current environment" (user-facing
+            context), not framing rules.
 
         Returns a new list — does NOT modify self.messages.
         """
@@ -4157,21 +4352,33 @@ class Agent:
         if not dynamic_ctx:
             return messages
 
-        # Find the last user message index to insert context before it
+        # Find the last user message
         last_user_idx = None
         for i in range(len(messages) - 1, -1, -1):
             if messages[i].get("role") == "user":
                 last_user_idx = i
                 break
 
-        # Create a copy and inject
         result = list(messages)
-        ctx_msg = {"role": "system", "content": dynamic_ctx, "_dynamic": True}
-        if last_user_idx is not None and last_user_idx > 0:
-            result.insert(last_user_idx, ctx_msg)
-        else:
-            # No user message found — append at end
+        if last_user_idx is None or last_user_idx <= 0:
+            # No user message yet — fall back to system msg appended at end
+            ctx_msg = {"role": "system", "content": dynamic_ctx, "_dynamic": True}
             result.append(ctx_msg)
+            return result
+
+        # Prepend into the last user message (copy first, never mutate)
+        last_user = dict(result[last_user_idx])
+        if last_user.get("_has_dynamic_ctx"):
+            return result  # idempotent
+        original_content = last_user.get("content", "") or ""
+        last_user["content"] = (
+            "[当前动态上下文 · 仅供参考，下方分隔线后才是我的实际请求]\n"
+            + dynamic_ctx
+            + "\n\n---\n\n"
+            + original_content
+        )
+        last_user["_has_dynamic_ctx"] = True
+        result[last_user_idx] = last_user
         return result
 
     def _memory_write_back(self, user_message: str, assistant_response: str):

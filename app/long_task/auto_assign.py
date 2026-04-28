@@ -200,6 +200,27 @@ def _assign(hub, project, task, agent_id: str, reason: dict | None = None) -> No
             task.metadata["assignment_reason"] = reason
         except Exception:
             pass
+
+    # Auto-grant shared-context skill on first long-task assignment.
+    # Solo conversational agents stay clean; only multi-agent collaborators
+    # get the sc_* tool bundle. Once granted, never revoked — the agent
+    # has "learned" this toolset for future long-tasks. Best-effort.
+    try:
+        agent = hub.get_agent(agent_id) if hasattr(hub, "get_agent") else None
+        if agent is not None:
+            granted = list(getattr(agent, "granted_skills", []) or [])
+            if "shared-context" not in granted:
+                granted.append("shared-context")
+                agent.granted_skills = granted
+                logger.info(
+                    "auto_assign: granted 'shared-context' to agent=%s "
+                    "(first long-task assignment)", agent_id,
+                )
+                if hasattr(hub, "_save_agents"):
+                    hub._save_agents()
+    except Exception as _ge:
+        logger.debug("shared-context auto-grant failed (non-fatal): %s", _ge)
+
     # Save project state so the assignment survives a restart.
     try:
         if hasattr(hub, "_save_projects"):

@@ -1892,6 +1892,148 @@ TOOL_DEFINITIONS: list[dict] = [
             }
         }
     },
+    # ── Shared-context tools (project-scoped DB for multi-agent coord) ──
+    {
+        "type": "function",
+        "function": {
+            "name": "sc_query",
+            "description": (
+                "Query the project's shared context database. Token-cheap "
+                "alternative to dumping content through chat — pull just the "
+                "rows you need.\n"
+                "Tables: artifacts (file refs with summary), decisions "
+                "(structured choices made), milestones (project goals/phases), "
+                "handoffs (agent→agent assignments), pending_qs (open Q&A). "
+                "Pass table='summary' (or omit) to get a compact project state "
+                "overview.\n"
+                "Filters apply per-table: kind+status for artifacts, status for "
+                "decisions/milestones, dst_agent+status for handoffs/pending_qs. "
+                "Returns JSON {table, count, rows}.\n"
+                "Use this BEFORE asking another agent — the answer may already "
+                "exist."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table": {"type": "string", "enum": ["artifacts", "decisions", "milestones", "handoffs", "pending_qs", "summary"]},
+                    "kind": {"type": "string", "description": "Filter (artifacts only): document | code | data | image | report | config"},
+                    "status": {"type": "string", "description": "Filter by row status (varies by table)"},
+                    "dst_agent": {"type": "string", "description": "Filter handoffs/pending_qs by destination agent"},
+                    "since_ts": {"type": "number", "description": "Unix ts; only return rows newer than this"},
+                    "limit": {"type": "integer", "description": "Max rows (default 10, capped at 50)"},
+                    "project_id": {"type": "string", "description": "Optional; inferred from chat context"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "sc_register_artifact",
+            "description": (
+                "Record a workspace file as a sharable artifact reference so "
+                "other agents can find it via sc_query(table='artifacts'). "
+                "ONLY register the *card* (path + title + ≤200 char summary); "
+                "the full file stays in the workspace.\n"
+                "Use when: you produced a file other agents will need (a "
+                "document draft, code module, data table, image). "
+                "DON'T use for ephemeral intermediates.\n"
+                "Returns: ``OK · registered artifact id=art_*`` — pass that id "
+                "to sc_handoff or include in your text reply."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Workspace-relative file path"},
+                    "title": {"type": "string", "description": "Human-readable title (defaults to path)"},
+                    "summary": {"type": "string", "description": "≤200 char content preview"},
+                    "kind": {"type": "string", "enum": ["document", "code", "data", "image", "report", "config", "other"]},
+                    "token_count": {"type": "integer", "description": "Approximate token count of the full file (helps consumers budget)"},
+                    "project_id": {"type": "string", "description": "Optional; inferred from chat context"},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "sc_get_artifact",
+            "description": (
+                "Fetch the full record (path / title / summary / token_count "
+                "/ creator) of an artifact by its ``art_*`` id. Use this when "
+                "you got an artifact id from sc_query or a handoff and need "
+                "to know what it points to before deciding whether to read "
+                "the underlying file."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "artifact_id": {"type": "string", "description": "Artifact id, e.g. art_a1b2c3d4"},
+                },
+                "required": ["artifact_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "sc_record_decision",
+            "description": (
+                "Append a structured decision to the project's decision log. "
+                "Use this for team-wide decisions that other agents need to "
+                "respect (e.g. 'choose AWS over Azure', 'use REST not GraphQL', "
+                "'PPT 用蓝色风格'). Once recorded, future tasks see it in their "
+                "shared-context summary and via sc_query(table='decisions').\n"
+                "DON'T use for: per-task internal choices, ephemeral preferences. "
+                "DO supersede an old decision when overriding — pass supersedes_id."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "What was being decided"},
+                    "decision": {"type": "string", "description": "The chosen answer"},
+                    "rationale": {"type": "string", "description": "Why this choice (optional but recommended)"},
+                    "supersedes_id": {"type": "string", "description": "If overriding a prior decision, pass its dec_* id"},
+                    "project_id": {"type": "string", "description": "Optional; inferred from chat context"},
+                },
+                "required": ["topic", "decision"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "sc_handoff",
+            "description": (
+                "PULL-MODEL handoff to another agent — writes a row to the "
+                "handoffs table; the destination agent discovers it via "
+                "sc_query(table='handoffs', dst_agent='self', status='pending'). "
+                "Token cost ~0 vs. /handoff which copies content into dst's "
+                "messages.\n"
+                "Pass artifact_refs as a list of art_* ids the receiver will "
+                "need (don't paste file content). Summary should be ≤300 "
+                "chars — point, don't narrate.\n"
+                "Returns the handoff id."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "dst_agent": {"type": "string", "description": "Receiver agent id (or name — resolver tolerates both)"},
+                    "intent": {"type": "string", "description": "What the receiver should do, ≤500 chars"},
+                    "summary": {"type": "string", "description": "Optional 1-2 line context, ≤300 chars"},
+                    "artifact_refs": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of art_* ids the receiver will need. AVOID pasting file content here.",
+                    },
+                    "project_id": {"type": "string", "description": "Optional; inferred from chat context"},
+                },
+                "required": ["dst_agent", "intent"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -2243,6 +2385,17 @@ from .tools_split.skills import (  # noqa: E402,F401
     _tool_submit_skill,
 )
 
+# Shared-context tools — agents query/write the project shared context
+# database (artifacts, decisions, milestones, handoffs, pending Q&A)
+# instead of pushing content through messages. Token-efficient by design.
+from .tools_split.shared_context import (  # noqa: E402,F401
+    _tool_sc_query,
+    _tool_sc_register_artifact,
+    _tool_sc_get_artifact,
+    _tool_sc_record_decision,
+    _tool_sc_handoff,
+)
+
 # UI-block tools — interactive choice + display-only checklist.
 from .tools_split.ui import (  # noqa: E402,F401
     _tool_emit_ui_block,
@@ -2326,6 +2479,12 @@ _TOOL_FUNCS: dict[str, callable] = {
     "desktop_screenshot": _tool_desktop_screenshot,
     "create_video": _tool_create_video,
     "get_skill_guide": _tool_get_skill_guide,
+    # Shared-context (project-scoped DB for multi-agent collaboration)
+    "sc_query": _tool_sc_query,
+    "sc_register_artifact": _tool_sc_register_artifact,
+    "sc_get_artifact": _tool_sc_get_artifact,
+    "sc_record_decision": _tool_sc_record_decision,
+    "sc_handoff": _tool_sc_handoff,
 }
 
 

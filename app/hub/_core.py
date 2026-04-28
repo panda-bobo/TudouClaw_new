@@ -296,6 +296,23 @@ class Hub:
         except Exception as _he:
             logger.warning("Failed to start heartbeat loop: %s", _he)
 
+        # ── Preprocessor pre-warm ─────────────────────────────────────
+        # Async fire-and-forget: for every agent that has a preprocessor
+        # configured, trigger _build_static_system_prompt() in the
+        # background so the LRU cache is hot before the user's first
+        # chat. Without this, the first chat with any preprocessor-
+        # enabled agent eats a 10-25s latency hit (small model on a 14K
+        # prompt). Failures are silent; they're logged at DEBUG and
+        # don't block hub startup.
+        try:
+            threading.Thread(
+                target=self._preprocessor_prewarm,
+                name="hub-preprocessor-prewarm",
+                daemon=True,
+            ).start()
+        except Exception as _pwe:
+            logger.debug("preprocessor pre-warm skip: %s", _pwe)
+
         # ── Shutdown hook: persist agent state on exit ──
         # Chat tasks run in daemon threads whose finally blocks are NOT
         # guaranteed to execute when the process exits.  This atexit
@@ -353,6 +370,53 @@ class Hub:
                     len(report.get("errors", [])))
         except Exception as _re:
             logger.warning("Startup skill resync failed: %s", _re)
+
+    def _preprocessor_prewarm(self) -> None:
+        """Background pre-warm of preprocessor LRU cache for every agent
+        that opted in. Runs once at hub startup. Each agent runs serially
+        (small models on Mac saturate one core anyway; parallelism just
+        thrashes the GPU). Best-effort: timeouts, network errors, etc.
+        all log at DEBUG and continue with the next agent.
+        """
+        try:
+            from ..preprocessing import bridge as _prep_bridge
+        except Exception as _ie:
+            logger.debug("preprocessor pre-warm: bridge import failed: %s", _ie)
+            return
+        # Collect agents needing pre-warm (snapshot to avoid race during scan)
+        targets = []
+        for aid, agent in (self.agents or {}).items():
+            try:
+                if not _prep_bridge.is_enabled(agent):
+                    continue
+                if "optimize_prompt" not in _prep_bridge.get_modes(agent):
+                    continue
+                targets.append((aid, agent))
+            except Exception:
+                continue
+        if not targets:
+            return
+        logger.info(
+            "preprocessor pre-warm: %d agent(s) eligible (will run serially)",
+            len(targets),
+        )
+        for aid, agent in targets:
+            try:
+                t0 = time.time()
+                # Force a rebuild that runs the preprocessor + caches result.
+                # _build_static_system_prompt has its own internal cache check
+                # so we don't re-invoke if hash already matches.
+                _ = agent._build_static_system_prompt()
+                elapsed = (time.time() - t0) * 1000
+                logger.info(
+                    "preprocessor pre-warm: agent=%s done in %.0fms",
+                    aid, elapsed,
+                )
+            except Exception as _e:
+                logger.debug(
+                    "preprocessor pre-warm: agent=%s failed (non-fatal): %s",
+                    aid, _e,
+                )
 
     def _heartbeat_loop(self):
         """Periodic loop:

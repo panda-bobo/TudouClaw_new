@@ -1665,6 +1665,7 @@ function renderCurrentView() {
       // the panel divs exist by the time refresh runs.
       setTimeout(function(){
         try { _ltArtifactRefresh('agent', currentAgent); } catch(_){}
+        try { _refreshPreprocessorBadge(currentAgent); } catch(_){}
       }, 100);
       break;
     }
@@ -2922,6 +2923,9 @@ function renderAgentChat(agentId) {
           '<button id="tts-btn-' + agentId + '" class="btn btn-ghost btn-sm" onclick="_toggleTTS(\'' + agentId + '\')" title="自动朗读新消息 (Auto TTS)" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" style="font-size:14px;color:var(--text3)">volume_up</span></button>' +
           '<button class="btn btn-ghost btn-sm" onclick="wakeAgent(\'' + agentId + '\')" title="' + t('chat.wake.tooltip') + '" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" style="font-size:14px">notifications_active</span> <span data-i18n="chat.wake">Wake</span></button>' +
           '<button id="rag-btn-' + agentId + '" class="btn btn-ghost btn-sm" onclick="_toggleRagOnly(\'' + agentId + '\')" title="' + t('chat.rag.off') + '" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" id="rag-icon-' + agentId + '" style="font-size:14px;color:var(--text3)">search</span> <span data-i18n="chat.rag">RAG</span></button>' +
+          // Preprocessor status badge — only visible when agent.preprocessor_model is set.
+          // Click → opens Settings to the preprocessor section.
+          '<span id="prep-badge-' + agentId + '" style="display:none"></span>' +
         '</div>' +
         '<div style="display:flex;align-items:center;gap:10px">' +
           // Model/provider selectors moved into the input box (closer to
@@ -11978,6 +11982,298 @@ function eaPickAvatar(id) {
   _renderAvatarGrid('ea-avatar-grid', '_eaSelectedAvatar', 'eaPickAvatar');
 }
 
+// ── Preprocessor (small local LLM) ──────────────────────────────────
+// Cache the Ollama model list so opening Settings doesn't re-fetch.
+window._eaOllamaModelsCache = null;
+
+async function eaPopulatePreprocessor(currentModel, currentModes, currentEndpoint) {
+  var provSel = document.getElementById('ea-preprocessor-provider');
+  var modelSel = document.getElementById('ea-preprocessor-model');
+  var endpoint = document.getElementById('ea-preprocessor-endpoint');
+  var modeOpt = document.getElementById('ea-preprocessor-mode-optimize');
+  var modeUnd = document.getElementById('ea-preprocessor-mode-understanding');
+  if (!provSel || !modelSel) return;
+  if (endpoint) endpoint.value = currentEndpoint || '';
+  // Fetch the unified model list (Ollama + MLX + all providers)
+  var data = window._eaPreprocModelsCache;
+  if (!data) {
+    try {
+      data = await api('GET', '/api/portal/llm/preprocessor-models');
+      window._eaPreprocModelsCache = data;
+    } catch(e) { data = {models: [], sources: []}; }
+  }
+  var models = (data && data.models) || [];
+  // Group by source label, build provider list
+  var groups = {};
+  models.forEach(function(m) {
+    var key = m.source_label || m.source || 'unknown';
+    if (!groups[key]) {
+      groups[key] = {label: key, source: m.source, endpoint: m.endpoint, models: []};
+    }
+    groups[key].models.push(m);
+  });
+  // Cache groups for use by handlers
+  window._eaPreprocGroups = groups;
+  // Populate provider dropdown
+  provSel.innerHTML = '<option value="">不启用 / Disabled</option>';
+  Object.keys(groups).forEach(function(label) {
+    var g = groups[label];
+    var opt = document.createElement('option');
+    opt.value = label;
+    opt.dataset.endpoint = g.endpoint || '';
+    opt.dataset.source = g.source;
+    opt.textContent = label + ' (' + g.models.length + ')';
+    provSel.appendChild(opt);
+  });
+  // Add "custom" provider option
+  var custOpt = document.createElement('option');
+  custOpt.value = '__custom__';
+  custOpt.textContent = '自定义 endpoint…';
+  provSel.appendChild(custOpt);
+  // Match current model to a provider — pick the first source containing it
+  var matchedLabel = '';
+  if (currentModel) {
+    for (var label in groups) {
+      if (groups[label].models.some(function(m){ return m.name === currentModel; })) {
+        matchedLabel = label;
+        break;
+      }
+    }
+    if (!matchedLabel) matchedLabel = '__custom__';
+  }
+  if (matchedLabel) provSel.value = matchedLabel;
+  // Populate model dropdown for the selected provider
+  eaOnPreprocessorProviderChange(currentModel || '');
+  // Restore mode checkboxes
+  var modes = currentModes || [];
+  if (modeOpt) modeOpt.checked = modes.indexOf('optimize_prompt') >= 0;
+  if (modeUnd) modeUnd.checked = modes.indexOf('task_understanding') >= 0;
+  // Auto-probe health if anything is configured
+  if (currentModel || currentEndpoint) {
+    setTimeout(function(){ eaCheckPreprocessorHealth(); }, 100);
+  }
+}
+
+// Provider change → repopulate model dropdown for that provider's models +
+// auto-fill endpoint from provider's base_url.
+function eaOnPreprocessorProviderChange(restoreModel) {
+  var provSel = document.getElementById('ea-preprocessor-provider');
+  var modelSel = document.getElementById('ea-preprocessor-model');
+  var endpoint = document.getElementById('ea-preprocessor-endpoint');
+  if (!provSel || !modelSel) return;
+  var label = provSel.value;
+  modelSel.innerHTML = '';
+  if (!label) {
+    // Disabled
+    modelSel.innerHTML = '<option value="">（不启用）</option>';
+    if (endpoint) endpoint.value = '';
+    return;
+  }
+  if (label === '__custom__') {
+    // User picks endpoint manually + types model name
+    modelSel.innerHTML = '<option value="__custom_model__">（自定义 model 名 — 在 endpoint 字段下方填写）</option>';
+    return;
+  }
+  var groups = window._eaPreprocGroups || {};
+  var g = groups[label];
+  if (!g) {
+    modelSel.innerHTML = '<option value="">（无可用 model）</option>';
+    return;
+  }
+  // Auto-fill endpoint from provider unless user typed override
+  if (endpoint && (!endpoint.value || endpoint.dataset.autoFilled === '1')) {
+    endpoint.value = g.endpoint || '';
+    endpoint.dataset.autoFilled = '1';
+  }
+  modelSel.innerHTML = '<option value="">（请选择 model）</option>';
+  g.models.forEach(function(m) {
+    var opt = document.createElement('option');
+    opt.value = m.name;
+    var sizeStr = m.size_gb ? ' (' + m.size_gb + 'GB)' : '';
+    opt.textContent = m.name + sizeStr;
+    if (restoreModel && m.name === restoreModel) opt.selected = true;
+    modelSel.appendChild(opt);
+  });
+}
+
+function eaOnPreprocessorModelChange() {
+  // Re-trigger health probe when model picked
+  var modelSel = document.getElementById('ea-preprocessor-model');
+  if (modelSel && modelSel.value && modelSel.value !== '__custom_model__') {
+    setTimeout(function(){ eaCheckPreprocessorHealth(); }, 100);
+  }
+}
+
+// Render fallback rows (each editable). Backed by window._eaPreprocessorFallback.
+function eaRenderPreprocessorFallback() {
+  var rows = document.getElementById('ea-preprocessor-fallback-rows');
+  if (!rows) return;
+  var arr = window._eaPreprocessorFallback || [];
+  if (!arr.length) {
+    rows.innerHTML = '<div style="font-size:10px;color:var(--text3);font-style:italic;padding:4px 0">（暂无备用模型 — 主模型失败时直接走默认路径）</div>';
+    return;
+  }
+  rows.innerHTML = arr.map(function(entry, idx) {
+    return '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">'
+      + '<span style="font-size:10px;color:var(--text3);min-width:14px;text-align:right">'+(idx+1)+'.</span>'
+      + '<input type="text" value="'+esc(entry)+'" '
+      +   'placeholder="model 或 model@http://endpoint" '
+      +   'onchange="eaUpdatePreprocessorFallback('+idx+', this.value)" '
+      +   'style="flex:1;font-size:11px;font-family:monospace;padding:4px 6px;border:1px solid var(--border);border-radius:4px;background:var(--surface)">'
+      + '<button type="button" class="btn btn-ghost btn-sm" onclick="eaRemovePreprocessorFallback('+idx+')" style="padding:2px 6px"><span class="material-symbols-outlined" style="font-size:14px">close</span></button>'
+      + '</div>';
+  }).join('');
+}
+
+function eaAddPreprocessorFallback() {
+  if (!window._eaPreprocessorFallback) window._eaPreprocessorFallback = [];
+  window._eaPreprocessorFallback.push('');
+  eaRenderPreprocessorFallback();
+}
+
+function eaUpdatePreprocessorFallback(idx, val) {
+  if (!window._eaPreprocessorFallback) window._eaPreprocessorFallback = [];
+  window._eaPreprocessorFallback[idx] = (val || '').trim();
+}
+
+function eaRemovePreprocessorFallback(idx) {
+  if (!window._eaPreprocessorFallback) return;
+  window._eaPreprocessorFallback.splice(idx, 1);
+  eaRenderPreprocessorFallback();
+}
+
+// eaCollectPreprocessor was already updated to read endpoint, but the
+// sel.value now has "@source" suffix when picked from dropdown — strip it.
+// Override the old function:
+function eaCollectPreprocessor() {
+  var provSel = document.getElementById('ea-preprocessor-provider');
+  var modelSel = document.getElementById('ea-preprocessor-model');
+  var endpoint = document.getElementById('ea-preprocessor-endpoint');
+  if (!provSel || !modelSel) return null;
+  var provVal = provSel.value;
+  var modelVal = modelSel.value;
+  var model = '';
+  if (provVal === '' || provVal === null) {
+    // Disabled
+    model = '';
+  } else if (provVal === '__custom__') {
+    // Custom — model dropdown option is "__custom_model__" placeholder;
+    // expect model name in endpoint OR a free-form text field. For now,
+    // fall back to whatever's in endpoint as a single combined string is awkward;
+    // user types model into a dedicated input we'd need. Simpler: refuse.
+    // Practical: just take the modelSel.value if user picked something.
+    model = (modelVal === '__custom_model__' ? '' : modelVal).trim();
+  } else if (modelVal && modelVal !== '__custom_model__') {
+    model = modelVal;
+  }
+  var modes = [];
+  if ((document.getElementById('ea-preprocessor-mode-optimize')||{}).checked) modes.push('optimize_prompt');
+  if ((document.getElementById('ea-preprocessor-mode-understanding')||{}).checked) modes.push('task_understanding');
+  return {
+    model: model,
+    modes: modes,
+    endpoint: endpoint ? endpoint.value.trim() : '',
+    fallback: (window._eaPreprocessorFallback || []).filter(function(x){ return (x||'').trim(); }),
+  };
+}
+
+async function eaRefreshPreprocessorModels() {
+  // Force re-fetch
+  window._eaOllamaModelsCache = null;
+  // Re-populate preserving current selection
+  var sel = document.getElementById('ea-preprocessor-model');
+  var custom = document.getElementById('ea-preprocessor-model-custom');
+  var current = '';
+  if (sel) {
+    if (sel.value === '__custom__' && custom) current = custom.value.trim();
+    else current = sel.value;
+  }
+  var modes = [];
+  if ((document.getElementById('ea-preprocessor-mode-optimize')||{}).checked) modes.push('optimize_prompt');
+  if ((document.getElementById('ea-preprocessor-mode-understanding')||{}).checked) modes.push('task_understanding');
+  await eaPopulatePreprocessor(current, modes);
+  if (window._toast) window._toast('Ollama 模型列表已刷新', 'success');
+}
+
+// (Older eaCollectPreprocessor removed 2026-04-28 — the version above
+//  handles the new "<model>@<source>" select value format.)
+
+// Probe the configured endpoint + verify the chosen model is loaded.
+// Renders a colored badge next to the endpoint field:
+//   🟢 connected · N models    (reachable + target model present)
+//   🟡 model 'X' not loaded     (reachable but target model missing)
+//   🔴 unreachable             (connection failed)
+async function eaCheckPreprocessorHealth() {
+  var badge = document.getElementById('ea-preprocessor-health');
+  if (!badge) return;
+  var prep = eaCollectPreprocessor() || {};
+  // Show "checking…" while probing
+  badge.style.display = 'inline-block';
+  badge.style.background = 'var(--surface2)';
+  badge.style.color = 'var(--text3)';
+  badge.textContent = '· checking…';
+  var qs = '';
+  if (prep.endpoint) qs += 'endpoint=' + encodeURIComponent(prep.endpoint);
+  if (prep.model && prep.model !== '__custom__') {
+    qs += (qs ? '&' : '') + 'model=' + encodeURIComponent(prep.model);
+  }
+  var url = '/api/portal/llm/preprocessor-health' + (qs ? '?' + qs : '');
+  try {
+    var d = await api('GET', url);
+    if (!d || !d.reachable) {
+      badge.style.background = '#ef444422';
+      badge.style.color = '#ef4444';
+      badge.textContent = '🔴 unreachable';
+      badge.title = (d && d.error) || 'unreachable';
+      return;
+    }
+    if (prep.model && !d.target_model_present) {
+      badge.style.background = '#f59e0b22';
+      badge.style.color = '#f59e0b';
+      badge.textContent = '🟡 model 未加载';
+      badge.title = '已连接 ' + d.endpoint + '，但 model "' + prep.model + '" 不在 /v1/models 列表里。可能需要先 ollama pull 或 mlx_lm.server --model <name> 启动。';
+      return;
+    }
+    badge.style.background = '#22c55e22';
+    badge.style.color = '#22c55e';
+    badge.textContent = '🟢 connected · ' + d.model_count + ' models';
+    badge.title = '✓ ' + d.endpoint + ' (latency ' + d.latency_ms + 'ms)';
+  } catch (e) {
+    badge.style.background = '#ef444422';
+    badge.style.color = '#ef4444';
+    badge.textContent = '🔴 check failed';
+    badge.title = String(e);
+  }
+}
+
+// Render/refresh the small "⚡预处理" status badge on the agent main page,
+// shown next to the RAG button. Only visible when preprocessor_model is set.
+async function _refreshPreprocessorBadge(agentId) {
+  var el = document.getElementById('prep-badge-' + agentId);
+  if (!el) return;
+  var prep = null;
+  try {
+    prep = await api('GET', '/api/portal/agent/' + encodeURIComponent(agentId) + '/preprocessor');
+  } catch(e) { prep = null; }
+  if (!prep || !prep.enabled) {
+    el.style.display = 'none';
+    el.innerHTML = '';
+    return;
+  }
+  var modes = prep.preprocessor_modes || [];
+  var modeText = modes.length ? modes.map(function(m){
+    return m === 'optimize_prompt' ? 'prompt' :
+           m === 'task_understanding' ? '理解' : m;
+  }).join('+') : '默认';
+  var tooltip = '预处理模型 · ' + prep.preprocessor_model + ' (' + modeText + ')\n点击进入设置修改';
+  el.style.display = 'inline-flex';
+  el.style.cssText = 'display:inline-flex;align-items:center;gap:4px;padding:3px 8px;font-size:10px;background:linear-gradient(135deg,#a855f722,#5b8def22);color:var(--primary);border-radius:4px;border:1px solid var(--primary-tint-30, #a855f744);cursor:pointer;font-weight:600';
+  el.title = tooltip;
+  el.onclick = function(){ try { editAgentProfile(agentId); } catch(_){} };
+  el.innerHTML = '<span class="material-symbols-outlined" style="font-size:12px">bolt</span> '
+    + esc(prep.preprocessor_model.split(':')[0]);  // truncate ":3b-instruct" suffix
+}
+
 // Persona template library — loaded once, reused on open
 window._caPersonaCache = null;
 async function loadPersonasForCreate() {
@@ -12833,6 +13129,18 @@ async function editAgentProfile(agentId) {
   if (arEn) arEn.checked = !!ar.enabled;
   var arTh = document.getElementById('ea-ar-threshold');
   if (arTh) arTh.value = ar['complex_threshold_chars'] || 2000;
+  // ── Preprocessor (small local LLM) ─────────────────────────────
+  // Populate model dropdown from cached Ollama list (or refresh fresh),
+  // then select the agent's currently-configured model.
+  try {
+    eaPopulatePreprocessor(agent.preprocessor_model || '',
+                           agent.preprocessor_modes || [],
+                           agent.preprocessor_endpoint || '');
+    // Restore fallback list (separate from main populate since it's a list editor)
+    window._eaPreprocessorFallback = Array.isArray(agent.preprocessor_fallback)
+      ? agent.preprocessor_fallback.slice() : [];
+    eaRenderPreprocessorFallback();
+  } catch(e) { console.warn('preprocessor populate failed:', e); }
   // 面板默认收起；如果用户已经配过任意 extra_llms / learning / multimodal / auto_route，就自动展开
   var panel = document.getElementById('ea-llm-panel');
   var toggleIcon = document.getElementById('ea-llm-toggle-label');
@@ -13007,6 +13315,18 @@ async function saveAgentProfile() {
         await api('POST', '/api/portal/agent/' + agentId + '/self-improvement/disable', {});
       } catch(err) { console.error('disable self-improvement error:', err); }
     }
+    // Persist preprocessor settings (separate endpoint — model + modes + url + fallback)
+    try {
+      var prep = eaCollectPreprocessor();
+      if (prep) {
+        await api('POST', '/api/portal/agent/' + agentId + '/preprocessor', {
+          model: prep.model || '',
+          modes: prep.modes || [],
+          endpoint: prep.endpoint || '',
+          fallback: prep.fallback || [],
+        });
+      }
+    } catch(err) { console.error('save preprocessor error:', err); }
     hideModal('edit-agent');
     refresh();
   } catch(e) {
@@ -18506,27 +18826,123 @@ function renderOrchestrationPage() {
     + '<div style="flex:1;min-width:0"><h2 style="margin:0;font-family:\'Plus Jakarta Sans\',sans-serif;font-size:22px;font-weight:800;white-space:nowrap">编排总览</h2>'
     + '<p style="font-size:12px;color:var(--text3);margin-top:4px">系统健康 · Agent 表现 · 长任务流水线</p></div>'
     + '<div style="display:flex;gap:8px;flex-shrink:0"><button class="btn btn-ghost btn-sm" onclick="renderOrchestration()"><span class="material-symbols-outlined" style="font-size:14px">account_tree</span> 关系图</button>'
+    + '<button class="btn btn-ghost btn-sm" onclick="_orchOpenSharedContextViz()"><span class="material-symbols-outlined" style="font-size:14px">database</span> 项目状态</button>'
+    + '<button class="btn btn-ghost btn-sm" onclick="_orchOpenContextPreview()"><span class="material-symbols-outlined" style="font-size:14px">data_usage</span> Context 预览</button>'
     + '<button class="btn btn-sm" onclick="renderOrchestrationPage()"><span class="material-symbols-outlined" style="font-size:14px">refresh</span> 刷新</button></div></div>'
     + '<div id="orch-overview-cards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:20px"></div>'
-    + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px">'
+    + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px;margin-bottom:16px">'
     + '<div id="orch-agents-section"></div>'
-    + '<div id="orch-pipelines-section"></div></div></div>';
+    + '<div id="orch-pipelines-section"></div></div>'
+    + '<div id="orch-preprocessor-section"></div></div>';
 
   // Loading skeletons
   document.getElementById('orch-overview-cards').innerHTML = _orchSkelCards(4);
   document.getElementById('orch-agents-section').innerHTML = _orchSkelBlock('Agent 排行');
   document.getElementById('orch-pipelines-section').innerHTML = _orchSkelBlock('长任务流水线');
+  var prepEl = document.getElementById('orch-preprocessor-section');
+  if (prepEl) prepEl.innerHTML = _orchSkelBlock('⚡ 预处理 metrics');
 
-  // Fetch all 3 endpoints in parallel
+  // Fetch all 4 endpoints in parallel
   Promise.all([
     fetch('/api/portal/orchestration/overview').then(function(r){return r.json();}).catch(function(e){return {_err: String(e)};}),
     fetch('/api/portal/orchestration/agents?limit=20').then(function(r){return r.json();}).catch(function(e){return {_err: String(e)};}),
     fetch('/api/portal/orchestration/pipelines?limit=10').then(function(r){return r.json();}).catch(function(e){return {_err: String(e)};}),
+    fetch('/api/portal/orchestration/preprocessor-metrics').then(function(r){return r.json();}).catch(function(e){return {_err: String(e)};}),
   ]).then(function(results) {
     _renderOrchOverview(results[0]);
     _renderOrchAgents(results[1]);
     _renderOrchPipelines(results[2]);
+    _renderOrchPreprocessor(results[3]);
   });
+}
+
+function _renderOrchPreprocessor(d) {
+  var el = document.getElementById('orch-preprocessor-section');
+  if (!el) return;
+  if (d && d._err) {
+    el.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;color:var(--error);font-size:12px">⚡ 预处理 metrics 加载失败: '+esc(d._err)+'</div>';
+    return;
+  }
+  d = d || {};
+  var phases = d.phases || [];
+  var enabledAgents = d.enabled_agents || [];
+  var breaker = d.breaker || [];
+  var pausedCount = d.breaker_paused_count || 0;
+  var cache = d.cache || {};
+
+  // Header bar
+  var headerHtml = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">'
+    + '<div style="font-size:13px;font-weight:700">⚡ 预处理 metrics</div>'
+    + '<div style="font-size:11px;color:var(--text3)">'
+    +   enabledAgents.length + ' agent 启用 · cache ' + (cache.size||0) + '/' + (cache.capacity||256)
+    +   ' · hits ' + (cache.hits||0) + ' / misses ' + (cache.misses||0)
+    +   (pausedCount > 0 ? ' · <span style="color:#f59e0b;font-weight:600">⏸ ' + pausedCount + ' phase 熔断中</span>' : '')
+    + '</div></div>';
+
+  // Phases table
+  var phasesHtml = '';
+  if (!phases.length) {
+    phasesHtml = '<div style="padding:30px;text-align:center;color:var(--text3);font-size:12px">尚无预处理调用 — 启用 agent 的 preprocessor 后这里会出现 phase 数据</div>';
+  } else {
+    phasesHtml = '<div style="overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:11px">'
+      + '<thead><tr style="border-bottom:1px solid var(--border)">'
+      + '<th style="padding:6px;text-align:left;font-size:10px;color:var(--text3);font-weight:600">PHASE</th>'
+      + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">CALLS</th>'
+      + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">CACHE 命中率</th>'
+      + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">FALLBACK</th>'
+      + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">TOKENS in/out</th>'
+      + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">平均延迟</th>'
+      + '</tr></thead><tbody>';
+    phases.forEach(function(p) {
+      var hitPct = (p.cache_hit_rate * 100).toFixed(0) + '%';
+      var hitColor = p.cache_hit_rate >= 0.5 ? '#22c55e' : (p.cache_hit_rate >= 0.2 ? '#f59e0b' : 'var(--text3)');
+      var fbColor = p.fallbacks > 0 ? '#ef4444' : 'var(--text3)';
+      phasesHtml += '<tr style="border-bottom:1px solid var(--border-light)">'
+        + '<td style="padding:6px"><b>'+esc(p.kind)+'</b></td>'
+        + '<td style="padding:6px;text-align:right">'+p.calls+'</td>'
+        + '<td style="padding:6px;text-align:right;color:'+hitColor+';font-weight:600">'+hitPct+' ('+p.cache_hits+')</td>'
+        + '<td style="padding:6px;text-align:right;color:'+fbColor+'">'+p.fallbacks+'</td>'
+        + '<td style="padding:6px;text-align:right;color:var(--text2)">'+_formatNum(p.tokens_in)+' / '+_formatNum(p.tokens_out)+'</td>'
+        + '<td style="padding:6px;text-align:right">'+p.latency_ms_avg+'ms</td>'
+        + '</tr>';
+    });
+    phasesHtml += '</tbody></table></div>';
+  }
+
+  // Breaker rows (if any paused)
+  var breakerHtml = '';
+  var pausedBreakers = breaker.filter(function(b){ return b.paused; });
+  if (pausedBreakers.length) {
+    breakerHtml = '<div style="margin-top:12px;padding:10px;background:#f59e0b11;border-left:3px solid #f59e0b;border-radius:4px">'
+      + '<div style="font-size:11px;font-weight:600;color:#f59e0b;margin-bottom:6px">⏸ 熔断中（失败率超阈值，自动暂停 60s）</div>';
+    pausedBreakers.forEach(function(b) {
+      breakerHtml += '<div style="font-size:11px;margin-bottom:3px">'
+        + '<code>'+esc(b.kind)+'</code> on agent <code>'+esc(b.agent_id.slice(0,12))+'</code>'
+        + ' · 失败 '+b.fail_count+'/'+b.history_size+'  · 剩余 '+b.paused_remaining_s+'s'
+        + '</div>';
+    });
+    breakerHtml += '</div>';
+  }
+
+  // Enabled agents list (compact)
+  var agentsHtml = '';
+  if (enabledAgents.length) {
+    agentsHtml = '<div style="margin-top:12px;font-size:11px;color:var(--text3)">'
+      + '<div style="font-weight:600;margin-bottom:6px">已启用 agent</div>';
+    enabledAgents.forEach(function(a) {
+      var modeLabel = (a.modes||[]).map(function(m){
+        return m === 'optimize_prompt' ? 'prompt' : (m === 'task_understanding' ? '理解' : m);
+      }).join('+') || '默认';
+      agentsHtml += '<div style="margin-bottom:3px"><b>'+esc(a.name)+'</b>: '
+        + '<code style="font-size:10px">'+esc(a.model.split(':')[0])+'</code>'
+        + ' @ <code style="font-size:10px">'+esc(a.endpoint || 'default')+'</code>'
+        + ' (' + esc(modeLabel) + ')</div>';
+    });
+    agentsHtml += '</div>';
+  }
+
+  el.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px">'
+    + headerHtml + phasesHtml + breakerHtml + agentsHtml + '</div>';
 }
 
 function _orchSkelCards(n) {
@@ -18604,6 +19020,8 @@ function _renderOrchAgents(d) {
     return;
   }
   var rows = (d && d.agents) || [];
+  // Cache for the Context Preview modal — saves an extra fetch.
+  window._orchAgentRows = rows;
   // Build role filter dropdown from unique roles
   var roles = {};
   rows.forEach(function(r){ if (r.role) roles[r.role] = true; });
@@ -18696,6 +19114,286 @@ function _renderOrchPipelines(d) {
 // Opens a modal showing the parent task's children as a topologically
 // layered DAG. Click a node → right-side detail panel shows status,
 // assigned agent, output path, and assignment_reason ("why this agent").
+// ============ Context Preview Modal (P1b — budget allocator) ============
+// Lets the operator see what an agent's per-call context looks like:
+// 5-section budget breakdown + rendered preview. Useful for debugging
+// "why did agent X see this in its prompt".
+// ============ Shared Context Visualization (P7) ============
+// Modal showing project shared-context tables: artifacts (timeline) /
+// decisions (log) / milestones (Gantt-ish) / handoffs (network) /
+// open Q&A. Project-scoped — dropdown to switch.
+function _orchOpenSharedContextViz() {
+  var existing = document.getElementById('orch-sc-modal');
+  if (existing) existing.remove();
+  var modal = document.createElement('div');
+  modal.id = 'orch-sc-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px';
+  modal.innerHTML =
+    '<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;width:min(1100px,100%);max-height:90vh;display:flex;flex-direction:column;overflow:hidden">'
+    + '<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border-light)">'
+    + '<div><div style="font-size:14px;font-weight:700"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">database</span> 项目共享上下文</div>'
+    + '<div style="font-size:11px;color:var(--text3)">artifacts / decisions / milestones / handoffs / pending_qs — 跨 agent 协作的状态全貌</div></div>'
+    + '<button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'orch-sc-modal\').remove()"><span class="material-symbols-outlined" style="font-size:16px">close</span></button></div>'
+    + '<div style="padding:14px 18px;border-bottom:1px solid var(--border-light);display:flex;align-items:center;gap:12px">'
+    + '<label style="font-size:11px;color:var(--text3);font-weight:600;text-transform:uppercase">PROJECT</label>'
+    + '<select id="sc-proj-select" style="flex:1;font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface)" onchange="_orchSCLoad(this.value)"><option value="">加载中…</option></select>'
+    + '<button class="btn btn-ghost btn-sm" onclick="_orchSCLoad(document.getElementById(\'sc-proj-select\').value)"><span class="material-symbols-outlined" style="font-size:14px">refresh</span></button></div>'
+    + '<div id="sc-content" style="flex:1;overflow:auto;padding:14px 18px"><div style="color:var(--text3);font-size:12px;text-align:center;padding:30px">选择 project 查看共享状态</div></div></div>';
+  modal.addEventListener('click', function(e){ if (e.target === modal) modal.remove(); });
+  document.body.appendChild(modal);
+  // Populate project list
+  fetch('/api/portal/orchestration/shared-context/projects')
+    .then(function(r){ return r.json(); })
+    .then(function(d) {
+      var sel = document.getElementById('sc-proj-select');
+      var projects = (d && d.projects) || [];
+      if (!projects.length) {
+        sel.innerHTML = '<option value="">（无项目共享数据）</option>';
+        document.getElementById('sc-content').innerHTML = '<div style="color:var(--text3);font-size:12px;text-align:center;padding:40px">还没有项目使用 sc_* 表。等 agent 通过 sc_register_artifact / sc_record_decision / sc_handoff 等工具写入数据后会出现在这里。</div>';
+        return;
+      }
+      sel.innerHTML = '<option value="">--- 选择 project ---</option>'
+        + projects.map(function(p) {
+          var c = p.counts || {};
+          var summary = ' (a=' + (c.artifacts||0) + ' d=' + (c.decisions||0) + ' m=' + (c.milestones||0) + ' h=' + (c.handoffs||0) + ' q=' + (c.pending_qs||0) + ')';
+          return '<option value="'+esc(p.project_id)+'">'+esc(p.name)+summary+'</option>';
+        }).join('');
+      // Auto-select first one
+      if (projects.length === 1) {
+        sel.value = projects[0].project_id;
+        _orchSCLoad(projects[0].project_id);
+      }
+    });
+}
+
+async function _orchSCLoad(project_id) {
+  var el = document.getElementById('sc-content');
+  if (!el) return;
+  if (!project_id) {
+    el.innerHTML = '<div style="color:var(--text3);font-size:12px;text-align:center;padding:30px">选择 project</div>';
+    return;
+  }
+  el.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:20px;text-align:center">⏳ 加载中…</div>';
+  try {
+    var d = await fetch('/api/portal/orchestration/shared-context/state/'+encodeURIComponent(project_id))
+      .then(function(r){ return r.json(); });
+    if (!d || d.detail) {
+      el.innerHTML = '<div style="color:var(--error);font-size:12px;padding:20px">'+esc((d&&d.detail)||'加载失败')+'</div>';
+      return;
+    }
+    _orchSCRender(d, el);
+  } catch (e) {
+    el.innerHTML = '<div style="color:var(--error);font-size:12px;padding:20px">加载失败: '+esc(String(e))+'</div>';
+  }
+}
+
+function _orchSCRender(d, el) {
+  var names = d.agent_names || {};
+  var nameOf = function(aid) { return names[aid] || (aid ? aid.slice(0,8) : '-'); };
+  var fmtTs = function(ts) {
+    if (!ts) return '-';
+    var date = new Date(ts * 1000);
+    return date.toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+  };
+
+  // ── Milestones (Gantt-ish list) ──────────────────────────────────
+  var ms = d.milestones || [];
+  var msHtml = '<div style="margin-bottom:18px"><div style="font-size:13px;font-weight:700;margin-bottom:8px">📅 Milestones ('+ms.length+')</div>';
+  if (!ms.length) {
+    msHtml += '<div style="font-size:11px;color:var(--text3);padding:10px;background:var(--surface2);border-radius:6px">（无）</div>';
+  } else {
+    msHtml += '<div style="display:grid;gap:6px">';
+    ms.forEach(function(m) {
+      var statusColor = m.status==='done'?'#22c55e':m.status==='in_progress'?'#5b8def':m.status==='blocked'?'#ef4444':'#94a3b8';
+      msHtml += '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--surface2);border-left:3px solid '+statusColor+';border-radius:4px">'
+        + '<span style="font-size:10px;font-weight:600;color:'+statusColor+';text-transform:uppercase">'+esc(m.status)+'</span>'
+        + '<span style="font-size:12px;flex:1">'+esc(m.name)+'</span>'
+        + '<span style="font-size:10px;color:var(--text3)">owner: '+esc(nameOf(m.owner_agent))+'</span>'
+        + (m.blocked_by ? '<span style="font-size:10px;color:#ef4444">blocked by: '+esc(m.blocked_by.slice(0,30))+'</span>' : '')
+        + '</div>';
+    });
+    msHtml += '</div>';
+  }
+  msHtml += '</div>';
+
+  // ── Decisions (log) ──────────────────────────────────────────────
+  var decs = d.decisions || [];
+  var decHtml = '<div style="margin-bottom:18px"><div style="font-size:13px;font-weight:700;margin-bottom:8px">⚖️ Decisions ('+decs.length+')</div>';
+  if (!decs.length) {
+    decHtml += '<div style="font-size:11px;color:var(--text3);padding:10px;background:var(--surface2);border-radius:6px">（无）</div>';
+  } else {
+    decHtml += '<div style="display:grid;gap:6px">';
+    decs.forEach(function(de) {
+      var stColor = de.status==='final'?'#22c55e':de.status==='overridden'?'#94a3b8':'#f59e0b';
+      decHtml += '<div style="padding:8px 10px;background:var(--surface2);border-left:3px solid '+stColor+';border-radius:4px">'
+        + '<div style="display:flex;align-items:center;justify-content:space-between;font-size:12px;margin-bottom:3px">'
+        + '<span><b>'+esc(de.topic)+'</b> → <span style="color:'+stColor+';font-weight:600">'+esc(de.decision)+'</span></span>'
+        + '<span style="font-size:10px;color:var(--text3)">'+esc(nameOf(de.decided_by))+' · '+fmtTs(de.decided_at)+'</span></div>'
+        + (de.rationale ? '<div style="font-size:10px;color:var(--text3);margin-top:3px">'+esc(de.rationale.slice(0,200))+'</div>' : '')
+        + '</div>';
+    });
+    decHtml += '</div>';
+  }
+  decHtml += '</div>';
+
+  // ── Artifacts (timeline) ─────────────────────────────────────────
+  var arts = d.artifacts || [];
+  var artHtml = '<div style="margin-bottom:18px"><div style="font-size:13px;font-weight:700;margin-bottom:8px">📦 Artifacts ('+arts.length+')</div>';
+  if (!arts.length) {
+    artHtml += '<div style="font-size:11px;color:var(--text3);padding:10px;background:var(--surface2);border-radius:6px">（无）</div>';
+  } else {
+    artHtml += '<div style="overflow:auto;max-height:300px"><table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr style="border-bottom:1px solid var(--border)">'
+      + '<th style="padding:6px;text-align:left;font-size:10px;color:var(--text3);font-weight:600">ID</th>'
+      + '<th style="padding:6px;text-align:left;font-size:10px;color:var(--text3);font-weight:600">KIND</th>'
+      + '<th style="padding:6px;text-align:left;font-size:10px;color:var(--text3);font-weight:600">TITLE</th>'
+      + '<th style="padding:6px;text-align:left;font-size:10px;color:var(--text3);font-weight:600">CREATOR</th>'
+      + '<th style="padding:6px;text-align:left;font-size:10px;color:var(--text3);font-weight:600">SUMMARY</th>'
+      + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">CREATED</th></tr></thead><tbody>';
+    arts.forEach(function(a) {
+      var statusBadge = a.status === 'superseded' ? '<span style="font-size:9px;padding:1px 4px;background:var(--surface3);color:var(--text3);border-radius:3px;margin-left:4px">superseded</span>' : '';
+      artHtml += '<tr style="border-bottom:1px solid var(--border-light)">'
+        + '<td style="padding:5px 6px;font-family:monospace;font-size:10px"><code>'+esc(a.id.slice(0,12))+'</code></td>'
+        + '<td style="padding:5px 6px"><span style="font-size:10px;padding:1px 4px;background:var(--primary-tint-10);color:var(--primary);border-radius:3px">'+esc(a.kind)+'</span></td>'
+        + '<td style="padding:5px 6px"><b>'+esc(a.title)+'</b>'+statusBadge+'</td>'
+        + '<td style="padding:5px 6px;color:var(--text3)">'+esc(nameOf(a.agent_id))+'</td>'
+        + '<td style="padding:5px 6px;color:var(--text3);font-size:10px">'+esc((a.summary||'').slice(0,80))+'</td>'
+        + '<td style="padding:5px 6px;text-align:right;font-size:10px;color:var(--text3)">'+fmtTs(a.produced_at)+'</td></tr>';
+    });
+    artHtml += '</tbody></table></div>';
+  }
+  artHtml += '</div>';
+
+  // ── Handoffs (network — simple list grouped by status) ───────────
+  var ho = d.handoffs || [];
+  var hoHtml = '<div style="margin-bottom:18px"><div style="font-size:13px;font-weight:700;margin-bottom:8px">↪️ Handoffs ('+ho.length+')</div>';
+  if (!ho.length) {
+    hoHtml += '<div style="font-size:11px;color:var(--text3);padding:10px;background:var(--surface2);border-radius:6px">（无）</div>';
+  } else {
+    hoHtml += '<div style="display:grid;gap:6px">';
+    ho.forEach(function(h) {
+      var stColor = h.status==='pending'?'#f59e0b':h.status==='acknowledged'?'#5b8def':h.status==='resolved'?'#22c55e':'#94a3b8';
+      var refsText = (h.artifact_refs||[]).length ? ' · refs: ' + h.artifact_refs.map(function(r){return r.slice(0,12);}).join(', ') : '';
+      hoHtml += '<div style="padding:8px 10px;background:var(--surface2);border-left:3px solid '+stColor+';border-radius:4px;font-size:11px">'
+        + '<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">'
+        + '<b>'+esc(nameOf(h.src_agent))+'</b><span style="color:var(--text3)">→</span><b>'+esc(nameOf(h.dst_agent))+'</b>'
+        + '<span style="font-size:10px;padding:1px 4px;background:'+stColor+'22;color:'+stColor+';border-radius:3px;font-weight:600">'+esc(h.status)+'</span>'
+        + '<span style="font-size:10px;color:var(--text3);margin-left:auto">'+fmtTs(h.ts)+'</span></div>'
+        + '<div style="font-size:11px">'+esc(h.intent.slice(0,200))+'</div>'
+        + (h.summary ? '<div style="font-size:10px;color:var(--text3);margin-top:3px">'+esc(h.summary.slice(0,150))+'</div>' : '')
+        + (refsText ? '<div style="font-size:10px;color:var(--text3);font-family:monospace;margin-top:3px">'+esc(refsText)+'</div>' : '')
+        + '</div>';
+    });
+    hoHtml += '</div>';
+  }
+  hoHtml += '</div>';
+
+  // ── Pending Q&A ──────────────────────────────────────────────────
+  var qs = d.pending_qs || [];
+  var qsHtml = '<div style="margin-bottom:8px"><div style="font-size:13px;font-weight:700;margin-bottom:8px">❓ Open Questions ('+qs.length+')</div>';
+  if (!qs.length) {
+    qsHtml += '<div style="font-size:11px;color:var(--text3);padding:10px;background:var(--surface2);border-radius:6px">（无）</div>';
+  } else {
+    qsHtml += '<div style="display:grid;gap:6px">';
+    qs.forEach(function(q) {
+      var stColor = q.status==='answered'?'#22c55e':q.status==='abandoned'?'#94a3b8':'#f59e0b';
+      qsHtml += '<div style="padding:8px 10px;background:var(--surface2);border-left:3px solid '+stColor+';border-radius:4px;font-size:11px">'
+        + '<div style="display:flex;gap:6px;margin-bottom:3px">'
+        + esc(nameOf(q.asked_by))+' <span style="color:var(--text3)">问</span> '+esc(nameOf(q.asked_to))
+        + '<span style="font-size:10px;padding:1px 4px;background:'+stColor+'22;color:'+stColor+';border-radius:3px;font-weight:600;margin-left:auto">'+esc(q.status)+'</span></div>'
+        + '<div>'+esc(q.question.slice(0,300))+'</div>'
+        + (q.answer ? '<div style="font-size:10px;color:var(--text3);margin-top:6px;padding:4px 6px;background:var(--surface);border-radius:3px"><b>答:</b> '+esc(q.answer.slice(0,200))+'</div>' : '')
+        + '</div>';
+    });
+    qsHtml += '</div>';
+  }
+  qsHtml += '</div>';
+
+  el.innerHTML = msHtml + decHtml + artHtml + hoHtml + qsHtml;
+}
+
+function _orchOpenContextPreview() {
+  var rows = (window._orchAgentRows || []);
+  var defaultAgent = rows[0] ? rows[0].id : '';
+  var agentOptions = rows.map(function(a) {
+    return '<option value="'+esc(a.id)+'">'+esc(a.name||a.id)+' ('+esc(a.role||'-')+')</option>';
+  }).join('');
+  var existing = document.getElementById('orch-ctx-modal');
+  if (existing) existing.remove();
+  var modal = document.createElement('div');
+  modal.id = 'orch-ctx-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px';
+  modal.innerHTML =
+    '<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;width:min(900px,100%);max-height:90vh;display:flex;flex-direction:column;overflow:hidden">'
+    + '<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border-light)">'
+    + '<div><div style="font-size:14px;font-weight:700"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">data_usage</span> Context 预算预览</div>'
+    + '<div style="font-size:11px;color:var(--text3)">查看 budget allocator 给某个 agent 的 5 段 context 分配</div></div>'
+    + '<button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'orch-ctx-modal\').remove()"><span class="material-symbols-outlined" style="font-size:16px">close</span></button></div>'
+    + '<div style="padding:14px 18px;border-bottom:1px solid var(--border-light);display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px">'
+    + '<div><label style="font-size:10px;color:var(--text3);font-weight:600;text-transform:uppercase">Agent</label>'
+    + '<select id="ctx-agent" style="width:100%;font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface);margin-top:4px">'+agentOptions+'</select></div>'
+    + '<div><label style="font-size:10px;color:var(--text3);font-weight:600;text-transform:uppercase">Project ID（可空）</label>'
+    + '<input id="ctx-project" type="text" placeholder="留空 = 不查 project" style="width:100%;font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface);margin-top:4px"/></div>'
+    + '<div><label style="font-size:10px;color:var(--text3);font-weight:600;text-transform:uppercase">Budget</label>'
+    + '<input id="ctx-budget" type="number" value="2000" min="200" max="8000" step="200" style="width:100%;font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface);margin-top:4px"/></div>'
+    + '<div><label style="font-size:10px;color:var(--text3);font-weight:600;text-transform:uppercase">Mode</label>'
+    + '<select id="ctx-complex" style="width:100%;font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface);margin-top:4px"><option value="false">默认（35% RAG）</option><option value="true">复杂任务（50% RAG）</option></select></div>'
+    + '</div>'
+    + '<div style="padding:14px 18px;border-bottom:1px solid var(--border-light)">'
+    + '<label style="font-size:10px;color:var(--text3);font-weight:600;text-transform:uppercase">Intent (任务意图)</label>'
+    + '<input id="ctx-intent" type="text" value="测试: 起草竞品分析报告" style="width:100%;font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface);margin-top:4px"/>'
+    + '<button class="btn btn-primary btn-sm" onclick="_orchRunContextPreview()" style="margin-top:10px"><span class="material-symbols-outlined" style="font-size:14px">play_arrow</span> 计算 context</button></div>'
+    + '<div id="ctx-result" style="flex:1;overflow:auto;padding:14px 18px"><div style="color:var(--text3);font-size:12px;text-align:center;padding:30px">点击"计算 context"查看分配结果</div></div></div>';
+  modal.addEventListener('click', function(e){ if (e.target === modal) modal.remove(); });
+  document.body.appendChild(modal);
+  if (defaultAgent) document.getElementById('ctx-agent').value = defaultAgent;
+}
+
+async function _orchRunContextPreview() {
+  var agent = document.getElementById('ctx-agent').value;
+  var proj = document.getElementById('ctx-project').value.trim();
+  var budget = document.getElementById('ctx-budget').value;
+  var complex = document.getElementById('ctx-complex').value === 'true';
+  var intent = document.getElementById('ctx-intent').value || '示例任务';
+  var resultEl = document.getElementById('ctx-result');
+  resultEl.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:20px;text-align:center">⏳ 计算中…</div>';
+  var url = '/api/portal/orchestration/context-preview/' + encodeURIComponent(agent)
+    + '?intent=' + encodeURIComponent(intent)
+    + '&budget=' + encodeURIComponent(budget)
+    + '&complex_task=' + (complex ? 'true' : 'false');
+  if (proj) url += '&project_id=' + encodeURIComponent(proj);
+  try {
+    var d = await fetch(url, {headers: {Authorization: 'Bearer ' + (localStorage.getItem('lt-jwt')||'')}}).then(function(r){return r.json();});
+    if (!d || d.detail) {
+      resultEl.innerHTML = '<div style="color:var(--error);font-size:12px;padding:20px">'+esc(d&&d.detail||'查询失败')+'</div>';
+      return;
+    }
+    // Section bars
+    var sectionRows = (d.sections||[]).map(function(s){
+      var pct = s.budget > 0 ? Math.round(100 * s.used / s.budget) : 0;
+      var color = s.truncated ? '#ef4444' : (pct > 80 ? '#f59e0b' : '#22c55e');
+      var truncBadge = s.truncated ? ' <span style="font-size:9px;padding:1px 4px;background:#ef444422;color:#ef4444;border-radius:3px;font-weight:600">truncated</span>' : '';
+      return '<div style="margin-bottom:10px">'
+        + '<div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px">'
+        + '<div style="font-weight:600">'+esc(s.name)+'<span style="color:var(--text3);font-weight:400;margin-left:6px">· '+esc(s.source||'-')+'</span>'+truncBadge+'</div>'
+        + '<div style="color:var(--text3)">'+s.used+' / '+s.budget+' tokens</div></div>'
+        + '<div style="height:6px;background:var(--surface2);border-radius:3px;overflow:hidden"><div style="height:100%;width:'+Math.min(100,pct)+'%;background:'+color+'"></div></div>'
+        + (s.text_preview ? '<div style="font-size:10px;color:var(--text3);margin-top:4px;padding:6px 8px;background:var(--surface2);border-radius:4px;font-family:monospace;white-space:pre-wrap;max-height:80px;overflow:hidden">'+esc(s.text_preview)+'</div>' : '')
+        + '</div>';
+    }).join('');
+    var headerColor = d.utilization_pct > 90 ? '#ef4444' : (d.utilization_pct > 70 ? '#f59e0b' : '#22c55e');
+    resultEl.innerHTML =
+      '<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--surface2);border-radius:8px;margin-bottom:14px">'
+      + '<div style="font-size:12px"><b>'+esc(d.agent_name)+'</b> ('+esc(d.agent_role||'-')+')</div>'
+      + '<div style="font-size:12px;color:'+headerColor+';font-weight:700">利用率 '+d.utilization_pct+'% · '+d.total_used+' / '+d.total_budget+' tokens</div></div>'
+      + '<div style="font-size:11px;color:var(--text3);margin-bottom:8px;font-weight:600;text-transform:uppercase">5 段分配</div>'
+      + sectionRows
+      + '<details style="margin-top:14px"><summary style="cursor:pointer;font-size:11px;color:var(--text3);font-weight:600">渲染后完整 context</summary>'
+      + '<pre style="margin-top:8px;padding:10px;background:var(--surface2);border-radius:6px;font-size:10px;max-height:300px;overflow:auto;white-space:pre-wrap">'+esc(d.rendered_preview)+'</pre></details>';
+  } catch (e) {
+    resultEl.innerHTML = '<div style="color:var(--error);font-size:12px;padding:20px">查询失败: '+esc(String(e))+'</div>';
+  }
+}
+
 function _orchOpenDAGModal(parentId) {
   var pipes = window._orchPipesCache || [];
   var p = pipes.find(function(x){ return x.parent_task_id === parentId; });

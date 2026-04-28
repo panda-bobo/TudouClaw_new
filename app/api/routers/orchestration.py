@@ -233,3 +233,245 @@ async def get_pipelines(
         "total": len(out),
         "ts": time.time(),
     }
+
+
+@router.get("/context-preview/{agent_id}")
+async def get_context_preview(
+    agent_id: str,
+    project_id: str = Query("", description="Project scope (omit for non-project preview)"),
+    intent: str = Query("示例任务: 检查共享上下文与 RAG 注入"),
+    budget: int = Query(2000, ge=200, le=8000),
+    complex_task: bool = Query(False),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Per-section context-budget preview for the orchestration UI.
+
+    Calls the budget allocator with the given intent + project + budget
+    and returns the section breakdown (name, source, budget, used,
+    truncated, text). Useful for debugging "why did agent X see this
+    context" and visualising token consumption per section.
+    """
+    agent = hub.get_agent(agent_id) if hasattr(hub, "get_agent") else None
+    if agent is None:
+        raise HTTPException(404, f"agent not found: {agent_id}")
+    try:
+        from ...shared_context import get_agent_context
+        bundle = get_agent_context(
+            agent_id=agent_id,
+            project_id=project_id,
+            intent=intent,
+            role=getattr(agent, "role", "") or "",
+            budget=int(budget),
+            complex_task=bool(complex_task),
+            history_summary_text="",  # caller-supplied; preview leaves empty
+        )
+    except Exception as e:
+        logger.warning("context-preview failed: %s", e)
+        raise HTTPException(500, f"context preview failed: {e}")
+    return {
+        "agent_id": agent_id,
+        "agent_name": getattr(agent, "name", "") or agent_id,
+        "agent_role": getattr(agent, "role", "") or "",
+        "intent": intent,
+        "project_id": project_id,
+        "complex_task": complex_task,
+        "total_budget": bundle.total_budget,
+        "total_used": bundle.total_used,
+        "utilization_pct": round(
+            100.0 * bundle.total_used / bundle.total_budget, 1
+        ) if bundle.total_budget else 0,
+        "sections": [
+            {
+                "name": s.name,
+                "source": s.source,
+                "budget": s.budget,
+                "used": s.used,
+                "truncated": s.truncated,
+                "text_preview": s.text[:280] + ("…" if len(s.text) > 280 else ""),
+                "text_len_chars": len(s.text),
+            }
+            for s in bundle.sections
+        ],
+        "rendered_preview": bundle.rendered[:600] + ("…" if len(bundle.rendered) > 600 else ""),
+        "ts": time.time(),
+    }
+
+
+@router.get("/preprocessor-metrics")
+async def get_preprocessor_metrics(
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Per-phase preprocessor metrics + circuit breaker snapshot.
+
+    Used by the orchestration page to render the "预处理" card:
+      * per-kind: calls / cache_hits / fallbacks / tokens_in / tokens_out
+        / latency_ms_avg / cache_hit_rate
+      * circuit breaker rows: agent / kind / paused / paused_remaining_s
+      * agent count: how many agents have preprocessor configured
+
+    Cheap — pure dict snapshot, no I/O.
+    """
+    try:
+        from ...preprocessing import bridge as _prep_bridge
+    except Exception as e:
+        return {"error": f"preprocessor module unavailable: {e}"}
+
+    raw = _prep_bridge.get_metrics()
+    cache = raw.pop("_cache", {})
+    # Enrich each kind with averages
+    phases = []
+    for kind, m in raw.items():
+        calls = m.get("calls", 0) or 0
+        hits = m.get("cache_hits", 0) or 0
+        latency_total = m.get("latency_ms_total", 0) or 0
+        # Real (non-cache) calls = calls - hits
+        real_calls = max(1, calls - hits)
+        phases.append({
+            "kind": kind,
+            "calls": calls,
+            "cache_hits": hits,
+            "fallbacks": m.get("fallbacks", 0) or 0,
+            "tokens_in": m.get("tokens_in", 0) or 0,
+            "tokens_out": m.get("tokens_out", 0) or 0,
+            "latency_ms_avg": int(latency_total / real_calls) if calls else 0,
+            "cache_hit_rate": round(hits / calls, 3) if calls else 0.0,
+        })
+
+    breaker = _prep_bridge.get_breaker_state()
+    paused_count = sum(1 for r in breaker if r["paused"])
+
+    # Count agents that have preprocessor configured
+    enabled_agents = []
+    for aid, a in (hub.agents or {}).items():
+        if _prep_bridge.is_enabled(a):
+            enabled_agents.append({
+                "id": a.id,
+                "name": a.name,
+                "model": a.preprocessor_model,
+                "endpoint": getattr(a, "preprocessor_endpoint", "") or "",
+                "modes": list(getattr(a, "preprocessor_modes", []) or []),
+            })
+
+    return {
+        "phases": phases,
+        "cache": cache,
+        "breaker": breaker,
+        "breaker_paused_count": paused_count,
+        "enabled_agents": enabled_agents,
+        "enabled_agent_count": len(enabled_agents),
+        "ts": time.time(),
+    }
+
+
+@router.get("/shared-context/projects")
+async def list_projects_with_sc(
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """List projects that have any shared-context state (artifacts /
+    decisions / milestones / handoffs / pending Q&A).
+
+    UI: dropdown for the Project State viz tab.
+    """
+    try:
+        from ...shared_context import get_shared_context_store
+        store = get_shared_context_store()
+    except Exception as e:
+        return {"projects": [], "error": str(e)}
+    # Cheap aggregation — one query per table, group by project_id
+    db = store.db._conn
+    project_ids: set[str] = set()
+    for table in ("sc_artifacts", "sc_decisions", "sc_milestones",
+                  "sc_handoffs", "sc_pending_qs"):
+        try:
+            for r in db.execute(f"SELECT DISTINCT project_id FROM {table}").fetchall():
+                pid = r["project_id"]
+                if pid:
+                    project_ids.add(pid)
+        except Exception:
+            continue
+    # Resolve project name from hub registry where possible
+    projects = []
+    for pid in sorted(project_ids):
+        name = pid
+        try:
+            if hasattr(hub, "get_project"):
+                proj = hub.get_project(pid)
+                if proj is not None:
+                    name = getattr(proj, "name", "") or pid
+        except Exception:
+            pass
+        # Quick counts
+        counts = {}
+        for table, key in (
+            ("sc_artifacts", "artifacts"),
+            ("sc_decisions", "decisions"),
+            ("sc_milestones", "milestones"),
+            ("sc_handoffs", "handoffs"),
+            ("sc_pending_qs", "pending_qs"),
+        ):
+            try:
+                row = db.execute(
+                    f"SELECT COUNT(*) AS n FROM {table} WHERE project_id = ?",
+                    (pid,),
+                ).fetchone()
+                counts[key] = int(row["n"]) if row else 0
+            except Exception:
+                counts[key] = 0
+        projects.append({"project_id": pid, "name": name, "counts": counts})
+    return {"projects": projects, "ts": time.time()}
+
+
+@router.get("/shared-context/state/{project_id}")
+async def get_project_state(
+    project_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Full shared-context dump for one project: artifacts / decisions /
+    milestones / handoffs / pending_qs (each table's recent N rows).
+
+    Used by the Project State viz tab to render timeline + decision log
+    + Gantt + handoff network + open Q&A. Bounded fetch sizes to keep
+    response < 100KB.
+    """
+    try:
+        from ...shared_context import get_shared_context_store
+        store = get_shared_context_store()
+    except Exception as e:
+        raise HTTPException(500, f"shared-context unavailable: {e}")
+    if not project_id:
+        raise HTTPException(400, "project_id required")
+    out = {
+        "project_id": project_id,
+        "artifacts":  store.list_artifacts(project_id=project_id, status="", limit=200),
+        "decisions":  store.list_decisions(project_id=project_id, status="", limit=100),
+        "milestones": store.list_milestones(project_id=project_id, status="", limit=100),
+        "handoffs":   store.list_handoffs(project_id=project_id, status="", limit=100),
+        "pending_qs": store.list_pending_questions(project_id=project_id, status="", limit=100),
+    }
+    # Resolve agent names for handoffs (UI needs labels, not raw IDs)
+    if hasattr(hub, "get_agent"):
+        agent_ids = set()
+        for a in out["artifacts"]:
+            agent_ids.add(a.get("agent_id", ""))
+        for h in out["handoffs"]:
+            agent_ids.add(h.get("src_agent", ""))
+            agent_ids.add(h.get("dst_agent", ""))
+        for m in out["milestones"]:
+            agent_ids.add(m.get("owner_agent", ""))
+        agent_names = {}
+        for aid in agent_ids:
+            if not aid:
+                continue
+            try:
+                a = hub.get_agent(aid)
+                if a is not None:
+                    agent_names[aid] = (a.name or aid)[:20]
+            except Exception:
+                continue
+        out["agent_names"] = agent_names
+    out["ts"] = time.time()
+    return out

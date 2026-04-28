@@ -1434,59 +1434,127 @@ async def chat_handoff(
     if target.id == src_agent.id:
         raise HTTPException(400, "cannot hand off to self")
 
-    # Build context summary from src's recent user/assistant messages
-    ctx_lines: list[str] = []
-    if include_context:
-        recent = list(src_agent.messages or [])[-12:]
-        kept = []
-        for m in recent:
-            if not isinstance(m, dict):
-                continue
-            role = m.get("role", "")
-            if role not in ("user", "assistant"):
-                continue
-            content = m.get("content", "")
-            if not isinstance(content, str) or not content.strip():
-                continue
-            kept.append((role, content[:300].replace("\n", " ")))
-        kept = kept[-6:]  # last 6 turns max
-        if kept:
-            ctx_lines.append("[最近上下文]")
-            for role, c in kept:
-                tag = "用户" if role == "user" else "我"
-                ctx_lines.append(f"  - {tag}: {c}{'…' if len(c) >= 300 else ''}")
-
     src_label = f"{src_agent.role or '?'}-{src_agent.name or '?'}"
-    handoff_text = (
-        f"[来自 {src_label} 的协助请求]\n\n"
-        f"原始问题: {user_msg}"
-    )
-    if ctx_lines:
-        handoff_text += "\n\n" + "\n".join(ctx_lines)
+    target_label = f"{target.role or '?'}-{target.name or '?'}"
 
-    # Append to target's messages so its chat UI shows the handoff
-    try:
-        target.messages.append({
-            "role": "user",
-            "content": handoff_text,
-            "_source": f"handoff_from:{src_agent.id}",
-        })
-        if hasattr(target, "_log"):
-            target._log("message", {
-                "role": "user", "content": handoff_text,
-                "source": f"handoff_from:{src_agent.id}",
+    # ── PULL MODE: write to sc_handoffs table, post lightweight notice ──
+    # Active when src has a project_id (shared context exists). Saves ~85%
+    # tokens vs the old push mode by not copying full chat context into
+    # dst.messages. Dst auto-reads via sc_query at task setup (already
+    # wired into Agent._build_shared_context_summary).
+    project_id = (getattr(src_agent, "project_id", "") or "").strip()
+    handoff_id = ""
+    used_pull_mode = False
+    ctx_lines: list[str] = []  # legacy var, kept for backward-compat reply format
+
+    if project_id:
+        try:
+            from ...shared_context import get_shared_context_store
+            store = get_shared_context_store()
+            # Build short summary (60 chars cap) from last user message
+            recent_summary = ""
+            for m in reversed(list(src_agent.messages or [])[-6:]):
+                if isinstance(m, dict) and m.get("role") == "user":
+                    c = (m.get("content") or "").strip().replace("\n", " ")
+                    if c:
+                        recent_summary = c[:60]
+                        break
+            handoff_id = store.write_handoff(
+                project_id=project_id,
+                src_agent=src_agent.id,
+                dst_agent=target.id,
+                intent=user_msg,
+                summary=recent_summary,
+                artifact_refs=[],  # caller can pass them later via tool
+            )
+            used_pull_mode = True
+            logger.info(
+                "handoff PULL: %s → %s wrote sc_handoffs row id=%s "
+                "(project=%s)",
+                src_agent.id, target.id, handoff_id, project_id,
+            )
+        except Exception as _pe:
+            logger.warning("handoff: sc_handoffs write failed, falling back to push: %s", _pe)
+            used_pull_mode = False
+
+    if used_pull_mode:
+        # Lightweight notification — 1 short line + handoff id, dst pulls
+        # full details via sc_query / sc_get_artifact when ready.
+        notice = (
+            f"📨 [新 handoff 已就位] 来自 {src_label} · id={handoff_id[:12]} · "
+            f"调 sc_query(table='handoffs', dst_agent='self') 查看详情。"
+        )
+        try:
+            target.messages.append({
+                "role": "user",
+                "content": notice,
+                "_source": f"handoff_pull:{handoff_id}",
             })
-    except Exception as _pe:
-        logger.warning("handoff: append to target.messages failed: %s", _pe)
+            if hasattr(target, "_log"):
+                target._log("message", {
+                    "role": "user", "content": notice,
+                    "source": f"handoff_pull:{handoff_id}",
+                })
+        except Exception as _pe:
+            logger.warning("handoff: pull notice append failed: %s", _pe)
+    else:
+        # ── PUSH FALLBACK (no project_id, can't write to sc_handoffs) ──
+        # Build full context summary + post to dst (legacy behavior).
+        if include_context:
+            recent = list(src_agent.messages or [])[-12:]
+            kept = []
+            for m in recent:
+                if not isinstance(m, dict):
+                    continue
+                role = m.get("role", "")
+                if role not in ("user", "assistant"):
+                    continue
+                content = m.get("content", "")
+                if not isinstance(content, str) or not content.strip():
+                    continue
+                kept.append((role, content[:300].replace("\n", " ")))
+            kept = kept[-6:]
+            if kept:
+                ctx_lines.append("[最近上下文]")
+                for role, c in kept:
+                    tag = "用户" if role == "user" else "我"
+                    ctx_lines.append(f"  - {tag}: {c}{'…' if len(c) >= 300 else ''}")
+
+        handoff_text = (
+            f"[来自 {src_label} 的协助请求]\n\n"
+            f"原始问题: {user_msg}"
+        )
+        if ctx_lines:
+            handoff_text += "\n\n" + "\n".join(ctx_lines)
+        try:
+            target.messages.append({
+                "role": "user",
+                "content": handoff_text,
+                "_source": f"handoff_push:{src_agent.id}",
+            })
+            if hasattr(target, "_log"):
+                target._log("message", {
+                    "role": "user", "content": handoff_text,
+                    "source": f"handoff_push:{src_agent.id}",
+                })
+        except Exception as _pe:
+            logger.warning("handoff: push append failed: %s", _pe)
 
     # Confirmation bubble for source agent
-    target_label = f"{target.role or '?'}-{target.name or '?'}"
-    reply_md = (
-        f"➡️ **已转交给 {target_label}**\n\n"
-        f"原始问题: {user_msg}\n\n"
-        f"_{'附带 ' + str(len(ctx_lines)) + ' 行上下文摘要' if ctx_lines else '未附上下文'} · "
-        f"对方收到后会在自己的 chat 里继续。_"
-    )
+    if used_pull_mode:
+        reply_md = (
+            f"➡️ **已转交给 {target_label}** (pull 模式)\n\n"
+            f"原始问题: {user_msg}\n\n"
+            f"_handoff id `{handoff_id[:12]}` 写入项目共享表 sc_handoffs。"
+            f"对方任务启动时自动看到，或主动调 sc_query 查询。_"
+        )
+    else:
+        reply_md = (
+            f"➡️ **已转交给 {target_label}** (push 模式 · 无项目上下文)\n\n"
+            f"原始问题: {user_msg}\n\n"
+            f"_{'附带 ' + str(len(ctx_lines)) + ' 行上下文摘要' if ctx_lines else '未附上下文'} · "
+            f"对方收到后会在自己的 chat 里继续。_"
+        )
     try:
         src_agent.messages.append({
             "role": "user",
@@ -1516,6 +1584,8 @@ async def chat_handoff(
         "target_id": target.id,
         "target_label": target_label,
         "context_lines": len(ctx_lines),
+        "mode": "pull" if used_pull_mode else "push",
+        "handoff_id": handoff_id,
     }
 
 
@@ -3446,3 +3516,347 @@ async def confirm_conversation_task_done(
     ct.status = ConversationTaskStatus.DONE
     ct_store.save(ct)
     return {"ok": True, "conversation_task_id": ct.id, "status": ct.status}
+
+
+# ════════════════════════════════════════════════════════════════════
+# Preprocessor (small local LLM) — per-agent opt-in
+# ════════════════════════════════════════════════════════════════════
+@router.get("/llm/ollama-models")
+async def list_ollama_models(
+    user: CurrentUser = Depends(get_current_user),
+):
+    """List models available on the local Ollama instance.
+
+    Used by the Agent Settings UI dropdown for selecting a preprocessor
+    model. Calls Ollama's ``/api/tags`` endpoint directly. Returns
+    ``{"models": [{"name": "...", "size_gb": ...}], "ollama_url": "..."}``.
+
+    Returns empty list (no error) when Ollama is unreachable, so the UI
+    can degrade to manual input.
+    """
+    import json as _json
+    import os
+    import urllib.request
+    base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+    try:
+        req = urllib.request.Request(
+            f"{base}/api/tags",
+            headers={"User-Agent": "tudouclaw/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=2.5) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        logger.debug("ollama tags fetch failed: %s", e)
+        return {"models": [], "ollama_url": base, "error": str(e)}
+    models = []
+    for m in (data.get("models") or []):
+        size_b = int(m.get("size") or 0)
+        models.append({
+            "name": str(m.get("name") or ""),
+            "size_gb": round(size_b / (1024**3), 2) if size_b else 0,
+            "modified_at": m.get("modified_at") or "",
+        })
+    # Sort: local small models first (preprocessor target), then large
+    # local, then cloud (size_gb=0 — those run remotely, not "local").
+    # Within each group, smaller first / alphabetical.
+    def _sort_key(m):
+        size = m.get("size_gb", 0) or 0
+        is_cloud = (size == 0) or (":cloud" in m["name"])
+        return (1 if is_cloud else 0, size, m["name"])
+    models.sort(key=_sort_key)
+    return {"models": models, "ollama_url": base}
+
+
+@router.get("/llm/preprocessor-models")
+async def list_preprocessor_models(
+    user: CurrentUser = Depends(get_current_user),
+):
+    """List models available for preprocessor selection — aggregated from
+    ALL registered LLM providers + local Ollama + local MLX-LM.
+
+    NOT hardcoded to any single source. Each model entry carries its
+    ``provider_id`` + ``endpoint`` so the frontend can auto-fill the
+    endpoint URL when the user picks a model.
+
+    Source markers (returned in each entry):
+      * ``ollama``      — local Ollama (port 11434 by default)
+      * ``mlx``         — local MLX-LM server (port 10240 typical)
+      * ``provider:X``  — registered LLM provider (Anthropic, OpenAI, ...)
+    """
+    import json as _json
+    import os
+    import urllib.request
+
+    out_models: list[dict] = []
+    sources: list[dict] = []
+
+    # ─ 1. Local Ollama ──────────────────────────────────────────────
+    ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+    try:
+        req = urllib.request.Request(
+            f"{ollama_url}/api/tags",
+            headers={"User-Agent": "tudouclaw/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+        for m in (data.get("models") or []):
+            size_b = int(m.get("size") or 0)
+            out_models.append({
+                "name": str(m.get("name") or ""),
+                "source": "ollama",
+                "source_label": "本地 Ollama",
+                "endpoint": ollama_url,
+                "provider_id": "",
+                "size_gb": round(size_b / (1024**3), 2) if size_b else 0,
+            })
+        sources.append({"source": "ollama", "label": "本地 Ollama",
+                        "endpoint": ollama_url, "model_count": len(data.get("models", [])),
+                        "reachable": True})
+    except Exception as e:
+        sources.append({"source": "ollama", "label": "本地 Ollama",
+                        "endpoint": ollama_url, "reachable": False, "error": str(e)})
+
+    # ─ 2. Local MLX-LM (probes common ports) ───────────────────────
+    for mlx_url in ("http://127.0.0.1:10240", "http://localhost:10240"):
+        try:
+            req = urllib.request.Request(f"{mlx_url}/v1/models")
+            with urllib.request.urlopen(req, timeout=1.5) as resp:
+                data = _json.loads(resp.read().decode("utf-8"))
+            mlx_models = data.get("data") or []
+            for m in mlx_models:
+                out_models.append({
+                    "name": str(m.get("id") or ""),
+                    "source": "mlx",
+                    "source_label": "本地 MLX-LM",
+                    "endpoint": mlx_url,
+                    "provider_id": "",
+                    "size_gb": 0,
+                })
+            sources.append({"source": "mlx", "label": "本地 MLX-LM",
+                            "endpoint": mlx_url, "model_count": len(mlx_models),
+                            "reachable": True})
+            break  # first reachable wins
+        except Exception:
+            continue
+
+    # ─ 3. Registered LLM providers (cloud + custom) ────────────────
+    try:
+        from ... import llm as _llm
+        registry = _llm.get_registry()
+        for prov in registry.list(include_disabled=False):
+            try:
+                # Detect models — provider's manual_models OR live discovery
+                models = []
+                if hasattr(prov, "manual_models") and prov.manual_models:
+                    models = list(prov.manual_models)
+                elif hasattr(registry, "detect_models"):
+                    try:
+                        models = registry.detect_models(prov.id)
+                    except Exception:
+                        models = []
+                # Skip providers we already covered (local Ollama / MLX)
+                base_url = (prov.base_url or "").rstrip("/")
+                if not base_url:
+                    continue
+                if base_url == ollama_url:
+                    continue  # already enumerated as 'ollama'
+                if "10240" in base_url:
+                    continue  # already enumerated as 'mlx'
+                for m_name in models:
+                    out_models.append({
+                        "name": str(m_name),
+                        "source": f"provider:{prov.id}",
+                        "source_label": prov.name or prov.id,
+                        "endpoint": base_url,
+                        "provider_id": prov.id,
+                        "size_gb": 0,
+                    })
+                sources.append({
+                    "source": f"provider:{prov.id}",
+                    "label": prov.name or prov.id,
+                    "endpoint": base_url,
+                    "model_count": len(models),
+                    "reachable": True,
+                })
+            except Exception:
+                continue
+    except Exception as e:
+        logger.debug("provider registry list failed: %s", e)
+
+    # Sort: local sources first (ollama / mlx), then providers; small models first
+    def _sort_key(m):
+        source_priority = 0 if m["source"] in ("ollama", "mlx") else 1
+        size = m.get("size_gb", 0) or 0
+        is_cloud_marker = ":cloud" in m["name"]
+        return (source_priority, 1 if is_cloud_marker else 0, size, m["name"])
+    out_models.sort(key=_sort_key)
+
+    return {
+        "models": out_models,
+        "sources": sources,
+        "model_count": len(out_models),
+    }
+
+
+@router.get("/llm/preprocessor-health")
+async def preprocessor_health(
+    endpoint: str = Query("", description="OpenAI-compat base URL (e.g. http://127.0.0.1:10240). Empty = default Ollama."),
+    model: str = Query("", description="Optional model name to verify is loaded"),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Probe a preprocessor endpoint for reachability + model availability.
+
+    UI calls this from Settings on save / endpoint blur to show a live
+    health badge:
+      🟢 connected · N models loaded
+      🟡 reachable but model 'X' not in /v1/models list
+      🔴 unreachable · check endpoint
+
+    Never raises — returns ``{ok, reachable, ...}`` shape always.
+    """
+    import json as _json
+    import time as _time
+    import urllib.request
+    base = (endpoint or "http://localhost:11434").strip().rstrip("/")
+    target_model = (model or "").strip()
+    t0 = _time.time()
+    try:
+        req = urllib.request.Request(
+            f"{base}/v1/models",
+            headers={"User-Agent": "tudouclaw/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=2.5) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        # Fall back to Ollama-native /api/tags (Ollama serves /v1 too but
+        # some older builds may not)
+        try:
+            req2 = urllib.request.Request(
+                f"{base}/api/tags",
+                headers={"User-Agent": "tudouclaw/1.0"},
+            )
+            with urllib.request.urlopen(req2, timeout=2.0) as resp2:
+                data = {"data": [
+                    {"id": m.get("name") or ""}
+                    for m in (_json.loads(resp2.read().decode("utf-8")).get("models") or [])
+                ]}
+        except Exception as e2:
+            return {
+                "ok": False,
+                "reachable": False,
+                "endpoint": base,
+                "error": f"{type(e).__name__}: {e}",
+                "latency_ms": int((_time.time() - t0) * 1000),
+            }
+    models_list = [m.get("id") or "" for m in (data.get("data") or [])]
+    target_present = (not target_model) or any(
+        target_model == m or target_model in m for m in models_list
+    )
+    return {
+        "ok": True,
+        "reachable": True,
+        "endpoint": base,
+        "model_count": len(models_list),
+        "models": models_list[:30],  # cap to avoid bloat
+        "target_model": target_model,
+        "target_model_present": target_present,
+        "latency_ms": int((_time.time() - t0) * 1000),
+    }
+
+
+@router.post("/agent/{agent_id}/preprocessor")
+async def update_agent_preprocessor(
+    agent_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Update an agent's preprocessor settings.
+
+    Body shape:
+        {
+            "model": "qwen2.5:3b-instruct" | "",   // "" disables
+            "modes": ["optimize_prompt", "task_understanding"]
+        }
+
+    ``model=""`` is the canonical "disabled" state. ``modes`` controls
+    which behaviours run at the first-turn-setup node (other 2 nodes
+    have no sub-modes). Multi-node aware: proxies to remote node when
+    the agent isn't local.
+    """
+    agent, proxied = _local_or_proxy_post(hub, agent_id, "/preprocessor", body)
+    if proxied is not None:
+        return proxied
+    model = (body.get("model") or "").strip()
+    endpoint = (body.get("endpoint") or "").strip().rstrip("/")
+    modes_raw = body.get("modes") or []
+    fallback_raw = body.get("fallback") or []
+    if not isinstance(modes_raw, list):
+        modes_raw = []
+    if not isinstance(fallback_raw, list):
+        fallback_raw = []
+    # Whitelist modes against known set
+    from ...preprocessing import ALL_MODES
+    modes = [str(m).strip().lower() for m in modes_raw
+             if str(m).strip().lower() in ALL_MODES]
+    # Sanitize fallback entries — drop empties, strip trailing whitespace
+    fallback = [str(f).strip() for f in fallback_raw if str(f).strip()]
+
+    agent.preprocessor_model = model
+    agent.preprocessor_modes = modes
+    agent.preprocessor_endpoint = endpoint
+    agent.preprocessor_fallback = fallback
+    # New config invalidates the cached static prompt — force rebuild
+    # next time _build_static_system_prompt is called.
+    agent._cached_static_prompt = ""
+    agent._static_prompt_hash = ""
+    try:
+        if hasattr(hub, "_save_agents"):
+            hub._save_agents()
+    except Exception as e:
+        logger.debug("preprocessor save failed: %s", e)
+
+    # Pre-warm in background so the user's NEXT chat gets an already-
+    # optimized prompt instead of paying first-call latency. Best-effort.
+    if model and "optimize_prompt" in modes:
+        try:
+            import threading as _th
+            def _warm():
+                try:
+                    _ = agent._build_static_system_prompt()
+                except Exception as _e:
+                    logger.debug("post-save pre-warm failed: %s", _e)
+            _th.Thread(target=_warm, name=f"preprocessor-prewarm-{agent.id[:8]}",
+                       daemon=True).start()
+        except Exception as _te:
+            logger.debug("post-save pre-warm thread spawn failed: %s", _te)
+
+    return {
+        "ok": True,
+        "agent_id": agent.id,
+        "preprocessor_model": agent.preprocessor_model,
+        "preprocessor_modes": list(agent.preprocessor_modes),
+        "preprocessor_endpoint": agent.preprocessor_endpoint,
+        "preprocessor_fallback": list(agent.preprocessor_fallback),
+        "enabled": bool(agent.preprocessor_model),
+    }
+
+
+@router.get("/agent/{agent_id}/preprocessor")
+async def get_agent_preprocessor(
+    agent_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Read an agent's current preprocessor settings."""
+    agent = hub.get_agent(agent_id) if hasattr(hub, "get_agent") else None
+    if agent is None:
+        raise HTTPException(404, f"agent not found: {agent_id}")
+    return {
+        "agent_id": agent.id,
+        "preprocessor_model": getattr(agent, "preprocessor_model", "") or "",
+        "preprocessor_modes": list(getattr(agent, "preprocessor_modes", []) or []),
+        "preprocessor_endpoint": getattr(agent, "preprocessor_endpoint", "") or "",
+        "preprocessor_fallback": list(getattr(agent, "preprocessor_fallback", []) or []),
+        "enabled": bool(getattr(agent, "preprocessor_model", "")),
+    }

@@ -1,0 +1,25 @@
+name: shared-context
+version: 1.0.0
+description:
+  zh-CN: Project 级共享上下文数据库 - artifacts/decisions/milestones/handoffs/Q&A 表查询和写入。
+  en: project-scoped shared context DB — query/write artifacts, decisions, milestones, handoffs, pending Q&A.
+author: tudou-builtin
+runtime: markdown
+entry: SKILL.md
+tags:
+  - tool-bundle
+  - core
+  - shared-context
+  - multi-agent
+source: official
+metadata:
+  emoji: "🗄️"
+  display_name_zh: "共享上下文"
+  display_name_en: "shared context"
+  bundle_type: capability
+  tools:
+    - sc_query
+    - sc_register_artifact
+    - sc_get_artifact
+    - sc_record_decision
+    - sc_handoff

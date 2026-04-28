@@ -1286,6 +1286,18 @@ class AgentLLMMixin:
             except Exception as _se:
                 logger.debug("skill prompt injection failed: %s", _se)
 
+        # 9. Shared-context summary (project + meeting state, per-agent
+        #    personalised). Goes LAST so even tight budgets still get plan
+        #    state + intent first. Only fires when agent is in a project
+        #    or meeting — solo conversational agents never see this.
+        if total_chars < max_dynamic_chars:
+            try:
+                sc_summary = self._build_shared_context_summary()
+                if sc_summary:
+                    _try_add(sc_summary)
+            except Exception as _sce:
+                logger.debug("shared-context summary injection failed: %s", _sce)
+
         if not parts:
             return ""
         result = "\n\n".join(parts)
@@ -1300,6 +1312,79 @@ class AgentLLMMixin:
         except Exception:
             pass
         return result
+
+    def _build_shared_context_summary(self) -> str:
+        """Per-agent shared-context block: project state + meeting state +
+        handoffs/Q&A directed at me.
+
+        Returns "" when agent is neither in a project nor in a meeting
+        (so solo conversational agents pay zero overhead). Capped at
+        ~1800 chars total via the underlying summary helpers.
+
+        This is fed into the dynamic-context bundle which the chat loop
+        prepends to the LAST user message (NOT a separate system msg) —
+        keeps the static system prompt KV-cache hot and surfaces "current
+        environment" semantically as user-supplied context.
+        """
+        project_id = (getattr(self, "project_id", "") or "").strip()
+        meeting_id = (getattr(self, "meeting_id", "") or "").strip()
+        if not project_id and not meeting_id:
+            return ""
+        blocks: list[str] = []
+        # ─ Project summary (counts + recent artifacts/decisions/milestones)
+        if project_id:
+            try:
+                from .shared_context import get_shared_context_store
+                store = get_shared_context_store()
+                proj_md = store.project_summary_markdown(project_id)
+                if proj_md:
+                    blocks.append(proj_md)
+                # Per-agent: handoffs to me + open questions to me
+                handoffs_to_me = store.list_handoffs(
+                    project_id=project_id,
+                    dst_agent=self.id,
+                    status="pending",
+                    limit=5,
+                )
+                if handoffs_to_me:
+                    lines = ["[给我的待处理 handoff]"]
+                    for h in handoffs_to_me:
+                        refs = ", ".join(h.get("artifact_refs") or []) or "无"
+                        summary = (h.get("summary") or "").replace("\n", " ")[:80]
+                        lines.append(
+                            f"- 来自 {h['src_agent']}: {h['intent']}"
+                            + (f"\n  refs: {refs}" if refs != "无" else "")
+                            + (f"\n  备注: {summary}" if summary else "")
+                        )
+                    blocks.append("\n".join(lines))
+                qs_to_me = store.list_pending_questions(
+                    project_id=project_id,
+                    asked_to=self.id,
+                    status="open",
+                    limit=3,
+                )
+                if qs_to_me:
+                    lines = ["[等我回答的问题]"]
+                    for q in qs_to_me:
+                        question = (q.get("question") or "").replace("\n", " ")[:120]
+                        lines.append(
+                            f"- 来自 {q.get('asked_by','?')}: {question}"
+                        )
+                    blocks.append("\n".join(lines))
+            except Exception as e:
+                logger.debug("project summary block failed: %s", e)
+        # ─ Meeting summary (in-memory, ephemeral)
+        if meeting_id:
+            try:
+                from .meeting_summary import meeting_summary_markdown
+                meet_md = meeting_summary_markdown(
+                    meeting_id, viewer_agent_id=self.id,
+                )
+                if meet_md:
+                    blocks.append(meet_md)
+            except Exception as e:
+                logger.debug("meeting summary block failed: %s", e)
+        return "\n\n".join(blocks)
 
     def _build_system_prompt(self) -> str:
         """Build full system prompt (backward compat — used by enable/disable methods).
@@ -1381,10 +1466,17 @@ class AgentLLMMixin:
                 self.messages.pop(i)
 
     def _inject_dynamic_context(self, messages: list[dict], current_query: str = "") -> list[dict]:
-        """Inject dynamic context into a COPY of messages for sending to LLM.
+        """Inject dynamic context by **prepending into the LAST user
+        message** (NOT as a separate system msg).
 
-        Dynamic context is appended at the END (right before the last user
-        message) so the prefix stays stable for KV cache reuse.
+        Why user-role + prepend (changed 2026-04-28):
+          * Avoids a 4th system message stacking on top of static + step
+            framing + verify retry — which dilutes attention and confuses
+            "stable rule" vs "current state" semantics.
+          * KV cache stays hot — only the LAST user message's content
+            grows; the static prefix is unchanged.
+          * The dynamic context represents "current environment" semantically
+            — that's user-facing context, not framing rules.
 
         Returns a new list — does NOT modify self.messages.
         """
@@ -1392,21 +1484,36 @@ class AgentLLMMixin:
         if not dynamic_ctx:
             return messages
 
-        # Find the last user message index to insert context before it
+        # Find the last user message index to prepend into
         last_user_idx = None
         for i in range(len(messages) - 1, -1, -1):
             if messages[i].get("role") == "user":
                 last_user_idx = i
                 break
 
-        # Create a copy and inject
         result = list(messages)
-        ctx_msg = {"role": "system", "content": dynamic_ctx, "_dynamic": True}
-        if last_user_idx is not None and last_user_idx > 0:
-            result.insert(last_user_idx, ctx_msg)
-        else:
-            # No user message found — append at end
+        if last_user_idx is None or last_user_idx <= 0:
+            # No user message yet (e.g. system-only kickoff) — fall back
+            # to a separate system msg as the existing behaviour.
+            ctx_msg = {"role": "system", "content": dynamic_ctx, "_dynamic": True}
             result.append(ctx_msg)
+            return result
+
+        # Prepend into the last user message — copy first to avoid
+        # mutating self.messages.
+        last_user = dict(result[last_user_idx])
+        original_content = last_user.get("content", "") or ""
+        # Idempotent: if we've already prepended in this call, don't double up
+        if last_user.get("_has_dynamic_ctx"):
+            return result
+        last_user["content"] = (
+            "[当前动态上下文 · 仅供参考，下方分隔线后才是我的实际请求]\n"
+            + dynamic_ctx
+            + "\n\n---\n\n"
+            + original_content
+        )
+        last_user["_has_dynamic_ctx"] = True
+        result[last_user_idx] = last_user
         return result
 
     def _memory_write_back(self, user_message: str, assistant_response: str):

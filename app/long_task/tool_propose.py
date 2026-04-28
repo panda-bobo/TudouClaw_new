@@ -127,6 +127,43 @@ def _tool_propose_decomposition(
                      "make sure you're inside a project context.",
         }
 
+    # ── Preprocessor hook: small-model first-pass draft ─────────────────
+    # When the calling LLM passes empty ``sub_tasks`` AND its agent has
+    # preprocessor configured, route to the small local model to generate
+    # a rough draft. The big LLM then sees the response and can call
+    # propose_decomposition again with refinements, OR the user can edit
+    # in the UI before confirming. Failure → fall through (caller's
+    # responsibility to provide sub_tasks).
+    if not (sub_tasks or []):
+        try:
+            from .. import preprocessing as _prep
+            from ..api.deps.hub import get_hub
+            hub = get_hub()
+            agent = hub.get_agent(_caller_agent_id) if (hub and _caller_agent_id) else None
+            if agent and _prep.is_enabled(agent):
+                res = _prep.invoke(
+                    agent,
+                    kind="task_decompose",
+                    payload={
+                        "intent": (title + "\n" + (summary or "")
+                                   if title else (summary or "")),
+                        "n": 4,
+                        "context": (prd or "")[:1500],
+                    },
+                    timeout_s=15.0,
+                )
+                if res.ok and isinstance(res.value, dict):
+                    drafted = res.value.get("sub_tasks") or []
+                    if drafted:
+                        sub_tasks = drafted
+                        logger.info(
+                            "preprocessor.task_decompose agent=%s drafted "
+                            "%d sub-tasks (%dms, cache_hit=%s)",
+                            agent.id, len(drafted), res.latency_ms, res.cache_hit,
+                        )
+        except Exception as _pe:
+            logger.debug("preprocessor.task_decompose failed (non-fatal): %s", _pe)
+
     specs, err = _validate_sub_tasks(sub_tasks or [])
     if err:
         return {"ok": False, "error": err}

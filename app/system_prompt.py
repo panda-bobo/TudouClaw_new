@@ -668,6 +668,13 @@ def build_persona_block(
     Empty fields are skipped. Returns "" when all three are empty.
     Sections are labeled in the agent's language so the LLM can tell
     them apart and apply each appropriately.
+
+    Dedup (2026-04-28): historically many agents have ``system_prompt``
+    and ``soul_md`` containing IDENTICAL text (the create-agent UI
+    confused the two fields, so users pasted the same persona into both).
+    Audit shows 4/6 production agents affected, wasting 290-941 tokens
+    per chat per agent. When the two strings match, we emit ONE merged
+    block instead of two duplicate sections.
     """
     parts: list[str] = []
 
@@ -675,13 +682,17 @@ def build_persona_block(
     sm = (soul_md or "").strip()
     ci = (custom_instructions or "").strip()
 
-    if sp:
-        head = "## 身份与专业" if use_zh else "## Identity & Expertise"
+    if sp and sm and sp == sm:
+        # Identical content in both fields — emit once with combined header.
+        head = "## 身份与行为方式" if use_zh else "## Identity & Behavior"
         parts.append(f"{head}\n{sp}")
-
-    if sm:
-        head = "## 沟通风格与行为方式" if use_zh else "## Communication & Behavior"
-        parts.append(f"{head}\n{sm}")
+    else:
+        if sp:
+            head = "## 身份与专业" if use_zh else "## Identity & Expertise"
+            parts.append(f"{head}\n{sp}")
+        if sm:
+            head = "## 沟通风格与行为方式" if use_zh else "## Communication & Behavior"
+            parts.append(f"{head}\n{sm}")
 
     if ci:
         head = "## 补充指令" if use_zh else "## Additional Notes"
