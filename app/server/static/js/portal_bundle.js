@@ -1763,8 +1763,16 @@ function renderCurrentView() {
     }
     case 'orchestration': {
       titleEl.textContent = t('nav.orchestration', '编排');
-      actionsEl.innerHTML = '<button class="btn btn-sm" onclick="renderOrchestrationPage()"><span class="material-symbols-outlined" style="font-size:14px">refresh</span> 刷新</button>';
+      actionsEl.innerHTML =
+          '<button class="btn btn-sm" onclick="showView(\'canvas\', null)"><span class="material-symbols-outlined" style="font-size:14px">account_tree</span> 编排画布</button>'
+        + '<button class="btn btn-sm" onclick="renderOrchestrationPage()"><span class="material-symbols-outlined" style="font-size:14px">refresh</span> 刷新</button>';
       renderOrchestrationPage();
+      break;
+    }
+    case 'canvas': {
+      titleEl.textContent = t('nav.canvas', '编排画布');
+      actionsEl.innerHTML = '<button class="btn btn-sm" onclick="showView(\'orchestration\', null)"><span class="material-symbols-outlined" style="font-size:14px">arrow_back</span> 返回编排</button>';
+      renderCanvasPage();
       break;
     }
     case 'workflows': {
@@ -21925,6 +21933,576 @@ function renderRolesSkillsHub() {
   } catch(e) { sc.innerHTML = '<div style="color:var(--error);padding:20px">'+e.message+'</div>'; }
   finally { sc.id = 'hub-roles-content'; _orig.id = 'content'; }
 }
+
+// ============ Visual Orchestration Canvas (drag-drop DAG editor) ============
+//
+// Two-mode page:
+//   • List mode  — show all saved workflows as cards, "+ 新建" button
+//   • Editor mode — open one workflow on an SVG canvas with drag/drop
+//                   nodes, click-to-connect edges, right-side config panel
+//
+// State lives on a single _canvasState object that persists during the
+// session. Saving round-trips through /api/portal/canvas-workflows.
+//
+// MVP scope: author + save + load + delete. Execution engine NOT in scope.
+
+var _canvasState = {
+  mode: 'list',                  // 'list' | 'editor'
+  list: [],                      // workflow meta cache
+  current: null,                 // active workflow {id, name, nodes, edges, ...}
+  selectedNodeId: null,          // for right-panel config
+  // Drag tracking
+  drag: null,                    // {nodeId, startX, startY, originX, originY}
+  // Edge creation state
+  pendingEdge: null,             // {fromNodeId, fromAnchor: 'top'|'right'|'bottom'|'left', svgX, svgY}
+};
+
+// 5 node types — palette source + render style
+var _NODE_TYPES = {
+  start:    { icon: '▶', label: '开始',     color: '#10b981', shape: 'circle' },
+  agent:    { icon: '🤖', label: 'Agent 节点', color: '#3b82f6', shape: 'rect' },
+  tool:     { icon: '🛠', label: '工具调用',  color: '#f97316', shape: 'rect' },
+  decision: { icon: '◆', label: '条件分支',  color: '#eab308', shape: 'diamond' },
+  parallel: { icon: '⫴', label: '并行执行',  color: '#a855f7', shape: 'rect' },
+  end:      { icon: '■', label: '结束',     color: '#6b7280', shape: 'circle' },
+};
+
+var _NODE_W = 140, _NODE_H = 60;        // standard rect dims; circle/diamond override
+
+// ─────────── List mode ───────────
+
+async function renderCanvasPage() {
+  var c = document.getElementById('content');
+  c.innerHTML =
+      '<div style="padding:18px">'
+    + '  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">'
+    + '    <div><h2 style="margin:0">编排画布 / Visual Orchestration</h2>'
+    + '      <div style="font-size:12px;color:var(--text3);margin-top:4px">拖拽式 DAG 设计器,把多 Agent 协作流程画成图。MVP 阶段:画 + 存,执行引擎在后续版本上线。</div>'
+    + '    </div>'
+    + '    <button class="btn btn-primary btn-sm" onclick="_canvasNewWorkflow()"><span class="material-symbols-outlined" style="font-size:16px">add</span> 新建 Workflow</button>'
+    + '  </div>'
+    + '  <div id="canvas-list-box" style="color:var(--text3)">加载中…</div>'
+    + '</div>';
+  await _loadCanvasList();
+}
+
+async function _loadCanvasList() {
+  var box = document.getElementById('canvas-list-box');
+  if (!box) return;
+  try {
+    var data = await api('GET', '/api/portal/canvas-workflows');
+    _canvasState.list = data.workflows || [];
+    if (!_canvasState.list.length) {
+      box.innerHTML =
+          '<div style="text-align:center;padding:40px 20px;border:1px dashed var(--border);border-radius:12px;background:var(--surface)">'
+        + '  <div style="font-size:48px;margin-bottom:10px">🎨</div>'
+        + '  <div style="font-weight:600;margin-bottom:4px">还没有 workflow</div>'
+        + '  <div style="font-size:12px;color:var(--text3);margin-bottom:14px">点击右上角"新建 Workflow"开始画第一个流程</div>'
+        + '</div>';
+      return;
+    }
+    box.innerHTML =
+        '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px">'
+      + _canvasState.list.map(function(m) {
+          var ts = m.updated_at ? new Date(m.updated_at * 1000).toLocaleString() : '';
+          return ''
+            + '<div style="border:1px solid var(--border);border-radius:10px;padding:14px;background:var(--surface);cursor:pointer;transition:all 0.15s" '
+            +    'onmouseenter="this.style.borderColor=\'var(--primary)\';this.style.boxShadow=\'0 4px 8px rgba(0,0,0,0.08)\'" '
+            +    'onmouseleave="this.style.borderColor=\'var(--border)\';this.style.boxShadow=\'\'" '
+            +    'onclick="_canvasOpenEditor(\'' + esc(m.id) + '\')">'
+            + '  <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:6px">'
+            + '    <div style="font-weight:700;font-size:14px">' + esc(m.name) + '</div>'
+            + '    <button class="btn btn-ghost btn-sm" title="删除" onclick="event.stopPropagation();_canvasDelete(\'' + esc(m.id) + '\',\'' + esc(m.name) + '\')" style="color:var(--error);padding:2px 4px"><span class="material-symbols-outlined" style="font-size:14px">delete</span></button>'
+            + '  </div>'
+            + (m.description ? '  <div style="font-size:12px;color:var(--text2);margin-bottom:8px;line-height:1.4">' + esc(m.description).slice(0, 100) + '</div>' : '')
+            + '  <div style="display:flex;gap:10px;font-size:11px;color:var(--text3)">'
+            + '    <span><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">scatter_plot</span> ' + (m.node_count || 0) + ' 节点</span>'
+            + '    <span><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">arrow_right_alt</span> ' + (m.edge_count || 0) + ' 连接</span>'
+            + '    <span style="margin-left:auto">' + esc(ts) + '</span>'
+            + '  </div>'
+            + '</div>';
+        }).join('')
+      + '</div>';
+  } catch (e) {
+    box.innerHTML = '<div style="color:var(--error);padding:20px">加载失败: ' + esc(String(e)) + '</div>';
+  }
+}
+
+window._canvasNewWorkflow = function() {
+  var name = prompt('Workflow 名称?', '未命名流程 ' + new Date().toLocaleString());
+  if (!name) return;
+  _canvasState.current = {
+    id: '', name: name, description: '',
+    nodes: [
+      { id: 'n_start', type: 'start', x: 80,  y: 200, label: '开始', config: {} },
+      { id: 'n_end',   type: 'end',   x: 700, y: 200, label: '结束', config: {} },
+    ],
+    edges: [],
+  };
+  _canvasState.selectedNodeId = null;
+  _canvasRenderEditor();
+};
+
+window._canvasOpenEditor = async function(wfId) {
+  try {
+    var wf = await api('GET', '/api/portal/canvas-workflows/' + encodeURIComponent(wfId));
+    _canvasState.current = wf;
+    _canvasState.selectedNodeId = null;
+    _canvasRenderEditor();
+  } catch (e) {
+    _toast('打开失败: ' + e, 'error');
+  }
+};
+
+window._canvasDelete = async function(wfId, name) {
+  if (!confirm('删除 "' + name + '"?')) return;
+  try {
+    await api('DELETE', '/api/portal/canvas-workflows/' + encodeURIComponent(wfId));
+    _toast('已删除', 'success');
+    await _loadCanvasList();
+  } catch (e) { _toast('删除失败: ' + e, 'error'); }
+};
+
+// ─────────── Editor mode ───────────
+
+function _canvasRenderEditor() {
+  var c = document.getElementById('content');
+  var wf = _canvasState.current;
+  if (!wf) return;
+  c.innerHTML =
+      '<div style="display:flex;flex-direction:column;height:calc(100vh - 80px)">'
+    // Toolbar
+    + '  <div style="display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--border);background:var(--surface)">'
+    + '    <button class="btn btn-ghost btn-sm" onclick="renderCanvasPage()"><span class="material-symbols-outlined" style="font-size:16px">arrow_back</span> 返回列表</button>'
+    + '    <input id="canvas-name" value="' + esc(wf.name) + '" style="font-weight:600;font-size:14px;padding:4px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);flex:1;max-width:340px">'
+    + '    <span style="font-size:11px;color:var(--text3);font-family:monospace">' + esc(wf.id || '(unsaved)') + '</span>'
+    + '    <div style="margin-left:auto;display:flex;gap:6px">'
+    + '      <button class="btn btn-sm" onclick="_canvasExportJson()"><span class="material-symbols-outlined" style="font-size:14px">download</span> 导出 JSON</button>'
+    + '      <button class="btn btn-primary btn-sm" onclick="_canvasSave()"><span class="material-symbols-outlined" style="font-size:14px">save</span> 保存</button>'
+    + '    </div>'
+    + '  </div>'
+    + '  <div style="display:flex;flex:1;min-height:0">'
+    // Left palette
+    + '    <div style="width:160px;border-right:1px solid var(--border);padding:12px;overflow-y:auto;background:var(--surface)">'
+    + '      <div style="font-size:11px;color:var(--text3);margin-bottom:8px;font-weight:600">节点工具栏</div>'
+    +        Object.keys(_NODE_TYPES).map(function(t) {
+              var nt = _NODE_TYPES[t];
+              return '<div draggable="true" ondragstart="_canvasPaletteDragStart(event,\'' + t + '\')" '
+                   + 'style="padding:8px 10px;margin-bottom:6px;border:1px solid var(--border);border-radius:6px;background:var(--bg);cursor:grab;display:flex;align-items:center;gap:6px;font-size:12px">'
+                   + '<span style="color:' + nt.color + ';font-size:16px">' + nt.icon + '</span>'
+                   + esc(nt.label) + '</div>';
+            }).join('')
+    + '      <div style="font-size:10px;color:var(--text3);margin-top:14px;line-height:1.5">'
+    + '        💡 拖到右侧画布<br>'
+    + '        💡 单击节点选中<br>'
+    + '        💡 节点右侧 ● 拖到另一节点 = 连线<br>'
+    + '        💡 选中后按 Delete 删除'
+    + '      </div>'
+    + '    </div>'
+    // SVG canvas (center)
+    + '    <div id="canvas-svg-host" style="flex:1;background:var(--bg);overflow:auto;position:relative" ondragover="event.preventDefault()" ondrop="_canvasDrop(event)">'
+    + '      <svg id="canvas-svg" width="2400" height="1400" style="display:block;background-image:radial-gradient(circle, var(--border) 1px, transparent 1px);background-size:20px 20px"></svg>'
+    + '    </div>'
+    // Right config panel
+    + '    <div id="canvas-config-panel" style="width:280px;border-left:1px solid var(--border);padding:14px;overflow-y:auto;background:var(--surface)">'
+    + '      <div style="font-size:11px;color:var(--text3)">未选中节点</div>'
+    + '      <div style="font-size:12px;color:var(--text3);margin-top:10px;line-height:1.5">点击画布上的节点查看 / 编辑属性</div>'
+    + '    </div>'
+    + '  </div>'
+    + '</div>';
+  _canvasRedrawSvg();
+  _canvasBindKeyboard();
+}
+
+function _canvasRedrawSvg() {
+  var svg = document.getElementById('canvas-svg');
+  if (!svg) return;
+  var wf = _canvasState.current;
+  // Defs (arrowheads)
+  var defs = '<defs>'
+    + '<marker id="cv-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">'
+    + '  <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--text2)"/>'
+    + '</marker>'
+    + '</defs>';
+  // Edges first (so nodes render on top)
+  var edgesSvg = (wf.edges || []).map(_canvasRenderEdge).join('');
+  // Pending edge (during creation drag)
+  var pendingSvg = '';
+  if (_canvasState.pendingEdge) {
+    var pe = _canvasState.pendingEdge;
+    var src = _findNode(pe.fromNodeId);
+    if (src) {
+      var p = _nodeAnchorPoint(src, pe.fromAnchor);
+      pendingSvg = '<path d="M ' + p.x + ' ' + p.y + ' L ' + pe.svgX + ' ' + pe.svgY
+        + '" stroke="var(--primary)" stroke-width="2" stroke-dasharray="4 3" fill="none" pointer-events="none"/>';
+    }
+  }
+  var nodesSvg = (wf.nodes || []).map(_canvasRenderNode).join('');
+  svg.innerHTML = defs + edgesSvg + pendingSvg + nodesSvg;
+  // Bind events on each node group (event delegation would need svg listener)
+  svg.querySelectorAll('g[data-node-id]').forEach(function(g) {
+    var nid = g.getAttribute('data-node-id');
+    g.addEventListener('mousedown', function(e) { _canvasNodeMouseDown(e, nid); });
+    g.addEventListener('click', function(e) { e.stopPropagation(); _canvasSelectNode(nid); });
+  });
+  svg.querySelectorAll('circle[data-anchor]').forEach(function(circle) {
+    circle.addEventListener('mousedown', function(e) {
+      e.stopPropagation();
+      _canvasStartEdge(circle.getAttribute('data-node-id'),
+                       circle.getAttribute('data-anchor'));
+    });
+  });
+  svg.addEventListener('mousemove', _canvasMouseMove);
+  svg.addEventListener('mouseup', _canvasMouseUp);
+  svg.addEventListener('click', function() { _canvasSelectNode(null); });
+}
+
+function _findNode(id) {
+  return (_canvasState.current.nodes || []).find(function(n) { return n.id === id; });
+}
+
+function _nodeAnchorPoint(node, anchor) {
+  var w = (node.type === 'start' || node.type === 'end') ? 50 : _NODE_W;
+  var h = (node.type === 'start' || node.type === 'end') ? 50 : _NODE_H;
+  switch (anchor) {
+    case 'top':    return { x: node.x + w/2, y: node.y };
+    case 'right':  return { x: node.x + w,   y: node.y + h/2 };
+    case 'bottom': return { x: node.x + w/2, y: node.y + h };
+    case 'left':   return { x: node.x,       y: node.y + h/2 };
+  }
+  return { x: node.x + w/2, y: node.y + h/2 };
+}
+
+function _canvasRenderNode(n) {
+  var nt = _NODE_TYPES[n.type] || _NODE_TYPES.agent;
+  var isSel = (_canvasState.selectedNodeId === n.id);
+  var stroke = isSel ? 'var(--primary)' : nt.color;
+  var sw = isSel ? 3 : 2;
+  var w = _NODE_W, h = _NODE_H;
+  var shapeSvg = '';
+  if (nt.shape === 'circle') {
+    w = h = 50;
+    shapeSvg = '<circle cx="25" cy="25" r="23" fill="' + nt.color + '" fill-opacity="0.15" stroke="' + stroke + '" stroke-width="' + sw + '"/>';
+  } else if (nt.shape === 'diamond') {
+    shapeSvg = '<path d="M ' + (w/2) + ' 2 L ' + (w-2) + ' ' + (h/2) + ' L ' + (w/2) + ' ' + (h-2) + ' L 2 ' + (h/2) + ' z" fill="' + nt.color + '" fill-opacity="0.15" stroke="' + stroke + '" stroke-width="' + sw + '"/>';
+  } else {
+    shapeSvg = '<rect x="2" y="2" width="' + (w-4) + '" height="' + (h-4) + '" rx="6" ry="6" fill="' + nt.color + '" fill-opacity="0.15" stroke="' + stroke + '" stroke-width="' + sw + '"/>';
+  }
+  // Label
+  var labelTxt = (n.label || nt.label).slice(0, 16);
+  var labelSvg = '<text x="' + (w/2) + '" y="' + (h/2 + 4) + '" text-anchor="middle" font-size="12" fill="var(--text)" pointer-events="none">'
+               + esc(labelTxt) + '</text>';
+  // Icon (top-left for rect, hidden for circle/diamond)
+  var iconSvg = (nt.shape === 'rect')
+    ? '<text x="8" y="16" font-size="13" fill="' + nt.color + '" pointer-events="none">' + nt.icon + '</text>'
+    : '';
+  // Anchor handles (for edge creation) — shown only on hover via opacity
+  var anchors = ['top','right','bottom','left'].map(function(a) {
+    var p = { top:[w/2,0], right:[w,h/2], bottom:[w/2,h], left:[0,h/2] }[a];
+    return '<circle cx="' + p[0] + '" cy="' + p[1] + '" r="5" fill="var(--primary)" stroke="#fff" stroke-width="1.5" '
+         + 'class="cv-anchor" data-node-id="' + n.id + '" data-anchor="' + a + '" '
+         + 'style="opacity:0;cursor:crosshair" '
+         + 'onmouseenter="this.style.opacity=1" '
+         + 'onmouseleave="this.style.opacity=0"/>';
+  }).join('');
+  return '<g data-node-id="' + n.id + '" transform="translate(' + n.x + ',' + n.y + ')" style="cursor:move">'
+       + '<rect x="-2" y="-2" width="' + (w+4) + '" height="' + (h+4) + '" fill="transparent" '
+       +   'onmouseenter="this.parentNode.querySelectorAll(\'.cv-anchor\').forEach(function(a){a.style.opacity=1})" '
+       +   'onmouseleave="this.parentNode.querySelectorAll(\'.cv-anchor\').forEach(function(a){a.style.opacity=0})"/>'
+       + shapeSvg + iconSvg + labelSvg + anchors + '</g>';
+}
+
+function _canvasRenderEdge(e) {
+  var src = _findNode(e.from), tgt = _findNode(e.to);
+  if (!src || !tgt) return '';
+  // Pick anchors: use right/left for horizontal, top/bottom for vertical.
+  // Heuristic: whichever pair gives the most direct line.
+  var srcW = (src.type === 'start' || src.type === 'end') ? 50 : _NODE_W;
+  var srcH = (src.type === 'start' || src.type === 'end') ? 50 : _NODE_H;
+  var tgtW = (tgt.type === 'start' || tgt.type === 'end') ? 50 : _NODE_W;
+  var tgtH = (tgt.type === 'start' || tgt.type === 'end') ? 50 : _NODE_H;
+  var sx = src.x + srcW/2, sy = src.y + srcH/2;
+  var tx = tgt.x + tgtW/2, ty = tgt.y + tgtH/2;
+  var dx = tx - sx, dy = ty - sy;
+  var p1, p2;
+  if (Math.abs(dx) >= Math.abs(dy)) {
+    p1 = (dx >= 0) ? { x: src.x + srcW, y: sy } : { x: src.x, y: sy };
+    p2 = (dx >= 0) ? { x: tgt.x,        y: ty } : { x: tgt.x + tgtW, y: ty };
+  } else {
+    p1 = (dy >= 0) ? { x: sx, y: src.y + srcH } : { x: sx, y: src.y };
+    p2 = (dy >= 0) ? { x: tx, y: tgt.y       } : { x: tx, y: tgt.y + tgtH };
+  }
+  // Cubic bezier with control points pulling outward from each end
+  var cp1x = p1.x + (p2.x - p1.x) * 0.5;
+  var cp1y = p1.y;
+  var cp2x = p1.x + (p2.x - p1.x) * 0.5;
+  var cp2y = p2.y;
+  var d = 'M ' + p1.x + ' ' + p1.y + ' C ' + cp1x + ' ' + cp1y + ', ' + cp2x + ' ' + cp2y + ', ' + p2.x + ' ' + p2.y;
+  var labelSvg = '';
+  if (e.label) {
+    var midX = (p1.x + p2.x) / 2;
+    var midY = (p1.y + p2.y) / 2;
+    labelSvg = '<rect x="' + (midX - 28) + '" y="' + (midY - 9) + '" width="56" height="18" rx="9" fill="var(--bg)" stroke="var(--border)"/>'
+             + '<text x="' + midX + '" y="' + (midY + 4) + '" text-anchor="middle" font-size="10" fill="var(--text2)">' + esc(e.label.slice(0, 8)) + '</text>';
+  }
+  return '<g data-edge-id="' + e.id + '">'
+       + '<path d="' + d + '" stroke="var(--text2)" stroke-width="2" fill="none" marker-end="url(#cv-arrow)" '
+       + ' onclick="event.stopPropagation();_canvasDeleteEdge(\'' + e.id + '\')" '
+       + ' style="cursor:pointer" />'
+       + labelSvg + '</g>';
+}
+
+window._canvasDeleteEdge = function(eid) {
+  if (!confirm('删除这条连线?')) return;
+  _canvasState.current.edges = _canvasState.current.edges.filter(function(x) { return x.id !== eid; });
+  _canvasRedrawSvg();
+};
+
+// ─────────── Drag from palette to canvas ───────────
+
+window._canvasPaletteDragStart = function(e, nodeType) {
+  e.dataTransfer.setData('text/canvas-node-type', nodeType);
+  e.dataTransfer.effectAllowed = 'copy';
+};
+
+window._canvasDrop = function(e) {
+  e.preventDefault();
+  var t = e.dataTransfer.getData('text/canvas-node-type');
+  if (!t || !_NODE_TYPES[t]) return;
+  var svg = document.getElementById('canvas-svg');
+  var rect = svg.getBoundingClientRect();
+  var x = Math.max(0, e.clientX - rect.left - _NODE_W/2);
+  var y = Math.max(0, e.clientY - rect.top - _NODE_H/2);
+  var nid = 'n_' + Date.now().toString(36);
+  _canvasState.current.nodes.push({
+    id: nid, type: t, x: x, y: y,
+    label: _NODE_TYPES[t].label, config: {},
+  });
+  _canvasState.selectedNodeId = nid;
+  _canvasRedrawSvg();
+  _canvasRenderConfigPanel();
+};
+
+// ─────────── Node drag (move within canvas) ───────────
+
+function _canvasNodeMouseDown(e, nodeId) {
+  if (e.button !== 0) return;
+  // If user clicked an anchor circle, _canvasStartEdge already fired and
+  // stopped propagation — we shouldn't see those events here.
+  e.preventDefault();
+  var n = _findNode(nodeId);
+  if (!n) return;
+  var svg = document.getElementById('canvas-svg');
+  var rect = svg.getBoundingClientRect();
+  _canvasState.drag = {
+    nodeId: nodeId,
+    startMouseX: e.clientX - rect.left,
+    startMouseY: e.clientY - rect.top,
+    originX: n.x, originY: n.y,
+  };
+}
+
+function _canvasMouseMove(e) {
+  var svg = document.getElementById('canvas-svg');
+  var rect = svg.getBoundingClientRect();
+  if (_canvasState.drag) {
+    var d = _canvasState.drag;
+    var n = _findNode(d.nodeId);
+    if (!n) return;
+    var dx = (e.clientX - rect.left) - d.startMouseX;
+    var dy = (e.clientY - rect.top)  - d.startMouseY;
+    n.x = Math.max(0, d.originX + dx);
+    n.y = Math.max(0, d.originY + dy);
+    _canvasRedrawSvg();
+  } else if (_canvasState.pendingEdge) {
+    _canvasState.pendingEdge.svgX = e.clientX - rect.left;
+    _canvasState.pendingEdge.svgY = e.clientY - rect.top;
+    _canvasRedrawSvg();
+  }
+}
+
+function _canvasMouseUp(e) {
+  if (_canvasState.drag) { _canvasState.drag = null; }
+  if (_canvasState.pendingEdge) {
+    // See if mouseup landed on a node — if so, create an edge
+    var hit = e.target.closest('g[data-node-id]');
+    var pe = _canvasState.pendingEdge;
+    if (hit) {
+      var toId = hit.getAttribute('data-node-id');
+      if (toId !== pe.fromNodeId) {
+        // Avoid duplicate edges between same pair (idempotent)
+        var dup = (_canvasState.current.edges || []).some(function(x) {
+          return x.from === pe.fromNodeId && x.to === toId;
+        });
+        if (!dup) {
+          _canvasState.current.edges.push({
+            id: 'e_' + Date.now().toString(36),
+            from: pe.fromNodeId, to: toId, label: '', condition: '',
+          });
+        }
+      }
+    }
+    _canvasState.pendingEdge = null;
+    _canvasRedrawSvg();
+  }
+}
+
+function _canvasStartEdge(fromNodeId, fromAnchor) {
+  _canvasState.pendingEdge = {
+    fromNodeId: fromNodeId, fromAnchor: fromAnchor,
+    svgX: 0, svgY: 0,
+  };
+}
+
+// ─────────── Selection + config panel ───────────
+
+function _canvasSelectNode(nid) {
+  _canvasState.selectedNodeId = nid;
+  _canvasRedrawSvg();
+  _canvasRenderConfigPanel();
+}
+
+function _canvasRenderConfigPanel() {
+  var box = document.getElementById('canvas-config-panel');
+  if (!box) return;
+  var nid = _canvasState.selectedNodeId;
+  if (!nid) {
+    box.innerHTML = '<div style="font-size:11px;color:var(--text3)">未选中节点</div>'
+                  + '<div style="font-size:12px;color:var(--text3);margin-top:10px;line-height:1.5">点击画布上的节点查看 / 编辑属性</div>';
+    return;
+  }
+  var n = _findNode(nid);
+  if (!n) return;
+  var nt = _NODE_TYPES[n.type] || _NODE_TYPES.agent;
+  var typeFields = '';
+  // Type-specific config fields
+  if (n.type === 'agent') {
+    typeFields = ''
+      + '<div style="margin-bottom:8px"><label style="font-size:11px;color:var(--text3)">绑定 Agent ID</label>'
+      + '<input data-cfg="agent_id" value="' + esc(n.config.agent_id || '') + '" placeholder="a16c2710acb6 / 留空 = 任意空闲 agent" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px"></div>'
+      + '<div style="margin-bottom:8px"><label style="font-size:11px;color:var(--text3)">提示词 (Prompt)</label>'
+      + '<textarea data-cfg="prompt" placeholder="给 agent 的指令" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px;min-height:80px;resize:vertical">' + esc(n.config.prompt || '') + '</textarea></div>'
+      + '<div style="display:flex;gap:6px;margin-bottom:8px">'
+      + '<div style="flex:1"><label style="font-size:11px;color:var(--text3)">超时(s)</label>'
+      + '<input data-cfg="timeout" type="number" value="' + (n.config.timeout || 300) + '" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px"></div>'
+      + '<div style="flex:1"><label style="font-size:11px;color:var(--text3)">重试</label>'
+      + '<input data-cfg="retry" type="number" value="' + (n.config.retry || 0) + '" min="0" max="5" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px"></div>'
+      + '</div>';
+  } else if (n.type === 'tool') {
+    typeFields = ''
+      + '<div style="margin-bottom:8px"><label style="font-size:11px;color:var(--text3)">工具名 / Skill ID</label>'
+      + '<input data-cfg="tool_name" value="' + esc(n.config.tool_name || '') + '" placeholder="drawio-skill / send_email / ..." style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px"></div>'
+      + '<div style="margin-bottom:8px"><label style="font-size:11px;color:var(--text3)">参数 (JSON)</label>'
+      + '<textarea data-cfg="args" placeholder=\'{"path": "..."}\' style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:11px;font-family:monospace;min-height:80px;resize:vertical">' + esc(typeof n.config.args === 'string' ? n.config.args : JSON.stringify(n.config.args || {}, null, 2)) + '</textarea></div>';
+  } else if (n.type === 'decision') {
+    typeFields = ''
+      + '<div style="margin-bottom:8px"><label style="font-size:11px;color:var(--text3)">条件表达式</label>'
+      + '<textarea data-cfg="condition" placeholder="result.success == true / output.length > 0" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px;min-height:60px;resize:vertical">' + esc(n.config.condition || '') + '</textarea></div>'
+      + '<div style="font-size:11px;color:var(--text3);line-height:1.5">出边的 label 字段 (yes/no) 决定走哪条分支</div>';
+  } else if (n.type === 'parallel') {
+    typeFields = '<div style="font-size:12px;color:var(--text3);line-height:1.5">所有出边并行执行,等所有分支完成后再继续。无需配置。</div>';
+  } else if (n.type === 'start' || n.type === 'end') {
+    typeFields = '<div style="font-size:12px;color:var(--text3);line-height:1.5">' + esc(nt.label) + '节点无需配置。</div>';
+  }
+  box.innerHTML =
+      '<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid var(--border)">'
+    + '  <span style="color:' + nt.color + ';font-size:18px">' + nt.icon + '</span>'
+    + '  <div style="font-weight:600;font-size:13px">' + esc(nt.label) + '</div>'
+    + '  <span style="margin-left:auto;font-size:10px;color:var(--text3);font-family:monospace">' + esc(n.id) + '</span>'
+    + '</div>'
+    + '<div style="margin-bottom:8px"><label style="font-size:11px;color:var(--text3)">显示标签</label>'
+    + '<input data-cfg="__label" value="' + esc(n.label || '') + '" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px"></div>'
+    + typeFields
+    + '<div style="display:flex;gap:6px;margin-top:14px">'
+    + '  <button class="btn btn-sm" style="flex:1" onclick="_canvasApplyConfig()"><span class="material-symbols-outlined" style="font-size:14px">check</span> 应用</button>'
+    + '  <button class="btn btn-sm" style="color:var(--error)" onclick="_canvasDeleteSelected()"><span class="material-symbols-outlined" style="font-size:14px">delete</span></button>'
+    + '</div>';
+}
+
+window._canvasApplyConfig = function() {
+  var nid = _canvasState.selectedNodeId;
+  var n = _findNode(nid);
+  if (!n) return;
+  document.querySelectorAll('#canvas-config-panel [data-cfg]').forEach(function(el) {
+    var key = el.getAttribute('data-cfg');
+    var val = el.value;
+    if (key === '__label') {
+      n.label = val;
+    } else {
+      // Try parsing JSON for the args field
+      if (key === 'args' && val.trim()) {
+        try { n.config[key] = JSON.parse(val); }
+        catch (e) { n.config[key] = val; /* keep as string */ }
+      } else if (el.type === 'number') {
+        n.config[key] = parseInt(val, 10) || 0;
+      } else {
+        n.config[key] = val;
+      }
+    }
+  });
+  _canvasRedrawSvg();
+  _toast('已应用 (尚未保存到服务器)', 'info');
+};
+
+window._canvasDeleteSelected = function() {
+  var nid = _canvasState.selectedNodeId;
+  if (!nid) return;
+  if (!confirm('删除该节点及其所有连线?')) return;
+  _canvasState.current.nodes = _canvasState.current.nodes.filter(function(n) { return n.id !== nid; });
+  _canvasState.current.edges = _canvasState.current.edges.filter(function(e) { return e.from !== nid && e.to !== nid; });
+  _canvasState.selectedNodeId = null;
+  _canvasRedrawSvg();
+  _canvasRenderConfigPanel();
+};
+
+// ─────────── Keyboard shortcuts ───────────
+
+function _canvasBindKeyboard() {
+  if (window._canvasKeyHandler) document.removeEventListener('keydown', window._canvasKeyHandler);
+  window._canvasKeyHandler = function(e) {
+    // Only act when canvas editor is the visible page
+    if (!document.getElementById('canvas-svg')) return;
+    var tag = (e.target.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea') return;
+    if ((e.key === 'Delete' || e.key === 'Backspace') && _canvasState.selectedNodeId) {
+      e.preventDefault();
+      _canvasDeleteSelected();
+    }
+  };
+  document.addEventListener('keydown', window._canvasKeyHandler);
+}
+
+// ─────────── Save / export ───────────
+
+window._canvasSave = async function() {
+  // Apply current config-panel edits before save
+  if (_canvasState.selectedNodeId) _canvasApplyConfig();
+  var nameEl = document.getElementById('canvas-name');
+  var wf = _canvasState.current;
+  wf.name = (nameEl && nameEl.value || wf.name || 'Untitled').trim();
+  try {
+    var saved = await api('POST', '/api/portal/canvas-workflows', wf);
+    _canvasState.current = saved;
+    _toast('已保存 ✓', 'success');
+    // Refresh the visible id label in the toolbar
+    _canvasRenderEditor();
+  } catch (e) {
+    _toast('保存失败: ' + e, 'error');
+  }
+};
+
+window._canvasExportJson = function() {
+  var wf = _canvasState.current;
+  var json = JSON.stringify(wf, null, 2);
+  var blob = new Blob([json], { type: 'application/json' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = (wf.name || 'workflow').replace(/[^a-zA-Z0-9_一-龥-]/g, '_') + '.json';
+  a.click();
+  setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
+};
+
 
 // ============ Skill Categories — admin-curated taxonomy ============
 //

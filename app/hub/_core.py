@@ -247,6 +247,19 @@ class Hub:
         except Exception as _se:
             logger.warning("Skill store init failed: %s", _se)
 
+        # ── Canvas Workflows (visual drag-drop DAG editor) ──
+        # User-authored workflow graphs persisted as one JSON-per-workflow
+        # under <data_dir>/workflows/. Distinct from app/workflow.py which
+        # owns the legacy state-machine task workflows. Failures here are
+        # non-fatal — the canvas page just shows "store unavailable".
+        try:
+            from .. import canvas_workflows as _canvas_mod
+            cw_dir = os.path.join(self._data_dir, "workflows")
+            self.canvas_workflow_store = _canvas_mod.init_store(cw_dir)
+            logger.info("Canvas workflow store initialized at %s", cw_dir)
+        except Exception as _cwe:
+            logger.warning("Canvas workflow store init failed: %s", _cwe)
+
         # ── Skill Categories (admin-defined two-dimensional taxonomy) ──
         # Loaded right after skill_store so the API can join entries with
         # their category assignments. Two files:
