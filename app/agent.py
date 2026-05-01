@@ -3918,21 +3918,41 @@ class Agent:
         # cache key never changed and the agent kept reporting "no
         # such skill" forever). Falling back to ``self.granted_skills``
         # keeps the build working even if the registry is unreachable.
+        #
+        # Also fold each granted skill's SKILL.md mtime into the hash
+        # (HANDOFF [F], 2026-05-01) so editing a SKILL.md propagates
+        # to the next chat turn without a server restart. Before this,
+        # SKILL.md content was baked into the cached static prompt and
+        # only refreshed when grant_ids changed.
         try:
             _grant_ids: list[str] = []
+            _md_mtimes: list[str] = []
             try:
                 from .skills.engine import get_registry as _grs
                 _r = _grs()
                 if _r is not None:
-                    _grant_ids = [
-                        getattr(i, "id", "") for i in _r.list_for_agent(self.id)
-                        if getattr(i, "id", "")
-                    ]
+                    for _i in _r.list_for_agent(self.id):
+                        _gid = getattr(_i, "id", "") or ""
+                        if _gid:
+                            _grant_ids.append(_gid)
+                        _idir = getattr(_i, "install_dir", "") or ""
+                        if _gid and _idir:
+                            _mp = os.path.join(_idir, "SKILL.md")
+                            try:
+                                _md_mtimes.append(
+                                    f"{_gid}:{os.stat(_mp).st_mtime_ns}"
+                                )
+                            except OSError:
+                                # SKILL.md missing or unreadable — skip
+                                # silently; grant_id alone keys the hash.
+                                continue
             except Exception:
                 _grant_ids = []
             if not _grant_ids:
                 _grant_ids = list(self.granted_skills or [])
             parts.append(",".join(sorted(_grant_ids)))
+            if _md_mtimes:
+                parts.append("skill_md|" + ",".join(sorted(_md_mtimes)))
         except Exception:
             pass
         # ── Active context flavor (2026-04-29) ────────────────────────
