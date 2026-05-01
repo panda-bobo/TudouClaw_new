@@ -85,6 +85,7 @@ ERR_TOOL_TIMEOUT         = "tool_timeout"            # tools/call never replied
 ERR_TOOL_ERROR           = "tool_error"              # tools/call replied with error
 ERR_INTERNAL             = "internal_error"          # our code broke
 ERR_BUILTIN_FAILED       = "builtin_failed"          # builtin handler raised
+ERR_QA_GATE_BLOCKED      = "qa_gate_blocked"         # platform QA gate refused the call
 
 
 @dataclass
@@ -488,6 +489,19 @@ class NodeMCPDispatcher:
                 error_kind=ERR_NOT_CONFIGURED,
                 error_message="no target MCP config",
             )
+
+        # QA gate (HANDOFF [C]) — pre-flight validation for known
+        # high-risk tools (currently send_email-class). Block here so
+        # both the stdio and builtin branches are covered with one hook.
+        from .. import qa_gate as _qa
+        if tool_name in _qa.EMAIL_TOOL_NAMES:
+            gate = _qa.validate_email_args(arguments or {})
+            if not gate.ok:
+                return DispatchResult(
+                    ok=False,
+                    error_kind=ERR_QA_GATE_BLOCKED,
+                    error_message=f"QA gate blocked {tool_name}: {gate.reason}",
+                )
 
         transport = getattr(target, "transport", "") or ""
         command   = getattr(target, "command", "") or ""

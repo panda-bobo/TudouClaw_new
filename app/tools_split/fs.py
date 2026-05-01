@@ -214,6 +214,16 @@ def _tool_write_file(path: str, content: str, **_: Any) -> str:
         p = pol.safe_path(path, for_write=True)
     except _sandbox.SandboxViolation as e:
         return f"Error: {e}"
+
+    # QA gate (HANDOFF [C]) — block obviously-broken writes (binary
+    # extension via text mode, empty/placeholder markdown, drawio with
+    # no shapes). Surfaces as a tool error so the agent retries instead
+    # of silently producing garbage on disk.
+    from .. import qa_gate as _qa
+    gate = _qa.validate_file_write(path, content)
+    if not gate.ok:
+        return f"Error: QA gate blocked write to {path}: {gate.reason}"
+
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
