@@ -106,6 +106,22 @@ class LLMProvider:
     # Default False — be conservative; opt in per-provider when verified.
     supports_parallel_tool_calls_param: bool = False
 
+    # Whether this provider's chat-completions endpoint accepts the
+    # multimodal content shape `[{type:"image_url", image_url:{url:...}}]`.
+    # When False, the sanitizer downgrades image parts to text placeholders
+    # before sending — otherwise the API 400s with "unknown variant
+    # `image_url`" (DeepSeek as of 2026-04). Default True — be permissive
+    # for vision-capable providers (OpenAI / Anthropic / Qwen-VL); opt out
+    # per-provider when the chat endpoint is verified text-only.
+    supports_vision: bool = True
+
+    # Whether this provider's chat-completions endpoint accepts the
+    # `temperature` parameter at all. Most do; OpenAI's o1 family rejects
+    # it. Default True. (Caller still gates on temperature >= 0; this is
+    # a hard gate on top of that — even temperature=0 gets stripped when
+    # the provider doesn't accept the field.)
+    supports_temperature_param: bool = True
+
     # Max number of (assistant+tool_calls, tool*) rounds the provider
     # accepts in one request. 0 = unlimited.
     #
@@ -125,6 +141,8 @@ class LLMProvider:
         "coerce_list_content_to_string",
         "drop_assistant_name",
         "supports_parallel_tool_calls_param",
+        "supports_vision",
+        "supports_temperature_param",
         "max_tool_call_rounds",
     )
 
@@ -385,6 +403,11 @@ class DeepSeekProvider(LLMProvider):
     backfill_reasoning_content = True        # required on every assistant
     drop_empty_content_with_tools = True
     supports_parallel_tool_calls_param = True
+    # DeepSeek's `api.deepseek.com/v1/chat/completions` is text-only — the
+    # JSON schema rejects `image_url` content parts with 400 "unknown
+    # variant". Their vision model (deepseek-vl) lives on a separate
+    # endpoint that the framework would target via a different provider.
+    supports_vision = False
 
 
 class GLMProvider(LLMProvider):

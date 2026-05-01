@@ -91,8 +91,22 @@ _LEAK_SCANNERS: list[tuple[str, "re.Pattern", str]] = [
     ("local_path", re.compile(r'[A-Z]:\\Users\\[a-zA-Z0-9_.\-]+\\'), "USERPROFILE"),
     # Internal IP ranges (RFC1918)
     ("internal_ip", re.compile(r'\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})(?::\d{2,5})?\b'), "SERVICE_HOST"),
-    # SSH targets (user@host)
-    ("ssh_target", re.compile(r'[a-zA-Z0-9_.\-]+@(?:(?:\d{1,3}\.){3}\d{1,3}|[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})'), "SSH_HOST"),
+    # SSH targets (user@host) — match only the actually-dangerous shapes:
+    #   1. SCP / git-ssh syntax: ``user@host:path`` (the colon distinguishes
+    #      it from an email address)
+    #   2. Preceded by an ssh-family command verb: ``ssh user@host``,
+    #      ``scp ... user@host``, ``rsync user@host``, ``sftp user@host``,
+    #      ``git+ssh://user@host`` etc.
+    # Without these guards, every email in a README ("contact: me@company.com")
+    # is mis-flagged as an SSH credential leak — see install rejection of
+    # narrator-ai-cli-skill (2026-04-29) where the contact email
+    # ``merlinyang@gridltd.com`` was mistakenly classified as ssh_target.
+    ("ssh_target", re.compile(
+        r'(?:(?<=\bssh\s)|(?<=\bscp\s)|(?<=\brsync\s)|(?<=\bsftp\s)|(?<=git\+ssh://)|(?<=ssh://))'
+        r'[a-zA-Z0-9_.\-]+@(?:(?:\d{1,3}\.){3}\d{1,3}|[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})'
+        r'|'
+        r'[a-zA-Z0-9_.\-]+@(?:(?:\d{1,3}\.){3}\d{1,3}|[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})(?=:[\w/.\-])'
+    ), "SSH_HOST"),
     # Generic password assignments
     ("password",  re.compile(r'password[=:]\s*["\']?[^\s"\',;)\}\]]{6,}["\']?', re.IGNORECASE), "PASSWORD"),
     # Basic auth in URLs (full match)

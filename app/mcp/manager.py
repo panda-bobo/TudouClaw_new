@@ -845,6 +845,32 @@ class MCPManager:
         except Exception as e:
             logger.error(f"Failed to load MCP configs: {e}")
 
+        # ── One-shot migration: encrypt any sensitive plaintext env ──
+        # Older configs (pre-2026-04-29 encryption support) keep
+        # SMTP_PASSWORD / API_KEY / etc. in cleartext. On every load we
+        # walk the in-memory MCPs once and re-save if anything was
+        # plaintext-sensitive. Idempotent — second run is a no-op.
+        try:
+            from .secrets import migrate_plaintext_env
+            total_migrated = 0
+            for _node_id, _ncfg in self.node_configs.items():
+                for _mid, _mcfg in (_ncfg.available_mcps or {}).items():
+                    if not isinstance(_mcfg.env, dict):
+                        continue
+                    new_env, n = migrate_plaintext_env(_mcfg.env)
+                    if n > 0:
+                        _mcfg.env = new_env
+                        total_migrated += n
+            if total_migrated > 0:
+                logger.info(
+                    "MCP secrets: encrypted %d previously-plaintext env "
+                    "value(s) on load; rewriting config to disk",
+                    total_migrated,
+                )
+                self._save()
+        except Exception as _me:
+            logger.warning("MCP secret migration on load failed: %s", _me)
+
     def _save(self) -> None:
         """保存配置到 SQLite + JSON backup。"""
         db = self._get_db()
@@ -1274,9 +1300,26 @@ class MCPManager:
         return cfg
 
     def add_mcp_to_node(self, node_id: str, config: MCPServerConfig) -> MCPServerConfig:
-        """向节点添加MCP。(Add MCP to a node.)"""
+        """向节点添加 / 覆盖 MCP。(Add or update MCP on a node.)
+
+        Sensitive env values that come back as the mask placeholder
+        (the admin form didn't touch them) are merged in from the
+        existing config, so an edit-and-save round-trip doesn't
+        accidentally null out passwords / API keys the admin never saw
+        in plaintext.
+        """
         with self._lock:
             node_cfg = self.get_node_mcp_config(node_id)
+            # Merge unchanged-mask fields from existing entry (if any).
+            try:
+                from .secrets import merge_unchanged_from_existing
+                existing = node_cfg.available_mcps.get(config.id)
+                if existing is not None and isinstance(getattr(existing, "env", None), dict):
+                    config.env = merge_unchanged_from_existing(
+                        config.env, existing.env,
+                    )
+            except Exception:
+                pass
             node_cfg.add_mcp(config)
             self._save()
         # Config changed → any cached manifest is potentially stale.

@@ -129,7 +129,9 @@ def tick(hub) -> int:
         return 0
     assigned_count = 0
     try:
-        projects = hub.list_projects() or []
+        # Use raw Project objects (not dicts from list_projects()) — we
+        # need .tasks / .members / ProjectTaskStatus enum comparisons.
+        projects = list((hub.projects or {}).values())
     except Exception as e:  # noqa: BLE001
         logger.debug("auto_assign tick: list_projects failed: %s", e)
         return 0

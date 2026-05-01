@@ -41,3 +41,17 @@ def set_project_context(project_id: str) -> None:
 def get_project_context() -> str:
     """Return the current thread's project id, or empty string if not in a project."""
     return getattr(_tl, "project_id", "") or ""
+
+
+# ── Current ProjectTask context (2026-04-29) ─────────────────────────
+# When ProjectChatEngine.handle_task_assignment is mid-execution, the
+# task being worked on is set here so tools called from inside the
+# agent (notably submit_deliverable) can auto-fill `task_id` on the
+# resulting Deliverable. Lets the deliverables UI group artifacts by
+# the task that produced them, instead of one flat 30-item list.
+def set_current_task_id(task_id: str) -> None:
+    _tl.task_id = task_id or ""
+
+
+def get_current_task_id() -> str:
+    return getattr(_tl, "task_id", "") or ""

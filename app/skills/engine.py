@@ -444,6 +444,62 @@ def _read_skill_md_frontmatter(skill_md_path: str) -> dict:
         return {}
 
 
+def _extract_skill_md_summary(skill_md_path: str) -> tuple[str, str]:
+    """Best-effort extraction of (name, description) from a SKILL.md
+    that has NO YAML frontmatter — used as a fallback so external
+    skills (Anthropic spec, ClawHub imports) without frontmatter
+    still register cleanly.
+
+    Heuristics:
+      - name: first H1 heading (``# Foo``) → otherwise empty (caller
+        falls back to the install dir name).
+      - description: first non-empty / non-heading paragraph below
+        the H1, capped at 240 chars. If absent, return "" — caller
+        still bails on empty description, but the error message will
+        explain "add a `# Title` line and a one-line description".
+    """
+    p = Path(skill_md_path)
+    if not p.exists():
+        return ("", "")
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ("", "")
+    name = ""
+    desc = ""
+    lines = text.splitlines()
+    # First H1
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("# ") and not s.startswith("##"):
+            name = s.lstrip("#").strip()
+            break
+    # First plain paragraph after the H1
+    saw_title = False
+    buf: list[str] = []
+    for ln in lines:
+        s = ln.rstrip()
+        if not saw_title:
+            if s.strip().startswith("# ") and not s.strip().startswith("##"):
+                saw_title = True
+            continue
+        # Skip subsequent headings / blank lines until we hit prose
+        if not s.strip():
+            if buf:
+                break
+            continue
+        if s.lstrip().startswith("#"):
+            if buf:
+                break
+            continue
+        buf.append(s.strip())
+        if len(" ".join(buf)) >= 240:
+            break
+    if buf:
+        desc = " ".join(buf)[:240]
+    return (name, desc)
+
+
 def synthesize_manifest_from_skill_md(
     skill_dir: str,
     *,
@@ -474,28 +530,34 @@ def synthesize_manifest_from_skill_md(
         skill_md = alt[0]
 
     fm = _read_skill_md_frontmatter(str(skill_md))
+    # No frontmatter? Fall back to extracting (name, description) from
+    # the first H1 + first paragraph in the markdown body. Many
+    # community skills (esp. Anthropic-spec / ClawHub imports) are
+    # plain markdown without frontmatter — supporting that path means
+    # one less "fix your skill" round-trip for the user.
+    md_name, md_desc = ("", "")
     if not fm:
-        raise ManifestError(
-            f"SKILL.md in {src} has no YAML frontmatter — cannot synthesize manifest"
-        )
+        md_name, md_desc = _extract_skill_md_summary(str(skill_md))
 
     metadata = fm.get("metadata") if isinstance(fm.get("metadata"), dict) else {}
 
     # Prefer slug for the install id (matches dir-name-safe convention).
     # Fall back to raw name (may contain spaces/uppercase — install_root
-    # path sanitizer handles it via .replace).
+    # path sanitizer handles it via .replace), then to body H1, then dir.
     name = str(
-        fm.get("slug") or fm.get("name") or src.name or ""
+        fm.get("slug") or fm.get("name") or md_name or src.name or ""
     ).strip()
     if not name:
         raise ManifestError(
-            f"SKILL.md frontmatter missing 'name' or 'slug' in {src}"
+            f"SKILL.md in {src} has no name — add YAML frontmatter "
+            f"`name: my-skill` or a `# My Skill` heading at the top."
         )
 
-    description = fm.get("description") or ""
+    description = fm.get("description") or md_desc or ""
     if not description:
         raise ManifestError(
-            f"SKILL.md frontmatter missing 'description' in {src}"
+            f"SKILL.md in {src} has no description — add YAML frontmatter "
+            f"`description: ...` or a paragraph after the `# Title` line."
         )
 
     version = str(

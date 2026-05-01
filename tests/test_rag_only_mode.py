@@ -17,6 +17,16 @@ from types import SimpleNamespace
 
 import pytest
 
+# Skipped: this test isolated AgentLLMMixin._get_effective_tools by
+# binding it to a stub object via __get__. As of 2026-04-30, that mixin
+# has been confirmed dead-in-production (Agent does not inherit from
+# it) and the file is wrapped as archaeology. The production behavior
+# is exercised by test_today_e2e.py instead.
+pytest.skip(
+    "AgentLLMMixin retired (2026-04-30); see app/agent_llm.py tombstone.",
+    allow_module_level=True,
+)
+
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)

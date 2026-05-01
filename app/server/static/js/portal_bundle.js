@@ -23,6 +23,13 @@ let _agentsSubTab = null; // Current node tab inside Agents view (null = first n
       else if (/警告|warn|注意/i.test(msg)) type = 'warning';
       else type = 'info';
     }
+    // Defensive: unknown type names (legacy bug — callers passing 'ok' /
+    // 'err' got white-on-white because CSS only had .toast-success /
+    // .toast-error / .toast-warning / .toast-info). Map common aliases
+    // and fall back to 'info' so a future typo never goes invisible.
+    var _ALIAS = {ok: 'success', err: 'error', fail: 'error', warn: 'warning'};
+    if (_ALIAS[type]) type = _ALIAS[type];
+    if (['success','error','warning','info'].indexOf(type) === -1) type = 'info';
     var container = document.getElementById('toast-container');
     if (!container) {
       container = document.createElement('div');
@@ -313,8 +320,13 @@ function _autoGrowChatInput(el) {
   if (!el || el.tagName !== 'TEXTAREA') return;
   // Reset to "auto" first so shrinking works (scrollHeight only grows).
   el.style.height = 'auto';
-  // Cap at max-height so very long pastes still scroll inside.
-  var maxH = parseInt(el.style.maxHeight) || 200;
+  // Cap at max-height so very long pastes still scroll inside the box.
+  // Read inline first (user may have manually drag-resized), fall back to
+  // computed CSS (which now is 320px for chat-input-area textareas), and
+  // a hard 320 floor so long prompts don't get visually cut to 200px.
+  var maxH = parseInt(el.style.maxHeight)
+          || parseInt(getComputedStyle(el).maxHeight)
+          || 320;
   el.style.height = Math.min(el.scrollHeight, maxH) + 'px';
 }
 window._autoGrowChatInput = _autoGrowChatInput;
@@ -1579,9 +1591,13 @@ async function refreshSidebar() {
       var projCount = document.getElementById('project-count');
       if (projCount && pData) projCount.textContent = projects.length;
     } catch(e){}
-    // Update event log and task count (but NOT chat messages)
+    // Update event log and task count, and append any chat bubbles for
+    // late-arriving messages (another agent's @-mention, watchdog wake,
+    // scheduled task) that aren't from the user's own current turn.
+    // _pollChatNewMessages is a no-op when an active stream is in flight.
     if (currentAgent) {
       loadAgentEventLog(currentAgent);
+      try { _pollChatNewMessages(currentAgent); } catch(e) {}
       // Also refresh the state-machine task queue so failed tasks drop
       // off the UI within the 15s heartbeat instead of sticking around
       // until the user navigates away and back. Without this, a task
@@ -1653,6 +1669,7 @@ function renderCurrentView() {
       var existingChat = document.getElementById('chat-msgs-' + currentAgent);
       if (existingChat) {
         try { loadAgentEventLog(currentAgent); } catch(e) {}
+        try { _pollChatNewMessages(currentAgent); } catch(e) {}
         try { loadExecutionSteps(currentAgent); } catch(e) {}
         try { loadInterAgentMessages(currentAgent); } catch(e) {}
         try { loadAgentRuntimeStats(currentAgent); } catch(e) {}
@@ -2879,6 +2896,73 @@ function renderDashboard() {
 }
 
 // ============ Agent Chat ============
+// ── Bottom-panel tab helpers (2026-04-30 redesign) ──
+// The chat-page bottom region is a tabbed strip with 4 panes
+// (Capabilities / Task Queue / Execution Log / TODOs). Only one
+// pane visible at a time so each gets full readable real estate.
+// State persists per-agent via localStorage.
+
+function _bottomTabKey(agentId) {
+  return 'lt-bottom-tab-' + agentId;
+}
+
+function _getActiveBottomTab(agentId) {
+  try {
+    var v = localStorage.getItem(_bottomTabKey(agentId));
+    if (v && ['caps','tasks','log','todos'].indexOf(v) !== -1) return v;
+  } catch(_) {}
+  return 'caps';
+}
+
+function _renderBottomTabBtn(agentId, paneId, icon, label, color) {
+  var active = _getActiveBottomTab(agentId) === paneId;
+  return '<button data-pane="' + paneId + '" '
+    + 'onclick="_selectBottomTab(\'' + agentId + '\',\'' + paneId + '\')" '
+    + 'style="background:' + (active ? 'var(--surface)' : 'transparent') + ';'
+    + 'border:none;border-bottom:2px solid ' + (active ? color : 'transparent') + ';'
+    + 'padding:10px 14px;cursor:pointer;display:flex;align-items:center;gap:6px;'
+    + 'font-size:11px;font-weight:' + (active ? '700' : '500') + ';'
+    + 'color:' + (active ? 'var(--text)' : 'var(--text3)') + ';'
+    + 'text-transform:uppercase;letter-spacing:0.6px;transition:all 0.15s">'
+    + '<span class="material-symbols-outlined" style="font-size:15px;color:' + color + '">' + icon + '</span>'
+    + label
+    + '</button>';
+}
+
+window._selectBottomTab = function(agentId, paneId) {
+  // Persist
+  try { localStorage.setItem(_bottomTabKey(agentId), paneId); } catch(_) {}
+  // Toggle pane visibility
+  var panes = document.querySelectorAll(
+    '#lt-pane-caps-' + CSS.escape(agentId) + ', '
+    + '#lt-pane-tasks-' + CSS.escape(agentId) + ', '
+    + '#lt-pane-log-' + CSS.escape(agentId) + ', '
+    + '#lt-pane-todos-' + CSS.escape(agentId));
+  panes.forEach(function(p) {
+    p.style.display = (p.getAttribute('data-pane') === paneId) ? 'block' : 'none';
+  });
+  // Update tab strip styles
+  var tabs = document.querySelectorAll(
+    '#lt-bottom-tabs-' + CSS.escape(agentId) + ' button');
+  var COLOR = {caps:'#a78bfa', tasks:'var(--primary)', log:'var(--primary)', todos:'var(--primary)'};
+  tabs.forEach(function(b) {
+    var pid = b.getAttribute('data-pane');
+    var act = pid === paneId;
+    b.style.background = act ? 'var(--surface)' : 'transparent';
+    b.style.borderBottomColor = act ? COLOR[pid] : 'transparent';
+    b.style.color = act ? 'var(--text)' : 'var(--text3)';
+    b.style.fontWeight = act ? '700' : '500';
+  });
+};
+
+// Re-apply active state on render (called after renderAgentChat fills the DOM)
+window._applyInitialBottomTab = function(agentId) {
+  var sel = _getActiveBottomTab(agentId);
+  if (sel !== 'caps') {  // 'caps' is the inline default; only override if differs
+    _selectBottomTab(agentId, sel);
+  }
+};
+
 function renderAgentChat(agentId) {
   var c = document.getElementById('content');
   c.style.padding = '0';
@@ -2906,9 +2990,10 @@ function renderAgentChat(agentId) {
   var _inputDisabledAttrs = _hasLLM ? '' : ' disabled aria-disabled="true"';
   var _inputDisabledStyle = _hasLLM ? '' : 'opacity:0.4;cursor:not-allowed;';
   c.innerHTML = '' +
-    '<!-- Chat Section: 75% height (was 60% — bumped up so the bottom ' +
-    '4-card row shrinks to a half-height strip per UI cleanup ' +
-    '2026-04-27 round 3). Horizontal split: chat (flex:1) | artifact panel (right). -->' +
+    '<!-- Chat Section: 75% height. Bottom region (~25%) hosts a tabbed ' +
+    'panel — one of {Capabilities, Task Queue, Execution Log, TODOs} ' +
+    'visible at a time so each gets full readable real estate (vs. 4 ' +
+    'cramped cards). Horizontal split: chat (flex:1) | artifact panel. -->' +
     '<section style="display:flex;height:75%;flex-shrink:0;background:var(--surface);border-bottom:1px solid var(--overlay-5);overflow:hidden;position:relative">' +
     '<div style="flex:1;display:flex;flex-direction:column;min-width:0">' +
       '<div style="padding:10px 20px;border-bottom:1px solid var(--overlay-5);display:flex;justify-content:space-between;align-items:center;background:var(--bg2);backdrop-filter:blur(16px)">' +
@@ -2956,37 +3041,37 @@ function renderAgentChat(agentId) {
     _renderArtifactPanelShell('agent', agentId) +
     '</section>' +
 
-    '<!-- Bottom Section: Task Execution + Logs -->' +
-    '<section style="flex:1;overflow-y:auto;display:grid;grid-template-columns:12fr;gap:0">' +
-      // --- Bottom row: 4 cards side-by-side ---
-      // Layout (per UI cleanup 2026-04-27 round 2): all 4 panels live
-      // on a single horizontal row. Capabilities used to be a top
-      // strip + 3 panels below — collapsed into one 4-column grid for
-      // tighter vertical use.
-      // Removed earlier same round:
-      //   • Runtime / Model & 专业领域 / Think (LIVE) cards
-      //   • Agent Messages column
-      // Kept: Capabilities (now a compact card) + Task Queue +
-      // Execution Log + TODOs.
-      '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:0;flex:1;overflow:hidden">' +
-        '<!-- Capabilities -->' +
-        '<div style="border-right:1px solid var(--overlay-5);padding:16px 20px;overflow-y:auto;background:linear-gradient(135deg,var(--surface),rgba(167,139,250,0.06));cursor:pointer" onclick="showSkillPanel(\'' + agentId + '\')">' +
-          '<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--overlay-5)">' +
-            '<span class="material-symbols-outlined" style="font-size:16px;color:#a78bfa">build_circle</span>' +
-            '<span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--text)">Capabilities</span>' +
-          '</div>' +
+    '<!-- Bottom Section: tabbed single-panel (2026-04-30 redesign). All 4 panes kept in DOM (display:none/block toggled) so existing helpers (loadTasks / loadAgentEventLog / loadExecutionSteps / _refreshAgentHeaderCounts) still find their target IDs unchanged. -->' +
+    '<section style="flex:1;overflow:hidden;display:flex;flex-direction:column;background:var(--surface)">' +
+      // ── Tab strip ──
+      '<div class="lt-bottom-tabs" id="lt-bottom-tabs-' + agentId + '" '
+        + 'style="display:flex;border-bottom:1px solid var(--overlay-8);'
+        + 'flex-shrink:0;background:var(--bg2);padding:0 8px">' +
+        _renderBottomTabBtn(agentId, 'caps',  'build_circle', 'Capabilities', '#a78bfa') +
+        _renderBottomTabBtn(agentId, 'tasks', 'queue',        'Task Queue',  'var(--primary)') +
+        _renderBottomTabBtn(agentId, 'log',   'terminal',     'Execution Log','var(--primary)') +
+        _renderBottomTabBtn(agentId, 'todos', 'checklist',    'TODOs',       'var(--primary)') +
+      '</div>' +
+      // ── Pane container ──
+      '<div style="flex:1;overflow:hidden;position:relative">' +
+        // Capabilities pane (default visible — user just sees the agent's tool surface first)
+        '<div class="lt-bottom-pane" data-pane="caps" id="lt-pane-caps-' + agentId + '" '
+          + 'style="position:absolute;inset:0;overflow-y:auto;padding:16px 20px;'
+          + 'background:linear-gradient(135deg,var(--surface),rgba(167,139,250,0.06));'
+          + 'cursor:pointer" onclick="showSkillPanel(\'' + agentId + '\')">' +
           (function(){
             var skills = (ag.granted_skills && ag.granted_skills.length) || 0;
             var mcps = (ag.mcp_servers && ag.mcp_servers.length) || 0;
             var tools = (ag.tools && ag.tools.length) || 0;
-            return '<div style="display:flex;flex-direction:column;gap:10px;font-size:12px">' +
-              '<div style="display:flex;justify-content:space-between;align-items:baseline"><span style="color:var(--text3);text-transform:uppercase;font-size:10px;letter-spacing:0.5px">Skills</span><span style="font-weight:700;font-size:18px;color:#a78bfa">' + skills + '</span></div>' +
-              '<div style="display:flex;justify-content:space-between;align-items:baseline"><span style="color:var(--text3);text-transform:uppercase;font-size:10px;letter-spacing:0.5px">MCPs</span><span style="font-weight:700;font-size:18px;color:#a78bfa">' + mcps + '</span></div>' +
-              '<div style="display:flex;justify-content:space-between;align-items:baseline"><span style="color:var(--text3);text-transform:uppercase;font-size:10px;letter-spacing:0.5px">Tools</span><span style="font-weight:700;font-size:18px;color:#a78bfa">' + tools + '</span></div>' +
-            '</div>';
+            return '<div style="display:flex;gap:32px;flex-wrap:wrap;font-size:13px">' +
+              '<div><div style="color:var(--text3);text-transform:uppercase;font-size:10px;letter-spacing:0.5px;margin-bottom:4px">Skills</div><div style="font-weight:700;font-size:24px;color:#a78bfa">' + skills + '</div></div>' +
+              '<div><div style="color:var(--text3);text-transform:uppercase;font-size:10px;letter-spacing:0.5px;margin-bottom:4px">MCPs</div><div style="font-weight:700;font-size:24px;color:#a78bfa">' + mcps + '</div></div>' +
+              '<div><div style="color:var(--text3);text-transform:uppercase;font-size:10px;letter-spacing:0.5px;margin-bottom:4px">Tools</div><div style="font-weight:700;font-size:24px;color:#a78bfa">' + tools + '</div></div>' +
+            '</div>' +
+            '<div style="margin-top:14px;font-size:11px;color:var(--text3)">Click to open detailed skill panel →</div>';
           })() +
           // Hidden spans for the token/memory poller — kept under this
-          // card so _refreshAgentHeaderCounts and friends still find
+          // pane so _refreshAgentHeaderCounts and friends still find
           // their target IDs.
           '<span id="agent-token-stats-' + agentId + '" style="display:none"></span>' +
           '<span id="agent-token-calls-' + agentId + '" style="display:none"></span>' +
@@ -2994,26 +3079,24 @@ function renderAgentChat(agentId) {
           '<span id="agent-memory-bar-' + agentId + '" style="display:none"></span>' +
           '<span id="agent-task-count-' + agentId + '" style="display:none">0</span>' +
         '</div>' +
-        '<!-- Tasks -->' +
-        '<div style="border-right:1px solid var(--overlay-5);padding:16px 20px;overflow-y:auto">' +
+        // Tasks pane
+        '<div class="lt-bottom-pane" data-pane="tasks" id="lt-pane-tasks-' + agentId + '" '
+          + 'style="display:none;position:absolute;inset:0;overflow-y:auto;padding:16px 20px">' +
           '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--overlay-5)">' +
-            '<div style="display:flex;align-items:center;gap:6px"><span class="material-symbols-outlined" style="font-size:16px;color:var(--primary)">queue</span><span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--text)">Task Queue</span></div>' +
-            '<button class="btn btn-sm btn-ghost" onclick="addTaskDialog(\'' + agentId + '\')"><span class="material-symbols-outlined" style="font-size:14px">add</span></button>' +
+            '<div style="font-size:12px;color:var(--text2)">Active task queue (V2 conversation tasks merge in)</div>' +
+            '<button class="btn btn-sm btn-ghost" onclick="addTaskDialog(\'' + agentId + '\')"><span class="material-symbols-outlined" style="font-size:14px">add</span> 新建</button>' +
           '</div>' +
           '<div id="tasks-list-' + agentId + '" style="display:flex;flex-direction:column;gap:4px"></div>' +
         '</div>' +
-        '<!-- Event Log -->' +
-        '<div style="padding:16px 20px;overflow-y:auto;background:var(--bg);border-right:1px solid var(--overlay-5)">' +
-          '<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--overlay-5)"><span class="material-symbols-outlined" style="font-size:16px;color:var(--primary)">terminal</span><span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--text)">Execution Log</span></div>' +
+        // Execution Log pane
+        '<div class="lt-bottom-pane" data-pane="log" id="lt-pane-log-' + agentId + '" '
+          + 'style="display:none;position:absolute;inset:0;overflow-y:auto;padding:16px 20px;background:var(--bg)">' +
           '<div id="agent-event-log-' + agentId + '" style="font-family:monospace;font-size:11px;line-height:1.7;color:var(--text3)"></div>' +
         '</div>' +
-        '<!-- Execution Steps Panel (TODOs) -->' +
-        '<div style="padding:16px 16px;overflow-y:auto;background:var(--surface)">' +
-          '<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--overlay-5)">' +
-            '<span class="material-symbols-outlined" style="font-size:16px;color:var(--primary)">checklist</span>' +
-            '<span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--text)">' + window.t('panel.todos', 'TODOs') + '</span>' +
-          '</div>' +
-          '<div id="execution-steps-' + agentId + '" style="display:flex;flex-direction:column;gap:0">' +
+        // TODOs pane
+        '<div class="lt-bottom-pane" data-pane="todos" id="lt-pane-todos-' + agentId + '" '
+          + 'style="display:none;position:absolute;inset:0;overflow-y:auto;padding:16px 20px">' +
+          '<div id="execution-steps-' + agentId + '" style="display:flex;flex-direction:column;gap:6px">' +
             '<div style="color:var(--text3);font-size:12px;padding:8px 0">Waiting for agent to start a task...</div>' +
           '</div>' +
         '</div>' +
@@ -3023,11 +3106,17 @@ function renderAgentChat(agentId) {
     '<!-- Workspace Info -->' +
     '<section style="padding:12px 20px;background:var(--surface2);border-top:1px solid var(--overlay-5);font-size:12px;color:var(--text2)">' +
       '<div><span style="color:var(--text3)">Private Workspace:</span> <code style="color:var(--primary)">~/.tudou_claw/workspaces/' + esc(agentId) + '</code></div>' +
-      (ag.shared_workspace ? '<div style="margin-top:4px"><span style="color:var(--text3)">Shared Workspace:</span> <code style="color:var(--primary)">' + esc(ag.shared_workspace) + '</code></div>' : '') +
+    // Shared Workspace 不再显示在 agent 页面：共享目录归属于具体的
+    // project / meeting，不属于 agent 本身。Agent solo 页面应该只看到
+    // 自己的私有工作目录。共享目录的展示已经移到项目 / 会议页面。
     '</section>';
     // NOTE: V2 tasks are no longer rendered as a separate panel here.
     // They now merge into the existing Task Queue column (tasks-list-<id>)
     // via loadTasks() + loadConversationTasksIntoQueue(). One list, one place to look.
+  // Apply persisted bottom-tab selection (default 'caps' is already
+  // visible inline — only override when user previously picked another).
+  try { _applyInitialBottomTab(agentId); } catch(_){}
+
   loadAgentChat(agentId).then(function() {
     // After history is rendered, attach file cards to historical
     // bubbles by matching filenames mentioned in their text.
@@ -3690,6 +3779,13 @@ async function quickSwitchModel(agentId) {
   if (!provEl || !modelEl) return;
   var provider = provEl.value;
   var model = modelEl.value;
+  // Atomic — never send half-set state to the backend (its guard would
+  // reject). If user picked a provider with no models, just refresh the
+  // dropdown without persisting; if both empty, clear binding explicitly.
+  if ((provider && !model) || (!provider && model)) {
+    _toast && _toast('该 Provider 暂无可用模型,请选其他 Provider', 'warning');
+    return;
+  }
   await api('POST', '/api/portal/agent/' + agentId + '/profile', { provider: provider, model: model });
   // Update local agent data
   var ag = agents.find(function(a){ return a.id === agentId; });
@@ -3780,6 +3876,73 @@ async function loadAgentChat(agentId, _retryCount) {
     }
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Late-message poller — appends bubbles for events the user didn't
+// trigger this turn (another agent's @-mention, watchdog wake-up,
+// scheduled task fire, etc.). Without this, the Execution Log shows
+// the new message immediately (refreshSidebar already polls /events
+// for the side panel) but the chat panel only updates on full reload.
+//
+// Called from the heartbeat (refreshSidebar). Cheap because:
+//   • Skipped when an active streaming task is in flight — the
+//     streaming code is already rendering bubbles into the same panel.
+//   • Dedupes against the existing DOM via (role + content prefix).
+//   • Hits the same /events endpoint loadAgentEventLog already calls;
+//     server-side it's a list slice, no extra DB work.
+// ─────────────────────────────────────────────────────────────────────
+async function _pollChatNewMessages(agentId) {
+  try {
+    if (!agentId) return;
+    // Skip if the agent has an in-flight streaming task — its handler
+    // owns bubble rendering and a poll would duplicate its work.
+    if (document.getElementById('chat-progress-' + agentId)) return;
+    var el = document.getElementById('chat-msgs-' + agentId);
+    if (!el) return;  // Chat panel not mounted (user is on another view).
+
+    // Build a Set of (role::contentPrefix) for every bubble already in
+    // the panel so we can drop server events that are already rendered.
+    var rendered = new Set();
+    var bubbles = el.querySelectorAll('.chat-msg, .chat-msg-row');
+    for (var i = 0; i < bubbles.length; i++) {
+      var b = bubbles[i];
+      var role = b._role;
+      var raw = b._rawText;
+      if (!raw) {
+        var c = b.querySelector && b.querySelector('.chat-msg-content');
+        if (c) {
+          if (!role) role = 'assistant';
+          raw = c._rawText;
+        }
+      }
+      if (role && typeof raw === 'string') {
+        rendered.add(role + '::' + raw.slice(0, 200));
+      }
+    }
+    if (rendered.size === 0) return;  // Empty panel — defer to loadAgentChat.
+
+    var data = await api('GET', '/api/portal/agent/' + agentId + '/events');
+    if (!data || !data.events) return;
+    for (var j = 0; j < data.events.length; j++) {
+      var ev = data.events[j];
+      if (ev.kind !== 'message') continue;
+      var d = ev.data || {};
+      var r = d.role || 'assistant';
+      if (r === 'system') continue;
+      var content = d.content || '';
+      if (r === 'assistant' && !String(content).trim()) continue;
+      var key = r + '::' + String(content).slice(0, 200);
+      if (rendered.has(key)) continue;
+      // Mark as rendered before appending so a slow re-entrant call
+      // (overlapping heartbeat) doesn't double-add.
+      rendered.add(key);
+      addChatBubble(agentId, r, content, ev.timestamp || 0);
+    }
+  } catch (e) {
+    // Never break the heartbeat for a UX nicety.
+  }
+}
+window._pollChatNewMessages = _pollChatNewMessages;
 
 // Open an image in a fullscreen lightbox overlay. Click anywhere to close.
 function _openImagePreview(src) {
@@ -4110,6 +4273,41 @@ window._formatChatTime = _formatChatTime;
 function addChatBubble(agentId, role, text, timestamp, extraClass) {
   const el = document.getElementById('chat-msgs-'+agentId);
   if(!el) return;
+
+  // ── Last-resort dedup: ring buffer of recent assistant bubble contents ──
+  // Cause-of-write: 2026-05-01 same agent reply rendered 4× in a row because
+  // text_final fires multiple times in one turn and `_lastFinalizedText_`
+  // single-slot dedup gets cleared between fires. _pollChatNewMessages and
+  // loadAgentChat have their own dedup; this is the safety net for the
+  // streaming-finalize path that bypasses both. Keeps the last 5 finalized
+  // assistant contents per agent and silently drops exact-or-prefix repeats
+  // posted within 60s of each other.
+  // Scoped to assistant only (user can legitimately resend identical text);
+  // skipped for streaming placeholders (empty text) and slash commands.
+  if (role && role.indexOf('assistant') !== -1
+      && role.indexOf('thinking') === -1
+      && extraClass !== 'slash-cmd'
+      && typeof text === 'string' && text.trim()) {
+    var _now = Date.now();
+    var _key = '_recentBubbles_' + agentId;
+    var _hist = window[_key] = window[_key] || [];
+    var _trimmed = text.trim();
+    var _head = _trimmed.slice(0, 300);  // first 300 chars is enough to fingerprint
+    for (var _i = 0; _i < _hist.length; _i++) {
+      var _h = _hist[_i];
+      if ((_now - _h.t) > 60000) continue;  // older than 60s — stale, ignore
+      // Match if exact, or one is a prefix of the other (streaming chunk vs final)
+      if (_h.head === _head
+          || _trimmed.startsWith(_h.full)
+          || _h.full.startsWith(_trimmed)) {
+        // Duplicate of a recent bubble — drop silently
+        return null;
+      }
+    }
+    _hist.push({ t: _now, head: _head, full: _trimmed });
+    if (_hist.length > 5) _hist.shift();
+  }
+
   const div = document.createElement('div');
   div.className = 'chat-msg ' + role + (extraClass ? ' ' + extraClass : '');
 
@@ -4189,10 +4387,14 @@ function addChatBubble(agentId, role, text, timestamp, extraClass) {
     actionBar.className = 'chat-msg-actions';
     actionBar.innerHTML = '<button class="chat-action-btn" onclick="_speakBubble(this)" title="' + window.t('bubble.speak', '朗读此消息') + '"><span class="material-symbols-outlined" style="font-size:14px">volume_up</span></button>' +
       '<button class="chat-action-btn" onclick="_saveToFile(this,\''+agentId+'\')" title="' + window.t('bubble.saveFile', '保存为文件') + '"><span class="material-symbols-outlined" style="font-size:14px">save</span> ' + window.t('action.save', 'Save') + '</button>' +
-      '<button class="chat-action-btn" onclick="_copyToClipboard(this)" title="' + window.t('bubble.copy', '复制') + '"><span class="material-symbols-outlined" style="font-size:14px">content_copy</span> ' + window.t('bubble.copy', '复制') + '</button>';
+      '<button class="chat-action-btn" onclick="_copyToClipboard(this)" title="' + window.t('bubble.copy', '复制') + '"><span class="material-symbols-outlined" style="font-size:14px">content_copy</span> ' + window.t('bubble.copy', '复制') + '</button>' +
+      '<button class="chat-action-btn chat-action-delete" onclick="_deleteBubble(this,\''+agentId+'\',\'assistant\')" title="' + window.t('bubble.delete', '删除此消息') + '"><span class="material-symbols-outlined" style="font-size:14px">close</span></button>';
     div.appendChild(actionBar);
     row.appendChild(div);
     div._contentDiv = contentDiv;
+    // Stash ts + role on the row so _deleteBubble can resolve them.
+    row._timestamp = ts;
+    row._role = 'assistant';
     // Propagate merged-follow flag from div → row (the DOM level CSS
     // hooks for avatar hide + margin collapse live on the row).
     if (div._pendingMergedFollow) {
@@ -4215,13 +4417,88 @@ function addChatBubble(agentId, role, text, timestamp, extraClass) {
     timeSpan.textContent = timeLabel;
     timeSpan.style.cssText = 'display:block;margin-top:2px;text-align:right;';
     div.appendChild(timeSpan);
-    // Stash ts on the user msg div so the next call can compare against it.
+    // x-delete button for user bubbles (small, top-right corner via CSS)
+    var delBtn = document.createElement('button');
+    delBtn.className = 'chat-msg-del-user';
+    delBtn.title = window.t('bubble.delete', '删除此消息');
+    delBtn.innerHTML = '<span class="material-symbols-outlined" style="font-size:14px">close</span>';
+    delBtn.onclick = function(ev) {
+      ev.stopPropagation();
+      _deleteBubble(this, agentId, 'user');
+    };
+    div.appendChild(delBtn);
+    // Stash ts + raw text on the user msg div for _deleteBubble.
     div._timestamp = ts;
+    div._role = 'user';
+    div._rawText = text || '';
     el.appendChild(div);
     el.scrollTop = el.scrollHeight;
     return div;
   }
 }
+
+// Delete a single chat bubble — calls server then removes the DOM node.
+// `btnEl` is the x button itself; we walk up to find the row/div whose
+// _timestamp + _role + _rawText were stashed at render time.
+window._deleteBubble = async function(btnEl, agentId, role) {
+  try {
+    var node = btnEl;
+    var ts = 0, prefix = '';
+    // Walk up: assistant bubbles stash ts on the row (chat-msg-row);
+    // user bubbles stash ts on the div (chat-msg.user).
+    var hops = 0;
+    while (node && hops < 6) {
+      if (typeof node._timestamp === 'number' && node._timestamp > 0) {
+        ts = node._timestamp;
+        // Pull raw text — assistant has it on _contentDiv, user on the div itself.
+        if (role === 'assistant') {
+          var cd = node.querySelector ? node.querySelector('.chat-msg-content') : null;
+          if (cd && typeof cd._rawText === 'string') prefix = cd._rawText;
+        } else if (typeof node._rawText === 'string') {
+          prefix = node._rawText;
+        }
+        break;
+      }
+      node = node.parentElement;
+      hops++;
+    }
+    if (!ts) {
+      console.warn('_deleteBubble: no timestamp found on bubble');
+      return;
+    }
+    if (!confirm(window.t('bubble.deleteConfirm', '确定删除这条消息？'))) return;
+    var resp = await fetch('/api/portal/agent/' + agentId + '/message/delete', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      credentials: 'same-origin',
+      body: JSON.stringify({
+        ts: ts,
+        role: role,
+        content_prefix: (prefix || '').slice(0, 200)
+      })
+    });
+    if (resp.status === 401) { window.location.href = '/'; return; }
+    var data = {};
+    try { data = await resp.json(); } catch(_) {}
+    if (!data.ok) {
+      alert((data.error || '删除失败') + (data.event_removed === false && data.message_removed === false ? ' (未找到匹配)' : ''));
+      return;
+    }
+    // Remove the DOM node. For assistant bubbles we remove the whole row
+    // (avatar + bubble + actions); for user bubbles just the div.
+    var target = node;
+    if (role === 'assistant' && node.classList && node.classList.contains('chat-msg-row')) {
+      target = node;  // already the row
+    } else if (role === 'assistant') {
+      var row = node.closest && node.closest('.chat-msg-row');
+      if (row) target = row;
+    }
+    if (target && target.parentNode) target.parentNode.removeChild(target);
+  } catch (e) {
+    console.error('_deleteBubble error', e);
+    alert('删除失败: ' + e.message);
+  }
+};
 
 // Badge under a user chat bubble offering to convert the message into a
 // V2 state-machine (6-phase) tracked task. Click → POST /api/v2/agents/
@@ -4499,6 +4776,24 @@ async function attachHistoricalFileCards(agentId) {
     'agent.json': 1, 'README.md': 1,
   };
   var taskStartTs = (window._currentTaskStart || {})[agentId] || 0;
+  // When the user just opened the agent and hasn't submitted yet,
+  // _currentTaskStart is 0 — without a fallback floor, EVERY historical
+  // deliverable (AWS reports from last week, PPTXs from another project)
+  // attaches to the last bubble. Use the last assistant bubble's
+  // timestamp as the floor in that case, so orphans only attach when
+  // they were produced as part of the most-recent turn.
+  var orphanFloor = taskStartTs;
+  if (orphanFloor <= 0 && bubbles.length) {
+    var _last = bubbles[bubbles.length - 1];
+    var _lastTs = (_last && typeof _last._timestamp === 'number')
+                  ? _last._timestamp
+                  : 0;
+    if (!_lastTs) {
+      var _lastRow = _last && _last.closest ? _last.closest('.chat-msg-row') : null;
+      if (_lastRow && typeof _lastRow._timestamp === 'number') _lastTs = _lastRow._timestamp;
+    }
+    if (_lastTs > 0) orphanFloor = _lastTs;
+  }
   var realOrphans = orphans.filter(function(o) {
     var name = (o && (o.filename || o.name || o.id || '')) || '';
     if (META_BASENAMES[name]) return false;
@@ -4506,12 +4801,19 @@ async function attachHistoricalFileCards(agentId) {
     if (dot < 0) return false;
     var ext = name.slice(dot).toLowerCase();
     if (DELIVERABLE_EXTS[ext] !== 1) return false;
-    if (taskStartTs > 0) {
+    if (orphanFloor > 0) {
       var ts = o.produced_at || 0;
       if (typeof ts === 'string') ts = parseFloat(ts) || 0;
-      // Allow 30s grace before task_started_at (clock skew + write
-      // happening just before the very first event of the turn).
-      if (ts > 0 && ts < taskStartTs - 30) return false;
+      // Allow 30s grace before the floor (clock skew + write happening
+      // just before the very first event of the turn).
+      if (ts > 0 && ts < orphanFloor - 30) return false;
+      // If the file has no produced_at at all, treat it as ancient —
+      // we have no proof it belongs to this turn.
+      if (ts === 0) return false;
+    } else {
+      // No floor at all (no taskStartTs, no bubble ts) — refuse to
+      // auto-attach. Old behavior (attach everything) is the bug.
+      return false;
     }
     return true;
   });
@@ -5092,6 +5394,266 @@ function _clearSlashNewArm(agentId) {
 // Active task streams per agent (so we can reconnect)
 var _activeTaskStreams = {};  // agentId -> {taskId, abortCtrl}
 
+// ─────────────────────────────────────────────────────────────────────
+// /route-intent classifier — short-timeout cache
+//
+// The auto-router calls a small classifier LLM on every send to decide
+// if the message is recall / remember / learn / task / chat. That call
+// is synchronous and 1-3s — the user feels it as "Enter pressed but
+// nothing happens" before the bubble shows.
+//
+// Treatment: race the call against a 600ms timeout (fail-open → normal
+// chat path) and cache successful classifications by message text for
+// 5 minutes (so re-sends of the same message are instant).
+// ─────────────────────────────────────────────────────────────────────
+var _routeIntentCache = new Map();  // key → {result, ts}
+var _ROUTE_INTENT_CACHE_MS = 5 * 60 * 1000;
+var _ROUTE_INTENT_TIMEOUT_MS = 600;
+var _ROUTE_INTENT_CACHE_CAP = 100;
+
+function _routeIntentCacheKey(text) {
+  return String(text || '').slice(0, 200).trim().toLowerCase();
+}
+
+function _getCachedRouteIntent(text) {
+  var key = _routeIntentCacheKey(text);
+  if (!key) return null;
+  var hit = _routeIntentCache.get(key);
+  if (hit && (Date.now() - hit.ts) < _ROUTE_INTENT_CACHE_MS) {
+    return hit.result;
+  }
+  if (hit) _routeIntentCache.delete(key);  // expired
+  return null;
+}
+
+function _cacheRouteIntent(text, result) {
+  var key = _routeIntentCacheKey(text);
+  if (!key || !result) return;
+  _routeIntentCache.set(key, { result: result, ts: Date.now() });
+  // Map preserves insertion order — drop oldest when over cap.
+  if (_routeIntentCache.size > _ROUTE_INTENT_CACHE_CAP) {
+    var firstKey = _routeIntentCache.keys().next().value;
+    _routeIntentCache.delete(firstKey);
+  }
+}
+
+// Race ``api('POST', /route-intent, ...)`` against a 600ms timeout.
+// Caches successful results by message text. Returns the classifier
+// result or null on timeout / error (caller falls through to normal chat).
+async function _classifyIntentWithTimeout(agentId, rawText) {
+  // Cache hit → return instantly.
+  var cached = _getCachedRouteIntent(rawText);
+  if (cached !== null) return cached;
+  var apiPromise = api('POST',
+    '/api/portal/agent/' + encodeURIComponent(agentId) + '/route-intent',
+    { message: rawText });
+  // Side-channel: even if we time out, cache the result when it
+  // eventually arrives so a re-send hits the cache.
+  apiPromise.then(function(r) {
+    if (r && !r.error) _cacheRouteIntent(rawText, r);
+  }).catch(function(){});
+  // Race
+  var timeoutP = new Promise(function(resolve) {
+    setTimeout(function(){ resolve(null); }, _ROUTE_INTENT_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([apiPromise, timeoutP]);
+  } catch (_) {
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Pending message queue — Claude Code-style "queue + merge" UX.
+//
+// When the user submits another message while an agent is still
+// streaming a reply, instead of aborting the live stream OR firing a
+// concurrent task, we push the message into a per-scope queue and
+// surface it as a chip under the input. When the current turn finishes
+// cleanly (status === "completed"), the queue is auto-flushed: all
+// pending texts get joined with double-newlines into ONE user turn,
+// all pending attachments concatenated. Slash commands refuse to
+// queue (they're immediate-execution semantics).
+//
+// Aborted / failed turns leave the queue intact — the user explicitly
+// stopped, so they decide whether to ✕ remove items or hit send to
+// flush them as the next turn.
+//
+// Cap: 5 pending items; further sends show a toast.
+//
+// Scope key:
+//   solo:    "agent:{agentId}"
+//   meeting: "meeting:{meetingId}"
+// (Project chat does NOT use this queue — see UX notes; each user
+// message there is its own fan-out event.)
+// ─────────────────────────────────────────────────────────────────────
+window._pendingQueue = window._pendingQueue || {};
+var _PENDING_QUEUE_CAP = 5;
+
+function _pendingQueueKey(scope, id) {
+  return (scope || 'agent') + ':' + (id || '');
+}
+
+function _pendingQueueGet(scope, id) {
+  var k = _pendingQueueKey(scope, id);
+  if (!window._pendingQueue[k]) window._pendingQueue[k] = [];
+  return window._pendingQueue[k];
+}
+
+// Are we in the middle of a streaming turn for this scope?
+//   solo:    progress bar element exists OR _activeTaskStreams[agentId] is set
+//   meeting: window._mtgTyping[mid].pending has at least one agent waiting
+//            (set by meetingPostMessage; cleared by _mtgRenderTypingBubbles
+//            once the agent has posted its reply).
+function _isScopeBusy(scope, id) {
+  if (scope === 'agent') {
+    return !!document.getElementById('chat-progress-' + id)
+        || !!_activeTaskStreams[id];
+  }
+  if (scope === 'meeting') {
+    var typingMap = window._mtgTyping || {};
+    var slot = typingMap[id];
+    if (slot && slot.pending && Object.keys(slot.pending).length > 0) return true;
+    // Also consider server-reported active_speakers as a busy signal — they
+    // come from the polling tick when an agent is mid-reply.
+    var cur = window._currentMeeting || {};
+    if (cur && cur.id === id && Array.isArray(cur.active_speakers)
+        && cur.active_speakers.length > 0) return true;
+    return false;
+  }
+  return false;
+}
+
+// Where to mount the chip strip — depends on scope.
+//   solo:    above chat-input-{agentId}
+//   meeting: above mtg-msg-input (the meeting view shows one meeting at a
+//            time, so the input id is fixed, not parameterized by mid).
+function _pendingQueueHostInfo(scope, id) {
+  if (scope === 'agent') {
+    var inputEl = document.getElementById('chat-input-' + id);
+    return inputEl ? { input: inputEl, host: inputEl.parentElement } : null;
+  }
+  if (scope === 'meeting') {
+    var meetingInput = document.getElementById('mtg-msg-input');
+    return meetingInput ? { input: meetingInput, host: meetingInput.parentElement } : null;
+  }
+  return null;
+}
+
+function _renderPendingQueue(scope, id) {
+  var info = _pendingQueueHostInfo(scope, id);
+  if (!info) return;
+  var chipId = 'pending-queue-' + scope + '-' + id;
+  var existing = document.getElementById(chipId);
+  var items = _pendingQueueGet(scope, id);
+  if (!items.length) {
+    if (existing && existing.parentElement) existing.parentElement.removeChild(existing);
+    return;
+  }
+  if (!existing) {
+    existing = document.createElement('div');
+    existing.id = chipId;
+    existing.style.cssText = 'display:flex;flex-direction:column;gap:4px;'
+      + 'margin:4px 2px;font-size:11px;background:var(--surface2);'
+      + 'border:1px solid var(--overlay-8);border-radius:8px;padding:8px';
+    info.host.insertBefore(existing, info.input);
+  }
+  var hint = scope === 'meeting'
+    ? '将在下一轮 round 开始前合并注入'
+    : '将在当前回合结束后合并发送';
+  var header = '<div style="color:var(--text3);font-size:10px;display:flex;justify-content:space-between">'
+    + '<span>📋 待发送 ' + items.length + '/' + _PENDING_QUEUE_CAP + ' 条</span>'
+    + '<span style="opacity:0.7">' + hint + '</span>'
+    + '</div>';
+  var list = items.map(function(it, idx) {
+    var preview = String(it.text || '').slice(0, 80);
+    if (it.text && it.text.length > 80) preview += '…';
+    var attCount = (it.attachments || []).length;
+    var attLabel = attCount ? ' <span style="color:var(--text3)">📎' + attCount + '</span>' : '';
+    return '<div style="display:flex;align-items:center;gap:6px;'
+      + 'background:var(--surface);padding:4px 8px;border-radius:6px">'
+      + '<span style="flex:1;color:var(--text2);overflow:hidden;'
+      + 'text-overflow:ellipsis;white-space:nowrap">'
+      + esc(preview) + attLabel + '</span>'
+      + '<button onclick="_pendingQueueRemove(\'' + scope + '\',\'' + esc(id) + '\',' + idx + ')" '
+      + 'title="移除这条" style="background:none;border:none;color:var(--text3);'
+      + 'cursor:pointer;padding:0 4px;font-size:14px;line-height:1">×</button>'
+      + '</div>';
+  }).join('');
+  existing.innerHTML = header + list;
+}
+
+window._pendingQueueRemove = function(scope, id, idx) {
+  var q = _pendingQueueGet(scope, id);
+  if (idx >= 0 && idx < q.length) q.splice(idx, 1);
+  _renderPendingQueue(scope, id);
+};
+
+// Enqueue a message for later flush. Returns true on success, false if
+// rejected (cap reached). Caller is responsible for clearing the input
+// and showing user feedback.
+function _pendingQueueEnqueue(scope, id, text, attachments) {
+  var q = _pendingQueueGet(scope, id);
+  if (q.length >= _PENDING_QUEUE_CAP) {
+    if (window._toast) window._toast(
+      '队列已满（' + _PENDING_QUEUE_CAP + ' 条），请等当前回复完成', 'warning');
+    return false;
+  }
+  q.push({
+    text: String(text || ''),
+    attachments: (attachments || []).slice(),
+    queued_at: Date.now() / 1000,
+  });
+  _renderPendingQueue(scope, id);
+  return true;
+}
+
+// Flush the queue: combine all pending texts (joined by \n\n) and all
+// attachments, then call the scope-specific send routine. Caller decides
+// whether to call this — typically auto-fired after a "completed"
+// terminal event, or manually triggered after abort.
+async function _pendingQueueFlush(scope, id) {
+  var q = _pendingQueueGet(scope, id);
+  if (!q.length) return;
+  // Drain atomically — copy then clear, so a re-entrant flush from a
+  // racing event handler doesn't double-send.
+  var items = q.slice();
+  q.length = 0;
+  _renderPendingQueue(scope, id);
+  var combinedText = items.map(function(it){ return it.text; })
+                          .filter(Boolean)
+                          .join('\n\n');
+  var combinedAttachments = [];
+  items.forEach(function(it) {
+    (it.attachments || []).forEach(function(a) { combinedAttachments.push(a); });
+  });
+  if (scope === 'agent') {
+    // Inject into the input + attachments, then trigger sendAgentMsg.
+    var inputEl = document.getElementById('chat-input-' + id);
+    if (!inputEl) return;
+    inputEl.value = combinedText;
+    try { _autoGrowChatInput(inputEl); } catch(_){}
+    // Restore attachments into the agent's attach list.
+    var list = _agentAttachList(id);
+    list.length = 0;
+    combinedAttachments.forEach(function(a){ list.push(a); });
+    try { _renderAgentAttachPreview(id); } catch(_){}
+    // Fire the normal send path.
+    try { await sendAgentMsg(id); } catch(e) { console.error('flush sendAgentMsg failed', e); }
+  } else if (scope === 'meeting') {
+    // Send as a meeting interjection. Backend API:
+    //   POST /api/portal/meetings/{id}/messages with role=user.
+    try {
+      await api('POST', '/api/portal/meetings/' + encodeURIComponent(id) + '/messages',
+        { content: combinedText, role: 'user' });
+    } catch (e) {
+      console.error('flush meeting interjection failed', e);
+    }
+  }
+}
+window._pendingQueueFlush = _pendingQueueFlush;
+
+
 async function sendAgentMsg(agentId) {
   const inputEl = document.getElementById('chat-input-'+agentId);
   if(!inputEl) return;
@@ -5100,11 +5662,47 @@ async function sendAgentMsg(agentId) {
     alert('该 Agent 还没有配置 LLM。请先从顶部选择 provider / model。');
     return;
   }
+  var rawText = inputEl.value.trim();
+  var attachments = _agentAttachList(agentId).slice();
+  if(!rawText && !attachments.length) return;
+
+  // Slash-command preprocessing — happens BEFORE busy-check so we can
+  // tell if this is a command (commands refuse to queue).
+  var slash = _parseSlashCommand(rawText);
+
+  // ── Queue + merge: agent is currently streaming a reply ──
+  // Don't abort the in-flight stream (the old behavior dropped the
+  // user's prior reply silently). Instead, push this message onto a
+  // pending queue rendered as a chip strip; auto-flush as ONE merged
+  // user turn after the current turn completes.
+  // Slash commands are immediate-execution and refuse to queue.
+  var isSlashCmd = !!(slash.armOnly || slash.helpOnly
+    || slash.recallQuery !== undefined || slash.rememberFact
+    || slash.taskTitle || slash.handoffTarget || slash.learnTopic);
+  if (_isScopeBusy('agent', agentId)) {
+    if (isSlashCmd) {
+      if (window._toast) window._toast(
+        '当前回合还没结束，命令稍后再发', 'warning');
+      return;
+    }
+    var ok = _pendingQueueEnqueue('agent', agentId, rawText, attachments);
+    if (ok) {
+      inputEl.value = '';
+      try { _autoGrowChatInput(inputEl); } catch(_){}
+      // Clear the attachments list — they're now owned by the queue
+      // item. They'll be restored on flush.
+      var alist = _agentAttachList(agentId);
+      alist.length = 0;
+      try { _renderAgentAttachPreview(agentId); } catch(_){}
+    }
+    return;
+  }
+
   // Defensive cleanup: clear any stale stream slot left over from a prior
   // turn that ended without a proper `done` event (SSE reconnect race,
-  // page-visibility drop, etc.). Without this, every N-th send fails
-  // silently because the new request's SSE handler aliases onto the dead
-  // AbortController. Costs nothing when state is already clean.
+  // page-visibility drop, etc.). Only fires when NOT busy — when busy
+  // we queued above and never reach here, so this can never abort a live
+  // turn anymore.
   var stale = _activeTaskStreams[agentId];
   if (stale) {
     try { if (stale.abortCtrl) stale.abortCtrl.abort(); } catch(e){}
@@ -5112,12 +5710,6 @@ async function sendAgentMsg(agentId) {
   }
   // Also sweep any orphan progress bar from a prior aborted turn.
   try { _removeProgressBar(agentId); } catch(e){}
-  var rawText = inputEl.value.trim();
-  var attachments = _agentAttachList(agentId).slice();
-  if(!rawText && !attachments.length) return;
-
-  // Slash-command preprocessing.
-  var slash = _parseSlashCommand(rawText);
 
   // /new alone → arm the flag for next send, show a chip, consume the
   // input but DO NOT submit anything to the LLM.
@@ -5326,9 +5918,11 @@ async function sendAgentMsg(agentId) {
   if (_autoRouteOn && rawText && rawText.length >= 4 && !attachments.length
       && !rawText.startsWith('/') && !rawText.startsWith('\\')) {
     try {
-      var clf = await api('POST',
-        '/api/portal/agent/' + encodeURIComponent(agentId) + '/route-intent',
-        { message: rawText });
+      // Race against a 600ms timeout — classifier latency was eating
+      // every send (user pressed Enter, waited 2-3s for bubble).
+      // Cache is checked first; failed/slow calls fall through to
+      // normal chat (no functional regression, just no auto-route).
+      var clf = await _classifyIntentWithTimeout(agentId, rawText);
       if (clf && !clf.error && clf.intent && clf.intent !== 'chat') {
         var conf = parseFloat(clf.confidence || 0);
         var thresh = parseFloat(clf.threshold || 0.85);
@@ -6476,6 +7070,35 @@ async function _streamTaskEvents(agentId, taskId, thinkDiv, progressBar) {
             } else if(evt.type==='text') {
               var textContent = evt.content || '';
               if (!textContent.trim()) continue;  // Skip empty text events
+              // Dup-guard: if a previous `text_delta` stream just finalized
+              // an identical (or near-identical) bubble, this `text` event
+              // is the backend's "complete-message" signal — same content,
+              // already rendered, should NOT create a second bubble.
+              // (2026-04-29 user report: "好啊..." appeared twice — caused
+              // by streaming bubble + final-text bubble both surviving.)
+              if (window['_lastFinalizedText_' + agentId]) {
+                var _prev = String(window['_lastFinalizedText_' + agentId] || '').trim();
+                var _new = textContent.trim();
+                // Either exact match, or final is a superset of streamed
+                // (the streaming might've cut off mid-word).
+                if (_prev && (_prev === _new || _new.startsWith(_prev) || _prev.startsWith(_new))) {
+                  // Upgrade the existing finalized bubble's content if the
+                  // final-text version is longer / properly markdown-rendered.
+                  if (window['_lastFinalizedDiv_' + agentId] && _new.length >= _prev.length) {
+                    try {
+                      window['_lastFinalizedDiv_' + agentId].innerHTML =
+                        _renderSimpleMarkdown(textContent, agentId);
+                      window['_lastFinalizedDiv_' + agentId]._rawText = textContent;
+                      if (evt.timestamp) window['_lastFinalizedDiv_' + agentId]._timestamp = evt.timestamp;
+                    } catch (_e) {}
+                  }
+                  // Clear the finalized marker so a genuinely new message
+                  // later in the same stream isn't accidentally suppressed.
+                  window['_lastFinalizedText_' + agentId] = '';
+                  window['_lastFinalizedDiv_' + agentId] = null;
+                  continue;  // skip — would have been a duplicate bubble
+                }
+              }
               if (thinkDiv.parentNode) thinkDiv.remove();
               if (!msgDiv) { msgDiv = addChatBubble(agentId, 'assistant', '', evt.timestamp||0); }
               fullText = textContent;
@@ -6501,6 +7124,22 @@ async function _streamTaskEvents(agentId, taskId, thinkDiv, progressBar) {
                     else if (msgEl) msgEl.remove();
                     else msgDiv.remove();
                   } catch(e) {}
+                  // Empty bubble was removed — nothing to dedup against.
+                  window['_lastFinalizedText_' + agentId] = '';
+                  window['_lastFinalizedDiv_' + agentId] = null;
+                } else {
+                  // Real content was streamed and the bubble stays in DOM.
+                  // Stash a reference + content so a follow-up `text`
+                  // event with the same payload can be detected as a
+                  // duplicate (the backend often re-emits the final text
+                  // after streaming for non-streaming clients).
+                  // Apply markdown now so the bubble looks finalized.
+                  try {
+                    msgDiv.innerHTML = _renderSimpleMarkdown(fullText, agentId);
+                    msgDiv._rawText = fullText;
+                  } catch(_e) {}
+                  window['_lastFinalizedText_' + agentId] = trimmed;
+                  window['_lastFinalizedDiv_' + agentId] = msgDiv;
                 }
                 msgDiv = null;
                 fullText = '';
@@ -6609,6 +7248,14 @@ async function _streamTaskEvents(agentId, taskId, thinkDiv, progressBar) {
         // Load final state from backend
         loadAgentEventLog(agentId);
         loadExecutionSteps(agentId);
+        // ── Auto-flush pending queue ──
+        // Turn completed cleanly. If the user queued more messages
+        // while this turn was streaming, fire them as the next merged
+        // user turn. Slight delay so the progress bar fade-out finishes
+        // first (visual cue: this turn done → next turn starts).
+        setTimeout(function(){
+          try { _pendingQueueFlush('agent', agentId); } catch(e){}
+        }, 850);
         return;
       }
       // SSE connection ended but task not done — reconnect automatically
@@ -6635,6 +7282,14 @@ async function _streamTaskEvents(agentId, taskId, thinkDiv, progressBar) {
             delete _stepsTimers[agentId];
             loadAgentEventLog(agentId);
             loadExecutionSteps(agentId);
+            // Auto-flush pending queue ONLY when the terminal status is
+            // "completed". On aborted/failed we keep the queue intact so
+            // the user can ✕ remove items or trigger send manually.
+            if (statusData.status === 'completed') {
+              setTimeout(function(){
+                try { _pendingQueueFlush('agent', agentId); } catch(e){}
+              }, 850);
+            }
             return;
           }
         }
@@ -11510,7 +12165,8 @@ async function loadAvailableModels() {
   if (cfg) {
     _availableModels = cfg.available_models || {};
     _providerList = (cfg.providers || []).filter(p => p.enabled);
-    _defaultProvider = cfg.provider || 'ollama';
+    // No silent fallback to ollama — agents must explicitly bind a provider.
+    _defaultProvider = cfg.provider || '';
     _defaultModel = cfg.model || '';
     // Populate dynamic provider selects
     populateProviderSelects();
@@ -11525,7 +12181,7 @@ function populateProviderSelects() {
     const sel = document.getElementById(selId);
     if (!sel) return;
     const curVal = sel.value;
-    sel.innerHTML = '<option value="">Default (global)</option>';
+    sel.innerHTML = '<option value="">— 请选择 Provider —</option>';
     _providerList.forEach(p => {
       const opt = document.createElement('option');
       opt.value = p.id;
@@ -11540,9 +12196,14 @@ function updateModelSelect(providerSelectId, modelSelectId, currentModel) {
   const providerEl = document.getElementById(providerSelectId);
   const modelEl = document.getElementById(modelSelectId);
   if (!providerEl || !modelEl) return;
-  const provider = providerEl.value || _defaultProvider;
-  const models = _availableModels[provider] || [];
-  modelEl.innerHTML = '<option value="">Default (global)</option>';
+  // No silent fallback to _defaultProvider — only show models for the
+  // explicitly-picked provider, so the user can't accidentally save a
+  // model under provider="".
+  const provider = providerEl.value;
+  const models = provider ? (_availableModels[provider] || []) : [];
+  modelEl.innerHTML = provider
+    ? '<option value="">— 请选择 Model —</option>'
+    : '<option value="">(先选择 Provider)</option>';
   models.forEach(m => {
     const opt = document.createElement('option');
     opt.value = m;
@@ -13212,6 +13873,16 @@ async function saveAgentProfile() {
     const name = nameEl.value.trim();
     if (!name) { alert('Agent name is required'); return; }
 
+    // Atomic provider+model — never persist one without the other (would
+    // brick the agent: chat fails with NO_LLM_CONFIGURED). Empty both is OK
+    // (intentional clearing); mixed states get blocked here.
+    var _pv = providerEl ? (providerEl.value || '').trim() : '';
+    var _mv = modelEl ? (modelEl.value || '').trim() : '';
+    if ((_pv && !_mv) || (!_pv && _mv)) {
+      alert('请同时选择 Provider 和 Model(或都留空清除绑定)。');
+      return;
+    }
+
     // Expertise: prefer the new visible input (ea-expertise) over the
     // legacy hidden _eaTags. Comma-separated → list[str], trimmed,
     // empties dropped. Falls back to _eaTags if input doesn't exist
@@ -13345,12 +14016,29 @@ async function deleteAgent(agentId) {
 
 async function clearAgent(agentId) {
   if(!await confirm('Clear all messages and conversation history for this agent?')) return;
-  await api('POST', '/api/portal/agent/' + agentId + '/clear');
-  // Re-render agent chat immediately to show empty state
+  var r = await api('POST', '/api/portal/agent/' + agentId + '/clear');
+  if (r && r.error) { _toast && _toast('清空失败: ' + r.error, 'error'); return; }
+  // Force-reset the chat DOM immediately. Without this, the polling
+  // path in loadAgentChat sees "0 events but DOM has messages" → takes
+  // the "preserve existing" branch (meant for transient empty
+  // responses) → old bubbles + file cards stay on screen even though
+  // the backend cleared. We know the user's intent here, so blow it
+  // away explicitly.
+  try {
+    var el = document.getElementById('chat-msgs-' + agentId);
+    if (el) el.innerHTML = '';
+  } catch (_e) {}
+  // Drop any cached streaming-preview / typing state so a re-render
+  // after Clear starts from zero.
+  try {
+    delete window['_lastFinalizedText_' + agentId];
+    delete window['_lastFinalizedDiv_' + agentId];
+  } catch (_e) {}
   if (currentView === 'agent' && currentAgent === agentId) {
     renderAgentChat(agentId);
   }
   refresh();
+  _toast && _toast('已清空对话', 'success');
 }
 
 async function delegateTask() {
@@ -13531,7 +14219,7 @@ async function toggleChannelEnabled(id, enable) {
         window._toast(
           enable ? `Channel enabled — polling resumed`
                  : `Channel disabled — no availability monitoring`,
-          'ok');
+          'success');
       }
       renderChannels();
     } else {
@@ -13762,7 +14450,11 @@ async function renderProjectDetail(projId) {
     if (proj.status !== 'completed' && proj.status !== 'cancelled' && proj.status !== 'archived') {
       abortBtn = '<button class="btn btn-ghost btn-sm" style="color:var(--error)" onclick="projectAbort(\''+projId+'\')" title="停止任何正在运行的 Agent + kill 子进程"><span class="material-symbols-outlined" style="font-size:16px">stop_circle</span> 终止</button>';
     }
-    actionsEl.innerHTML = pauseBtn + closeBtn + abortBtn + '<button class="btn btn-ghost btn-sm" onclick="showProjectMemberModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">group_add</span> Members</button><button class="btn btn-ghost btn-sm" onclick="showProjectTaskModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">add_task</span> Task</button><button class="btn btn-ghost btn-sm" onclick="editProject(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">edit</span> Edit</button><button class="btn btn-ghost btn-sm" style="color:var(--error)" onclick="deleteProject(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">delete</span> Delete</button><button class="btn btn-ghost btn-sm" onclick="currentView=\'projects\';renderCurrentView()"><span class="material-symbols-outlined" style="font-size:16px">arrow_back</span> Back</button>';
+    var wakeBtn = '';
+    if (proj.status !== 'completed' && proj.status !== 'cancelled' && proj.status !== 'archived') {
+      wakeBtn = '<button class="btn btn-ghost btn-sm" style="color:var(--success,#22c55e)" onclick="wakeProjectAgents(\''+projId+'\')" title="唤醒卡住或中断的 Agent (有未完成任务/里程碑的)"><span class="material-symbols-outlined" style="font-size:16px">notifications_active</span> 唤醒</button>';
+    }
+    actionsEl.innerHTML = pauseBtn + closeBtn + abortBtn + wakeBtn + '<button class="btn btn-ghost btn-sm" onclick="showProjectMemberModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">group_add</span> Members</button><button class="btn btn-ghost btn-sm" onclick="showProjectTaskModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">add_task</span> Task</button><button class="btn btn-ghost btn-sm" onclick="editProject(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">edit</span> Edit</button><button class="btn btn-ghost btn-sm" style="color:var(--warning,#ff9800)" onclick="clearProjectChat(\''+projId+'\')" title="清空团队对话记录(项目元数据/任务/里程碑保留)"><span class="material-symbols-outlined" style="font-size:16px">forum</span> 清空对话</button><button class="btn btn-ghost btn-sm" style="color:var(--error)" onclick="deleteProject(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">delete</span> Delete</button><button class="btn btn-ghost btn-sm" onclick="currentView=\'projects\';renderCurrentView()"><span class="material-symbols-outlined" style="font-size:16px">arrow_back</span> Back</button>';
     if (proj.paused) {
       var pausedBanner = '<div style="background:rgba(255,152,0,0.15);border-bottom:1px solid var(--warning,#ff9800);padding:8px 16px;color:var(--warning,#ff9800);font-size:12px">⏸️ 项目已暂停 — 暂停人: '+esc(proj.paused_by||'-')+(proj.paused_reason?'，原因: '+esc(proj.paused_reason):'')+(proj.paused_queue_count?'  ·  排队消息: '+proj.paused_queue_count:'')+'</div>';
       // banner inserted via wrapper below
@@ -14244,22 +14936,23 @@ function _renderProjectDeliverables(projId, data) {
       '</div>' +
     '</div>';
   };
-  var agentSections = (agents||[]).map(function(ag){
+  // Per-agent grouping section — REMOVED 2026-04-28. All project
+  // deliverables live in the shared dir; the per-agent sub-folders
+  // were always empty in practice and just added visual noise. Only
+  // surface agents that have *explicit* deliverables (registered via
+  // submit_deliverable) — those carry author info worth showing.
+  var agentSections = (agents||[]).filter(function(ag){
+    return (ag.explicit_deliverables||[]).length > 0;
+  }).map(function(ag){
     var explicit = (ag.explicit_deliverables||[]).map(renderDeliverableCard).join('');
-    var files = (ag.files||[]).map(renderFileRow).join('');
-    var emptyHint = (!explicit && !files) ? '<div style="color:var(--text3);font-size:12px;padding:14px;text-align:center">该 Agent 暂无交付物</div>' : '';
-    var dirHint = ag.deliverable_dir ? '<div style="font-size:10px;color:var(--text3);margin-top:2px;font-family:monospace">📁 '+esc(ag.deliverable_dir)+'</div>' : '';
     return '<div style="background:var(--overlay-2);border:1px solid var(--overlay-6);border-radius:12px;padding:14px;margin-bottom:14px">' +
       '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;gap:10px">' +
         '<div style="flex:1;min-width:0">' +
           '<div style="font-size:14px;font-weight:700">👤 '+esc(ag.agent_name||ag.agent_id)+(ag.role?' <span style="font-size:11px;color:var(--text3);font-weight:400">('+esc(ag.role)+')</span>':'')+'</div>' +
-          dirHint +
         '</div>' +
-        '<div style="font-size:10px;color:var(--text3);white-space:nowrap">📄 '+(ag.file_count||0)+' · 📋 '+(ag.explicit_count||0)+'</div>' +
+        '<div style="font-size:10px;color:var(--text3);white-space:nowrap">📋 '+(ag.explicit_count||0)+'</div>' +
       '</div>' +
-      (explicit ? '<div style="margin-bottom:8px">'+explicit+'</div>' : '') +
-      (files ? '<div style="background:var(--surface);border-radius:8px;overflow:hidden">'+files+'</div>' : '') +
-      emptyHint +
+      explicit +
     '</div>';
   }).join('');
   var unassignedSection = '';
@@ -14269,14 +14962,58 @@ function _renderProjectDeliverables(projId, data) {
       unassigned.map(renderDeliverableCard).join('') +
     '</div>';
   }
-  // Shared project workspace files (scanned once at the project level,
-  // under ~/.tudou_claw/workspaces/shared/<project_id>/). Single flat list —
-  // this is the canonical place agents write their deliverables.
+  // Shared project workspace files. Group by top-level directory so
+  // task-organized output (`task-<id_short>/...`) shows as one
+  // collapsible folder per task instead of a flat list of 30 files.
+  // Files at the dir root and files under non-task subdirs go into a
+  // "项目根目录" group so we never lose a file.
   var sharedFiles = data.shared_files || [];
   var sharedDir = data.shared_dir || '';
   var sharedSection = '';
   if (sharedFiles.length || sharedDir) {
-    var rows = sharedFiles.map(renderFileRow).join('') ||
+    // Bucket: groupKey -> {label, files: [], isTask: bool}
+    var groups = {};
+    sharedFiles.forEach(function(f){
+      var rel = f.rel_path || f.name || '';
+      var firstSeg = '';
+      if (rel.indexOf('/') >= 0) firstSeg = rel.split('/')[0];
+      else if (f.is_dir) firstSeg = rel;
+      var isTask = firstSeg && firstSeg.indexOf('task-') === 0;
+      var key, label;
+      if (isTask) {
+        key = firstSeg;
+        // Try to resolve task title from project tasks if available.
+        var ptasks = (data.tasks || []) || [];
+        var tid_short = firstSeg.slice(5);
+        var t = ptasks.find(function(t){ return t.id && t.id.indexOf(tid_short) === 0; });
+        label = '🎯 ' + firstSeg + (t ? ' — ' + (t.title || '') : '');
+      } else {
+        key = '__root__';
+        label = '📁 项目根目录(未关联任务)';
+      }
+      if (!groups[key]) groups[key] = { label: label, files: [], isTask: isTask };
+      groups[key].files.push(f);
+    });
+    var groupKeys = Object.keys(groups).sort(function(a, b){
+      // Tasks first (by id), then root.
+      if (a === '__root__') return 1;
+      if (b === '__root__') return -1;
+      return a < b ? -1 : a > b ? 1 : 0;
+    });
+    var groupHtml = groupKeys.map(function(k){
+      var g = groups[k];
+      var rows = g.files.map(renderFileRow).join('');
+      var cls = g.isTask
+        ? 'background:rgba(139,92,246,0.06);border:1px solid rgba(139,92,246,0.25)'
+        : 'background:var(--surface);border:1px solid var(--overlay-5)';
+      return '<details ' + (g.isTask ? 'open' : '') + ' style="' + cls + ';border-radius:8px;margin-bottom:8px;overflow:hidden">' +
+        '<summary style="padding:8px 12px;font-weight:700;font-size:12px;cursor:pointer;display:flex;justify-content:space-between;align-items:center">' +
+          '<span>' + esc(g.label) + '</span>' +
+          '<span style="font-size:10px;color:var(--text3);font-weight:400">📄 ' + g.files.length + '</span>' +
+        '</summary>' +
+        '<div>' + rows + '</div>' +
+      '</details>';
+    }).join('') ||
       '<div style="color:var(--text3);font-size:12px;padding:14px;text-align:center">共享目录为空</div>';
     sharedSection = '<div style="background:var(--overlay-2);border:1px solid var(--overlay-6);border-radius:12px;padding:14px;margin-bottom:14px">' +
       '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;gap:10px">' +
@@ -14286,7 +15023,7 @@ function _renderProjectDeliverables(projId, data) {
         '</div>' +
         '<div style="font-size:10px;color:var(--text3);white-space:nowrap">📄 '+sharedFiles.length+'</div>' +
       '</div>' +
-      '<div style="background:var(--surface);border-radius:8px;overflow:hidden">'+rows+'</div>' +
+      groupHtml +
     '</div>';
   }
   var body = (sharedSection || agentSections || unassignedSection)
@@ -14294,7 +15031,7 @@ function _renderProjectDeliverables(projId, data) {
     : '<div style="color:var(--text3);font-size:13px;padding:20px;text-align:center">暂无交付件</div>';
   return '<div style="max-width:900px">' +
     '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">' +
-      '<div style="font-size:16px;font-weight:700">交付件 (按 Agent 分组)</div>' +
+      '<div style="font-size:16px;font-weight:700">交付件</div>' +
       '<button class="btn btn-primary btn-sm" onclick="showAddDeliverableModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> 新建交付件</button>' +
     '</div>' + body +
   '</div>';
@@ -14706,10 +15443,37 @@ async function loadProjectChat(projId) {
     var data = await api('GET', '/api/portal/projects/'+projId+'/chat?limit=200');
     var el = document.getElementById('project-chat-msgs-'+projId);
     if (!el) return;
+    var msgs = data.messages || [];
+    var streaming = data.streaming || [];
+
+    // ── Skip full re-render when message set is unchanged (2026-04-28) ──
+    // The polling loop fires every 2s; without this guard the entire
+    // chat DOM gets thrown away and rebuilt per tick → page flickers
+    // visibly while agents are working. Compare current DOM's data-
+    // msg-id sequence against the incoming list; if identical (same
+    // length AND same order), only refresh the streaming previews and
+    // bail on the message DOM.
+    var _existingIds = [];
+    var _existing = el.querySelectorAll('[data-msg-id]');
+    _existing.forEach(function(d) { _existingIds.push(d.dataset.msgId); });
+    var _msgsSame = false;
+    if (_existingIds.length === msgs.length) {
+      _msgsSame = true;
+      for (var _i = 0; _i < msgs.length; _i++) {
+        if (_existingIds[_i] !== (msgs[_i].id || '')) { _msgsSame = false; break; }
+      }
+    }
+    if (_msgsSame) {
+      _renderProjectStreamingPreviews(el, streaming);
+      return;
+    }
     el.innerHTML = '';
-    (data.messages||[]).forEach(function(m) {
+    msgs.forEach(function(m) {
       var isUser = m.sender === 'user';
       var div = document.createElement('div');
+      // Tag with the message id so the next polling tick can detect
+      // "no new messages" and skip the whole rebuild.
+      if (m.id) div.dataset.msgId = m.id;
       div.style.cssText = 'max-width:85%;padding:12px 16px;border-radius:12px;font-size:13px;line-height:1.6;word-wrap:break-word;overflow-wrap:break-word;' +
         (isUser ? 'align-self:flex-end;background:linear-gradient(135deg,#1a2332,#243447);color:#e0e6ed;border:1px solid var(--overlay-8);border-bottom-right-radius:4px' :
                   'align-self:flex-start;background:var(--surface);border:1px solid var(--overlay-5);border-bottom-left-radius:4px');
@@ -14728,7 +15492,17 @@ async function loadProjectChat(projId) {
       } else if (timeStr) {
         header = '<div style="text-align:right;margin-bottom:4px"><span style="font-size:9px;color:var(--text3);opacity:0.5">'+timeStr+'</span></div>';
       }
-      var badge = m.msg_type === 'task_update' ? '<span style="font-size:9px;background:rgba(210,153,34,0.15);color:var(--warning);padding:1px 5px;border-radius:3px;margin-left:4px">TASK</span>' : '';
+      // Source / msg_type badges — let the user see at a glance whether
+      // a message is an admin instruction, a task update, or one agent
+      // delegating to another.
+      var badge = '';
+      if (m.msg_type === 'task_update') {
+        badge = '<span style="font-size:9px;background:rgba(210,153,34,0.15);color:var(--warning);padding:1px 5px;border-radius:3px;margin-left:4px" title="task progress / completion">TASK</span>';
+      } else if (m.msg_type === 'task_assignment') {
+        badge = '<span style="font-size:9px;background:rgba(139,92,246,0.18);color:#a78bfa;padding:1px 5px;border-radius:3px;margin-left:4px" title="agent → agent delegation">派单</span>';
+      } else if (m.msg_type === 'system') {
+        badge = '<span style="font-size:9px;background:rgba(100,116,139,0.18);color:var(--text2);padding:1px 5px;border-radius:3px;margin-left:4px">SYS</span>';
+      }
       div.innerHTML = header + badge + '<div class="rich-msg-body">' + _renderRichContent(m.content) + '</div>';
       // Per-message FileCards: backend has extracted local-path / URL
       // file references and attached them as `m.refs`. Reuse the same
@@ -14795,8 +15569,47 @@ async function loadProjectChat(projId) {
       }
     }
 
+    // After full re-render, also paint the streaming preview bubbles.
+    _renderProjectStreamingPreviews(el, streaming);
+
     el.scrollTop = el.scrollHeight;
   } catch(e) {}
+}
+
+// Render / update one preview bubble per agent that's mid-stream.
+// Called both on full re-render and on the no-msg-change fast path so
+// the typed text grows visibly while polling fires every 2s.
+function _renderProjectStreamingPreviews(el, streaming) {
+  if (!el) return;
+  streaming = streaming || [];
+  var seenAgents = {};
+  streaming.forEach(function(s) {
+    var aid = s.agent_id;
+    if (!aid) return;
+    seenAgents[aid] = true;
+    var existing = el.querySelector('[data-stream-agent-id="' + aid + '"]');
+    var bodyHtml = '<span style="font-weight:700;color:var(--primary);font-size:11px">' +
+                   esc(s.sender_name || aid) + '</span>' +
+                   '<span style="opacity:0.6;font-size:10px;margin-left:4px">正在书写 · ' + (s.char_count||0) + '字</span>' +
+                   '<div class="rich-msg-body" style="margin-top:6px;font-size:13px;line-height:1.6;color:var(--text);white-space:pre-wrap;word-break:break-word">' +
+                     esc(s.content || '') + '<span class="thinking-dots" style="opacity:0.5;margin-left:2px">▌</span>' +
+                   '</div>';
+    if (existing) {
+      existing.innerHTML = bodyHtml;
+    } else {
+      var div = document.createElement('div');
+      div.setAttribute('data-stream-agent-id', aid);
+      div.style.cssText = 'align-self:flex-start;background:var(--surface);border:1px dashed var(--overlay-8);border-radius:12px;border-bottom-left-radius:4px;padding:12px 16px;max-width:85%;margin-bottom:8px';
+      div.innerHTML = bodyHtml;
+      el.appendChild(div);
+    }
+  });
+  // Drop any preview bubble whose agent is no longer in `streaming` —
+  // either the agent finished (their reply is now in messages) or
+  // never started this poll cycle.
+  el.querySelectorAll('[data-stream-agent-id]').forEach(function(d) {
+    if (!seenAgents[d.dataset.streamAgentId]) d.remove();
+  });
 }
 
 // ── Chat attachments (P1 #3) ──
@@ -17349,6 +18162,13 @@ function _mtgRenderTypingBubbles(mid, m) {
 
   if (remaining.length === 0) {
     area.innerHTML = '';
+    // Round just finished: if the user queued more interjections during
+    // this round, fire them as ONE merged user message. Slight delay so
+    // the typing-bubble removal renders first (visual: round done →
+    // interjection arrives).
+    setTimeout(function(){
+      try { _pendingQueueFlush('meeting', mid); } catch(e){}
+    }, 600);
     return;
   }
   // Build fresh bubble set. Each bubble is display:flex (its own row)
@@ -17836,6 +18656,65 @@ async function projectAbort(projId) {
   } catch(e) { alert('终止失败: '+(e.message||e)); }
 }
 
+// 唤醒项目里有未完成任务/里程碑的 agent。中途被 abort / hard-cap kill /
+// LLM 超时打断的 agent 不会自己重启,这个按钮触发系统消息把他们叫起来。
+// 走 POST /api/portal/projects/{id}/wake。
+async function wakeProjectAgents(projId) {
+  // Optional reason — keep it light (prompt + null = skip).
+  var reason = await prompt('唤醒备注(可选,会传给被唤醒的 agent):', '');
+  if (reason === null) return;  // user cancelled
+  try {
+    var r = await api('POST', '/api/portal/projects/'+projId+'/wake',
+      { reason: reason || '' });
+    if (r && r.error) {
+      _toast && _toast('唤醒失败: '+r.error, 'error');
+      return;
+    }
+    var n = (r && r.woken) || 0;
+    _toast && _toast(
+      n > 0 ? ('🔔 已唤醒 '+n+' 个 Agent') : '没有需要唤醒的 Agent',
+      n > 0 ? 'success' : 'info',
+    );
+    if (typeof renderProjectDetail === 'function') {
+      renderProjectDetail(projId);
+    }
+  } catch(e) { _toast && _toast('唤醒失败: '+(e.message||e), 'error'); }
+}
+
+// 清空项目对话:删除项目 chat_history + 每个 member agent 的
+// project:{id} 上下文 bucket。任务 / 里程碑 / 成员 / 交付件保留。
+// 走 DELETE /api/portal/projects/{id}/chat。
+async function clearProjectChat(projId) {
+  var ok = await _destructiveConfirm({
+    title: '清空项目对话?',
+    message: '会清掉团队群聊里所有消息,以及每个 member agent 在该项目下的'
+           + '对话历史(其他 project / meeting / 单聊不动)。'
+           + '任务 / 里程碑 / 成员 / 交付件不会被删。此操作不可撤销。',
+    confirmLabel: '🧹 清空',
+    cancelLabel: '取消',
+    tone: 'danger',
+    icon: 'forum',
+  });
+  if (!ok) return;
+  try {
+    var r = await api('DELETE', '/api/portal/projects/'+projId+'/chat');
+    if (r && r.error) {
+      _toast && _toast('清空失败: '+r.error, 'error');
+      return;
+    }
+    var ui_n = (r && r.ui_messages_cleared) || 0;
+    var ag_n = (r && r.agents_cleared) || 0;
+    var msg_n = (r && r.agent_messages_cleared) || 0;
+    _toast && _toast(
+      '已清空: UI ' + ui_n + ' 条 · ' + ag_n + ' 个 agent 共 ' + msg_n + ' 条消息',
+      'success',
+    );
+    if (typeof renderProjectDetail === 'function') {
+      renderProjectDetail(projId);
+    }
+  } catch(e) { _toast && _toast('清空失败: '+(e.message||e), 'error'); }
+}
+
 // Append a system-style card into the chat stream so users get a
 // visible acknowledgement of actions the agent/backend silently did
 // (abort request sent, abort confirmed, etc.). Unlike addChatBubble
@@ -18094,6 +18973,21 @@ async function meetingPostMessage(mid) {
   var v = (el && el.value || '').trim();
   var attachments = _mtgAttachList(mid).slice();
   if (!v && !attachments.length) return;
+
+  // ── Queue + merge: round in progress ──
+  // If any agent is mid-reply (typing bubble visible OR active_speakers
+  // non-empty), instead of firing a new round we push the user's input
+  // into a pending queue. Auto-flush as ONE merged interjection after
+  // all current respondents have posted.
+  if (_isScopeBusy('meeting', mid)) {
+    var ok = _pendingQueueEnqueue('meeting', mid, v, attachments);
+    if (ok) {
+      if (el) { el.value = ''; }
+      _mtgAttachments[mid] = [];
+      try { _renderMtgAttachPreview(mid); } catch(_){}
+    }
+    return;
+  }
 
   // -- Parse @ mentions --
   // @all / @ALL / @全员 / @所有人  -> null (backend default: all reply)
@@ -20603,13 +21497,97 @@ function _renderKmMemory() {
     sc.innerHTML = '<div style="color:var(--text3);padding:40px;text-align:center">暂无智能体</div>';
     return;
   }
-  sc.innerHTML = '<div style="margin-bottom:16px"><div style="font-size:15px;font-weight:700;color:var(--text)">Agent 私有记忆</div>'
+  sc.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;gap:12px;flex-wrap:wrap">'
+    + '<div><div style="font-size:15px;font-weight:700;color:var(--text)">Agent 私有记忆</div>'
     + '<div style="font-size:12px;color:var(--text3);margin-top:2px">点击任一 agent 查看其记忆层级（L1/L2/L3）、ExecutionPlan、Transcript</div></div>'
+    + '<div style="display:flex;gap:8px;align-items:center">'
+      + '<button class="btn btn-sm" onclick="_kmShowLastDream()" title="查看最近一次 Dream 报告"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">history</span> 最近 Dream</button>'
+      + '<button class="btn btn-primary btn-sm" id="km-dream-btn" onclick="_kmTriggerDream()" title="立即触发全量记忆维护：归并 intent→outcome、衰减/清理孤立 fact、KB 引用审计"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">nights_stay</span> 🌙 触发 Dream</button>'
+    + '</div>'
+    + '</div>'
+    + '<div id="km-dream-report" style="margin-bottom:16px"></div>'
     + '<div id="km-agent-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px"></div>';
   _renderKmAgentCards(visibleAgents);
   api('GET', '/api/portal/agents/memory-stats').then(function(data) {
     if (data) { _agentMemStats = data; _renderKmAgentCards(visibleAgents); }
   }).catch(function(){});
+}
+
+// Trigger a full-sweep memory dream + render the report inline.
+window._kmTriggerDream = async function() {
+  if (!confirm('触发全量记忆维护？\n\n• 每个 agent 跑一次 consolidator（合并相似 fact、归并 intent→outcome）\n• 删除"长期未访问 + 低置信度"的孤立 fact\n• 审计知识库长期未被引用的 entry\n\n建议等当前没人在用 agent 时执行（会短暂占用 CPU）。')) return;
+  var btn = document.getElementById('km-dream-btn');
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">hourglass_empty</span> 运行中...';
+  }
+  var reportBox = document.getElementById('km-dream-report');
+  if (reportBox) {
+    reportBox.innerHTML = '<div style="padding:14px;background:var(--surface);border:1px solid var(--border-light);border-radius:10px;color:var(--text3);font-size:12px">🌙 Dream 进行中...</div>';
+  }
+  try {
+    var report = await api('POST', '/api/portal/memory/dream');
+    _kmRenderDreamReport(report);
+    if (window._toast) window._toast('Dream 完成', 'success');
+  } catch (e) {
+    if (reportBox) {
+      reportBox.innerHTML = '<div style="padding:14px;background:var(--surface);border:1px solid var(--error);border-radius:10px;color:var(--error);font-size:12px">Dream 失败: ' + esc(String(e)) + '</div>';
+    }
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = '<span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">nights_stay</span> 🌙 触发 Dream';
+    }
+  }
+};
+
+window._kmShowLastDream = async function() {
+  try {
+    var resp = await api('GET', '/api/portal/memory/dream/last');
+    if (!resp || !resp.available) {
+      if (window._toast) window._toast('还没有 Dream 历史，点"触发 Dream"运行一次', 'info');
+      return;
+    }
+    _kmRenderDreamReport(resp.report);
+  } catch (e) {
+    if (window._toast) window._toast('加载历史失败: ' + e, 'error');
+  }
+};
+
+function _kmRenderDreamReport(report) {
+  var box = document.getElementById('km-dream-report');
+  if (!box || !report) return;
+  var actions = report.consolidator_actions || {};
+  var actionTotal = (actions.plans_resolved || 0) + (actions.facts_merged || 0)
+                  + (actions.facts_decayed || 0) + (actions.facts_deleted || 0);
+  var summary = ''
+    + '<div style="display:flex;gap:14px;flex-wrap:wrap;font-size:12px">'
+    + _drmStat('Agents', report.agents_processed || 0, 'var(--primary)')
+    + _drmStat('整理', actionTotal, '#a78bfa')
+    + _drmStat('删孤立', report.orphans_deleted || 0, '#ef4444')
+    + _drmStat('衰减', report.orphans_decayed || 0, '#f59e0b')
+    + _drmStat('KB 候选', (report.kb_orphan_candidates||[]).length, '#94a3b8')
+    + '</div>';
+  var dur = (report.duration_s || 0).toFixed(1);
+  var when = report.finished_at
+    ? new Date(report.finished_at * 1000).toLocaleString()
+    : '';
+  box.innerHTML = ''
+    + '<div style="background:var(--surface);border:1px solid var(--border-light);border-radius:10px;padding:14px">'
+      + '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px">'
+        + '<div style="font-weight:600;font-size:13px">🌙 Dream 报告</div>'
+        + '<div style="font-size:11px;color:var(--text3)">' + esc(when) + ' · ' + esc(dur) + 's</div>'
+      + '</div>'
+      + summary
+      + ((report.errors||[]).length ? ('<div style="margin-top:8px;font-size:11px;color:var(--error)">⚠ ' + (report.errors||[]).slice(0,3).map(esc).join(' / ') + '</div>') : '')
+    + '</div>';
+}
+
+function _drmStat(label, val, color) {
+  return '<div style="background:var(--surface2);padding:6px 12px;border-radius:8px">'
+    + '<div style="font-size:10px;color:var(--text3)">' + esc(label) + '</div>'
+    + '<div style="font-size:16px;font-weight:700;color:' + color + '">' + val + '</div>'
+    + '</div>';
 }
 
 function _renderKmAgentCards(visibleAgents) {
@@ -20943,7 +21921,7 @@ function renderRolesSkillsHub() {
 }
 
 // ============ Skill Store (Hub-level marketplace) ============
-var _skillStoreState = { q: '', source: '', entries: [], stats: null };
+var _skillStoreState = { q: '', source: '', tag: '', entries: [], stats: null, allTags: [] };
 
 function _fmtSize(bytes) {
   if (!bytes) return '';
@@ -20977,10 +21955,50 @@ async function renderSkillStore() {
     + '      <option value="local">local 本地</option>'
     + '    </select>'
     + '  </div>'
+    + '  <div id="store-tag-filters" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px"></div>'
     + '  <div id="store-stats" style="font-size:11px;color:var(--text3);margin-bottom:10px"></div>'
     + '  <div id="store-list" style="color:var(--text3)">加载中…</div>'
     + '</div>';
   loadSkillStore();
+}
+
+// Click a tag chip (on card or in filter bar) → toggle the filter.
+window._skillStoreFilterByTag = function(tag) {
+  var t = (tag || '').trim();
+  if (!t) return;
+  // Toggle: if already active, clear; else set.
+  if ((_skillStoreState.tag || '').toLowerCase() === t.toLowerCase()) {
+    _skillStoreState.tag = '';
+  } else {
+    _skillStoreState.tag = t;
+  }
+  loadSkillStore();
+};
+
+// Render the tag filter bar at the top of the store. Shows the most-used
+// tags (top 30) so users can browse by category without typing search terms.
+// Active tag gets a highlight; clicking again clears the filter.
+function _renderTagFilterBar() {
+  var bar = document.getElementById('store-tag-filters');
+  if (!bar) return;
+  var tags = _skillStoreState.allTags || [];
+  var active = (_skillStoreState.tag || '').toLowerCase();
+  if (!tags.length) {
+    bar.innerHTML = '';
+    return;
+  }
+  var clearChip = active
+    ? '<span style="padding:3px 10px;font-size:11px;border-radius:12px;background:var(--surface3);color:var(--text2);cursor:pointer;border:1px solid var(--border)" onclick="_skillStoreState.tag=\'\';loadSkillStore()" title="清除筛选">✕ 清除</span>'
+    : '';
+  var chips = tags.slice(0, 30).map(function(item) {
+    var t = item.tag, n = item.count;
+    var isActive = (t.toLowerCase() === active);
+    var style = isActive
+      ? 'padding:3px 10px;font-size:11px;border-radius:12px;background:var(--primary);color:#fff;cursor:pointer;border:1px solid var(--primary)'
+      : 'padding:3px 10px;font-size:11px;border-radius:12px;background:var(--surface3);color:var(--text2);cursor:pointer;border:1px solid var(--border)';
+    return '<span style="'+style+'" onclick="_skillStoreFilterByTag(\''+esc(t)+'\')">'+esc(t)+' <span style="opacity:0.7">·'+n+'</span></span>';
+  }).join('');
+  bar.innerHTML = clearChip + chips;
 }
 
 var _storeLoadTimer = null;
@@ -20995,11 +22013,39 @@ async function loadSkillStore() {
   var params = [];
   if (_skillStoreState.q) params.push('q=' + encodeURIComponent(_skillStoreState.q));
   if (_skillStoreState.source) params.push('source=' + encodeURIComponent(_skillStoreState.source));
+  if (_skillStoreState.tag) params.push('tag=' + encodeURIComponent(_skillStoreState.tag));
   var qs = params.length ? ('?' + params.join('&')) : '';
+  // Issue an UNFILTERED fetch in parallel (cheap — same handler) so we can
+  // build the tag filter bar from ALL skills, not just the ones matching
+  // the current filter (otherwise picking a tag would empty the bar).
+  var unfilteredPromise = (_skillStoreState.q || _skillStoreState.source || _skillStoreState.tag)
+    ? api('GET', '/api/portal/skill-store').catch(function(){ return null; })
+    : null;
   try {
     var data = await api('GET', '/api/portal/skill-store' + qs);
     _skillStoreState.entries = data.entries || [];
     _skillStoreState.stats = data.stats || null;
+    // Aggregate tag counts from the unfiltered set (when filtered) or
+    // current entries (when no filter active).
+    var tagSource = data.entries || [];
+    if (unfilteredPromise) {
+      try {
+        var allData = await unfilteredPromise;
+        if (allData && allData.entries) tagSource = allData.entries;
+      } catch (e) {}
+    }
+    var tagCounts = {};
+    tagSource.forEach(function(e){
+      (e.tags || []).forEach(function(t){
+        var tl = String(t).trim();
+        if (!tl) return;
+        tagCounts[tl] = (tagCounts[tl] || 0) + 1;
+      });
+    });
+    var allTags = Object.keys(tagCounts).map(function(t){ return {tag:t, count:tagCounts[t]}; });
+    allTags.sort(function(a,b){ return b.count - a.count || a.tag.localeCompare(b.tag); });
+    _skillStoreState.allTags = allTags;
+    _renderTagFilterBar();
     var annMap = {};
     (data.annotations || []).forEach(function(a){ annMap[a.skill_id] = a; });
     var installedMap = data.installed || {};
@@ -21112,9 +22158,29 @@ async function loadSkillStore() {
         +    '</div>'
         +  '</div>'
         +  '<div style="font-size:12px;color:var(--text2);line-height:1.5;min-height:36px">'+desc+'</div>'
+        +  _renderTagChips(e)
         +  '<div style="display:flex;gap:6px;margin-top:auto">'+actions+'</div>'
         + '</div>'
       );
+    }
+
+    // Render up to 5 tag chips on a card; click filters the store by that tag.
+    // Active tag (matching _skillStoreState.tag) gets a highlighted style.
+    function _renderTagChips(e) {
+      var tags = e.tags || [];
+      if (!tags.length) return '';
+      var activeTag = (_skillStoreState.tag || '').toLowerCase();
+      var shown = tags.slice(0, 5);
+      var more = tags.length > 5 ? ('<span style="font-size:10px;color:var(--text3);padding:2px 4px">+'+(tags.length-5)+'</span>') : '';
+      var chips = shown.map(function(t){
+        var tl = String(t).toLowerCase();
+        var active = (tl === activeTag);
+        var style = active
+          ? 'padding:2px 8px;font-size:10px;border-radius:10px;background:var(--primary);color:#fff;cursor:pointer;border:1px solid var(--primary)'
+          : 'padding:2px 8px;font-size:10px;border-radius:10px;background:var(--surface3);color:var(--text2);cursor:pointer;border:1px solid var(--border)';
+        return '<span style="'+style+'" onclick="event.stopPropagation();_skillStoreFilterByTag(\''+esc(String(t))+'\')" title="按此标签筛选">'+esc(String(t))+'</span>';
+      }).join('');
+      return '<div style="display:flex;flex-wrap:wrap;gap:4px">'+chips+more+'</div>';
     }
     // Render: one <section> per category with its own grid
     var sections = orderedKeys.map(function(k){
@@ -24059,12 +25125,12 @@ async function approveDraft(draftId, draftName) {
   try {
     var res = await api('POST', '/api/portal/pending-skills/' + encodeURIComponent(draftId) + '/approve', {});
     if (res.ok) {
-      window._toast('✓ 已批准: ' + draftName + (res['import']&&res['import'].imported ? '，已自动导入技能商店' : ''), 'ok');
+      window._toast('✓ 已批准: ' + draftName + (res['import']&&res['import'].imported ? '，已自动导入技能商店' : ''), 'success');
     } else {
-      window._toast('批准失败: ' + JSON.stringify(res), 'err');
+      window._toast('批准失败: ' + JSON.stringify(res), 'error');
     }
   } catch (e) {
-    window._toast('操作失败: ' + (e.message || String(e)), 'err');
+    window._toast('操作失败: ' + (e.message || String(e)), 'error');
   }
   loadPendingSkills();
 }
@@ -24073,12 +25139,12 @@ async function rejectDraft(draftId, draftName) {
   try {
     var res = await api('POST', '/api/portal/pending-skills/' + encodeURIComponent(draftId) + '/reject', {});
     if (res.ok) {
-      window._toast('已拒绝: ' + draftName, 'ok');
+      window._toast('已拒绝: ' + draftName, 'success');
     } else {
-      window._toast('操作失败: ' + JSON.stringify(res), 'err');
+      window._toast('操作失败: ' + JSON.stringify(res), 'error');
     }
   } catch (e) {
-    window._toast('操作失败: ' + (e.message || String(e)), 'err');
+    window._toast('操作失败: ' + (e.message || String(e)), 'error');
   }
   loadPendingSkills();
 }
@@ -24797,7 +25863,7 @@ async function _memoryMarkWrong(factId) {
   try {
     var r = await api('DELETE', '/api/portal/memory/' + encodeURIComponent(factId));
     if (r && r.ok) {
-      window._toast && window._toast('已删除：' + (r.preview || factId), 'ok');
+      window._toast && window._toast('已删除：' + (r.preview || factId), 'success');
       var row = document.getElementById('mem-ref-' + factId);
       if (row) {
         row.style.opacity = '0.4';
@@ -25036,6 +26102,32 @@ window._ltConfirmDraft = async function(projectId, draftId) {
   } catch(e) { alert('确认失败: ' + e); }
 };
 
+
+// ============ Sidebar collapse / expand ============
+//
+// Persisted to localStorage (key ``tudou-sidebar-collapsed``) so the
+// preference survives reloads. Toggling adds/removes the
+// ``.collapsed`` class on the sidebar; CSS in portal.html handles the
+// visual transition (256px ↔ 64px).
+window.toggleSidebar = function() {
+  var sb = document.getElementById('sidebar');
+  if (!sb) return;
+  var nowCollapsed = !sb.classList.contains('collapsed');
+  sb.classList.toggle('collapsed', nowCollapsed);
+  try {
+    localStorage.setItem('tudou-sidebar-collapsed', nowCollapsed ? '1' : '0');
+  } catch (_) {}
+};
+
+(function _initSidebarCollapsed() {
+  try {
+    var saved = localStorage.getItem('tudou-sidebar-collapsed');
+    if (saved === '1') {
+      var sb = document.getElementById('sidebar');
+      if (sb) sb.classList.add('collapsed');
+    }
+  } catch (_) {}
+})();
 
 // ============ Init ============
 refresh();

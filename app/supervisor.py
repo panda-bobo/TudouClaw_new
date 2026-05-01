@@ -100,7 +100,12 @@ class AgentSupervisor:
         )
         os.makedirs(work_dir, exist_ok=True)
 
-        shared_ws = getattr(agent, "shared_workspace", None) or ""
+        # Resolve from active context (project/meeting), not deprecated field.
+        # Falls back to "" for solo chat — solo MUST NOT cross into project dirs.
+        shared_ws = (
+            agent.get_active_shared_workspace()
+            if hasattr(agent, "get_active_shared_workspace") else ""
+        )
         project_id = getattr(agent, "project_id", "") or ""
 
         # Phase 2: UID isolation setup

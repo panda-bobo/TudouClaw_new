@@ -1,3 +1,21 @@
+"""DEAD CODE TOMBSTONE.
+
+AgentLLMMixin was never inherited by Agent in production. The class
+methods were duplicated directly onto Agent (see app/agent.py).
+See app/agent.py:43-50 for the audit comment that confirmed this.
+Tests that imported AgentLLMMixin tested code that never ran in
+production — those tests are pytest-skipped after this change.
+
+The original content is preserved below as a triple-quoted
+string so it stays readable in tree (and recoverable from
+git history) but contributes ZERO symbols at import time.
+Python parses the file successfully; nothing executes.
+
+To remove permanently in a future cleanup pass:
+    git rm <this_file>
+"""
+
+_DEAD_CODE_PRESERVED_FOR_ARCHAEOLOGY = '''
 """
 Agent LLM mixin — system prompt, context building, memory, and compression.
 
@@ -230,16 +248,19 @@ class AgentLLMMixin:
         except Exception:
             return ws
 
-        # Create shared workspace symlink if agent is part of a project
-        if self.shared_workspace:
+        # Create shared workspace symlink for the current active context.
+        # See agent.py canonical version for the per-context derivation.
+        _active_sw = (self.get_active_shared_workspace()
+                      if hasattr(self, "get_active_shared_workspace") else "")
+        if _active_sw:
             try:
                 shared_link = ws / "shared"
                 if shared_link.exists() or shared_link.is_symlink():
-                    if shared_link.resolve() != Path(self.shared_workspace).resolve():
+                    if shared_link.resolve() != Path(_active_sw).resolve():
                         shared_link.unlink()
-                        shared_link.symlink_to(self.shared_workspace)
+                        shared_link.symlink_to(_active_sw)
                 else:
-                    shared_link.symlink_to(self.shared_workspace)
+                    shared_link.symlink_to(_active_sw)
             except Exception:
                 pass  # Silently fail on symlink creation (may not be supported on all systems)
 
@@ -310,42 +331,47 @@ class AgentLLMMixin:
         skills_dir = ws / "skills"
         skills_dir.mkdir(parents=True, exist_ok=True)
 
-        # --- Skills.md (auto-refreshed: reflects loaded enhancement presets) ---
-        skills_md = ws / "Skills.md"
+        # --- granted_skills.md (renamed from Skills.md, 2026-04-28) ---
+        # See agent.py:_ensure_workspace_layout for the canonical comment.
+        # Slim ID + one-line desc + path; LLM reads SKILL.md on demand.
+        granted_md = ws / "granted_skills.md"
         try:
-            lines = ["# Skills — Agent: " + (self.name or self.id), ""]
-            lines.append("Auto-generated summary of skill presets loaded on this agent. "
-                         "Regenerated every time the agent starts. Do NOT hand-edit — "
-                         "manage skills via the Portal (Skills Library) or the "
-                         "`enable_enhancement` API.")
-            lines.append("")
-            if self.enhancer and getattr(self.enhancer, "enabled", False):
-                domain = getattr(self.enhancer, "domain", "") or "custom"
-                lines.append(f"## Loaded ({domain})")
-                lines.append("")
-                knows = getattr(self.enhancer, "knowledge", None)
-                n_know = len(knows.entries) if knows and hasattr(knows, "entries") else 0
-                patterns = getattr(self.enhancer, "reasoning", None)
-                n_pat = len(patterns.patterns) if patterns and hasattr(patterns, "patterns") else 0
-                memory = getattr(self.enhancer, "memory", None)
-                n_mem = len(memory.nodes) if memory and hasattr(memory, "nodes") else 0
-                lines.append(f"- knowledge entries: {n_know}")
-                lines.append(f"- reasoning patterns: {n_pat}")
-                lines.append(f"- memory nodes: {n_mem}")
-                # List constituent domains for composite enhancers
-                for sub in (domain.split("+") if "+" in domain else []):
-                    lines.append(f"  - preset: {sub.strip()}")
+            _lines = [
+                "# Granted Skills — Agent: " + (self.name or self.id),
+                "",
+                "本 agent 授权技能清单(自动维护,请勿手改)。需要某个技能的详细"
+                "用法时,`read_file <path>/SKILL.md` 或 `get_skill_guide(name)`。",
+                "",
+            ]
+            _granted_lines = []
+            try:
+                import sys as _sys
+                _llm_mod = _sys.modules.get(__package__ + ".llm") if __package__ else None
+                _hub = getattr(_llm_mod, "_active_hub", None) if _llm_mod else None
+                if _hub is not None and getattr(_hub, "skill_registry", None) is not None:
+                    for _inst in _hub.skill_registry.list_for_agent(self.id):
+                        _m = _inst.manifest
+                        _sid = getattr(_m, "id", "") or getattr(_m, "name", "") or "?"
+                        _path = _inst.install_dir or ""
+                        _desc_raw = getattr(_m, "description", "") or ""
+                        if isinstance(_desc_raw, dict):
+                            _desc_raw = (_desc_raw.get("zh-CN")
+                                         or _desc_raw.get("en")
+                                         or next(iter(_desc_raw.values()), ""))
+                        _desc = " ".join(str(_desc_raw).split())[:120]
+                        if _desc:
+                            _granted_lines.append(
+                                f"- `{_sid}` — {_desc} (path: `{_path}`)"
+                            )
+                        else:
+                            _granted_lines.append(f"- `{_sid}` (path: `{_path}`)")
+            except Exception as _re:
+                _granted_lines.append(f"- (registry unavailable: {_re})")
+            if _granted_lines:
+                _lines.extend(_granted_lines)
             else:
-                lines.append("## Loaded")
-                lines.append("")
-                lines.append("- (no skills enabled — use Portal → Skills Library to load "
-                             "up to 8 domain presets)")
-            lines.append("")
-            lines.append("## Profile Tags")
-            lines.append("")
-            lines.append(f"- expertise: {', '.join(self.profile.expertise) or '-'}")
-            lines.append(f"- skills (tags): {', '.join(self.profile.skills) or '-'}")
-            skills_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                _lines.append("- (尚无授权技能)")
+            granted_md.write_text("\n".join(_lines) + "\n", encoding="utf-8")
         except Exception:
             pass
 
@@ -579,11 +605,21 @@ class AgentLLMMixin:
         except Exception:
             return ""
         blocks = []
-        for fname, tag in (("Project.md", "project"),
-                           ("Skills.md", "skills"),
-                           ("MCP.md", "mcp_servers"),
-                           ("Tasks.md", "tasks"),
-                           ("Scheduled.md", "scheduled_tasks")):
+        # Per-context filtering. granted_skills moved to STATIC prompt
+        # (2026-04-28); see agent.py for canonical comment.
+        _ctx = getattr(self, "_active_context_id", "solo") or "solo"
+        if _ctx.startswith("project:") or _ctx.startswith("meeting:"):
+            _files = (
+                ("MCP.md", "mcp_servers"),
+            )
+        else:
+            _files = (
+                ("Project.md", "project"),
+                ("MCP.md", "mcp_servers"),
+                ("Tasks.md", "tasks"),
+                ("Scheduled.md", "scheduled_tasks"),
+            )
+        for fname, tag in _files:
             fp = ws / fname
             if not fp.exists():
                 continue
@@ -703,7 +739,8 @@ class AgentLLMMixin:
             ",".join(p.expertise), ",".join(p.skills),
             p.language or "", p.custom_instructions or "",
             self.working_dir or "",
-            self.shared_workspace or "",
+            (self.get_active_shared_workspace()
+             if hasattr(self, "get_active_shared_workspace") else ""),
             self.project_id or "",
             self.project_name or "",
             self.soul_md or "",
@@ -719,8 +756,10 @@ class AgentLLMMixin:
             _hdirs: list[str] = []
             if self.working_dir:
                 _hdirs.append(self.working_dir)
-            if self.shared_workspace and self.shared_workspace != self.working_dir:
-                _hdirs.append(self.shared_workspace)
+            _active_sw = (self.get_active_shared_workspace()
+                          if hasattr(self, "get_active_shared_workspace") else "")
+            if _active_sw and _active_sw != self.working_dir:
+                _hdirs.append(_active_sw)
             for _d in _hdirs:
                 for _n in ("PROJECT_CONTEXT.md", "TUDOU_CLAW.md",
                            "CLAW.md", "README.md"):
@@ -952,9 +991,13 @@ class AgentLLMMixin:
         # after first turn it's effectively free tokens.
         from pathlib import Path as _PCPath
         _ctx_dirs: list[_PCPath] = [wd]
-        if getattr(self, "shared_workspace", None):
+        _active_sw_for_ctx = (
+            self.get_active_shared_workspace()
+            if hasattr(self, "get_active_shared_workspace") else ""
+        )
+        if _active_sw_for_ctx:
             try:
-                _sw = _PCPath(self.shared_workspace)
+                _sw = _PCPath(_active_sw_for_ctx)
                 if _sw.resolve() != wd.resolve():
                     _ctx_dirs.append(_sw)
             except (OSError, ValueError):
@@ -992,17 +1035,23 @@ class AgentLLMMixin:
         ws_lines = []
         # Detect Chinese: use zh mode if system_prompt is rich CJK, or language is zh-CN
         use_zh = is_zh or (p.language and p.language.startswith("zh"))
-        has_project = bool(self.shared_workspace and self.project_name)
+        # Resolve shared workspace from active context (project/meeting/solo) —
+        # NOT from agent's deprecated self.shared_workspace field.
+        _active_sw = (
+            self.get_active_shared_workspace()
+            if hasattr(self, "get_active_shared_workspace") else ""
+        )
+        has_project = bool(_active_sw and self.project_name)
         if use_zh:
             ws_lines.append("\n<workspace_context>")
             ws_lines.append(f"私有工作目录 (你自己的空间): {wd}")
             if has_project:
-                ws_lines.append(f"项目共享目录 (团队共享): {self.shared_workspace}")
+                ws_lines.append(f"项目共享目录 (团队共享): {_active_sw}")
                 ws_lines.append(f"所属项目: {self.project_name} (ID: {self.project_id})")
             ws_lines.append("")
             ws_lines.append("⚠️ 文件写入规则 (必须遵守):")
             if has_project:
-                ws_lines.append(f"• 项目相关的代码/文件 → 写入项目共享目录: {self.shared_workspace}")
+                ws_lines.append(f"• 项目相关的代码/文件 → 写入项目共享目录: {_active_sw}")
                 ws_lines.append("  （其他 Agent 需要访问的文件必须放这里）")
                 ws_lines.append(f"• 个人临时文件/草稿/日志 → 写入私有目录: {wd}")
                 ws_lines.append("  （只有你自己会用到的文件放这里）")
@@ -1018,12 +1067,12 @@ class AgentLLMMixin:
             ws_lines.append("\n<workspace_context>")
             ws_lines.append(f"Private workspace (your own): {wd}")
             if has_project:
-                ws_lines.append(f"Project shared directory (team): {self.shared_workspace}")
+                ws_lines.append(f"Project shared directory (team): {_active_sw}")
                 ws_lines.append(f"Project: {self.project_name} (ID: {self.project_id})")
             ws_lines.append("")
             ws_lines.append("⚠️ File write rules (MUST follow):")
             if has_project:
-                ws_lines.append(f"• Project code/files → write to shared dir: {self.shared_workspace}")
+                ws_lines.append(f"• Project code/files → write to shared dir: {_active_sw}")
                 ws_lines.append("  (Files other agents need access to MUST go here)")
                 ws_lines.append(f"• Personal temp files/drafts/logs → write to private dir: {wd}")
                 ws_lines.append("  (Files only you will use go here)")
@@ -1272,19 +1321,9 @@ class AgentLLMMixin:
             exp_ctx = self.self_improvement.build_experience_context()
             _try_add(exp_ctx or "")
 
-        # 8. Granted skills (from skill registry)
-        if total_chars < max_dynamic_chars:
-            try:
-                import sys as _sys
-                _llm_mod = _sys.modules.get(__package__ + ".llm") if __package__ else None
-                hub = getattr(_llm_mod, "_active_hub", None) if _llm_mod else None
-                if hub is not None and getattr(hub, "skill_registry", None) is not None:
-                    skill_block = hub.skill_registry.build_prompt_block(
-                        self.id, agent_workspace=str(self._get_agent_workspace()))
-                    if skill_block:
-                        _try_add(skill_block)
-            except Exception as _se:
-                logger.debug("skill prompt injection failed: %s", _se)
+        # 8. (REMOVED 2026-04-28) skill_registry.build_prompt_block —
+        #    moved to single source: granted_skills.md (read by
+        #    _get_scheduled_context). See agent.py for canonical comment.
 
         # 9. Shared-context summary (project + meeting state, per-agent
         #    personalised). Goes LAST so even tight budgets still get plan
@@ -1522,6 +1561,15 @@ class AgentLLMMixin:
         1. 累计轮次计数，达到阈值时将溢出的 L1 消息压缩为 L2 摘要
         2. 从对话中提取 L3 事实（异步，不阻塞主流程）
         """
+        # Defensive: callers might pass multimodal list content (vision
+        # turns) or non-str types. Every downstream path here assumes
+        # str — coerce ONCE at the entry so any sub-call that does
+        # ``.lower()``、``+ ","、`` won't TypeError.
+        # (2026-04-30 incident: image-analysis turn → "can only
+        # concatenate str (not 'list') to str" surfaced as a chat error.)
+        user_message = _ensure_str_content(user_message)
+        assistant_response = _ensure_str_content(assistant_response)
+
         mm = self._get_memory_manager()
         if mm is None:
             return
@@ -2896,3 +2944,5 @@ Write only the summary body. Do not include any preamble or prefix."""
         # Return truncated preview + file path
         preview = result[:2000] + "\n...\n" + result[-500:]
         return f"[Result too large ({len(result)} chars), saved to {filepath}]\n\nPreview:\n{preview}"
+
+'''

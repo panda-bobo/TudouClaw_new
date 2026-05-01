@@ -208,11 +208,33 @@ _DEDUP_THRESHOLD = 0.85  # higher than memory.py default (0.75) — we want
 # Public API
 # ---------------------------------------------------------------------------
 
-def has_strong_signal(text: str) -> bool:
+def has_strong_signal(text) -> bool:
     """True iff ``text`` contains an explicit "remember this" trigger phrase.
 
     Used by the chat write-back path to fire extraction immediately on the
-    current turn (don't wait for task DONE / fallback)."""
+    current turn (don't wait for task DONE / fallback).
+
+    Tolerates non-string ``text`` (e.g. multimodal vision turns where the
+    user message is a list of content blocks). Returns False rather than
+    raising — this keeps a vision turn from poisoning the memory pipeline.
+    """
+    if not text:
+        return False
+    if not isinstance(text, str):
+        # Multimodal list / dict — pull text-only parts if possible.
+        try:
+            if isinstance(text, list):
+                parts = []
+                for p in text:
+                    if isinstance(p, dict) and p.get("type") == "text":
+                        parts.append(str(p.get("text", "")))
+                    elif isinstance(p, str):
+                        parts.append(p)
+                text = " ".join(parts)
+            else:
+                text = str(text)
+        except Exception:
+            return False
     if not text:
         return False
     low = text.lower()

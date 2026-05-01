@@ -217,7 +217,16 @@ def _safe_split_csv(value) -> list[str]:
 
 
 def read_entry_from_skill_md(skill_md_path: str, catalog_root: str = "") -> SkillCatalogEntry | None:
-    """Read an Anthropic-spec SKILL.md into a CatalogEntry."""
+    """Read an Anthropic-spec SKILL.md into a CatalogEntry.
+
+    Tolerates SKILL.md WITHOUT YAML frontmatter — falls back to extracting
+    name from the first H1 heading and description from the first
+    paragraph. Anthropic's public spec doesn't strictly require
+    frontmatter, and skills imported from ClawHub / GitHub often skip
+    it. Without this fallback the catalog scanner silently dropped them
+    (user report 2026-04-29: "Product Comparison & Review Copywriter
+    安装成功后在 skill 商店看不到").
+    """
     p = Path(skill_md_path)
     if not p.exists():
         return None
@@ -229,14 +238,26 @@ def read_entry_from_skill_md(skill_md_path: str, catalog_root: str = "") -> Skil
 
     meta, _body = _parse_frontmatter(text)
     if not meta:
-        return None
+        meta = {}
 
     metadata = meta.get("metadata") or {}
     if not isinstance(metadata, dict):
         metadata = {}
 
-    name = str(meta.get("name") or p.parent.name or "").strip()
-    description = str(meta.get("description") or "").strip()
+    # Fallback name/description from the markdown body when frontmatter
+    # didn't supply them. First H1 → name; first non-heading paragraph
+    # below it → description.
+    md_name = ""
+    md_desc = ""
+    if not meta.get("name") or not meta.get("description"):
+        try:
+            from .engine import _extract_skill_md_summary
+            md_name, md_desc = _extract_skill_md_summary(str(p))
+        except Exception:
+            md_name, md_desc = ("", "")
+
+    name = str(meta.get("name") or md_name or p.parent.name or "").strip()
+    description = str(meta.get("description") or md_desc or "").strip()
     if not name:
         return None
 
@@ -257,7 +278,13 @@ def read_entry_from_skill_md(skill_md_path: str, catalog_root: str = "") -> Skil
     sid = f"{author}/{name}" if "/" not in name else name
 
     langs = _safe_split_csv(metadata.get("languages"))
-    tags = _safe_split_csv(metadata.get("tags"))
+    # tags can live at the TOP level of frontmatter (Anthropic's standard
+    # SKILL.md shape — see narrator-ai-cli, most ClawHub skills) OR
+    # nested under metadata.tags (older Tudou-flavored layout). Accept
+    # either; merge if both are present so nothing is dropped.
+    _top_tags = _safe_split_csv(meta.get("tags"))
+    _meta_tags = _safe_split_csv(metadata.get("tags"))
+    tags = list(dict.fromkeys((_top_tags or []) + (_meta_tags or [])))
     src = str(metadata.get("source") or DEFAULT_SOURCE)
     if src not in SOURCE_TIERS:
         src = DEFAULT_SOURCE
@@ -549,8 +576,14 @@ class SkillStore:
                     continue
                 if source_filter and entry.source != source_filter:
                     continue
-                if tag and tag not in entry.tags:
-                    continue
+                # Tag filter — case-insensitive equality. SKILL.md authors
+                # frequently mix cases (``Video-Narration`` vs the chip
+                # the user clicked, ``video-narration``); strict equality
+                # would silently drop matches.
+                if tag:
+                    tl = tag.lower()
+                    if not any(str(t).lower() == tl for t in entry.tags):
+                        continue
                 if q:
                     hay = f"{entry.id} {entry.name} {entry.description} {' '.join(entry.tags)}".lower()
                     if q not in hay:

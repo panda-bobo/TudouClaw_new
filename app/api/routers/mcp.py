@@ -79,12 +79,24 @@ async def get_node_mcp_config(
     hub=Depends(get_hub),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Get MCP configuration for a specific node — matches legacy portal_routes_get."""
+    """Get MCP configuration for a specific node.
+
+    Sensitive env values (PASSWORD / TOKEN / API_KEY / ...) are
+    replaced with the mask placeholder before returning so the admin
+    browser never sees plaintext credentials. The form treats the
+    mask as "unchanged" on save (see merge_unchanged_from_existing).
+    """
     try:
         from ...mcp.manager import get_mcp_manager
+        from ...mcp.secrets import mask_env_for_display
         mcp_mgr = get_mcp_manager()
         node_cfg = mcp_mgr.get_node_mcp_config(node_id)
-        return node_cfg.to_dict()
+        out = node_cfg.to_dict()
+        # Walk available_mcps[*].env and mask sensitive values for display.
+        for _mid, _mcfg in (out.get("available_mcps") or {}).items():
+            if isinstance(_mcfg, dict) and isinstance(_mcfg.get("env"), dict):
+                _mcfg["env"] = mask_env_for_display(_mcfg["env"])
+        return out
     except (ImportError, Exception) as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -413,6 +425,74 @@ async def manage_mcps(
             target_nodes = body.get("target_nodes", None)
             result = mcp_mgr.change_mcp_scope(mcp_id, new_scope, target_nodes=target_nodes)
             return result
+
+        elif action == "set_env" and mcp_mgr:
+            # UI-driven env edit (the form behind GET /node/{id}).
+            # Two flavors:
+            #   * Node-scope: body has node_id + mcp_id + env (+ delete_keys?)
+            #     → updates the MCP's primary `env` dict (what
+            #       subprocess.Popen sees).
+            #   * Agent-scope: same plus `agent_id`
+            #     → updates agent_env_overrides instead (overlay applied
+            #       on top of the MCP's env when this agent calls it).
+            # Mask-value handling: any value still equal to the UI mask
+            # placeholder ("••••••") means "admin didn't touch this
+            # field" — keep the existing encrypted value rather than
+            # nulling it out.
+            mcp_id = (body.get("mcp_id") or "").strip()
+            agent_id = (body.get("agent_id") or "").strip()
+            new_env = body.get("env") or {}
+            delete_keys = body.get("delete_keys") or []
+            if not mcp_id:
+                raise HTTPException(400, "mcp_id is required")
+            try:
+                from ...mcp.secrets import (
+                    merge_unchanged_from_existing, MASK_PLACEHOLDER,
+                )
+            except Exception:
+                merge_unchanged_from_existing = None
+                MASK_PLACEHOLDER = "••••••"
+
+            node_cfg = mcp_mgr.get_node_mcp_config(node_id)
+            mcp_cfg = (node_cfg.available_mcps or {}).get(mcp_id)
+            if mcp_cfg is None:
+                raise HTTPException(404, f"MCP not found on node {node_id}: {mcp_id}")
+
+            if agent_id:
+                # Agent-scope override — merge mask placeholders against
+                # any existing agent override for this MCP.
+                existing = ((node_cfg.agent_env_overrides or {})
+                            .get(agent_id, {})
+                            .get(mcp_id, {})) or {}
+                if merge_unchanged_from_existing:
+                    new_env = merge_unchanged_from_existing(new_env, existing)
+                # Drop deleted keys
+                for k in delete_keys or []:
+                    new_env.pop(k, None)
+                # Persist
+                if hasattr(mcp_mgr, "set_agent_env_override"):
+                    for k, v in new_env.items():
+                        mcp_mgr.set_agent_env_override(agent_id, mcp_id, k, v)
+                    for k in delete_keys or []:
+                        mcp_mgr.set_agent_env_override(agent_id, mcp_id, k, None)
+                else:
+                    # Fallback: write directly + save
+                    node_cfg.agent_env_overrides.setdefault(agent_id, {})[mcp_id] = new_env
+                    mcp_mgr._save()
+                return {"ok": True, "scope": "agent", "agent_id": agent_id, "mcp_id": mcp_id}
+
+            # Node-scope (MCP env edit) — merge mask + delete + encrypt
+            # at to_dict() time (the existing chain through to_persist).
+            existing_env = dict(getattr(mcp_cfg, "env", None) or {})
+            if merge_unchanged_from_existing:
+                new_env = merge_unchanged_from_existing(new_env, existing_env)
+            for k in delete_keys or []:
+                new_env.pop(k, None)
+            mcp_cfg.env = new_env
+            mcp_mgr._save()
+            mcp_mgr.invalidate_tool_manifest(mcp_id) if hasattr(mcp_mgr, "invalidate_tool_manifest") else None
+            return {"ok": True, "scope": "node", "mcp_id": mcp_id,
+                    "env_keys": sorted(new_env.keys())}
 
         elif action == "test_connection" and mcp_mgr:
             from ...agent import MCPServerConfig

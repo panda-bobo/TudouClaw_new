@@ -194,7 +194,12 @@ def _log_payload_breakdown(safe_messages: list, tools: list | None,
 #             timeouts let the fallback-LLM path kick in quickly.
 # Override via env vars TUDOU_LLM_CONNECT_TIMEOUT / TUDOU_LLM_READ_TIMEOUT.
 try:
-    _CONNECT_TIMEOUT = float(os.environ.get("TUDOU_LLM_CONNECT_TIMEOUT", "45"))
+    # connect timeout default lowered 45→10s (2026-04-30): 45s was too
+    # forgiving for "is the provider even reachable?" — combined with
+    # the outer retry loop, a stale endpoint could burn 10+ minutes
+    # before surfacing a connect failure. 10s is plenty for a healthy
+    # API endpoint and fast-fails to the next retry / fallback otherwise.
+    _CONNECT_TIMEOUT = float(os.environ.get("TUDOU_LLM_CONNECT_TIMEOUT", "10"))
 except ValueError:
     _CONNECT_TIMEOUT = 45.0
 try:
@@ -677,15 +682,78 @@ from .llm_providers import (  # noqa: F401
 )
 
 
+def _strip_images_for_text_only(messages: list[dict]) -> tuple[list[dict], int]:
+    """Walk messages; for any user content that is a list with image_url
+    parts, replace it with a plain-text summary that preserves the text
+    parts and notes how many images were stripped.
+
+    Returns (new_messages, stripped_count)."""
+    out: list[dict] = []
+    stripped = 0
+    for m in messages:
+        content = m.get("content")
+        if not isinstance(content, list):
+            out.append(m)
+            continue
+        text_parts: list[str] = []
+        img_n = 0
+        has_other = False
+        for p in content:
+            if not isinstance(p, dict):
+                continue
+            ptype = p.get("type", "")
+            if ptype == "text":
+                text_parts.append(str(p.get("text", "")))
+            elif ptype in ("image_url", "image", "input_image"):
+                img_n += 1
+            elif ptype in ("audio", "input_audio"):
+                img_n += 1  # audio also unsupported on text-only
+            else:
+                has_other = True
+                text_parts.append(str(p.get("text", "")))
+        if img_n == 0 and not has_other:
+            out.append(m)
+            continue
+        joined_text = "\n".join(t for t in text_parts if t).strip()
+        if img_n:
+            note = f"\n\n[已省略 {img_n} 张图片 — 当前 LLM 不支持视觉,如需识图请切换支持 vision 的模型]"
+            joined_text = (joined_text + note).strip()
+        new_m = dict(m)
+        new_m["content"] = joined_text or "[image attached, stripped for text-only model]"
+        out.append(new_m)
+        stripped += img_n
+    return out, stripped
+
+
 def _sanitize_messages_for_openai(messages: list[dict],
-                                    target_url: str = "") -> list[dict]:
+                                    target_url: str = "",
+                                    target_model: str = "") -> list[dict]:
     """Sanitize messages for OpenAI-compatible APIs (LM Studio, Qwen, vLLM, Ollama, etc.).
 
     1. Merge multiple system messages into ONE (many local servers reject >1)
     2. Normalize content to plain strings (non-string content causes 400)
     3. Strip non-standard fields (e.g. 'source', '_dynamic') that strict APIs reject
     4. Preserve only standard OpenAI fields per role
+    5. Downgrade image_url parts to text when the target model is text-only
+       (DeepSeek chat etc. — their JSON schema rejects unknown variant `image_url`)
     """
+    # Pre-pass: strip images if the target provider declares supports_vision=False.
+    # Single source of truth: LLMProvider.supports_vision in app/llm_providers.py.
+    # Operators can opt providers in/out via llm_provider_configs/<name>.yaml.
+    try:
+        _strategy = resolve_strategy(target_url)
+        _vision_ok = bool(getattr(_strategy, "supports_vision", True))
+    except Exception:
+        _vision_ok = True  # conservative: don't strip when we can't resolve
+    if not _vision_ok:
+        messages, _img_n = _strip_images_for_text_only(messages)
+        if _img_n:
+            logger.warning(
+                "[sanitize] stripped %d image part(s) before sending to "
+                "text-only target (url=%s model=%s) — replaced with text "
+                "placeholders so the conversation stays coherent.",
+                _img_n, target_url, target_model,
+            )
     # Standard fields per role.
     # `reasoning_content` (assistant): DeepSeek "thinking mode" requires the
     # model's previous reasoning to be passed back on the next turn, else
@@ -1236,13 +1304,24 @@ class LLMConnectionPool:
 
             session = requests.Session()
 
-            # 配置重试策略
+            # ── Retry policy: DISABLE urllib3-level retry ──
+            # 2026-04-30 incident: a 智谱 GLM endpoint was slow; the
+            # outer streaming loop retried 6 times AND each attempt was
+            # internally retried 5 times by urllib3 → 30 nested attempts,
+            # each with up to (connect+read)=225s timeout. User stared
+            # at the screen for nearly half an hour before failure
+            # surfaced. The outer loop in chat() / stream_events()
+            # already retries with proper backoff and yields error
+            # events to the UI — having urllib3 retry below it is pure
+            # double-counting. Set ``total=0`` so each request fails
+            # fast back up to the outer retry, which has visibility.
             retry_strategy = Retry(
-                total=self.max_retries,
-                backoff_factor=self.backoff_factor,
-                status_forcelist=list(self.retry_on_status),
+                total=0,
+                connect=0,
+                read=0,
+                status=0,
                 allowed_methods=["POST", "GET"],
-                raise_on_status=False,  # 我们手动处理状态码
+                raise_on_status=False,
             )
 
             # HTTP/HTTPS 适配器 — 连接池 + 重试
@@ -2492,7 +2571,9 @@ def _openai_chat(base_url: str, api_key: str,
     # only place that knows about provider differences). Caller stays
     # provider-agnostic — switching providers requires zero call-site
     # changes.
-    safe_messages = _sanitize_messages_for_openai(messages, target_url=url)
+    safe_messages = _sanitize_messages_for_openai(
+        messages, target_url=url, target_model=model
+    )
 
     # ── HARD GUARD: drop orphan tool messages + strip empty tool_calls ──
     # Inline because reload bugs / stale pyc could leave the
@@ -2563,11 +2644,12 @@ def _openai_chat(base_url: str, api_key: str,
         "messages": safe_messages,
         "stream": stream,
     }
-    # Temperature: only inject when caller passed a non-negative value.
-    # -1.0 (or None) means "use provider default" — many providers and
-    # models care about this distinction (e.g. o1 rejects temperature;
-    # tier routing passes -1.0 when unconfigured so we simply omit).
-    if temperature is not None and temperature >= 0:
+    # Temperature: only inject when caller passed a non-negative value
+    # AND the provider declares it accepts the field. -1.0 (or None) means
+    # "use provider default" — and o1-class models reject the field
+    # entirely (provider sets supports_temperature_param=False).
+    if (temperature is not None and temperature >= 0
+            and bool(getattr(resolve_strategy(url), "supports_temperature_param", True))):
         payload["temperature"] = float(temperature)
     # Structured output forcing — caller passes either:
     #   {"type": "json_object"}                — any valid JSON
@@ -2945,7 +3027,9 @@ def _openai_stream_events(base_url: str, api_key: str,
     }
 
     messages = _apply_model_directives(messages, model)
-    safe_messages = _sanitize_messages_for_openai(messages, target_url=url)
+    safe_messages = _sanitize_messages_for_openai(
+        messages, target_url=url, target_model=model
+    )
 
     # ── HARD GUARD: orphan tool + empty tool_calls (final layer) ──
     _seen_ids: set = set()
@@ -3013,7 +3097,14 @@ def _openai_stream_events(base_url: str, api_key: str,
         )
 
     session = pool.get_session(_provider_id)
-    max_retries = pool.max_retries
+    # 2026-04-30: cap stream retries lower than the global LLM_MAX_RETRIES
+    # (5 → 2 by default). Streaming endpoints that need retry are usually
+    # genuinely down — burning 6 attempts × backoff just makes the user
+    # wait longer before the fallback chain kicks in. Env-tunable.
+    max_retries = min(
+        pool.max_retries,
+        int(os.environ.get("TUDOU_LLM_STREAM_MAX_RETRIES", "2") or 2),
+    )
 
     for attempt in range(max_retries + 1):
         pool.acquire_slot(_provider_id, model)
@@ -3622,7 +3713,14 @@ def _claude_stream_events(base_url: str, api_key: str,
     _apply_anthropic_prompt_cache(payload)
 
     session = pool.get_session(_provider_id)
-    max_retries = pool.max_retries
+    # 2026-04-30: cap stream retries lower than the global LLM_MAX_RETRIES
+    # (5 → 2 by default). Streaming endpoints that need retry are usually
+    # genuinely down — burning 6 attempts × backoff just makes the user
+    # wait longer before the fallback chain kicks in. Env-tunable.
+    max_retries = min(
+        pool.max_retries,
+        int(os.environ.get("TUDOU_LLM_STREAM_MAX_RETRIES", "2") or 2),
+    )
 
     for attempt in range(max_retries + 1):
         pool.acquire_slot(_provider_id, model)

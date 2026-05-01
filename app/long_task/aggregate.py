@@ -246,7 +246,9 @@ def tick_aggregate(hub) -> int:
         return 0
     fired = 0
     try:
-        projects = hub.list_projects() or []
+        # Raw Project objects — list_projects() returns dicts but
+        # aggregator needs .tasks / .metadata / ProjectTaskStatus enum.
+        projects = list((hub.projects or {}).values())
     except Exception:
         return 0
     for project in projects:

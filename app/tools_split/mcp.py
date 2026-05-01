@@ -156,6 +156,64 @@ def _handle_builtin_mcp(target: Any, tool_name: str, arguments: Any,
 # this function tiny is the architectural invariant that prevents
 # path/cwd/env bugs from multiplying across the codebase.
 
+# Names LLMs commonly try to invoke via mcp_call when they actually
+# mean "talk to a teammate inside this same system". Hitting any of
+# these is a strong signal the LLM picked the wrong path — we redirect
+# to the built-in `send_message` tool / @-mention before the call ever
+# reaches an external MCP. (Triggered: 2026-04-28 incident where 小土
+# burned 12 mcp_call attempts looping on `send_message` against an
+# unrelated MCP.)
+_INTRA_AGENT_TOOL_NAMES = frozenset({
+    "send_message", "send_msg", "send_im", "send_email", "send_mail",
+    "message", "im", "email", "mail",
+    "notify", "notify_agent", "ping_agent",
+    "delegate", "assign", "assign_to",
+    "handoff", "handoff_request",
+})
+
+# Recipient-field names commonly used by email/IM-flavored MCPs.
+# Walked in order; first non-empty match decides whether the recipient
+# looks like a real external address.
+_RECIPIENT_FIELD_NAMES = (
+    "to", "to_addr", "to_address", "to_email",
+    "recipient", "recipients",
+    "destination", "dest", "address", "addr",
+    "email", "emails",
+    "mail_to", "mailto",
+)
+
+
+def _looks_like_external_email(args: Any) -> bool:
+    """True if the args contain at least one well-formed email address
+    in any common recipient field. Used to LET legit external-email
+    sends pass the intra-agent redirect — we only want to block when
+    the LLM is trying to message an in-process teammate (recipient is
+    a name like '小刚' or '@general-小刚', not an actual address).
+    """
+    if not isinstance(args, dict):
+        return False
+    import re
+    # Loose RFC-ish: <local>@<domain>.<tld>
+    pat = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+    def _scan(value: Any) -> bool:
+        if isinstance(value, str):
+            return bool(pat.search(value))
+        if isinstance(value, list):
+            return any(_scan(v) for v in value)
+        if isinstance(value, dict):
+            return any(_scan(v) for v in value.values())
+        return False
+
+    for k in _RECIPIENT_FIELD_NAMES:
+        if k in args and _scan(args[k]):
+            return True
+    # Fallback: scan ALL string fields — some MCPs use exotic key
+    # names (e.g. `payload.message.to`). One real address anywhere is
+    # enough to call this an external send.
+    return _scan(args)
+
+
 def _tool_mcp_call(mcp_id: str = "", tool: str = "", arguments: Any = None,
                    list_mcps: bool = False, **_: Any) -> str:
     """Invoke an MCP tool bound to the calling agent.
@@ -175,6 +233,32 @@ def _tool_mcp_call(mcp_id: str = "", tool: str = "", arguments: Any = None,
         # List mode: delegate to the router's enumeration path.
         if list_mcps or not mcp_id:
             return _stub.list_mcps(caller_id)
+
+        # ── Intra-agent tool-name redirect ──
+        # If the LLM is trying `mcp_call(tool='send_message' / 'send_email' /
+        # 'delegate' / ...)` AND the recipient looks like an in-process
+        # teammate name (not a real email address), bounce back with a
+        # clear error. Real external recipients (e.g. user's Gmail) get
+        # through — the 2026-04-29 fix corrected the previous over-block
+        # that flagged ALL send_email calls regardless of recipient.
+        # (User report: "为啥 gmail 地址被误判为内部成员".)
+        _t_norm = (tool or "").strip().lower()
+        if _t_norm in _INTRA_AGENT_TOOL_NAMES and not _looks_like_external_email(arguments):
+            return (
+                f"Error: tried mcp_call(tool='{tool}') — but team members are "
+                f"in-process agents, not email / IM users; no MCP can deliver "
+                f"to them.\n"
+                f"To talk to a teammate, do ONE of:\n"
+                f"  ① In your reply text, write '@<role>-<name> ...' — the "
+                f"system parses @-mentions and triggers them automatically. "
+                f"This is the easiest way.\n"
+                f"  ② Call the BUILT-IN tool `send_message(to_agent=<id>, "
+                f"summary=..., key_fields=...)` — async envelope to their inbox.\n"
+                f"  ③ Call `handoff_request(to_agent=<id>, task=...)` — "
+                f"blocking, returns their result.\n"
+                f"Get the agent_id from the [团队成员] list at the top of your "
+                f"prompt (the `[id=...]` suffix on each line)."
+            )
 
         # Normalize arguments — the router/dispatcher wants a dict.
         args: dict

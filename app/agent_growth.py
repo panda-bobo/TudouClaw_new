@@ -1,3 +1,20 @@
+"""DEAD CODE TOMBSTONE.
+
+Same situation as agent_llm.py: enable_enhancement / disable_enhancement
+/ enable_self_improvement / trigger_retrospective live directly on
+the Agent class. This file was never imported into Agent inheritance.
+See app/agent.py:53-56 for the audit comment.
+
+The original content is preserved below as a triple-quoted
+string so it stays readable in tree (and recoverable from
+git history) but contributes ZERO symbols at import time.
+Python parses the file successfully; nothing executes.
+
+To remove permanently in a future cleanup pass:
+    git rm <this_file>
+"""
+
+_DEAD_CODE_PRESERVED_FOR_ARCHAEOLOGY = '''
 """
 Agent growth mixin — enhancement, active thinking, self-improvement, and growth.
 
@@ -406,3 +423,5 @@ class AgentGrowthMixin:
             return {"error": str(e)}
         finally:
             self._current_task = prev_task
+
+'''

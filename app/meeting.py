@@ -1816,7 +1816,11 @@ def execute_meeting_assignment(
         ag.shared_workspace = meeting_ws
 
     try:
-        reply = agent_chat_fn(aid, prompt)
+        reply = agent_chat_fn(
+            aid, prompt,
+            context_id=f"meeting:{getattr(meeting, 'id', '') or ''}",
+            source="user",
+        )
     except Exception as e:
         reply = f"❌ 任务执行失败: {e}"
     finally:
@@ -2076,7 +2080,11 @@ def meeting_agent_reply(meeting: "Meeting",
             if _meeting_ws:
                 ag.shared_workspace = _meeting_ws
             try:
-                reply = agent_chat_fn(aid, chat_msg)
+                reply = agent_chat_fn(
+                    aid, chat_msg,
+                    context_id=f"meeting:{getattr(meeting, 'id', '') or ''}",
+                    source="user",
+                )
             finally:
                 set_meeting_context("")
                 ag.shared_workspace = _prior_shared_ws
@@ -2353,6 +2361,66 @@ def meeting_agent_reply(meeting: "Meeting",
             "meeting %s: executor phase failed: %s",
             meeting.id, _exec_err, exc_info=True,
         )
+
+
+def dispatch_to_meeting_agent(meeting, registry, agent_chat_fn,
+                                agent_lookup_fn, agent_id: str, content: str,
+                                *, source: str = "user", source_id: str = "",
+                                source_label: str = "",
+                                post_to_chat: bool = True,
+                                msg_type: str = "chat") -> bool:
+    """Unified entry for triggering ONE meeting participant to respond.
+
+    Mirrors ``ProjectChatEngine.dispatch_to_agent`` for meetings — used
+    when a tool / API caller knows exactly who should respond and wants
+    source metadata flowed through. Does:
+
+      1. Post ``content`` into ``meeting.messages`` (UI surface) tagged
+         with the source label.
+      2. Delegate to ``spawn_meeting_reply`` with ``target_agent_ids``
+         narrowed to the single agent — re-uses its abort scope and
+         generation-bumping (so user-priority interrupt still works).
+
+    For broadcast (everyone responds), keep using ``spawn_meeting_reply``
+    directly with ``target_agent_ids=None``.
+
+    Returns True if dispatch was scheduled.
+    """
+    if meeting is None:
+        return False
+    target = agent_lookup_fn(agent_id) if callable(agent_lookup_fn) else None
+    if target is None:
+        logger.warning("dispatch_to_meeting_agent: agent %s not found",
+                       agent_id[:8] if agent_id else "?")
+        return False
+    if post_to_chat:
+        try:
+            meeting.add_message(
+                sender=source_id or source or "system",
+                sender_name=source_label or source or "system",
+                role="user",
+                content=content,
+            )
+            try:
+                registry.save()
+            except Exception:
+                pass
+        except Exception as _pe:
+            logger.debug(
+                "dispatch_to_meeting_agent: add_message failed: %s", _pe,
+            )
+    spawn_meeting_reply(
+        meeting, registry, agent_chat_fn, agent_lookup_fn,
+        user_msg=content,
+        target_agent_ids=[agent_id],
+    )
+    logger.info(
+        "dispatch_to_meeting_agent: meeting=%s agent=%s source=%s/%s",
+        meeting.id[:8] if meeting.id else "?",
+        agent_id[:8] if agent_id else "?",
+        source, (source_id[:8] if source_id else "-"),
+    )
+    return True
 
 
 def spawn_meeting_reply(meeting, registry, agent_chat_fn, agent_lookup_fn,

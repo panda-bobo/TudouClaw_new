@@ -136,6 +136,18 @@ def _tool_submit_deliverable(title: str = "", file_path: str = "",
         return err
     caller_id = _.get("_caller_agent_id", "") if isinstance(_, dict) else ""
 
+    # Auto-fill task_id from thread-local context when caller didn't
+    # pass one. Lets the deliverables UI group by task without requiring
+    # the LLM to thread task_id explicitly through every call.
+    if not (task_id or "").strip():
+        try:
+            from ..project_context import get_current_task_id
+            _tl_tid = get_current_task_id()
+            if _tl_tid:
+                task_id = _tl_tid
+        except Exception:
+            pass
+
     resolved_file_path = (file_path or "").strip()
 
     # ── Ensure the deliverable physically lives under the project's shared
@@ -322,8 +334,17 @@ def _tool_update_goal_progress(goal_id: str = "", current_value: Any = None,
 
 def _tool_create_milestone(name: str = "", responsible_agent_id: str = "",
                             due_date: str = "", project_id: str = "",
+                            description: str = "",
                             **_: Any) -> str:
-    """Create a ProjectMilestone for the current project."""
+    """Create a ProjectMilestone for the current project.
+
+    If ``responsible_agent_id`` is set AND points to a different agent
+    than the caller, this also **fires a project chat message + triggers
+    that agent to start work**. Without this, milestones are inert
+    metadata: the responsible agent never gets a signal that they were
+    assigned anything. (Discovered 2026-04-28 — 小土 created 4
+    milestones, the other two agents never received a prompt.)
+    """
     if not name:
         return "Error: 'name' is required."
     proj, err = _resolve_project(project_id,
@@ -331,23 +352,219 @@ def _tool_create_milestone(name: str = "", responsible_agent_id: str = "",
     if err:
         return err
     caller_id = _.get("_caller_agent_id", "") if isinstance(_, dict) else ""
+    resp_id = (responsible_agent_id or caller_id or "").strip()
     try:
         ms = proj.add_milestone(
             name=name.strip(),
-            responsible_agent_id=(responsible_agent_id or caller_id or "").strip(),
+            responsible_agent_id=resp_id,
             due_date=(due_date or "").strip(),
         )
         _save_projects_silently()
         logger.info("create_milestone OK: project=%s ms=%s name=%r",
                     proj.id, ms.id, name)
+
+        # ── Auto-delegate: build the task envelope and route through the
+        # unified dispatch entry (ProjectChatEngine.dispatch_to_agent).
+        # That single entry posts the chat message, spawns the abort-
+        # scoped thread, and tags the message with source metadata —
+        # all the bookkeeping lives in one place.
+        delegated_to = ""
+        if resp_id and resp_id != caller_id:
+            try:
+                hub = _get_hub()
+                target = (hub.agents.get(resp_id)
+                          if hub is not None and hasattr(hub, "agents") else None)
+                engine = getattr(hub, "project_chat_engine", None)
+                if target is not None and engine is not None:
+                    caller_agent = hub.agents.get(caller_id) if caller_id else None
+                    caller_label = (
+                        f"{caller_agent.role}-{caller_agent.name}"
+                        if caller_agent else "system"
+                    )
+                    target_mention = (
+                        f"@{target.role}-{target.name}"
+                        if getattr(target, "role", "") else f"@{target.name}"
+                    )
+                    desc = (description or "").strip()
+                    desc_block = f"\n\n说明: {desc}" if desc else ""
+                    due_block = f"\n截止: {ms.due_date}" if ms.due_date else ""
+                    delegate_msg = (
+                        f"{target_mention} 你被指派负责里程碑 [{ms.id}] "
+                        f"「{name}」。"
+                        f"{desc_block}"
+                        f"{due_block}"
+                        f"\n\n请基于你的角色和职责开始执行;完成后调用 "
+                        f"`submit_deliverable` 登记产出,并调用 "
+                        f"`update_milestone_status(milestone_id=\"{ms.id}\", "
+                        f"status=\"done\", evidence=...)` 收尾。"
+                    )
+                    ok = engine.dispatch_to_agent(
+                        proj, target.id, delegate_msg,
+                        source="agent",
+                        source_id=caller_id or "",
+                        source_label=caller_label,
+                        msg_type="task_assignment",
+                    )
+                    if ok:
+                        delegated_to = f"{target.role}-{target.name}"
+                        logger.info(
+                            "create_milestone delegated: project=%s ms=%s → %s",
+                            proj.id, ms.id, target.id[:8],
+                        )
+                else:
+                    logger.warning(
+                        "create_milestone: responsible_agent_id=%s not found "
+                        "in hub.agents — milestone created but no delegate "
+                        "message sent",
+                        resp_id,
+                    )
+            except Exception as _de:
+                logger.warning(
+                    "create_milestone auto-delegate failed (milestone still "
+                    "created): %s", _de,
+                )
+
+        suffix = f" — assigned to {delegated_to}" if delegated_to else ""
         return (
             f"Milestone created: {ms.id} — {name} "
             f"[responsible={ms.responsible_agent_id or '-'}, "
-            f"due={ms.due_date or '-'}, project={proj.id}]"
+            f"due={ms.due_date or '-'}, project={proj.id}]{suffix}"
         )
     except Exception as e:
         logger.exception("create_milestone failed")
         return f"Error: create_milestone failed: {e}"
+
+
+# ── update_milestone_responsibility ──────────────────────────────────
+
+def _tool_update_milestone_responsibility(milestone_id: str = "",
+                                            new_responsible_agent_id: str = "",
+                                            reason: str = "",
+                                            notify_old: bool = True,
+                                            project_id: str = "",
+                                            **_: Any) -> str:
+    """Reassign an existing milestone to a different agent AND auto-notify.
+
+    Use this when redistributing work after the initial create_milestone —
+    e.g. user says "把模块④从小刚移给小专,因为小专更熟悉行业需求". The
+    plain `update_milestone_status` tool can't change responsibility; this
+    one can, AND it fires the same delegation chat that create_milestone's
+    initial responsible_agent_id does, so the new owner actually gets
+    triggered to start work.
+    """
+    if not milestone_id:
+        return "Error: 'milestone_id' is required."
+    new_resp = (new_responsible_agent_id or "").strip()
+    if not new_resp:
+        return "Error: 'new_responsible_agent_id' is required."
+    proj, err = _resolve_project(project_id,
+                                 kwargs=_ if isinstance(_, dict) else None)
+    if err:
+        return err
+    caller_id = _.get("_caller_agent_id", "") if isinstance(_, dict) else ""
+    try:
+        # Find the milestone first so we know the OLD responsible
+        # (for optional courtesy notification + audit logging).
+        ms = None
+        for _m in proj.milestones:
+            if _m.id == milestone_id:
+                ms = _m
+                break
+        if ms is None:
+            return f"Error: milestone not found: {milestone_id}"
+        old_resp = (ms.responsible_agent_id or "").strip()
+        if old_resp == new_resp:
+            return (f"No change: milestone {milestone_id} already assigned "
+                    f"to {new_resp}.")
+
+        # Apply the change.
+        proj.update_milestone(milestone_id, responsible_agent_id=new_resp)
+        _save_projects_silently()
+
+        # Resolve agent objects for the chat plumbing.
+        hub = _get_hub()
+        engine = getattr(hub, "project_chat_engine", None)
+        new_agent = (hub.agents.get(new_resp)
+                     if hub is not None and hasattr(hub, "agents") else None)
+        old_agent = (hub.agents.get(old_resp)
+                     if old_resp and hub is not None and hasattr(hub, "agents")
+                     else None)
+        caller_agent = (hub.agents.get(caller_id)
+                        if caller_id and hub is not None and hasattr(hub, "agents")
+                        else None)
+        caller_label = (
+            f"{caller_agent.role}-{caller_agent.name}"
+            if caller_agent else "system"
+        )
+
+        if new_agent is None or engine is None:
+            # Reassignment persisted but we can't notify — surface that
+            # so the LLM doesn't think delegation worked when it didn't.
+            return (f"Milestone {ms.id} responsibility set to {new_resp}, "
+                    f"but could NOT trigger that agent (not in hub / no chat "
+                    f"engine). Use send_message manually if the agent exists.")
+
+        new_mention = (
+            f"@{new_agent.role}-{new_agent.name}"
+            if getattr(new_agent, "role", "") else f"@{new_agent.name}"
+        )
+        reason_block = f"\n调整原因: {reason.strip()}" if reason and reason.strip() else ""
+        old_block = ""
+        if old_agent:
+            old_block = (f"\n(原责任人: {old_agent.role}-{old_agent.name},"
+                         f" 已被替换。)")
+        new_msg = (
+            f"{new_mention} 你接手了里程碑 [{ms.id}] 「{ms.name}」。"
+            f"{reason_block}"
+            f"{old_block}"
+            f"\n\n请基于你的角色和职责开始执行;完成后调用 "
+            f"`submit_deliverable` 登记产出,并调用 "
+            f"`update_milestone_status(milestone_id=\"{ms.id}\", "
+            f"status=\"done\", evidence=...)` 收尾。"
+        )
+        engine.dispatch_to_agent(
+            proj, new_agent.id, new_msg,
+            source="agent",
+            source_id=caller_id or "",
+            source_label=caller_label,
+            msg_type="task_assignment",
+        )
+
+        # Courtesy ping the old responsible (post only, don't trigger).
+        # This is optional — `notify_old=False` skips it. Useful when the
+        # old assignee was the caller itself and self-notification adds noise.
+        if notify_old and old_agent and old_agent.id != caller_id and old_agent.id != new_agent.id:
+            old_mention = (f"@{old_agent.role}-{old_agent.name}"
+                           if getattr(old_agent, "role", "") else f"@{old_agent.name}")
+            release_msg = (
+                f"{old_mention} 里程碑 [{ms.id}] 「{ms.name}」已转交给 "
+                f"{new_agent.role}-{new_agent.name},你不再负责该里程碑。"
+                + (f" 调整原因: {reason.strip()}" if reason and reason.strip() else "")
+            )
+            try:
+                proj.post_message(
+                    sender=caller_id or "system",
+                    sender_name=caller_label,
+                    content=release_msg,
+                    msg_type="system",
+                )
+                _save_projects_silently()
+            except Exception:
+                pass
+
+        logger.info(
+            "milestone reassign: project=%s ms=%s %s → %s by %s",
+            proj.id, ms.id, old_resp[:8] if old_resp else "-",
+            new_resp[:8], caller_id[:8] if caller_id else "-",
+        )
+        return (
+            f"Milestone {ms.id} reassigned: "
+            f"{old_resp or '(unassigned)'} → {new_resp}; "
+            f"notified {new_agent.role}-{new_agent.name} via chat."
+        )
+    except Exception as e:
+        logger.exception("update_milestone_responsibility failed")
+        return f"Error: update_milestone_responsibility failed: {e}"
 
 
 # ── update_milestone_status ──────────────────────────────────────────

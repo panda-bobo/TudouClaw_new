@@ -376,12 +376,22 @@ class MCPServerConfig:
     installed_at: float = 0           # 安装成功的时间戳
 
     def to_dict(self) -> dict:
+        # Encrypt sensitive env values (PASSWORD / TOKEN / API_KEY / ...)
+        # before they touch disk. Idempotent — already-encrypted values
+        # pass through untouched. See app.mcp.secrets for the threat
+        # model (2026-04-29: an agent picked up plaintext SMTP creds
+        # from the MCP config and self-sent email via smtplib).
+        try:
+            from .mcp.secrets import encrypt_env_dict
+            _env_persisted = encrypt_env_dict(self.env or {})
+        except Exception:
+            _env_persisted = self.env or {}
         return {
             "id": self.id, "name": self.name,
             "transport": self.transport,
             "command": self.command,
             "url": self.url,
-            "env": self.env,
+            "env": _env_persisted,
             "enabled": self.enabled,
             "scope": self.scope,
             "install_status": self.install_status,
@@ -471,6 +481,21 @@ class AgentProfile:
     # Permanently granted skill capabilities, e.g. ["pdf:rw", "docx:rw"]
     # Populated automatically when a skill is granted to the agent.
 
+    def __post_init__(self):
+        # Defensive: any list-typed field passed as ``None`` (legacy
+        # saved JSON, preset round-trip via to_dict→AgentProfile(**d),
+        # explicit ``None`` from form input) → coerce to ``[]``. Without
+        # this guard, ``list(profile.allowed_tools)`` crashes downstream
+        # when re-saving the profile from another agent's update.
+        for _f in (
+            "rag_collection_ids", "expertise", "skills",
+            "allowed_tools", "denied_tools", "auto_approve_tools",
+            "exec_blacklist", "exec_whitelist", "mcp_servers",
+            "sandbox_allow_commands", "skill_capabilities",
+        ):
+            if getattr(self, _f, None) is None:
+                setattr(self, _f, [])
+
     def to_dict(self) -> dict:
         return {
             "agent_class": self.agent_class,
@@ -512,25 +537,30 @@ class AgentProfile:
             memory_mode=d.get("memory_mode", "full"),
             rag_mode=d.get("rag_mode", "shared"),
             rag_provider_id=d.get("rag_provider_id", ""),
-            rag_collection_ids=d.get("rag_collection_ids", []),
+            # NB: ``or []`` (not just ``, []``) — saved JSON may contain
+            # ``"allowed_tools": null`` for older agents, and dict.get's
+            # default only fires when the KEY is absent, not when the
+            # VALUE is None. Without ``or []`` we'd hand back None and
+            # downstream ``list(profile.allowed_tools)`` crashes.
+            rag_collection_ids=d.get("rag_collection_ids") or [],
             personality=d.get("personality", "helpful"),
             communication_style=d.get("communication_style", "technical"),
-            expertise=d.get("expertise", []),
-            skills=d.get("skills", []),
+            expertise=d.get("expertise") or [],
+            skills=d.get("skills") or [],
             language=d.get("language", "auto"),
             max_context_messages=d.get("max_context_messages", 50),
-            allowed_tools=d.get("allowed_tools", []),
-            denied_tools=d.get("denied_tools", []),
-            auto_approve_tools=d.get("auto_approve_tools", []),
+            allowed_tools=d.get("allowed_tools") or [],
+            denied_tools=d.get("denied_tools") or [],
+            auto_approve_tools=d.get("auto_approve_tools") or [],
             temperature=d.get("temperature", 0.7),
             custom_instructions=d.get("custom_instructions", ""),
             exec_policy=d.get("exec_policy", "ask"),
-            exec_blacklist=d.get("exec_blacklist", []),
-            exec_whitelist=d.get("exec_whitelist", []),
+            exec_blacklist=d.get("exec_blacklist") or [],
+            exec_whitelist=d.get("exec_whitelist") or [],
             mcp_servers=mcp_servers,
             sandbox_mode=d.get("sandbox_mode", ""),
-            sandbox_allow_commands=d.get("sandbox_allow_commands", []),
-            skill_capabilities=d.get("skill_capabilities", []),
+            sandbox_allow_commands=d.get("sandbox_allow_commands") or [],
+            skill_capabilities=d.get("skill_capabilities") or [],
         )
 
 

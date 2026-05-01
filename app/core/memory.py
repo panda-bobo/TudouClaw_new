@@ -101,6 +101,9 @@ class SemanticFact:
     confidence: float = 1.0
     created_at: float = 0.0
     updated_at: float = 0.0
+    # P0 dream 维护：用于识别"很久没被检索过"的孤立 fact
+    last_accessed_at: float = 0.0
+    access_count: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -108,6 +111,8 @@ class SemanticFact:
             "category": self.category, "content": self.content,
             "source": self.source, "confidence": self.confidence,
             "created_at": self.created_at, "updated_at": self.updated_at,
+            "last_accessed_at": self.last_accessed_at,
+            "access_count": self.access_count,
         }
 
     @classmethod
@@ -120,6 +125,88 @@ class SemanticFact:
             confidence=d.get("confidence", 1.0),
             created_at=d.get("created_at", 0.0),
             updated_at=d.get("updated_at", 0.0),
+            last_accessed_at=d.get("last_accessed_at", 0.0),
+            access_count=d.get("access_count", 0),
+        )
+
+
+# ---------------------------------------------------------------------------
+# L3+ — TopicMemory: compiled-truth + timeline (P1, gbrain-inspired)
+# ---------------------------------------------------------------------------
+#
+# 一个 SemanticFact 只能描述"用户在某一时刻表达了什么"；它无法表达
+# "对某个主题的当前最佳理解"。当用户说了 5 次"我喜欢简洁回答"再
+# 一次"我现在更喜欢详细一点"，flat L3 里会留 6 条互相矛盾的偏好，
+# 注入 system prompt 时既臃肿又混乱。
+#
+# TopicMemory 的设计（借鉴 gbrain 的 compiled-truth + timeline 二分）：
+#
+#   * 每个 (agent_id, topic, category) 唯一；topic 是 slug（如
+#     "user_writing_style"、"task_pattern_prd"），由 LLM 聚类决定。
+#   * compiled —— 当前理解，单段文本（< 500 字），LLM 在新证据出现
+#     时整体重写。注入 system prompt 时只塞 compiled。
+#   * timeline —— 仅追加的事件流，记录每条贡献到这个 topic 的原始
+#     fact，从不编辑。审计 + 回滚用。
+#   * confidence —— 每次"同向证据" +0.05，"冲突重写"先归零再 +0.7。
+#   * last_accessed_at —— 跟 SemanticFact 一样的访问追踪，dream 维护
+#     用得到。
+#
+# 写入流程见 ``MemoryTopicManager.register_fact``；读取见
+# ``get_topics_for_prompt``。
+#
+# Storage: timeline 列存 JSON text；topic + agent_id + category 三键
+# 复合 PRIMARY KEY（同 agent 下同 topic 同 category 唯一）。
+
+
+@dataclass
+class TopicMemory:
+    """L3+ 主题级 compiled-truth + timeline。"""
+    id: str = ""
+    agent_id: str = ""
+    topic: str = ""              # slug, e.g. "user_writing_style"
+    category: str = ""           # preference / rule / intent / ...
+    compiled: str = ""           # 当前理解（短文，可 LLM 重写）
+    timeline: list = field(default_factory=list)
+    # ↑ 列表元素形如：{"ts": 时间戳, "fact_id": "...", "content": "...",
+    #               "source": "...", "kind": "init|append|conflict_rewrite|merge"}
+    confidence: float = 1.0
+    created_at: float = 0.0
+    updated_at: float = 0.0      # compiled 上次重写时间
+    last_accessed_at: float = 0.0
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "agent_id": self.agent_id,
+            "topic": self.topic,
+            "category": self.category,
+            "compiled": self.compiled,
+            "timeline": list(self.timeline),
+            "confidence": self.confidence,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "last_accessed_at": self.last_accessed_at,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "TopicMemory":
+        tl = d.get("timeline") or []
+        if isinstance(tl, str):
+            try:
+                tl = json.loads(tl) if tl else []
+            except (ValueError, TypeError):
+                tl = []
+        return cls(
+            id=d.get("id", ""),
+            agent_id=d.get("agent_id", ""),
+            topic=d.get("topic", ""),
+            category=d.get("category", ""),
+            compiled=d.get("compiled", ""),
+            timeline=tl if isinstance(tl, list) else [],
+            confidence=float(d.get("confidence", 1.0) or 1.0),
+            created_at=float(d.get("created_at", 0.0) or 0.0),
+            updated_at=float(d.get("updated_at", 0.0) or 0.0),
+            last_accessed_at=float(d.get("last_accessed_at", 0.0) or 0.0),
         )
 
 
@@ -262,18 +349,28 @@ class MemoryManager:
         END;
 
         -- L3: Semantic Memory — 长期事实
+        --
+        -- last_accessed_at / access_count 用于 P0 dream 维护循环：
+        --   * 找出"很久没被检索过"的孤立 fact 候选删除
+        --   * access_count 也是 P3 反向链接加权排序的输入之一
+        -- 老库通过下面的 ALTER TABLE 迁移加列（IF NOT EXISTS 等价）。
         CREATE TABLE IF NOT EXISTS memory_semantic (
-            id          TEXT PRIMARY KEY,
-            agent_id    TEXT NOT NULL DEFAULT '',
-            category    TEXT NOT NULL DEFAULT 'general',
-            content     TEXT NOT NULL DEFAULT '',
-            source      TEXT NOT NULL DEFAULT '',
-            confidence  REAL NOT NULL DEFAULT 1.0,
-            created_at  REAL NOT NULL DEFAULT 0,
-            updated_at  REAL NOT NULL DEFAULT 0
+            id               TEXT PRIMARY KEY,
+            agent_id         TEXT NOT NULL DEFAULT '',
+            category         TEXT NOT NULL DEFAULT 'general',
+            content          TEXT NOT NULL DEFAULT '',
+            source           TEXT NOT NULL DEFAULT '',
+            confidence       REAL NOT NULL DEFAULT 1.0,
+            created_at       REAL NOT NULL DEFAULT 0,
+            updated_at       REAL NOT NULL DEFAULT 0,
+            last_accessed_at REAL NOT NULL DEFAULT 0,
+            access_count     INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_ms_agent ON memory_semantic(agent_id);
         CREATE INDEX IF NOT EXISTS idx_ms_cat ON memory_semantic(category);
+        -- idx_ms_accessed is created AFTER the ALTER TABLE migration
+        -- below; on legacy DBs the column doesn't exist yet at this
+        -- point, so the index is created explicitly later.
 
         -- L3 FTS5 全文索引
         CREATE VIRTUAL TABLE IF NOT EXISTS memory_semantic_fts USING fts5(
@@ -303,7 +400,49 @@ class MemoryManager:
             agent_id    TEXT PRIMARY KEY,
             data        TEXT NOT NULL DEFAULT '{}'
         );
+
+        -- L3+: TopicMemory (compiled-truth + timeline, P1)
+        -- See ``TopicMemory`` dataclass docstring above for design rationale.
+        --
+        -- (agent_id, topic, category) is the natural key; we keep ``id`` as a
+        -- stable surrogate for cross-references (e.g. timeline entries from
+        -- another topic's history).
+        CREATE TABLE IF NOT EXISTS memory_topic (
+            id               TEXT PRIMARY KEY,
+            agent_id         TEXT NOT NULL DEFAULT '',
+            topic            TEXT NOT NULL DEFAULT '',
+            category         TEXT NOT NULL DEFAULT '',
+            compiled         TEXT NOT NULL DEFAULT '',
+            timeline         TEXT NOT NULL DEFAULT '[]',
+            confidence       REAL NOT NULL DEFAULT 1.0,
+            created_at       REAL NOT NULL DEFAULT 0,
+            updated_at       REAL NOT NULL DEFAULT 0,
+            last_accessed_at REAL NOT NULL DEFAULT 0,
+            UNIQUE(agent_id, topic, category)
+        );
+        CREATE INDEX IF NOT EXISTS idx_mt_agent ON memory_topic(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_mt_accessed ON memory_topic(last_accessed_at);
         """)
+        # ── ALTER TABLE migrations (idempotent) ──
+        # SQLite < 3.35 doesn't support ADD COLUMN IF NOT EXISTS, so we
+        # try-except per column. New installs already have these via the
+        # CREATE TABLE above; old DBs get them retrofitted here.
+        for col_def in (
+            "last_accessed_at REAL NOT NULL DEFAULT 0",
+            "access_count INTEGER NOT NULL DEFAULT 0",
+        ):
+            try:
+                col_name = col_def.split()[0]
+                c.execute(f"ALTER TABLE memory_semantic ADD COLUMN {col_def}")
+                logger.info("memory: migrated memory_semantic add column %s", col_name)
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    logger.warning("memory: ALTER TABLE failed: %s", e)
+        try:
+            c.execute("CREATE INDEX IF NOT EXISTS idx_ms_accessed "
+                      "ON memory_semantic(last_accessed_at)")
+        except sqlite3.OperationalError:
+            pass
         c.commit()
 
     # ------------------------------------------------------------------
@@ -546,9 +685,41 @@ class MemoryManager:
         # Also store in ChromaDB for vector search
         self.vector_store_fact(fact)
 
+    def _touch_facts(self, fact_ids: list[str]) -> None:
+        """Bump last_accessed_at + access_count on the given fact ids.
+
+        Called from every retrieval path so dream / orphan-detection can
+        tell which facts are actually being used. One UPDATE batches all
+        ids — sub-ms overhead, fire-and-forget.
+        """
+        if not fact_ids:
+            return
+        try:
+            placeholders = ",".join(["?"] * len(fact_ids))
+            now = time.time()
+            with self._rlock:
+                self._conn.execute(
+                    f"UPDATE memory_semantic "
+                    f"SET last_accessed_at = ?, access_count = access_count + 1 "
+                    f"WHERE id IN ({placeholders})",
+                    [now] + list(fact_ids),
+                )
+                self._conn.commit()
+        except Exception as e:
+            # Never fail retrieval because access bookkeeping crashed.
+            logger.debug("memory _touch_facts failed (ignored): %s", e)
+
     def search_facts(self, agent_id: str, query: str,
-                     top_k: int = 5, category: str = "") -> list[SemanticFact]:
-        """FTS5 搜索 L3 事实。"""
+                     top_k: int = 5, category: str = "",
+                     touch: bool = True) -> list[SemanticFact]:
+        """FTS5 搜索 L3 事实。
+
+        Args:
+            touch: 是否更新返回 fact 的 last_accessed_at + access_count。
+                Default True (用户/agent 真实检索)。维护扫描（dream /
+                consolidator）应传 False，否则会把所有 fact 的访问时间
+                刷成"现在"，让 orphan 检测失效。
+        """
         if not query.strip():
             return self.get_recent_facts(agent_id, limit=top_k, category=category)
 
@@ -583,11 +754,18 @@ class MemoryManager:
             logger.warning("FTS query failed for semantic: %s", fts_query)
             return self.get_recent_facts(agent_id, limit=top_k, category=category)
 
-        return [SemanticFact.from_dict(dict(r)) for r in rows]
+        facts = [SemanticFact.from_dict(dict(r)) for r in rows]
+        if touch:
+            self._touch_facts([f.id for f in facts])
+        return facts
 
     def get_recent_facts(self, agent_id: str, limit: int = 10,
-                         category: str = "") -> list[SemanticFact]:
-        """获取最近的 L3 事实。"""
+                         category: str = "",
+                         touch: bool = True) -> list[SemanticFact]:
+        """获取最近的 L3 事实。
+
+        See ``search_facts`` for the ``touch`` flag's purpose.
+        """
         if category:
             rows = self._conn.execute("""
                 SELECT * FROM memory_semantic
@@ -600,7 +778,10 @@ class MemoryManager:
                 WHERE agent_id = ?
                 ORDER BY updated_at DESC LIMIT ?
             """, (agent_id, limit)).fetchall()
-        return [SemanticFact.from_dict(dict(r)) for r in rows]
+        facts = [SemanticFact.from_dict(dict(r)) for r in rows]
+        if touch:
+            self._touch_facts([f.id for f in facts])
+        return facts
 
     def count_facts(self, agent_id: str) -> int:
         row = self._conn.execute(
@@ -772,6 +953,7 @@ class MemoryManager:
                     "similarity": round(score, 3),
                     "matched_id": matched.id,
                     "previous": matched.content[:200],
+                    "fact": matched,
                 }
             # Refresh in place (historical memory may have been wrong).
             refreshed = SemanticFact(
@@ -794,6 +976,7 @@ class MemoryManager:
                 "similarity": round(score, 3),
                 "matched_id": matched.id,
                 "previous": matched.content[:200],
+                "fact": refreshed,
             }
 
         # Distinct enough — insert new.
@@ -804,6 +987,7 @@ class MemoryManager:
             "similarity": round(score, 3),
             "matched_id": "",
             "previous": "",
+            "fact": fact,
         }
 
     def recall(self, agent_id: str, query: str, *,
@@ -865,6 +1049,129 @@ class MemoryManager:
                 "DELETE FROM memory_semantic WHERE agent_id=?", (agent_id,),
             )
             self._conn.commit()
+
+    # ==================================================================
+    # L3+ TopicMemory CRUD (compiled-truth + timeline)
+    # ==================================================================
+
+    def save_topic(self, topic: TopicMemory) -> TopicMemory:
+        """Insert or replace a TopicMemory row. Mints an id if absent.
+
+        Note: this is a low-level write. For the rich update logic
+        (decide same / conflict / extend), use ``MemoryTopicManager``.
+        """
+        if not topic.agent_id or not topic.topic:
+            raise ValueError("topic.agent_id and topic.topic are required")
+        if not topic.id:
+            topic.id = uuid.uuid4().hex
+        now = time.time()
+        if topic.created_at == 0:
+            topic.created_at = now
+        topic.updated_at = now
+        with self._rlock:
+            self._conn.execute(
+                "INSERT INTO memory_topic "
+                "(id, agent_id, topic, category, compiled, timeline, "
+                " confidence, created_at, updated_at, last_accessed_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(agent_id, topic, category) DO UPDATE SET "
+                "  compiled=excluded.compiled, "
+                "  timeline=excluded.timeline, "
+                "  confidence=excluded.confidence, "
+                "  updated_at=excluded.updated_at, "
+                "  last_accessed_at=excluded.last_accessed_at",
+                (topic.id, topic.agent_id, topic.topic, topic.category,
+                 topic.compiled, json.dumps(topic.timeline, ensure_ascii=False),
+                 topic.confidence, topic.created_at, topic.updated_at,
+                 topic.last_accessed_at),
+            )
+            self._conn.commit()
+        return topic
+
+    def get_topic(self, agent_id: str, topic: str,
+                  category: str = "") -> Optional[TopicMemory]:
+        """Look up a TopicMemory by (agent_id, topic[, category]).
+
+        ``category`` empty → return any matching topic regardless of category
+        (useful when caller doesn't yet know which category bucket).
+        """
+        if category:
+            row = self._conn.execute(
+                "SELECT * FROM memory_topic "
+                "WHERE agent_id=? AND topic=? AND category=?",
+                (agent_id, topic, category),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT * FROM memory_topic "
+                "WHERE agent_id=? AND topic=? LIMIT 1",
+                (agent_id, topic),
+            ).fetchone()
+        if row is None:
+            return None
+        return TopicMemory.from_dict(dict(row))
+
+    def list_topics(self, agent_id: str,
+                    category: str = "",
+                    limit: int = 50,
+                    touch: bool = False) -> list[TopicMemory]:
+        """List topics for an agent.
+
+        Sort: ``last_accessed_at`` desc, then ``confidence`` desc — newest
+        / most-used surface first. The system-prompt injector picks the
+        top-K from this ordering.
+        """
+        if category:
+            rows = self._conn.execute(
+                "SELECT * FROM memory_topic "
+                "WHERE agent_id=? AND category=? "
+                "ORDER BY last_accessed_at DESC, confidence DESC LIMIT ?",
+                (agent_id, category, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM memory_topic WHERE agent_id=? "
+                "ORDER BY last_accessed_at DESC, confidence DESC LIMIT ?",
+                (agent_id, limit),
+            ).fetchall()
+        topics = [TopicMemory.from_dict(dict(r)) for r in rows]
+        if touch:
+            self._touch_topics([t.id for t in topics])
+        return topics
+
+    def _touch_topics(self, topic_ids: list[str]) -> None:
+        """Mirror of ``_touch_facts`` for TopicMemory: bump
+        last_accessed_at on real-user retrieval. Maintenance scans
+        should pass ``touch=False`` to ``list_topics``.
+        """
+        if not topic_ids:
+            return
+        try:
+            placeholders = ",".join(["?"] * len(topic_ids))
+            now = time.time()
+            with self._rlock:
+                self._conn.execute(
+                    f"UPDATE memory_topic SET last_accessed_at=? "
+                    f"WHERE id IN ({placeholders})",
+                    [now] + list(topic_ids),
+                )
+                self._conn.commit()
+        except Exception as e:
+            logger.debug("_touch_topics failed (ignored): %s", e)
+
+    def delete_topic(self, topic_id: str) -> None:
+        with self._rlock:
+            self._conn.execute(
+                "DELETE FROM memory_topic WHERE id=?", (topic_id,),
+            )
+            self._conn.commit()
+
+    def count_topics(self, agent_id: str) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS cnt FROM memory_topic WHERE agent_id=?",
+            (agent_id,),
+        ).fetchone()
+        return int(row["cnt"]) if row else 0
 
     # ==================================================================
     # ChromaDB Vector Search with auto-fallback to FTS5
@@ -1735,9 +2042,46 @@ class MemoryManager:
         contacts_written = self._extract_contacts_deterministic(
             agent_id, user_message)
 
+        # ── P2: pattern-based preference / rule extraction (zero LLM) ──
+        # Catches the high-frequency "我喜欢 X / 禁止 X / 记住 X / 下次 X /
+        # I prefer / never / remember / from now on" cases that previously
+        # cost a full LLM call per turn. See app/core/memory_extractor.py.
+        # If patterns capture ≥2 high-confidence facts, the LLM call below
+        # is skipped — this turn's signal is already in L3.
+        pattern_written = self._extract_patterns_deterministic(
+            agent_id, user_message)
+        det_written = list(contacts_written) + list(pattern_written)
+
         # 先检查是否值得提取（简单启发式）
         if not self._worth_extracting(user_message, assistant_response):
-            return list(contacts_written)
+            # Deterministic facts still need topic registration even
+            # when the LLM-extract heuristic short-circuits.
+            self._register_facts_to_topics(det_written, llm_call=llm_call)
+            return det_written
+
+        # If pattern extractor already captured enough signal, skip the
+        # expensive LLM extraction — patterns + contacts are the only
+        # signal this turn carries.
+        try:
+            from .memory_extractor import should_skip_llm
+            # Pull pattern-only dicts (exclude contacts; they were a
+            # separate channel and shouldn't count toward LLM-skip
+            # threshold).
+            pattern_dicts = [
+                {"category": f.category, "confidence": f.confidence}
+                for f in pattern_written
+            ]
+            if should_skip_llm(pattern_dicts):
+                logger.debug(
+                    "extract_facts: skipping LLM for agent %s — "
+                    "%d pattern hits cover this turn", agent_id,
+                    len(pattern_written))
+                # Even when LLM is skipped, the deterministic facts
+                # still feed the TopicMemory layer (P1).
+                self._register_facts_to_topics(det_written, llm_call=llm_call)
+                return det_written
+        except Exception:
+            pass
 
         current_time = time.strftime("%Y-%m-%d %H:%M")
         # Minimal structural prompt only — category enum + response schema.
@@ -1853,14 +2197,56 @@ class MemoryManager:
             # 清理过多的事实
             self._prune_facts(agent_id, config.l3_max_facts)
 
-            if saved_facts:
-                logger.info("Extracted %d facts for agent %s",
-                            len(saved_facts), agent_id)
-            return saved_facts
+            # Merge the deterministic (contact + pattern) facts into the
+            # returned list so callers see the full set of L3 writes from
+            # this turn. det_written is in scope from the top-of-method
+            # contact + pattern phase.
+            all_facts = det_written + saved_facts
+
+            # ── P1: register every fact into TopicMemory ──
+            # Each newly-written fact gets attached to its topic's
+            # compiled-truth + timeline. This is best-effort — never
+            # let a topic-write failure break the L3 write path.
+            self._register_facts_to_topics(all_facts, llm_call=llm_call)
+
+            if all_facts:
+                logger.info(
+                    "Extracted %d facts for agent %s "
+                    "(%d deterministic, %d via LLM)",
+                    len(all_facts), agent_id,
+                    len(det_written), len(saved_facts))
+            return all_facts
 
         except (json.JSONDecodeError, Exception) as e:
             logger.debug("Fact extraction failed: %s", e)
-            return []
+            # Even on LLM failure, deterministic facts are already saved.
+            self._register_facts_to_topics(det_written, llm_call=llm_call)
+            return det_written
+
+    def _register_facts_to_topics(self, facts: list,
+                                    llm_call: Any = None) -> None:
+        """P1 helper: pipe newly-written facts through MemoryTopicManager
+        so each one updates its topic's compiled-truth + timeline.
+
+        Best-effort. Topic registration failure must never break L3.
+        Disabled when ``TUDOU_DISABLE_TOPIC_MEMORY=1`` (test escape).
+        """
+        if not facts:
+            return
+        import os as _os
+        if _os.environ.get("TUDOU_DISABLE_TOPIC_MEMORY") in ("1", "true", "yes"):
+            return
+        try:
+            from .memory_topic import MemoryTopicManager
+            mgr = MemoryTopicManager(self)
+            for f in facts:
+                try:
+                    mgr.register_fact(f, llm_call=llm_call)
+                except Exception as e:
+                    logger.debug("topic register failed for fact %s: %s",
+                                  getattr(f, "id", "?"), e)
+        except Exception as e:
+            logger.debug("topic manager init failed: %s", e)
 
     # ── Session-level action buffer (replaces per-tool logging) ──
     # Actions are buffered during a chat session and aggregated into a single
@@ -1990,6 +2376,51 @@ class MemoryManager:
         r"(?:(?<!\d)1[3-9]\d{9}(?!\d))"
         r"|(?:(?<!\d)\+\d{1,3}[-\s]?\d{3,4}[-\s]?\d{3,4}[-\s]?\d{3,4}(?!\d))"
     )
+
+    def _extract_patterns_deterministic(self, agent_id: str,
+                                          user_message: str) -> list:
+        """P2 · zero-LLM preference / rule extraction.
+
+        Runs the regex catalog from ``app.core.memory_extractor`` over
+        ``user_message`` and writes each high-confidence hit to L3 via
+        ``upsert_fact``. Idempotent — re-mentions of the same preference
+        in subsequent turns refresh one row instead of duplicating.
+
+        Skip-LLM gating happens at ``extract_facts`` (the caller),
+        not here.
+        """
+        if not user_message:
+            return []
+        try:
+            from .memory_extractor import extract_patterns
+            hits = extract_patterns(user_message)
+        except Exception as e:
+            logger.debug("pattern extract failed: %s", e)
+            return []
+        if not hits:
+            return []
+        written: list = []
+        for h in hits:
+            fact = SemanticFact(
+                agent_id=agent_id,
+                category=h["category"],
+                content=h["content"],
+                source=h["source"],
+                confidence=float(h["confidence"]),
+            )
+            try:
+                # 0.85 threshold — same shape used by contact upsert
+                # path. Refreshes existing row on near-duplicate match.
+                res = self.upsert_fact(fact, threshold=0.85)
+                if res.get("fact"):
+                    written.append(res["fact"])
+            except Exception as e:
+                logger.debug("pattern upsert failed: %s", e)
+        if written:
+            logger.info(
+                "pattern extract: agent=%s wrote %d facts (zero LLM)",
+                agent_id, len(written))
+        return written
 
     def _extract_contacts_deterministic(self, agent_id: str,
                                          user_message: str) -> list:
@@ -2623,14 +3054,14 @@ class MemoryConsolidator:
         也兼容旧分类: action_plan → action_done。
         """
         # New categories
-        plans = self._mm.get_recent_facts(agent_id, limit=50, category="intent")
+        plans = self._mm.get_recent_facts(agent_id, limit=50, category="intent", touch=False)
         # Also check legacy categories
-        plans += self._mm.get_recent_facts(agent_id, limit=50, category="action_plan")
+        plans += self._mm.get_recent_facts(agent_id, limit=50, category="action_plan", touch=False)
         if not plans:
             return 0
 
-        dones = self._mm.get_recent_facts(agent_id, limit=100, category="outcome")
-        dones += self._mm.get_recent_facts(agent_id, limit=100, category="action_done")
+        dones = self._mm.get_recent_facts(agent_id, limit=100, category="outcome", touch=False)
+        dones += self._mm.get_recent_facts(agent_id, limit=100, category="action_done", touch=False)
         done_texts = [d.content.lower() for d in dones]
 
         resolved = 0
@@ -2705,7 +3136,7 @@ class MemoryConsolidator:
             if merged_total >= self._MAX_MERGE_PER_RUN:
                 break
             facts = self._mm.get_recent_facts(
-                agent_id, limit=50, category=cat)
+                agent_id, limit=50, category=cat, touch=False)
             if len(facts) < 2:
                 continue
 
@@ -2819,7 +3250,7 @@ class MemoryConsolidator:
         threshold_ts = now - (self._DECAY_DAYS * 86400)
 
         # 获取所有事实（按 updated_at 升序，最旧的先处理）
-        all_facts = self._mm.get_recent_facts(agent_id, limit=200)
+        all_facts = self._mm.get_recent_facts(agent_id, limit=200, touch=False)
         # 反转为升序（最旧的在前）
         all_facts.reverse()
 

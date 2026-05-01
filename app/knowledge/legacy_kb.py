@@ -130,7 +130,7 @@ def _sync_to_vector(entry_id: str, title: str, content: str,
                      tags: list[str] | None = None, delete: bool = False):
     """Sync knowledge entry to ChromaDB vector store (if available)."""
     try:
-        from .core.memory import get_memory_manager
+        from ..core.memory import get_memory_manager
         mm = get_memory_manager()
         if delete:
             mm.vector_delete_knowledge(entry_id)

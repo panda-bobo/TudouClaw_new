@@ -208,7 +208,10 @@ def _tool_read_file(path: str, offset: int = 0, limit: int | None = None,
 def _tool_write_file(path: str, content: str, **_: Any) -> str:
     pol = _sandbox.get_current_policy()
     try:
-        p = pol.safe_path(path)
+        # for_write=True so paths under sandbox.readonly_dirs are
+        # rejected (e.g. agent can read sibling skills' manifests as
+        # reference but can't overwrite them).
+        p = pol.safe_path(path, for_write=True)
     except _sandbox.SandboxViolation as e:
         return f"Error: {e}"
     try:
@@ -227,7 +230,7 @@ def _tool_edit_file(path: str, old_string: str, new_string: str,
                     **_: Any) -> str:
     pol = _sandbox.get_current_policy()
     try:
-        p = pol.safe_path(path)
+        p = pol.safe_path(path, for_write=True)
     except _sandbox.SandboxViolation as e:
         return f"Error: {e}"
     if not p.exists():

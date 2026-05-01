@@ -45,8 +45,12 @@ WS_MASTER_URL = "ws://localhost:9900"
 
 # ── LLM Model Defaults ──────────────────────────────────────────────────
 
-DEFAULT_PROVIDER = "ollama"
-DEFAULT_MODEL = "qwen3:8b"
+DEFAULT_PROVIDER = ""
+DEFAULT_MODEL = ""
+# (2026-04-28) Removed hardcoded "qwen3:8b" / "ollama" defaults. Agents
+# MUST explicitly bind a provider+model via Settings — no silent fall-through
+# to a global default. Chat will fail loudly with a clear "no model bound"
+# error rather than hitting Ollama with a model name that may not exist.
 DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 SKILLFORGE_MODEL = "claude-opus-4"
 

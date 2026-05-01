@@ -51,7 +51,8 @@ async def get_overview(
     try:
         from ..deps.hub import get_hub as _gh  # noqa: F401
         from ...project import ProjectTaskStatus
-        for p in (hub.list_projects() if hasattr(hub, "list_projects") else []):
+        # Raw Project objects — list_projects() returns dicts.
+        for p in list((hub.projects or {}).values()):
             proj_count += 1
             for t in (p.tasks or []):
                 if getattr(t, "parent_task_id", ""):
@@ -163,7 +164,8 @@ async def get_pipelines(
     out = []
     try:
         from ...project import ProjectTaskStatus
-        for p in (hub.list_projects() if hasattr(hub, "list_projects") else []):
+        # Raw Project objects — list_projects() returns dicts.
+        for p in list((hub.projects or {}).values()):
             tasks_by_id = {t.id: t for t in (p.tasks or [])}
             # Find parent tasks (those with at least one child)
             parent_ids: set[str] = set()

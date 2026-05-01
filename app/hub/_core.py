@@ -296,6 +296,21 @@ class Hub:
         except Exception as _he:
             logger.warning("Failed to start heartbeat loop: %s", _he)
 
+        # ── Memory dream daemon (P0) ──────────────────────────────────
+        # Daily memory maintenance at 03:00 local time. Keeps L3 facts
+        # tidy: prunes "never accessed + low confidence", decays stale,
+        # audits KB references. See app/core/memory_dream.py.
+        # Disabled when TUDOU_DISABLE_DREAM=1 (test env).
+        if os.environ.get("TUDOU_DISABLE_DREAM", "") not in ("1", "true", "yes"):
+            try:
+                threading.Thread(
+                    target=self._memory_dream_loop,
+                    name="hub-memory-dream", daemon=True,
+                ).start()
+                logger.info("Memory dream daemon started (daily at 03:00)")
+            except Exception as _de:
+                logger.warning("Failed to start dream daemon: %s", _de)
+
         # ── Preprocessor pre-warm ─────────────────────────────────────
         # Async fire-and-forget: for every agent that has a preprocessor
         # configured, trigger _build_static_system_prompt() in the
@@ -417,6 +432,56 @@ class Hub:
                     "preprocessor pre-warm: agent=%s failed (non-fatal): %s",
                     aid, _e,
                 )
+
+    def _memory_dream_loop(self):
+        """Daily L3 memory maintenance at 03:00 local time.
+
+        Sleeps in chunks (max 1h per chunk) so a process exit doesn't
+        leave a 23-hour-deep blocking sleep. Uses ``_heartbeat_stop``
+        as the global "shutdown" signal — same convention as the
+        heartbeat loop.
+
+        Body: ``MemoryDream.dream_all()`` — runs consolidator on every
+        agent, prunes orphaned L3 facts, audits KB. See app/core/memory_dream.py.
+        """
+        import datetime as _dt
+        from ..core.memory_dream import get_memory_dream
+        dream = get_memory_dream()
+        # Bind hub for cleaner agent enumeration.
+        try:
+            if dream._hub is None:
+                dream._hub = self
+        except Exception:
+            pass
+
+        def _seconds_until_3am():
+            now = _dt.datetime.now()
+            target = now.replace(hour=3, minute=0, second=0, microsecond=0)
+            if now >= target:
+                target = target + _dt.timedelta(days=1)
+            return max(60.0, (target - now).total_seconds())
+
+        while not self._heartbeat_stop.is_set():
+            wait = _seconds_until_3am()
+            # Chunked wait so shutdown is responsive.
+            while wait > 0 and not self._heartbeat_stop.is_set():
+                step = min(3600.0, wait)
+                if self._heartbeat_stop.wait(timeout=step):
+                    return
+                wait -= step
+            if self._heartbeat_stop.is_set():
+                return
+            try:
+                logger.info("Memory dream: starting nightly run")
+                report = dream.dream_all(llm_call=None)
+                logger.info(
+                    "Memory dream: done — %d agents, %d facts deleted, "
+                    "%d decayed, %d KB orphan candidates",
+                    report.agents_processed, report.orphans_deleted,
+                    report.orphans_decayed, len(report.kb_orphan_candidates),
+                )
+            except Exception as e:
+                logger.warning("Memory dream nightly run failed: %s", e)
 
     def _heartbeat_loop(self):
         """Periodic loop:
@@ -727,7 +792,9 @@ class Hub:
             return self.proxy_chat_sync(agent_id, node, _msg_str)
         raise ValueError(f"Agent not found: {agent_id}")
 
-    def _direct_chat(self, agent_id: str, message) -> str:
+    def _direct_chat(self, agent_id: str, message,
+                     context_id: str = "solo",
+                     source: str = "admin") -> str:
         """Call an agent's native chat() path directly, preserving identity.
 
         Why this exists (contrast with _workflow_chat):
@@ -753,12 +820,17 @@ class Hub:
         surfaces MUST call the agent's own chat() and keep the
         original agent_id all the way through.
 
+        ``context_id`` scopes the agent's message history to one of:
+        ``solo`` (default — direct admin/user chat), ``project:{pid}``,
+        or ``meeting:{mid}``. Each scope has its own conversation; an
+        upload in solo chat NEVER leaks into a new project's first turn.
+
         Supports str or list[dict] (multimodal) messages, same as
         _workflow_chat. Remote path unchanged.
         """
         agent = self.agents.get(agent_id)
         if agent is not None:
-            return agent.chat(message)
+            return agent.chat(message, context_id=context_id, source=source)
         # Remote — same as _workflow_chat's remote branch.
         node = self.find_agent_node(agent_id)
         if node:
@@ -1532,9 +1604,17 @@ class Hub:
         else:
             shared_dir = project_dir  # fallback if no project_id
 
-        # Set shared_workspace so sandbox allows access AND prompt tells agent
-        agent.shared_workspace = shared_dir
-        # Set project identity so prompt context is aware
+        # ── DEPRECATED: don't write to agent.shared_workspace anymore
+        # (2026-04-29). The shared workspace now derives from the active
+        # context per turn — see Agent.get_active_shared_workspace().
+        # An agent in N projects + M meetings can no longer be
+        # represented by a single field. The path for THIS project
+        # is still computed (shared_dir above) and the canonical
+        # convention is in get_shared_workspace_path(project_id), so
+        # nothing downstream loses data. Field write removed.
+        # Set project identity so prompt context is aware (still
+        # needed for the legacy `project_id` agent field — but
+        # multi-project agents will ALSO need a list eventually).
         if project_id:
             agent.project_id = project_id
         if project_name:
@@ -1562,13 +1642,16 @@ class Hub:
         regardless of what the project's working_directory field says.
         """
         synced = 0
-        from ..agent import Agent
         for proj in self.projects.values():
-            expected_shared = Agent.get_shared_workspace_path(proj.id)
             for member in proj.members:
                 agent = self.agents.get(member.agent_id)
-                if agent and (agent.shared_workspace != expected_shared
-                             or agent.project_id != proj.id):
+                # Shared workspace now flows from active context, not from
+                # agent.shared_workspace. Only re-sync when project identity
+                # diverges (project_id mismatch or context_type stale).
+                if agent and (
+                    getattr(agent, "project_id", "") != proj.id
+                    or getattr(agent, "context_type", "") != "project"
+                ):
                     self._sync_agent_to_project_dir(
                         member.agent_id, proj.working_directory or "",
                         project_id=proj.id, project_name=proj.name)
@@ -1592,13 +1675,20 @@ class Hub:
         return [p.to_dict() for p in self.projects.values()]
 
     def project_chat(self, project_id: str, content: str,
-                      target_agents: list[str] | None = None) -> list[str]:
-        """用户在项目群聊中发消息，返回会回复的 agent 列表。"""
+                      target_agents: list[str] | None = None,
+                      user_id: str = "") -> list[str]:
+        """用户在项目群聊中发消息，返回会回复的 agent 列表。
+
+        ``user_id`` flows into the source metadata so the agent's per-
+        context message bucket records ``source="user:<user_id>"`` —
+        this lets downstream UI / audit logs distinguish which human
+        sent which message in multi-admin deployments.
+        """
         proj = self.projects.get(project_id)
         if not proj:
             return []
         respondents = self.project_chat_engine.handle_user_message(
-            proj, content, target_agents)
+            proj, content, target_agents, user_id=user_id)
         # Persist project (including new chat messages) to disk
         self._save_projects()
         return respondents
@@ -1772,13 +1862,28 @@ class Hub:
             return
         if getattr(agent, "status", None) != AgentStatus.IDLE:
             return
-        # Most-recent step activity timestamp
+        # Most-recent activity timestamp.
+        # Includes:
+        #   * plan step started_at / completed_at — direct progress signal
+        #   * latest agent event (chat turn / tool call / message)
+        #     — catches the "agent was just chatting but didn't move the
+        #     plan forward" case. Without this signal the watchdog would
+        #     fire 5 min after the LAST STEP transition even if the user
+        #     was chatting with the agent 30s ago.
         ts_values = []
         for s in plan.steps:
             for k in ("completed_at", "started_at"):
                 v = getattr(s, k, 0) or 0
                 if v > 0:
                     ts_values.append(v)
+        try:
+            _evs = list(getattr(agent, "events", []) or [])
+            if _evs:
+                _last_ev_ts = float(getattr(_evs[-1], "timestamp", 0) or 0)
+                if _last_ev_ts > 0:
+                    ts_values.append(_last_ev_ts)
+        except Exception:
+            pass
         last_update = max(ts_values) if ts_values else getattr(
             plan, "created_at", 0) or 0
         now = time.time()
@@ -1825,8 +1930,8 @@ class Hub:
         counts[_plan_id] = n + 1
 
         msg = (
-            "[SYSTEM · 唤醒] 你的当前任务还有未完成步骤，但你已经空闲了 "
-            f"{int(now - last_update)} 秒。\n"
+            "[SYSTEM · 唤醒] 你的当前任务还有未完成步骤，"
+            f"已经 {int(now - last_update)} 秒没有任何进展（无新工具调用 / 步骤更新）。\n"
             f"计划：{plan_now.task_summary[:120]}\n"
             f"剩余开放步骤：{len(still_open)}\n"
             f"下一步（id={target_now.id}）：{target_now.title}\n"

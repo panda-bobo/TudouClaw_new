@@ -11,7 +11,8 @@ async function loadAvailableModels() {
   if (cfg) {
     _availableModels = cfg.available_models || {};
     _providerList = (cfg.providers || []).filter(p => p.enabled);
-    _defaultProvider = cfg.provider || 'ollama';
+    // No silent fallback to ollama — agents must explicitly bind a provider.
+    _defaultProvider = cfg.provider || '';
     _defaultModel = cfg.model || '';
     // Populate dynamic provider selects
     populateProviderSelects();
@@ -32,7 +33,7 @@ function populateProviderSelects() {
     const curVal = sel.value;
     var blankLabel = (selId === 'ea-learning-provider' || selId === 'ea-multimodal-provider')
       ? '（使用默认）'
-      : 'Default (global)';
+      : '— 请选择 Provider —';
     sel.innerHTML = '<option value="">' + blankLabel + '</option>';
     _providerList.forEach(p => {
       const opt = document.createElement('option');
@@ -48,9 +49,14 @@ function updateModelSelect(providerSelectId, modelSelectId, currentModel) {
   const providerEl = document.getElementById(providerSelectId);
   const modelEl = document.getElementById(modelSelectId);
   if (!providerEl || !modelEl) return;
-  const provider = providerEl.value || _defaultProvider;
-  const models = _availableModels[provider] || [];
-  modelEl.innerHTML = '<option value="">Default (global)</option>';
+  // No silent fallback to _defaultProvider — only show models for the
+  // explicitly-picked provider, so the user can't accidentally save a
+  // model under provider="".
+  const provider = providerEl.value;
+  const models = provider ? (_availableModels[provider] || []) : [];
+  modelEl.innerHTML = provider
+    ? '<option value="">— 请选择 Model —</option>'
+    : '<option value="">(先选择 Provider)</option>';
   models.forEach(m => {
     const opt = document.createElement('option');
     opt.value = m;

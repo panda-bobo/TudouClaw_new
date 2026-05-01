@@ -84,18 +84,35 @@ _BLACKLIST_PATTERNS: list[re.Pattern] = [
     re.compile(r"\bcat\s+.*\.ssh/id_"),
     re.compile(r"\bcat\s+.*\.aws/credentials"),
     re.compile(r"\bcat\s+.*\.env(\s|$)"),
+    # MCP credential files — agents must not read these. ``mcp_configs.json``
+    # contains (now-encrypted) env values; the master key file
+    # ``.mcp_master_key`` would let an agent decrypt them. Both off-limits.
+    # Matches read attempts via cat / less / head / tail / grep / wc / od.
+    re.compile(r"\b(cat|less|more|head|tail|grep|wc|od|xxd|hexdump|"
+                r"awk|sed|jq|python\s+-c\s+['\"]?import\s+json)\s+"
+                r"[^|;]*(?:tudou_claw[/\\][^|;]*mcp_configs?\.json"
+                r"|\.mcp_master_key)"),
+    # Direct outbound SMTP from sandbox bash — closes the
+    # 2026-04-29 self-sent-email loophole. Agent should NEVER use
+    # mail / sendmail / msmtp / smtplib / curl-to-smtp to reach
+    # external SMTP servers; teammates aren't email users.
+    re.compile(r"\b(sendmail|msmtp|mailx?)\s+"),
+    re.compile(r"\bcurl\s+[^|;]*\bsmtp(s)?://"),
+    re.compile(r"\bpython3?\s+-c\s+['\"][^'\"]*\bsmtplib\b"),
 ]
 
 
 class SandboxPolicy:
     """Per-execution sandbox policy."""
 
-    __slots__ = ("root", "mode", "allow_list", "agent_id", "agent_name", "allowed_dirs")
+    __slots__ = ("root", "mode", "allow_list", "agent_id", "agent_name",
+                 "allowed_dirs", "readonly_dirs")
 
     def __init__(self, root: str = "", mode: str = "",
                  allow_list: Optional[list[str]] = None,
                  agent_id: str = "", agent_name: str = "",
-                 allowed_dirs: Optional[list[str]] = None):
+                 allowed_dirs: Optional[list[str]] = None,
+                 readonly_dirs: Optional[list[str]] = None):
         self.root = self._resolve_root(root)
         self.mode = (mode or _DEFAULT_MODE).lower()
         if self.mode not in ("off", "command_only", "restricted", "strict"):
@@ -104,6 +121,13 @@ class SandboxPolicy:
         self.agent_id = agent_id
         self.agent_name = agent_name
         self.allowed_dirs = [str(Path(d).expanduser().resolve()) for d in (allowed_dirs or [])]
+        # Read-only allowed directories. Paths under these resolve OK
+        # when ``check_path(..., for_write=False)`` is called (read /
+        # list / cd) but are denied when ``for_write=True`` (write_file
+        # / edit_file / shell redirects). 2026-04-30: introduced so
+        # agents can read sibling skills' manifests as reference
+        # without gaining the ability to mutate them.
+        self.readonly_dirs = [str(Path(d).expanduser().resolve()) for d in (readonly_dirs or [])]
 
     @staticmethod
     def _resolve_root(root: str) -> Path:
@@ -122,8 +146,17 @@ class SandboxPolicy:
 
     # ---------- path validation ----------
 
-    def check_path(self, path: str) -> tuple[bool, str]:
-        """Return (ok, error_message). ok=True if path is inside the jail."""
+    def check_path(self, path: str, for_write: bool = False) -> tuple[bool, str]:
+        """Return (ok, error_message). ok=True if path is inside the jail.
+
+        ``for_write`` distinguishes read vs write operations. Paths under
+        ``readonly_dirs`` are allowed when ``for_write=False`` (read /
+        list / cd) but rejected when ``for_write=True`` (write_file /
+        edit_file). Existing read/write callers default to ``False`` —
+        write tools should pass ``True`` explicitly. Backward-compatible:
+        a caller that doesn't pass ``for_write`` keeps the old behavior
+        (treats every check as read-equivalent).
+        """
         if self.mode in ("off", "command_only"):
             return (True, "")
         if not path:
@@ -146,6 +179,16 @@ class SandboxPolicy:
         for allowed in self.allowed_dirs:
             if res_str == allowed or res_str.startswith(allowed + os.sep):
                 return (True, "")
+        # Read-only allowed dirs — pass for read, reject for write.
+        for ro in self.readonly_dirs:
+            if res_str == ro or res_str.startswith(ro + os.sep):
+                if for_write:
+                    return (False,
+                            f"Sandbox violation: '{path}' is in a read-only "
+                            f"directory ('{ro}'). Read OK; write blocked. "
+                            f"To modify it, request the operator to grant "
+                            f"the corresponding skill / workspace.")
+                return (True, "")
         # Compute a hint: what relative path the caller probably meant.
         # If they passed an absolute path that starts with '/' but a same-
         # named file would land under root, suggest the relative form.
@@ -163,9 +206,12 @@ class SandboxPolicy:
                 f"All file access must stay inside the agent's working directory "
                 f"or authorized workspaces.{hint}")
 
-    def safe_path(self, path: str) -> Path:
-        """Resolve a path relative to the sandbox root. Raises on escape."""
-        ok, err = self.check_path(path)
+    def safe_path(self, path: str, for_write: bool = False) -> Path:
+        """Resolve a path relative to the sandbox root. Raises on escape.
+
+        See ``check_path`` for the ``for_write`` flag's semantics.
+        """
+        ok, err = self.check_path(path, for_write=for_write)
         if not ok:
             raise SandboxViolation(err)
         p = Path(path).expanduser()
@@ -210,6 +256,12 @@ class SandboxPolicy:
                 if not inside:
                     for allowed in self.allowed_dirs:
                         if res_str == allowed or res_str.startswith(allowed + os.sep):
+                            inside = True
+                            break
+                # cd to read-only allowed dirs — fine, navigation only.
+                if not inside:
+                    for ro in self.readonly_dirs:
+                        if res_str == ro or res_str.startswith(ro + os.sep):
                             inside = True
                             break
                 if not inside:

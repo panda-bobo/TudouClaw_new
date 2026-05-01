@@ -160,3 +160,56 @@ async def memory_bulk_delete(
         mm.delete_fact(fid)
         deleted += 1
     return {"deleted": deleted, "skipped": skipped, "requested": len(req.ids)}
+
+
+# ── Dream — full-sweep memory maintenance ──────────────────────────
+# Inspired by gbrain's `dream` command. Runs on-demand (this endpoint)
+# OR on a daily cron (registered at app startup, see hub init). Reports
+# back what got cleaned so the user can audit.
+
+@router.post("/dream")
+async def memory_dream(
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Trigger a full-sweep memory maintenance pass.
+
+    Walks every agent, runs MemoryConsolidator(force=True), prunes
+    "never-accessed + low-confidence" L3 facts, and audits the shared
+    knowledge base for entries no fact ever cites.
+
+    Returns ``DreamReport.to_dict()``. The same report's markdown
+    rendering is available at ``GET /api/portal/memory/dream/last``.
+    """
+    from ...core.memory_dream import get_memory_dream
+    from ..deps.hub import get_hub
+    # No DI on the dream singleton — it lazily binds to the global
+    # MemoryManager. Hub injection just makes agent enumeration cleaner.
+    try:
+        hub = get_hub()
+    except Exception:
+        hub = None
+    dream = get_memory_dream()
+    if hub is not None and dream._hub is None:
+        dream._hub = hub
+    # llm_call=None for now; consolidator's similarity-merge step has a
+    # cheap deterministic fallback. P2 will wire the preprocessor model
+    # in here once it lands.
+    report = dream.dream_all(llm_call=None)
+    return report.to_dict()
+
+
+@router.get("/dream/last")
+async def memory_dream_last(
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Return the most recent dream report (or empty if never run)."""
+    from ...core.memory_dream import get_memory_dream
+    dream = get_memory_dream()
+    last = dream.last_report()
+    if last is None:
+        return {"available": False}
+    return {
+        "available": True,
+        "report": last.to_dict(),
+        "markdown": last.to_markdown(),
+    }

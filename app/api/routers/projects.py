@@ -482,7 +482,10 @@ async def send_project_message(
 
         respondents: list = []
         if hasattr(hub, "project_chat"):
-            respondents = hub.project_chat(project_id, content, target_agents) or []
+            respondents = hub.project_chat(
+                project_id, content, target_agents,
+                user_id=getattr(user, "user_id", "") or "",
+            ) or []
         elif hasattr(project, "post_message"):
             project.post_message(
                 sender="user",
@@ -541,6 +544,109 @@ async def project_abort(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/projects/{project_id}/wake")
+async def wake_project_agents(
+    project_id: str,
+    body: dict = Body(default={}),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Manually wake stuck agents in this project.
+
+    Useful when an agent hits the tool-call hard cap, an LLM call
+    times out, or the user aborted mid-turn — the agent goes idle
+    with unfinished tasks/milestones still owned, but nothing kicks
+    them back into action. This endpoint fires a system trigger msg
+    (via the unified dispatch) for either:
+
+      * one specific agent  — body: ``{"agent_id": "..."}``
+      * all members with pending tasks/milestones — body: ``{}``
+
+    Optional body field ``reason`` is appended to the trigger so the
+    agent knows why it's being woken.
+    """
+    try:
+        project = _get_project_or_404(hub, project_id)
+        engine = getattr(hub, "project_chat_engine", None)
+        if engine is None:
+            raise HTTPException(503, "project chat engine not initialized")
+        agent_id = (body.get("agent_id") or "").strip()
+        reason = (body.get("reason") or "").strip()
+        woke = engine.wake_agents(project, agent_id=agent_id, reason=reason)
+        try:
+            hub._save_projects()
+        except Exception:
+            pass
+        return {"ok": True, "woken": woke,
+                "scope": "agent" if agent_id else "all",
+                "target_agent_id": agent_id or None}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("wake_project_agents failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/projects/{project_id}/chat")
+async def clear_project_chat(
+    project_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Clear the project's chat — drops:
+
+      1. ``project.chat_history``  — what the UI displays.
+      2. For every member agent: their ``project:{project_id}`` bucket
+         in ``_messages_by_context`` — so the next LLM turn won't replay
+         this project's old messages either.
+
+    Solo / other-project / meeting buckets on each agent are NOT touched.
+    Tasks, milestones, deliverables, members are NOT touched (chat-only).
+    """
+    try:
+        project = _get_project_or_404(hub, project_id)
+        # 1. Drop UI-visible chat history
+        ui_cleared = len(project.chat_history or [])
+        project.chat_history = []
+        # 2. Drop per-agent project context bucket for every member.
+        #    Each agent's other contexts (solo / other projects / meetings)
+        #    are untouched — only this project's bucket is removed.
+        ctx_key = f"project:{project.id}"
+        agents_cleared = 0
+        agent_msgs_cleared = 0
+        for m in (project.members or []):
+            agent = hub.agents.get(getattr(m, "agent_id", "")) if hasattr(hub, "agents") else None
+            if agent is None:
+                continue
+            mbc = getattr(agent, "_messages_by_context", None)
+            if not isinstance(mbc, dict) or ctx_key not in mbc:
+                continue
+            agent_msgs_cleared += len(mbc.get(ctx_key) or [])
+            del mbc[ctx_key]
+            # If this context was active, fall back to solo so subsequent
+            # reads of agent.messages don't dangle on a removed bucket.
+            if getattr(agent, "_active_context_id", "") == ctx_key:
+                agent._switch_context("solo")
+            agents_cleared += 1
+        # 3. Persist
+        try:
+            hub._save_projects()
+            hub._save_agents()
+        except Exception as _se:
+            logger.debug("clear_project_chat: save failed: %s", _se)
+        return {
+            "ok": True,
+            "ui_messages_cleared": ui_cleared,
+            "agents_cleared": agents_cleared,
+            "agent_messages_cleared": agent_msgs_cleared,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("clear_project_chat failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/projects/{project_id}/chat")
 async def get_project_chat(
     project_id: str,
@@ -548,7 +654,13 @@ async def get_project_chat(
     hub=Depends(get_hub),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Get project chat history."""
+    """Get project chat history.
+
+    Also includes ``streaming`` array — for each member that is
+    currently mid-turn, surface their in-progress reply text so the
+    frontend can render a "typing" preview (option A from the
+    2026-04-28 streaming-UX discussion). Polling-based, no SSE.
+    """
     try:
         project = _get_project_or_404(hub, project_id)
         msgs = project.get_chat_history(limit=limit) if hasattr(project, "get_chat_history") else []
@@ -565,7 +677,32 @@ async def get_project_chat(
             _enrich_meeting_messages_with_refs(hub, msg_dicts)
         except Exception as _e:
             logger.debug("project chat ref enrichment failed: %s", _e)
-        return {"messages": msg_dicts}
+        # Streaming preview: for each project member whose agent.chat
+        # is mid-turn, expose the in-progress text buffer + an updated_at
+        # so the frontend can render a typing bubble that grows.
+        streaming: list[dict] = []
+        try:
+            from ...agent import AgentStatus as _AS
+            for m in (project.members or []):
+                a = hub.agents.get(m.agent_id) if hasattr(hub, "agents") else None
+                if a is None:
+                    continue
+                buf = getattr(a, "_streaming_buffer", "") or ""
+                if not buf:
+                    continue
+                # Only surface when the agent is actually busy — a
+                # leftover buffer from a finished turn shouldn't show.
+                if getattr(a, "status", None) != _AS.BUSY:
+                    continue
+                streaming.append({
+                    "agent_id": a.id,
+                    "sender_name": f"{a.role}-{a.name}" if a.role else a.name,
+                    "content": buf,
+                    "char_count": len(buf),
+                })
+        except Exception as _se:
+            logger.debug("project streaming-preview build failed: %s", _se)
+        return {"messages": msg_dicts, "streaming": streaming}
     except HTTPException:
         raise
     except Exception as e:

@@ -28,10 +28,21 @@ DEFAULT_DATA_DIR = _os.path.join(USER_HOME, ".tudou_claw")
 # default, which floods logs with
 #   Batches: 100%|████| 1/1 [00:00<00:00, 89.93it/s]
 # one line per embedding batch. Users reported it drowns real signal.
-# We monkey-patch tqdm.__init__ to force disable=True globally so every
-# tqdm instance created after this point (including the ones inside
-# sentence-transformers) is silent.
-# Escape hatch: TUDOU_TQDM=1 keeps tqdm alive (debugging).
+#
+# Defense in depth — TWO layers, both cheap, because either alone has
+# escape hatches:
+#
+#   1. monkey-patch tqdm.__init__(default disable=True). Catches anyone
+#      that lets disable default. Loses to callers that pass
+#      `disable=False` explicitly — sentence-transformers IS one, since
+#      it does `trange(..., disable=not show_progress_bar)`.
+#
+#   2. force sentence-transformers' logger level to WARNING. Its
+#      `encode()` default is "show progress iff our logger is INFO/DEBUG"
+#      (sentence_transformers/SentenceTransformer.py: encode()), so
+#      WARNING+ silences it without touching tqdm.
+#
+# Escape hatch: TUDOU_TQDM=1 keeps everything alive (debugging).
 if _os.environ.get("TUDOU_TQDM", "0") != "1":
     try:
         from functools import partialmethod as _pm
@@ -59,5 +70,18 @@ if _os.environ.get("TUDOU_TQDM", "0") != "1":
                 _cls.__init__ = _pm(_cls.__init__, disable=True)
             except Exception:
                 pass
+    except Exception:
+        pass
+    # Layer 2 — sentence-transformers checks ITS OWN logger level for the
+    # show_progress_bar default. WARNING silences the default; we don't
+    # touch its other log lines (model load info etc. — those stay).
+    try:
+        import logging as _logging
+        _logging.getLogger("sentence_transformers").setLevel(_logging.WARNING)
+        # Also the parent `sentence_transformers.SentenceTransformer`
+        # logger that the encode() method uses.
+        _logging.getLogger(
+            "sentence_transformers.SentenceTransformer"
+        ).setLevel(_logging.WARNING)
     except Exception:
         pass

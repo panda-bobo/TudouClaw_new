@@ -254,8 +254,10 @@ class ProjectManager(ManagerBase):
         else:
             shared_dir = project_dir  # fallback if no project_id
 
-        # Set shared_workspace so sandbox allows access AND prompt tells agent
-        agent.shared_workspace = shared_dir
+        # ── DEPRECATED (2026-04-29) ── no longer mutate agent.shared_workspace.
+        # Active-context resolution (Agent.get_active_shared_workspace) gives
+        # each turn the right project's dir without persisting a single
+        # value on the agent. See agent.py:get_active_shared_workspace.
         # Set project identity so prompt context is aware
         if project_id:
             agent.project_id = project_id
@@ -286,14 +288,15 @@ class ProjectManager(ManagerBase):
         regardless of what the project's working_directory field says.
         """
         synced = 0
-        from ..agent import Agent
-
         for proj in self._hub.projects.values():
-            expected_shared = Agent.get_shared_workspace_path(proj.id)
             for member in proj.members:
                 agent = self.agents.get(member.agent_id)
-                if agent and (agent.shared_workspace != expected_shared
-                              or agent.project_id != proj.id):
+                # Shared workspace flows from active context now. Only
+                # re-sync when project identity is stale on the agent.
+                if agent and (
+                    getattr(agent, "project_id", "") != proj.id
+                    or getattr(agent, "context_type", "") != "project"
+                ):
                     self._sync_agent_to_project_dir(
                         member.agent_id, proj.working_directory or "",
                         project_id=proj.id, project_name=proj.name)

@@ -168,6 +168,21 @@ def _spawn_stdio(command: str, env_overrides: dict[str, str]) -> tuple[subproces
     if not cmd:
         return None, "empty command"
 
+    # ── Decrypt sensitive env values right before Popen ──
+    # By the time env_overrides reaches us it may contain "enc:v1:..."
+    # ciphertext for fields like SMTP_PASSWORD. The MCP child process
+    # needs plaintext to actually authenticate, so we decrypt here.
+    # Plaintext lives in:
+    #   * this stack frame (briefly)
+    #   * Popen's env kwarg (passed to OS exec)
+    #   * the child process's environment
+    # …and never gets logged or written back to disk.
+    try:
+        from .secrets import decrypt_env_dict
+        env_overrides = decrypt_env_dict(env_overrides or {})
+    except Exception:
+        pass  # if decrypt module fails, pass through (may be plaintext legacy)
+
     # ALL path/env logic comes from runtime_paths. One source of truth.
     kw = subprocess_launch_kwargs(extra_env=env_overrides)
     try:

@@ -64,10 +64,13 @@ def _tool_team_create(name: str, task: str, role: str = "coder",
             from ..agent import create_agent as _create_agent_fn
             try:
                 # Build an ephemeral worker that inherits parent's config.
-                # Resolve working directory: explicit > parent's
-                # shared_workspace > parent's working_dir. This ensures
-                # child agents in a project share the same directory.
-                _wd = working_dir or parent.shared_workspace or parent.working_dir
+                # Resolve working directory: explicit > parent's active
+                # shared workspace (project/meeting) > parent's working_dir.
+                _parent_active_sw = (
+                    parent.get_active_shared_workspace()
+                    if hasattr(parent, "get_active_shared_workspace") else ""
+                )
+                _wd = working_dir or _parent_active_sw or parent.working_dir
                 worker = _create_agent_fn(
                     name=f"__bg_{worker_label}_{worker_id}",
                     role=role,
@@ -77,8 +80,16 @@ def _tool_team_create(name: str, task: str, role: str = "coder",
                     node_id=parent.node_id,
                     parent_id=parent.id,
                 )
-                # Inherit project context so child knows where to write files.
-                worker.shared_workspace = parent.shared_workspace
+                # Inherit active context so child resolves the same shared
+                # workspace via project/meeting registry.
+                try:
+                    worker._active_context_id = getattr(
+                        parent, "_active_context_id", "") or ""
+                except Exception:
+                    pass
+                # Snapshot of legacy field for boot/sandbox path that still
+                # reads it (kept until full deprecation lands).
+                worker.shared_workspace = _parent_active_sw
                 worker.project_id = parent.project_id
                 worker.project_name = parent.project_name
                 # Don't register it in the hub — it's transient.
@@ -578,6 +589,48 @@ def _tool_task_update(action: str, task_id: str = "", title: str = "",
                 return "Error: 'title' is required for create action."
             rec = (recurrence or "once").lower()
             agent_id = caller_id or (agent.id if agent else "")
+
+            # ── Project-scope routing (2026-04-28) ──
+            # Inside a project chat, an agent that calls `task_update` MUST
+            # land the task on `project.tasks` (the ProjectTask list shown
+            # in the right-side panel + driven by handle_task_assignment),
+            # NOT on `agent.tasks` (per-agent personal todo).
+            #
+            # Without this, the LLM (which doesn't distinguish the two
+            # buckets) creates per-agent tasks that are invisible to the
+            # project, and the right panel stays empty even after every
+            # member appears to call `task_update ✓`.
+            try:
+                from ..project_context import get_project_context
+                _project_id = get_project_context()
+            except Exception:
+                _project_id = ""
+            if _project_id:
+                proj = hub.projects.get(_project_id) if hasattr(hub, "projects") else None
+                if proj is not None:
+                    try:
+                        ptask = proj.add_task(
+                            title=title,
+                            description=description or "",
+                            assigned_to=caller_id or "",
+                            created_by=caller_id or "system",
+                            priority=0,
+                        )
+                        try:
+                            if hasattr(hub, "_save_projects"):
+                                hub._save_projects()
+                        except Exception:
+                            pass
+                        return (
+                            f"ProjectTask created: {ptask.id} — {title} "
+                            f"[project={proj.id}, assigned={caller_id or '-'}]"
+                        )
+                    except Exception as _pe:
+                        logger.warning(
+                            "Project-task routing failed for project %s: %s. "
+                            "Falling through to agent task path.",
+                            _project_id, _pe,
+                        )
 
             # ── Meeting-scope routing ──
             # If this tool is being called from within a meeting reply loop,

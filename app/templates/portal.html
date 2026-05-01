@@ -196,6 +196,102 @@ body {
   flex-direction: column;
   height: 100vh;
   z-index: 50;
+  /* position:relative so absolutely-positioned children (like
+     .sidebar-toggle) anchor to the sidebar's box, not the viewport.
+     Without this, ``right: -14px`` placed the chevron OFF-screen. */
+  position: relative;
+  transition: width 0.2s ease, min-width 0.2s ease;
+}
+/* ---- Sidebar collapse (icon-only mode) ----
+   Toggled via the chevron button in the header. Hides every text
+   span, narrows the panel to 64px, centers icons. Hover state still
+   shows the badge counts. ``title`` attributes on nav items provide
+   tooltips when collapsed. */
+.sidebar.collapsed {
+  width: 64px;
+  min-width: 64px;
+}
+.sidebar.collapsed .sidebar-header {
+  padding: 18px 8px 14px;
+}
+.sidebar.collapsed .sidebar-header h1 {
+  justify-content: center;
+  gap: 0;
+  font-size: 0;
+}
+.sidebar.collapsed .sidebar-header h1 > span:first-child {
+  font-size: 16px; /* keep the logo box visible */
+}
+.sidebar.collapsed .sidebar-header .subtitle,
+.sidebar.collapsed .sidebar-footer-user,
+.sidebar.collapsed #footer-username,
+.sidebar.collapsed #footer-role {
+  display: none;
+}
+.sidebar.collapsed .nav { padding: 12px 4px; }
+.sidebar.collapsed .nav-item {
+  justify-content: center;
+  gap: 0;
+  padding: 10px 8px;
+  position: relative;
+}
+.sidebar.collapsed .nav-item > span:not(.icon):not(.badge) {
+  display: none;
+}
+.sidebar.collapsed .nav-item .badge {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  margin-left: 0;
+  padding: 1px 5px;
+  font-size: 9px;
+  min-width: 14px;
+  text-align: center;
+}
+.sidebar.collapsed .sidebar-footer { padding: 10px 4px; }
+.sidebar.collapsed #sidebar-footer {
+  justify-content: center;
+}
+/* Toggle button — vertically centered on the sidebar's right edge.
+   2026-04-30: moved from top-right corner (top:22px, 20×20) to mid-right
+   (top:50%, 28×28) — original was hard to spot. Bigger, higher contrast,
+   floats half-outside the sidebar so it's reachable from the main panel. */
+.sidebar-toggle {
+  position: absolute;
+  top: 50%;
+  right: -14px;
+  transform: translateY(-50%);
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--primary);
+  border: 2px solid var(--bg);
+  color: #fff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 51;
+  transition: all 0.15s;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.18);
+  opacity: 0.6;  /* dim by default; brighten on sidebar/btn hover */
+}
+.sidebar:hover .sidebar-toggle {
+  opacity: 1;
+}
+.sidebar-toggle:hover {
+  opacity: 1;
+  background: var(--primary);
+  filter: brightness(1.15);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+}
+.sidebar-toggle .material-symbols-outlined {
+  font-size: 18px;
+  font-variation-settings: 'wght' 600;
+  color: #fff;
+}
+.sidebar.collapsed .sidebar-toggle {
+  transform: translateY(-50%) rotate(180deg);
 }
 .sidebar-header {
   padding: 24px 16px 20px;
@@ -728,6 +824,45 @@ body {
   color: var(--primary);
   border-color: var(--primary);
 }
+/* Delete-this-bubble x button — red on hover. */
+.chat-action-btn.chat-action-delete {
+  margin-left: auto;
+}
+.chat-action-btn.chat-action-delete:hover {
+  background: rgba(239, 68, 68, 0.12);
+  color: #ef4444;
+  border-color: #ef4444;
+}
+/* User bubble doesn't have an action bar — float a tiny x at the
+   top-right of the bubble itself. Hidden until hover, like the
+   assistant action bar. */
+.chat-msg.user {
+  position: relative;
+}
+.chat-msg-del-user {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  background: rgba(0, 0, 0, 0.15);
+  border: none;
+  color: #fff;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.2s, background 0.2s;
+}
+.chat-msg.user:hover .chat-msg-del-user {
+  opacity: 1;
+}
+.chat-msg-del-user:hover {
+  background: #ef4444;
+}
 .chat-progress-bar {
   align-self: flex-start;
   max-width: 80%;
@@ -867,11 +1002,14 @@ body {
   padding: 10px 12px;
   font-family: inherit;
   font-size: 14px;
-  resize: none;
+  /* resize: vertical lets users drag the bottom-right corner to enlarge
+     the input when pasting/composing very long prompts. _autoGrowChatInput
+     auto-fits up to max-height; user drag overrides freely above that. */
+  resize: vertical;
   outline: none;
   min-height: 42px;
-  max-height: 120px;
-  transition: all 0.2s;
+  max-height: 320px;   /* was 120px — ~14 lines of 14pt text fit without scroll */
+  transition: border-color 0.2s, background 0.2s;
 }
 .chat-input-area textarea::placeholder { color: var(--text3); }
 .chat-input-area textarea:focus {
@@ -1140,7 +1278,10 @@ body {
 <body>
 
 <!-- ============ Sidebar ============ -->
-<div class="sidebar">
+<div class="sidebar" id="sidebar">
+  <button class="sidebar-toggle" id="sidebar-toggle-btn" onclick="toggleSidebar()" title="收起 / 展开侧边栏" type="button">
+    <span class="material-symbols-outlined">chevron_left</span>
+  </button>
   <div class="sidebar-header">
     <h1 onclick="showView('dashboard',null)">
       <span style="width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,var(--primary),var(--primary-container));display:inline-flex;align-items:center;justify-content:center;flex-shrink:0">
@@ -1163,40 +1304,41 @@ body {
     </div>
 
     <!-- Primary navigation: 7 high-frequency entry points -->
+    <!-- title attributes show as tooltips when sidebar is collapsed -->
     <div class="nav-section">
-      <div class="nav-item active" data-view="dashboard" onclick="showView('dashboard',this)">
+      <div class="nav-item active" data-view="dashboard" onclick="showView('dashboard',this)" title="工作台">
         <span class="icon">space_dashboard</span> <span data-i18n="nav.dashboard">工作台</span>
         <span class="badge notification hidden" id="dashboard-badge">0</span>
       </div>
-      <div class="nav-item" data-view="projects" onclick="showView('projects',this)">
+      <div class="nav-item" data-view="projects" onclick="showView('projects',this)" title="项目与任务">
         <span class="icon">folder_special</span> <span data-i18n="nav.projects">项目与任务</span>
         <span class="badge" id="project-count">0</span>
       </div>
-      <div class="nav-item" data-view="orchestration" onclick="showView('orchestration',this)">
+      <div class="nav-item" data-view="orchestration" onclick="showView('orchestration',this)" title="编排">
         <span class="icon">hub</span> <span data-i18n="nav.orchestration">编排</span>
       </div>
-      <div class="nav-item" data-view="agents-list" onclick="showView('agents-list',this)">
+      <div class="nav-item" data-view="agents-list" onclick="showView('agents-list',this)" title="智能体">
         <span class="icon">smart_toy</span> <span data-i18n="nav.agents">智能体</span>
         <span class="badge" id="agent-count-badge">0</span>
       </div>
-      <div class="nav-item" data-view="knowledge-memory" onclick="showView('knowledge-memory',this)">
+      <div class="nav-item" data-view="knowledge-memory" onclick="showView('knowledge-memory',this)" title="知识与记忆">
         <span class="icon">psychology_alt</span> <span data-i18n="nav.knowledge">知识与记忆</span>
       </div>
-      <div class="nav-item" data-view="roles-skills" onclick="showView('roles-skills',this)">
+      <div class="nav-item" data-view="roles-skills" onclick="showView('roles-skills',this)" title="角色与技能">
         <span class="icon">workspace_premium</span> <span data-i18n="nav.rolesSkills">角色与技能</span>
       </div>
-      <div class="nav-item" data-view="tools-approvals" onclick="showView('tools-approvals',this)">
+      <div class="nav-item" data-view="tools-approvals" onclick="showView('tools-approvals',this)" title="工具与审批">
         <span class="icon">build_circle</span> <span data-i18n="nav.toolsApprovals">工具与审批</span>
         <span class="badge notification hidden" id="approval-badge">0</span>
       </div>
-      <div class="nav-item" data-view="integrations" onclick="showView('integrations',this)">
+      <div class="nav-item" data-view="integrations" onclick="showView('integrations',this)" title="集成与通知">
         <span class="icon">hub</span> <span data-i18n="nav.integrations">集成与通知</span>
       </div>
     </div>
 
     <!-- Bottom section: low-frequency admin items grouped -->
     <div class="nav-section" style="margin-top:auto">
-      <div class="nav-item" data-view="settings-hub" onclick="showView('settings-hub',this)">
+      <div class="nav-item" data-view="settings-hub" onclick="showView('settings-hub',this)" title="系统设置">
         <span class="icon">settings</span> <span data-i18n="nav.settings">系统设置</span>
       </div>
     </div>

@@ -549,9 +549,12 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "mcp_call",
             "description": (
-                "Invoke a tool on an external MCP server (email, slack, github, postgres, browser, custom) bound to this agent.\n"
-                "Use when: sending emails/slack/IM, interacting with third-party APIs through an MCP bridge, calling any capability that was added via MCP.\n"
-                "Not for: builtin tools above (call them directly). Not for discovering MCPs — pass list_mcps=true first to enumerate what's bound, then call with mcp_id + tool.\n"
+                "🎯 作用对象: **外部服务**(真实邮箱、Slack 工作区、GitHub、数据库、浏览器、第三方 API 等)。"
+                "**绝对不是**同进程的 agent 同事 —— 想给小刚/小专这种系统内 agent 派活,用 send_message / @ 提及,不要走这里。\n"
+                "\n"
+                "Invoke a tool on an external MCP server bound to this agent.\n"
+                "Use when: sending emails to **real email addresses** / posting to Slack workspaces / hitting third-party APIs / driving a browser / etc.\n"
+                "Not for: builtin tools above (call them directly). Not for talking to teammates inside this system. Not for discovering MCPs — pass list_mcps=true first to enumerate what's bound, then call with mcp_id + tool.\n"
                 "Output: raw MCP tool response (JSON or text depending on the server).\n"
                 "GOTCHA: `arguments` must be a JSON object — not a string. If you don't know what MCPs are available, call with list_mcps=true BEFORE guessing mcp_id. Errors include the MCP server name — check it's bound."
             ),
@@ -613,9 +616,12 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "send_message",
             "description": (
-                "Send a structured message to another agent's inbox. "
+                "🎯 作用对象: **同进程内的另一个 agent**(系统内的 AI 同事,如小刚/小专),**不是**真人也**没有**邮箱。\n"
+                "\n"
+                "Send a structured message to another agent's inbox (in-process, async).\n"
                 "Use envelope (summary/key_fields/artifact_refs) over long content. "
-                "For blocking handoffs use handoff_request; for scheduled tasks use task_update."
+                "For blocking handoffs use handoff_request; for scheduled tasks use task_update.\n"
+                "Not for: external email — use mcp_call for that. Not for posting to project group chat — write @ in your reply text instead."
             ),
             "parameters": {
                 "type": "object",
@@ -655,6 +661,8 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "handoff_request",
             "description": (
+                "🎯 作用对象: **同进程内的另一个 agent**(系统内的 AI 同事),阻塞等结果。**不是**外部邮箱/真人。\n"
+                "\n"
                 "BLOCKING task transfer with 3-state handshake (pending → acknowledged → completed). "
                 "Caller blocks until receiver returns or 600s timeout. "
                 "For FYI broadcasts use send_message; for parallel independent work use team_create. "
@@ -693,6 +701,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "task_update",
             "description": (
+                "🎯 作用对象: **当前 project 的任务列表**(项目右栏 TASKS 显示的那些);"
+                "在 solo / meeting context 下作用于 agent 个人任务。"
+                "**不是**给队友派活的工具(派活用 @ 提及 / send_message / "
+                "create_milestone with responsible_agent_id)。\n"
+                "\n"
                 "Create/update/complete/list shared task queue entries; "
                 "registers recurring or delayed tasks with the scheduler. "
                 "recurrence_spec: daily='HH:MM', weekly='DOW HH:MM', monthly='D HH:MM'. "
@@ -754,6 +767,8 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "check_inbox",
             "description": (
+                "🎯 作用对象: **你自己**的系统内 inbox(其他 agent 通过 send_message / reply_message 发给你的消息)。**不是**真实邮件 inbox。\n"
+                "\n"
                 "Read your inbox — messages sent to you by other agents via send_message / reply_message.\n"
                 "Use when: the plan calls for reviewing incoming handoffs, or you suspect teammates have pinged you since last turn.\n"
                 "Not for: sending new messages (use send_message / reply_message). Not for ACKing (use ack_message).\n"
@@ -2116,17 +2131,43 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "create_milestone",
             "description": (
-                "Create a project milestone (a dated checkpoint that typically bundles multiple deliverables).\n"
-                "Use when: the user says 'set a milestone', 'we want to ship by date X', 'major checkpoint'.\n"
+                "Create a project milestone AND optionally delegate it to another agent.\n"
+                "Use when: structuring a project into checkpoints; or assigning a chunk of work to a specific teammate.\n"
                 "Not for: individual tasks (use task_update). Not for goals (use create_goal — milestones are checkpoints, goals are metrics).\n"
-                "Output: milestone id + name + responsible agent + due date + project id.\n"
-                "GOTCHA: due_date accepts 'YYYY-MM-DD' or natural form — prefer ISO for unambiguous parsing. responsible_agent_id defaults to the calling agent — override when delegating."
+                "\n"
+                "⭐ DELEGATION (the main reason to set responsible_agent_id):\n"
+                "  - Pass another agent's id (NOT your own) → the system AUTO-FIRES a chat\n"
+                "    message into the project group: '@<that agent> 你被指派负责里程碑「X」...',\n"
+                "    AND that agent immediately starts working on it (no need for you to also\n"
+                "    call send_message — that would be a duplicate).\n"
+                "  - Get teammate ids from the team list at the top of your prompt:\n"
+                "    each line shows  `<role>-<name> [id=<agent_id>]: <responsibility>` — copy the\n"
+                "    id= value into responsible_agent_id.\n"
+                "  - Omit it (or pass your own id) → the milestone is yours; nobody else triggered.\n"
+                "\n"
+                "Output: milestone id + name + responsible agent + due date + project id; if delegated, also `assigned to <name>`.\n"
+                "GOTCHA: due_date accepts 'YYYY-MM-DD' or natural form — prefer ISO for unambiguous parsing."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "Milestone name"},
-                    "responsible_agent_id": {"type": "string", "description": "Optional responsible agent id (default: calling agent)"},
+                    "responsible_agent_id": {
+                        "type": "string",
+                        "description": (
+                            "Agent id of the responsible teammate. Pass ANOTHER agent's id "
+                            "to delegate (auto-fires a chat message + triggers them to start "
+                            "work). Default = caller's own id (self-assignment, no trigger). "
+                            "Look up ids in the [项目群聊] team list."
+                        ),
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": (
+                            "Optional one-paragraph context shown to the responsible agent in the "
+                            "delegation message. Helps them understand scope. Skipped if omitted."
+                        ),
+                    },
                     "due_date": {"type": "string", "description": "Due date in YYYY-MM-DD or natural form"},
                     "project_id": {"type": "string", "description": "Project id (optional; inferred from chat context)"},
                 },
@@ -2137,11 +2178,65 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "update_milestone_responsibility",
+            "description": (
+                "Reassign an existing milestone to a different agent AND auto-notify them.\n"
+                "Use when: redistributing work after the initial create_milestone — e.g. user asks "
+                "'把模块④ 从小刚移给小专,小专更熟悉行业需求'.\n"
+                "Not for: creating new milestones (use create_milestone). Not for status updates "
+                "(use update_milestone_status).\n"
+                "\n"
+                "⭐ Effect:\n"
+                "  - Updates milestone.responsible_agent_id to the new owner.\n"
+                "  - AUTO-FIRES a chat message to the new owner: '@<new owner> 你接手了里程碑「X」...',\n"
+                "    AND triggers them to start working on it (same delegation path as create_milestone\n"
+                "    with responsible_agent_id of another agent).\n"
+                "  - Also posts a courtesy notice to the old owner so they know they no longer own it\n"
+                "    (skip via notify_old=false if that adds noise).\n"
+                "\n"
+                "Get teammate ids from the [项目群聊] team list at the top of your prompt: each line shows\n"
+                "`<role>-<name> [id=<agent_id>]: <responsibility>` — copy the id= value into "
+                "new_responsible_agent_id."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "milestone_id": {"type": "string", "description": "The milestone id to reassign"},
+                    "new_responsible_agent_id": {
+                        "type": "string",
+                        "description": (
+                            "Agent id of the NEW responsible owner (look up in the team list)."
+                        ),
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": (
+                            "One-line reason for the reassignment (shown in both the new-owner trigger "
+                            "message and the old-owner release notice). Helps the recipients understand "
+                            "context. Optional but recommended."
+                        ),
+                    },
+                    "notify_old": {
+                        "type": "boolean",
+                        "description": (
+                            "Whether to send a courtesy notice to the previous responsible. "
+                            "Default true. Set false when self-reassigning or when noise is unwanted."
+                        ),
+                    },
+                    "project_id": {"type": "string", "description": "Project id (optional; inferred from chat context)"},
+                },
+                "required": ["milestone_id", "new_responsible_agent_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "update_milestone_status",
             "description": (
                 "Update a milestone's status or attach evidence of completion. Typical transitions: pending → in_progress → done.\n"
                 "Use when: you or your team completed work toward a milestone and want to record progress / evidence.\n"
-                "Not for: creating milestones (use create_milestone). Not for admin confirm/reject — that is a separate endpoint.\n"
+                "Not for: creating milestones (use create_milestone). Not for reassigning ownership (use update_milestone_responsibility). Not for admin confirm/reject — that is a separate endpoint.\n"
                 "Output: milestone id + new status + optional evidence length.\n"
                 "GOTCHA: attach `evidence` when flipping to done — the admin reviewer uses it to verify. Empty status + empty evidence returns an error ('provide at least one')."
             ),
@@ -2339,6 +2434,7 @@ from .tools_split.project import (  # noqa: E402,F401
     _tool_create_goal,
     _tool_update_goal_progress,
     _tool_create_milestone,
+    _tool_update_milestone_responsibility,
     _tool_update_milestone_status,
     _tool_propose_decomposition,
 )
@@ -2446,6 +2542,7 @@ _TOOL_FUNCS: dict[str, callable] = {
     "create_goal": _tool_create_goal,
     "update_goal_progress": _tool_update_goal_progress,
     "create_milestone": _tool_create_milestone,
+    "update_milestone_responsibility": _tool_update_milestone_responsibility,
     "update_milestone_status": _tool_update_milestone_status,
     # Long-task subsystem (app/long_task) — propose decomposition draft
     # for user confirmation; does NOT immediately create sub-tasks.

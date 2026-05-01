@@ -112,6 +112,73 @@ async def get_meeting(
 # Meeting messages
 # ---------------------------------------------------------------------------
 
+@router.delete("/meetings/{meeting_id}/messages")
+async def clear_meeting_messages(
+    meeting_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Clear the meeting's chat — drops:
+
+      1. ``meeting.messages``  — what the UI displays.
+      2. For every participant agent: their ``meeting:{meeting_id}``
+         bucket in ``_messages_by_context`` — so the next LLM turn
+         won't replay this meeting's old messages either.
+
+    Solo / project / other-meeting buckets on each agent are NOT
+    touched. Participants, files, assignments are NOT touched.
+    """
+    try:
+        reg = getattr(hub, "meeting_registry", None)
+        if reg is None:
+            raise HTTPException(503, "meeting registry not initialized")
+        m = reg.get(meeting_id)
+        if not m:
+            raise HTTPException(404, "Meeting not found")
+        ui_cleared = len(m.messages or [])
+        m.messages = []
+        ctx_key = f"meeting:{m.id}"
+        agents_cleared = 0
+        agent_msgs_cleared = 0
+        # `participants` is a list of agent ids (or dicts in some legacy
+        # paths). Normalize to ids.
+        for p in (getattr(m, "participants", []) or []):
+            aid = p if isinstance(p, str) else (
+                getattr(p, "agent_id", "") or
+                (p.get("agent_id", "") if isinstance(p, dict) else "")
+            )
+            if not aid:
+                continue
+            agent = hub.agents.get(aid) if hasattr(hub, "agents") else None
+            if agent is None:
+                continue
+            mbc = getattr(agent, "_messages_by_context", None)
+            if not isinstance(mbc, dict) or ctx_key not in mbc:
+                continue
+            agent_msgs_cleared += len(mbc.get(ctx_key) or [])
+            del mbc[ctx_key]
+            if getattr(agent, "_active_context_id", "") == ctx_key:
+                agent._switch_context("solo")
+            agents_cleared += 1
+        try:
+            reg.save()
+            if hasattr(hub, "_save_agents"):
+                hub._save_agents()
+        except Exception as _se:
+            logger.debug("clear_meeting_messages: save failed: %s", _se)
+        return {
+            "ok": True,
+            "ui_messages_cleared": ui_cleared,
+            "agents_cleared": agents_cleared,
+            "agent_messages_cleared": agent_msgs_cleared,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("clear_meeting_messages failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/meetings/{meeting_id}/messages")
 async def get_meeting_messages(
     meeting_id: str,

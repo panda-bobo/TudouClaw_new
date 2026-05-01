@@ -321,6 +321,24 @@ def _is_meta_promise(content: str) -> bool:
     return False
 
 
+# ──────────────────────────────────────────────────────────────────
+# DEAD CODE TOMBSTONE — AgentExecutionMixin
+# ──────────────────────────────────────────────────────────────────
+#
+# This mixin was never inherited by Agent in production. All chat-loop
+# / tool-execution methods are implemented directly on Agent in
+# app/agent.py. The class definition below is preserved as a
+# triple-quoted string for archaeology — nothing executes.
+#
+# Module-level helpers ABOVE this point (_stream_chat_to_response,
+# _text_similarity, _is_meta_promise) are STILL LIVE — they're
+# imported by agent.py via ``from .agent_execution import (...)``
+# and must not be touched.
+#
+# To remove permanently in a future cleanup pass:
+#   delete from this comment block to EOF.
+
+_DEAD_CODE_PRESERVED_FOR_ARCHAEOLOGY = '''
 class AgentExecutionMixin:
     """Mixin providing chat loop, tool execution, delegation, and plan management."""
 
@@ -613,8 +631,15 @@ class AgentExecutionMixin:
         #      admin-configured cross-agent sharing outside project/meeting)
         #   4. agent's own skills subdirectory (stays inside scope #1)
         allowed_dirs = []
-        if self.shared_workspace:
-            allowed_dirs.append(self.shared_workspace)
+        # Resolve shared workspace from current active context (project/meeting),
+        # not from the deprecated self.shared_workspace field. Falls back to ""
+        # in solo chat — solo chat must NOT cross into project dirs.
+        _active_sw = (
+            self.get_active_shared_workspace()
+            if hasattr(self, "get_active_shared_workspace") else ""
+        )
+        if _active_sw:
+            allowed_dirs.append(_active_sw)
         # Admin-granted access to other agents' workspaces.
         from . import DEFAULT_DATA_DIR as _DEFAULT_DD2
         data_dir = _os.environ.get("TUDOU_CLAW_DATA_DIR") or _DEFAULT_DD2
@@ -2653,20 +2678,36 @@ class AgentExecutionMixin:
         # Create or use provided child agent
         if child_agent is None:
             from .agent import Agent
+            # Snapshot of parent's currently active shared workspace, so the
+            # child collaborates in the same project/meeting scope. The
+            # legacy shared_workspace field is set for back-compat, but the
+            # authoritative resolution is via _active_context_id below.
+            _parent_sw_snap = (
+                self.get_active_shared_workspace()
+                if hasattr(self, "get_active_shared_workspace") else ""
+            )
             child_agent = Agent(
                 name=f"{self.name}_child_{uuid.uuid4().hex[:6]}",
                 role=self.role,
                 model=self.model,
                 provider=self.provider,
-                # Inherit working directory and shared workspace
+                # Inherit working directory; shared workspace flows from
+                # active context, not the deprecated field.
                 working_dir=self.working_dir,
-                shared_workspace=self.shared_workspace,
+                shared_workspace=_parent_sw_snap,
                 system_prompt=self.system_prompt,
                 profile=self.profile.__class__.from_dict(self.profile.to_dict()),
                 node_id=self.node_id,
                 parent_id=self.id,  # Track parent relationship
                 authorized_workspaces=list(self.authorized_workspaces),
             )
+            # Propagate active context so child resolves its own shared
+            # workspace through the same project/meeting registry.
+            try:
+                child_agent._active_context_id = getattr(
+                    self, "_active_context_id", "") or ""
+            except Exception:
+                pass
 
         # Set child's depth to parent's depth + 1
         child_agent._delegate_depth = self._delegate_depth + 1
@@ -2854,13 +2895,17 @@ class AgentExecutionMixin:
 
                 # Create isolated sub-agent
                 from .agent import Agent
+                _parent_sw_snap2 = (
+                    self.get_active_shared_workspace()
+                    if hasattr(self, "get_active_shared_workspace") else ""
+                )
                 sub_agent = Agent(
                     name=f"{self.name}_parallel_{agent_id}",
                     role=self.role,
                     model=self.model,
                     provider=self.provider,
                     working_dir=self.working_dir,
-                    shared_workspace=self.shared_workspace,
+                    shared_workspace=_parent_sw_snap2,
                     system_prompt=self.system_prompt,
                     profile=self.profile.__class__.from_dict(self.profile.to_dict()),
                     node_id=self.node_id,
@@ -2872,6 +2917,11 @@ class AgentExecutionMixin:
                 sub_agent._delegate_depth = self._delegate_depth + 1
                 sub_agent._max_delegate_depth = self._max_delegate_depth
                 sub_agent._cancellation_event = self._cancellation_event
+                try:
+                    sub_agent._active_context_id = getattr(
+                        self, "_active_context_id", "") or ""
+                except Exception:
+                    pass
 
                 # Track as active child
                 with self._active_children_lock:
@@ -3252,3 +3302,5 @@ class AgentExecutionMixin:
                 })
         except Exception as e:
             logger.debug("Experience add skipped: %s", e)
+
+'''

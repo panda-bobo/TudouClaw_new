@@ -1401,23 +1401,49 @@ class WebSession:
 class AuditEntry:
     timestamp: float = field(default_factory=time.time)
     action: str = ""
-    actor: str = ""
+    actor: str = ""              # display name
     role: str = ""
-    target: str = ""
-    detail: str = ""
+    target: str = ""             # tool name / resource name
+    detail: str = ""             # result preview / human-readable summary
     ip_address: str = ""
     success: bool = True
+    # ── Structured forensic fields (2026-04-29) ─────────────────────
+    # Added so we can answer "which agent ran what bash command in
+    # which project at what time and what came back" — the previous
+    # truncated `detail` lost the input arguments entirely (smoking
+    # gun: agent self-sent email via smtplib, the audit only showed
+    # "SUCCESS: Email sent successfully [exit code: 0]" with NO trace
+    # of the actual SMTP command that ran).
+    agent_id: str = ""           # full id, not just display name
+    user_id: str = ""            # who triggered the agent (human caller)
+    project_id: str = ""
+    meeting_id: str = ""
+    arguments: dict = field(default_factory=dict)  # tool input args
+    elapsed_ms: int = 0          # tool runtime
+    turn_id: str = ""            # correlation across one chat turn
 
     def to_dict(self) -> dict:
+        # Caps tuned for forensic value vs disk pressure:
+        #   detail (result):  4000 chars (was 300) — enough to see
+        #                     a bash output / email body
+        #   arguments:        kept as full dict — caller is responsible
+        #                     for not passing 100MB blobs
         return {
             "timestamp": self.timestamp,
             "action": self.action,
             "actor": self.actor,
             "role": self.role,
             "target": self.target,
-            "detail": self.detail[:300],
+            "detail": (self.detail or "")[:4000],
             "ip_address": self.ip_address,
             "success": self.success,
+            "agent_id": self.agent_id,
+            "user_id": self.user_id,
+            "project_id": self.project_id,
+            "meeting_id": self.meeting_id,
+            "arguments": self.arguments or {},
+            "elapsed_ms": self.elapsed_ms,
+            "turn_id": self.turn_id,
         }
 
 
@@ -2119,11 +2145,53 @@ class AuthManager:
 
     def audit(self, action: str, actor: str = "", role: str = "",
               target: str = "", detail: str = "", ip: str = "",
-              success: bool = True):
+              success: bool = True,
+              *,
+              agent_id: str = "", user_id: str = "",
+              project_id: str = "", meeting_id: str = "",
+              arguments: dict | None = None,
+              elapsed_ms: int = 0, turn_id: str = ""):
+        # Forensic fields are keyword-only so legacy positional callers
+        # (auth.audit("foo", actor="bar", target="baz")) keep working.
+
+        # Sanitize `arguments` — tool dispatch sometimes injects non-JSON
+        # values (Agent / AgentProfile / file handles / numpy arrays).
+        # Coerce anything not natively JSON-serializable to its repr so
+        # the audit log can be persisted without raising TypeError.
+        # (2026-04-29 incident: read_file/knowledge_lookup audits crashed
+        #  with "Object of type AgentProfile is not JSON serializable".)
+        def _sanitize(v):
+            if v is None or isinstance(v, (str, int, float, bool)):
+                return v
+            if isinstance(v, dict):
+                return {str(k): _sanitize(x) for k, x in v.items()}
+            if isinstance(v, (list, tuple, set)):
+                return [_sanitize(x) for x in v]
+            # Unknown object — try its dict-like methods first, then repr.
+            try:
+                if hasattr(v, "to_dict"):
+                    return _sanitize(v.to_dict())
+            except Exception:
+                pass
+            try:
+                return str(v)[:500]
+            except Exception:
+                return "<unserializable>"
+        try:
+            safe_args = _sanitize(arguments or {})
+            if not isinstance(safe_args, dict):
+                safe_args = {"_raw": safe_args}
+        except Exception:
+            safe_args = {}
         entry = AuditEntry(
             action=action, actor=actor, role=role,
-            target=target, detail=detail[:500],
+            target=target, detail=(detail or "")[:4000],
             ip_address=ip, success=success,
+            agent_id=agent_id, user_id=user_id,
+            project_id=project_id, meeting_id=meeting_id,
+            arguments=safe_args,
+            elapsed_ms=int(elapsed_ms or 0),
+            turn_id=turn_id,
         )
         with self._lock:
             self.audit_log.append(entry)
@@ -2137,12 +2205,29 @@ class AuthManager:
                              data=entry.to_dict())
             except Exception:
                 pass
-        # Also write to flat file (backup)
+        # Also write to flat file (backup). default=str catches any
+        # non-JSON object that slipped past _sanitize above so a stray
+        # type can't take down the whole audit pipeline.
         try:
             with open(self._audit_file, "a") as f:
-                f.write(json.dumps(entry.to_dict(), ensure_ascii=False) + "\n")
-        except OSError:
-            pass
+                f.write(json.dumps(
+                    entry.to_dict(),
+                    ensure_ascii=False,
+                    default=str,
+                ) + "\n")
+        except (OSError, TypeError, ValueError) as _e:
+            # As a last resort, write a minimal sentinel so the line
+            # count stays consistent and the failure is grep-able.
+            try:
+                with open(self._audit_file, "a") as f:
+                    f.write(json.dumps({
+                        "timestamp": entry.timestamp,
+                        "action": entry.action,
+                        "actor": entry.actor,
+                        "_serialize_error": str(_e)[:200],
+                    }) + "\n")
+            except Exception:
+                pass
         # Forward to upstream hub for cross-node aggregation (best-effort, non-blocking)
         try:
             import threading as _t

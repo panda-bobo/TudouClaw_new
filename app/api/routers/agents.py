@@ -720,10 +720,24 @@ async def update_agent_profile(
                     agent.working_dir = str(_resolved)
                 else:
                     agent.working_dir = os.path.abspath(_p)
-        if "provider" in body:
-            agent.provider = body["provider"]
-        if "model" in body:
-            agent.model = body["model"]
+        # Atomic provider+model — when both are present in the body, reject
+        # half-set combinations (would brick chat with NO_LLM_CONFIGURED).
+        # If only one key is present, treat the other as "unchanged" — the
+        # frontend may legitimately send a single-field patch.
+        if "provider" in body and "model" in body:
+            _new_p = (body.get("provider") or "").strip()
+            _new_m = (body.get("model") or "").strip()
+            if (_new_p and not _new_m) or (_new_m and not _new_p):
+                raise HTTPException(
+                    status_code=400,
+                    detail="provider 和 model 必须同时设置(或同时为空清除绑定)",
+                )
+            agent.provider = _new_p
+            agent.model = _new_m
+        elif "provider" in body:
+            agent.provider = (body.get("provider") or "").strip()
+        elif "model" in body:
+            agent.model = (body.get("model") or "").strip()
         if "learning_provider" in body:
             agent.learning_provider = str(body.get("learning_provider") or "")
         if "learning_model" in body:
@@ -1084,6 +1098,65 @@ async def clear_agent(
     if hasattr(agent, "clear"):
         agent.clear()
     return {"ok": True}
+
+
+@router.post("/agent/{agent_id}/message/delete")
+async def delete_message(
+    agent_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Delete a single chat bubble from the agent's chat history.
+
+    Body: ``{"ts": float, "role": "user"|"assistant",
+             "content_prefix": str}``  (content_prefix optional, used
+    to disambiguate same-second duplicates).
+
+    Removes the matching ``message`` event from ``agent.events`` AND the
+    corresponding entry from the active context's ``_messages_by_context``
+    bucket so the LLM doesn't re-see it on the next turn. See
+    ``Agent.delete_message_at`` for the matching rules.
+    """
+    agent = _get_agent_or_404(hub, agent_id)
+    from ...permissions import require, Permission
+    require(user, Permission.MANAGE_AGENT, resource=agent)
+    try:
+        ts = float(body.get("ts", 0) or 0)
+    except (TypeError, ValueError):
+        ts = 0.0
+    role = (body.get("role") or "").strip()
+    content_prefix = body.get("content_prefix") or ""
+    if not ts or role not in ("user", "assistant"):
+        raise HTTPException(
+            status_code=400,
+            detail="ts (float) and role (user|assistant) are required",
+        )
+    if not hasattr(agent, "delete_message_at"):
+        raise HTTPException(status_code=500, detail="agent has no delete_message_at method")
+    result = agent.delete_message_at(ts, role, content_prefix)
+    try:
+        hub._save_agents()
+    except Exception:
+        pass
+    actor_name = (getattr(user, "username", "")
+                  or getattr(user, "user_id", "") or "")
+    user_role = getattr(user, "role", "") or ""
+    try:
+        from ...auth import get_auth as _get_auth
+        _get_auth().audit(
+            "delete_message",
+            actor=actor_name,
+            role=user_role,
+            target=agent_id,
+            detail=f"role={role} ts={ts} prefix={content_prefix[:60]}",
+        )
+    except Exception:
+        pass
+    return {
+        "ok": (result["event_removed"] or result["message_removed"]),
+        **result,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2320,20 +2393,22 @@ async def create_agent(
             memory_mode=prof.get("memory_mode", "") or existing.memory_mode,
             rag_mode=prof.get("rag_mode", "") or existing.rag_mode,
             rag_provider_id=prof.get("rag_provider_id", "") or existing.rag_provider_id,
-            rag_collection_ids=prof.get("rag_collection_ids", []) or list(existing.rag_collection_ids),
+            rag_collection_ids=prof.get("rag_collection_ids", []) or list(existing.rag_collection_ids or []),
             personality=prof.get("personality", "") or existing.personality,
             communication_style=prof.get("communication_style", "") or existing.communication_style,
-            expertise=prof.get("expertise", []) or list(existing.expertise),
-            skills=prof.get("skills", []) or list(existing.skills),
+            expertise=prof.get("expertise", []) or list(existing.expertise or []),
+            skills=prof.get("skills", []) or list(existing.skills or []),
             language=prof.get("language", "auto") or existing.language,
             custom_instructions=prof.get("custom_instructions", "") or existing.custom_instructions,
             max_context_messages=int(prof.get("max_context_messages", existing.max_context_messages) or existing.max_context_messages),
             temperature=float(prof.get("temperature", existing.temperature) or existing.temperature),
             exec_policy=prof.get("exec_policy", "") or existing.exec_policy,
-            allowed_tools=list(existing.allowed_tools),
-            denied_tools=list(existing.denied_tools),
-            auto_approve_tools=list(existing.auto_approve_tools),
-            mcp_servers=list(existing.mcp_servers),
+            # Older agent profiles can have these list-typed fields stored as
+            # None (legacy saved state). list(None) raises — fall back to [].
+            allowed_tools=list(existing.allowed_tools or []),
+            denied_tools=list(existing.denied_tools or []),
+            auto_approve_tools=list(existing.auto_approve_tools or []),
+            mcp_servers=list(existing.mcp_servers or []),
         )
         hub._save_agents()
 
@@ -2929,7 +3004,10 @@ async def workspace_list(
     return {
         "agent_id": agent_id,
         "own_workspace": agent.working_dir,
-        "shared_workspace": getattr(agent, "shared_workspace", ""),
+        "shared_workspace": (
+            agent.get_active_shared_workspace()
+            if hasattr(agent, "get_active_shared_workspace") else ""
+        ),
         "authorized_workspaces": agent.authorized_workspaces,
     }
 

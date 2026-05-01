@@ -74,6 +74,13 @@ CORE_TOOLS: frozenset[str] = frozenset({
     "get_skill_guide",
     # MCP bridge — MCP has its own auth layer (per-server binding).
     "mcp_call",
+    # Skill submission to the Forge (admin-reviewed). Promoted to CORE
+    # 2026-04-30: any agent that finishes authoring a skill in its
+    # workspace should be able to push it to the Forge for review,
+    # without needing the operator to grant ``admin-ops`` first.
+    # The actual installation / activation still requires admin
+    # approval in the Forge UI — this just creates a draft.
+    "submit_skill",
 })
 
 
@@ -145,7 +152,9 @@ CAPABILITY_SKILLS: dict[str, list[str]] = {
         "pip_install",
         "request_web_login",
         "propose_skill",
-        "submit_skill",
+        # ``submit_skill`` was moved to CORE_TOOLS on 2026-04-30 so
+        # every agent can push a draft to the Forge. Final activation
+        # still gated by admin approval in the Forge UI.
     ],
 }
 

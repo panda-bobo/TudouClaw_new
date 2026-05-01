@@ -115,6 +115,11 @@ def try_handle(handler, path: str, hub, body: dict, auth,
     if path.startswith("/api/portal/agent/") and path.endswith("/clear"):
         return _handle_clear(handler, path, hub, body, auth, actor_name, user_role)
 
+    # ── Delete a single message bubble (by ts + role) ──
+    if path.startswith("/api/portal/agent/") and path.endswith("/message/delete"):
+        return _handle_delete_message(handler, path, hub, body, auth,
+                                       actor_name, user_role)
+
     # ── Model switching ──
     if path.startswith("/api/portal/agent/") and path.endswith("/model"):
         return _handle_model(handler, path, hub, body, auth, actor_name, user_role)
@@ -254,20 +259,22 @@ def _handle_create(handler, hub, body, auth, actor_name, user_role) -> bool:
             memory_mode=prof.get("memory_mode", "") or existing.memory_mode,
             rag_mode=prof.get("rag_mode", "") or existing.rag_mode,
             rag_provider_id=prof.get("rag_provider_id", "") or existing.rag_provider_id,
-            rag_collection_ids=prof.get("rag_collection_ids", []) or list(existing.rag_collection_ids),
+            rag_collection_ids=prof.get("rag_collection_ids", []) or list(existing.rag_collection_ids or []),
             personality=prof.get("personality", "") or existing.personality,
             communication_style=prof.get("communication_style", "") or existing.communication_style,
-            expertise=prof.get("expertise", []) or list(existing.expertise),
-            skills=prof.get("skills", []) or list(existing.skills),
+            expertise=prof.get("expertise", []) or list(existing.expertise or []),
+            skills=prof.get("skills", []) or list(existing.skills or []),
             language=prof.get("language", "auto") or existing.language,
             custom_instructions=prof.get("custom_instructions", "") or existing.custom_instructions,
             max_context_messages=int(prof.get("max_context_messages", existing.max_context_messages) or existing.max_context_messages),
             temperature=float(prof.get("temperature", existing.temperature) or existing.temperature),
             exec_policy=prof.get("exec_policy", "") or existing.exec_policy,
-            allowed_tools=list(existing.allowed_tools),
-            denied_tools=list(existing.denied_tools),
-            auto_approve_tools=list(existing.auto_approve_tools),
-            mcp_servers=list(existing.mcp_servers),
+            # Older agent profiles can have these list-typed fields stored as
+            # None (legacy saved state). list(None) raises — fall back to [].
+            allowed_tools=list(existing.allowed_tools or []),
+            denied_tools=list(existing.denied_tools or []),
+            auto_approve_tools=list(existing.auto_approve_tools or []),
+            mcp_servers=list(existing.mcp_servers or []),
         )
         hub._save_agents()  # re-save with profile
     # Set robot avatar if specified
@@ -449,6 +456,46 @@ def _handle_clear(handler, path, hub, body, auth, actor_name, user_role) -> bool
         handler._json({"ok": True})
     else:
         handler._json({"error": "Agent not found"}, 404)
+    return True
+
+
+def _handle_delete_message(handler, path, hub, body, auth,
+                            actor_name, user_role) -> bool:
+    """Delete a single message bubble from the agent's chat history.
+
+    Body: ``{"ts": float, "role": "user"|"assistant",
+             "content_prefix": str}``  (content_prefix optional, used
+    to disambiguate same-second duplicates).
+    """
+    agent_id = path.split("/")[4]
+    agent = hub.get_agent(agent_id)
+    if not agent:
+        handler._json({"error": "Agent not found"}, 404)
+        return True
+    try:
+        ts = float(body.get("ts", 0) or 0)
+    except (TypeError, ValueError):
+        ts = 0.0
+    role = (body.get("role") or "").strip()
+    content_prefix = body.get("content_prefix") or ""
+    if not ts or role not in ("user", "assistant"):
+        handler._json({"error": "ts (float) and role (user|assistant) "
+                                "are required"}, 400)
+        return True
+    result = agent.delete_message_at(ts, role, content_prefix)
+    # Persist so the deletion survives a restart.
+    try:
+        hub._save_agents()
+    except Exception:
+        pass
+    auth.audit("delete_message", actor=actor_name, role=user_role,
+               target=agent_id,
+               detail=f"role={role} ts={ts} prefix={content_prefix[:60]}",
+               ip=get_client_ip(handler))
+    handler._json({
+        "ok": (result["event_removed"] or result["message_removed"]),
+        **result,
+    })
     return True
 
 
@@ -1062,7 +1109,10 @@ def _handle_workspace_list(handler, hub, body, auth, actor_name, user_role) -> b
     handler._json({
         "agent_id": agent_id,
         "own_workspace": agent.working_dir,
-        "shared_workspace": agent.shared_workspace,
+        "shared_workspace": (
+            agent.get_active_shared_workspace()
+            if hasattr(agent, "get_active_shared_workspace") else ""
+        ),
         "authorized_workspaces": agent.authorized_workspaces,
     })
     return True

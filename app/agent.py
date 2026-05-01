@@ -40,20 +40,21 @@ from .chat_task import (                                          # noqa: F401
     ChatTaskStatus, ChatTask, ChatTaskManager,
     get_chat_task_manager,
 )
-# ── Import mixins (Agent class inherits from these) ──
-# DEAD CODE — kept for reference, not actually used.
-# Agent class below does NOT inherit AgentLLMMixin (verified by audit).
-# All methods that AgentLLMMixin would provide are implemented directly
-# on Agent (see _build_static_system_prompt, etc.). Commenting out the
-# import so accidental future code can't depend on it; keep the file
-# itself in tree until the next cleanup pass.
-# from .agent_llm import AgentLLMMixin                              # noqa: F401
-from .agent_execution import AgentExecutionMixin                  # noqa: F401
+# ── Mixin imports (DEAD as of 2026-04-30, see tombstones) ──
+# Agent class is a bare dataclass — does NOT inherit any mixin. All
+# methods that the mixin modules WOULD provide are implemented directly
+# on Agent. Three modules now wrap their dead-code body in a string
+# literal as archaeology:
+#   * app/agent_llm.py            (AgentLLMMixin)
+#   * app/agent_growth.py         (enhancement helpers)
+#   * app/agent_execution.py      (AgentExecutionMixin — module-level
+#                                  helpers _stream_chat_to_response,
+#                                  _text_similarity, _is_meta_promise
+#                                  ARE still live and imported below)
+# Old import lines kept here as comments for searchability:
+#   from .agent_llm import AgentLLMMixin            # ← retired 2026-04-30
+#   from .agent_execution import AgentExecutionMixin # ← retired 2026-04-30
 from .agent_execution import _stream_chat_to_response             # noqa: F401
-# DEAD CODE — kept for reference, not actually used.
-# Same situation as agent_llm above. enable_enhancement / disable_enhancement
-# / enable_self_improvement / trigger_retrospective are all defined on
-# Agent directly; agent_growth.py duplicates them with no inheritance.
 # from .agent_growth import AgentGrowthMixin                        # noqa: F401
 
 def _ensure_str_content(content) -> str:
@@ -1071,6 +1072,87 @@ def _build_granted_skills_roster(agent) -> str:
             lines.append(f"- `{name}`: {desc}")
         else:
             lines.append(f"- `{name}`")
+
+    # ── 通用 QA Gate ─────────────────────────────────────────────────
+    # 适用于所有 skill / 所有产出物 (设计 / 报告 / 数据 / 代码 / 通信)。
+    # Cause-of-write timeline:
+    #   2026-04-30 小刚用 drawio-skill 交付 125×382 破损缩略图(没自检)
+    #   2026-04-30 小刚用 pptx-author 交付 31 处 overlap/overflow 的 PPT(没跑 QA gate)
+    #   2026-05-01 小刚用 send_email MCP 一边发邮件一边假装在等用户确认(没核对参数)
+    # 三起事故的共同模式: 工具调用成功 != 产出可交付。
+    # 解法: 把"生成 != 交付"作为铁律,每类产出 KV-cache 里直接给可执行检查 snippet,
+    # agent 不用现想; QA gate 退出码非 0 时禁止说"已完成"。
+    lines.extend([
+        "",
+        "### ⚠️ 强制 QA Gate — 任何产出在交付前必须通过可执行检查",
+        "",
+        "**铁律: 生成 ≠ 交付。** 工具调用成功只代表 \"动作完成\","
+        "不代表 \"产出可用\"。任何文件 / 邮件 / MCP 结果 / 代码改动"
+        "**交付给用户前必须跑 QA gate, 退出码非 0 时禁止说 \"已完成\"**。",
+        "",
+        "**优先级 1 — Skill 自带 QA gate**: 如果调用的 skill 在 SKILL.md "
+        "末尾有 QA / 质量门段(drawio 的 Step 3.5/4.5/5、pptx-author 的 unified QA), "
+        "**直接跑那段脚本**。skill 作者已经把该 skill 特有的检查项写好了。",
+        "",
+        "**优先级 2 — 通用 snippet (skill 没有 QA gate 时用):**",
+        "",
+        "```bash",
+        "# 【代码 .py】",
+        "python3 -m py_compile <file>.py        # 语法检查",
+        "[ -d tests ] && python3 -m pytest -q   # 有测试就跑",
+        "",
+        "# 【代码 .sh / .bash】",
+        "bash -n <file>.sh                       # 语法检查",
+        "shellcheck <file>.sh 2>/dev/null || true",
+        "",
+        "# 【markdown / 报告 .md / .txt】",
+        "python3 -c \"",
+        "import re; t=open('<file>.md').read()",
+        "bad=[]",
+        "for p in [r'\\bxxx+\\b',r'\\bTODO\\b',r'\\[insert\\b',r'Lorem ipsum',r'<请填写>',r'\\bFIXME\\b']:",
+        "    if re.search(p,t,re.I): bad.append(f'占位符遗留: {p}')",
+        "if len(t.strip())<200: bad.append(f'太短: {len(t)} chars')",
+        "lv=[len(m.group(1)) for m in re.finditer(r'^(#+) ',t,re.M)]",
+        "for i in range(1,len(lv)):",
+        "    if lv[i]-lv[i-1]>1: bad.append(f'标题跳级 h{lv[i-1]}->h{lv[i]}')",
+        "print('❌ '+str(bad) if bad else '✓ OK')\"",
+        "",
+        "# 【数据 .csv】",
+        "python3 -c \"",
+        "import csv; rows=list(csv.reader(open('<file>.csv')))",
+        "print(f'rows={len(rows)} cols={len(rows[0]) if rows else 0}')",
+        "null=sum(1 for r in rows[1:] for c in r if not c.strip())",
+        "print(f'空值: {null}; 首/末行: {rows[1] if len(rows)>1 else None} / {rows[-1] if len(rows)>1 else None}')\"",
+        "",
+        "# 【数据 .json】",
+        "python3 -c \"",
+        "import json; d=json.load(open('<file>.json'))",
+        "print(f'type={type(d).__name__} keys={list(d.keys())[:5] if isinstance(d,dict) else \\\"list len=\\\"+str(len(d))}')\"",
+        "",
+        "# 【设计 .png / .jpg】",
+        "python3 -c \"",
+        "from PIL import Image; im=Image.open('<file>.png'); print(im.size, im.mode); ",
+        "assert im.size[0]>=600 and im.size[1]>=400, '太小 可能渲染失败'\"",
+        "",
+        "# 【邮件 send_email / AgentMail MCP】发送前校验,不要发完了再后悔",
+        "python3 -c \"",
+        "to='<recipient>'; subject='<subj>'; body='<body>'; attachments=[]",
+        "import re,os",
+        "assert '@' in to and '.' in to.split('@')[1], f'收件人格式错: {to}'",
+        "assert subject and len(subject)<=78, f'subject 空或超长: {len(subject)}'",
+        "assert body and len(body)>=20, f'body 太短或空: {len(body)}'",
+        "for a in attachments: assert os.path.isfile(a), f'附件不存在: {a}'",
+        "print('✓ ready to send')\"",
+        "",
+        "# 【MCP 调用结果 通用】调完后立刻看",
+        "# - 结果不为 None / 空字符串 / \\\"Error\\\" 开头",
+        "# - 如果是 dict 检查没有 'error'/'errno'/'exception' 字段",
+        "# - 数字结果在合理范围 (e.g. 余额非负、时间戳近期)",
+        "```",
+        "",
+        "**校验通过后在回复中明示** —— 例: \"✓ 已跑 QA gate (4 项检查全过), 交付文件: /path/to/...\"",
+        "**校验失败禁止上交** —— 回头修源,重跑 gate,exit 0 才说 \"已完成\"。如果改 5 轮仍过不了,向用户报告具体卸在哪一项。",
+    ])
     return "\n".join(lines)
 
 
@@ -1705,6 +1787,25 @@ class AgentProfile:
     kpi_definitions: list = field(default_factory=list)
     # List of KPIDefinition dicts for this role.
 
+    def __post_init__(self):
+        # Defensive: any list-typed field passed as ``None`` (legacy
+        # saved JSON, preset round-trip via to_dict→AgentProfile(**d),
+        # explicit ``None`` from form input) → coerce to ``[]``. Without
+        # this guard, ``list(profile.allowed_tools)`` crashes downstream
+        # when re-saving the profile from another agent's update.
+        for _f in (
+            "rag_collection_ids", "expertise", "skills",
+            "allowed_tools", "denied_tools", "auto_approve_tools",
+            "exec_blacklist", "exec_whitelist", "mcp_servers",
+            "sandbox_allow_commands", "skill_capabilities",
+            "quality_rules", "kpi_definitions",
+        ):
+            if getattr(self, _f, None) is None:
+                setattr(self, _f, [])
+        for _d in ("llm_tier_overrides", "output_contract", "input_contract"):
+            if getattr(self, _d, None) is None:
+                setattr(self, _d, {})
+
     def to_dict(self) -> dict:
         return {
             "agent_class": self.agent_class,
@@ -1758,27 +1859,32 @@ class AgentProfile:
             memory_mode=d.get("memory_mode", "full"),
             rag_mode=d.get("rag_mode", "shared"),
             rag_provider_id=d.get("rag_provider_id", ""),
-            rag_collection_ids=d.get("rag_collection_ids", []),
+            # NB: ``or []`` (not just ``, []``) — saved JSON may contain
+            # ``"allowed_tools": null`` etc. for older agents, and dict.get's
+            # default only fires when the KEY is absent, not when the
+            # VALUE is None. Without ``or []`` we'd hand back None and
+            # downstream ``list(profile.allowed_tools)`` crashes.
+            rag_collection_ids=d.get("rag_collection_ids") or [],
             personality=d.get("personality", "helpful"),
             communication_style=d.get("communication_style", "technical"),
-            expertise=d.get("expertise", []),
-            skills=d.get("skills", []),
+            expertise=d.get("expertise") or [],
+            skills=d.get("skills") or [],
             language=d.get("language", "auto"),
             max_context_messages=d.get("max_context_messages", 50),
-            allowed_tools=d.get("allowed_tools", []),
-            denied_tools=d.get("denied_tools", []),
-            auto_approve_tools=d.get("auto_approve_tools", []),
+            allowed_tools=d.get("allowed_tools") or [],
+            denied_tools=d.get("denied_tools") or [],
+            auto_approve_tools=d.get("auto_approve_tools") or [],
             temperature=d.get("temperature", 0.7),
             max_output_tokens=int(d.get("max_output_tokens", 0) or 0),
             agent_tier=d.get("agent_tier", "") or "",
             custom_instructions=d.get("custom_instructions", ""),
             exec_policy=d.get("exec_policy", "ask"),
-            exec_blacklist=d.get("exec_blacklist", []),
-            exec_whitelist=d.get("exec_whitelist", []),
+            exec_blacklist=d.get("exec_blacklist") or [],
+            exec_whitelist=d.get("exec_whitelist") or [],
             mcp_servers=mcp_servers,
             sandbox_mode=d.get("sandbox_mode", ""),
-            sandbox_allow_commands=d.get("sandbox_allow_commands", []),
-            skill_capabilities=d.get("skill_capabilities", []),
+            sandbox_allow_commands=d.get("sandbox_allow_commands") or [],
+            skill_capabilities=d.get("skill_capabilities") or [],
             # RolePresetV2 fields (all with safe defaults → V1 agents compatible)
             role_preset_id=d.get("role_preset_id", ""),
             role_preset_version=int(d.get("role_preset_version", 1)),
@@ -1916,7 +2022,17 @@ class Agent:
     status: AgentStatus = AgentStatus.IDLE
     agent_phase: AgentPhase = AgentPhase.IDLE  # State machine phase for task continuity
     node_id: str = "local"
-    shared_workspace: str = ""  # Shared project workspace directory (if part of a project)
+    # ⚠️ DEPRECATED (2026-04-29) — DO NOT READ DIRECTLY.
+    # An agent participates in N projects + M meetings simultaneously,
+    # so a single shared_workspace value is structurally wrong. The
+    # right path varies per active context. Use:
+    #     self.get_active_shared_workspace()
+    # which derives from `_active_context_id` + hub lookup at call
+    # time. Field kept on the dataclass (and in persistence) only for
+    # backward-compat with old agent.json files; new code MUST NOT
+    # write to it. Read sites are progressively being migrated to the
+    # method (see refs in tools / sandbox / system prompt).
+    shared_workspace: str = ""
     project_id: str = ""  # Project ID if agent belongs to a project
     project_name: str = ""  # Project name for prompt context
     context_type: str = "solo"  # "solo" | "project" | "meeting"
@@ -1941,6 +2057,25 @@ class Agent:
     soul_md: str = ""  # SOUL.md personality/persona in markdown
     robot_avatar: str = ""  # Robot avatar ID e.g. "robot_ceo"
     messages: list[dict] = field(default_factory=list)
+    # ── Per-context message stores (2026-04-28) ──────────────────────
+    # Maps context_id → its own message list. Each call surface (solo
+    # chat, project chat, meeting) gets its own conversation history so
+    # they don't bleed into each other (e.g. an image uploaded in solo
+    # chat must NOT appear in a new project's first turn).
+    #
+    # Conventions:
+    #   "solo"           — direct admin/user chat with the agent
+    #   "project:{pid}"  — chat inside a Project group
+    #   "meeting:{mid}"  — chat inside a Meeting
+    #
+    # `self.messages` is rebound to point at the active context's list
+    # by `_switch_context()`; existing code that does `self.messages.append(...)`
+    # / trim / etc. keeps working unchanged — it just operates on whatever
+    # list is currently active. The agent's `_lock` serializes turns, so
+    # there's no concurrent-context race within one agent.
+    _messages_by_context: dict[str, list[dict]] = field(
+        default_factory=lambda: {"solo": []}, repr=False)
+    _active_context_id: str = field(default="solo", repr=False)
     events: list[AgentEvent] = field(default_factory=list)
     tasks: list[AgentTask] = field(default_factory=list)
     channel_ids: list[str] = field(default_factory=list)  # bound channel IDs
@@ -2048,6 +2183,74 @@ class Agent:
     _credential_vault: dict = field(default_factory=dict, repr=False)
     # --- LoginGuard: transparent login-wall handler (lazy-init) ---
     _login_guard: Any = field(default=None, repr=False)
+    # --- Streaming buffer (2026-04-28): agent.chat() pushes each text_delta
+    # into this buffer so external readers (project chat polling endpoint)
+    # can show "typing" content in real time without an SSE connection.
+    # Cleared at chat() entry; finalised + cleared at chat() exit.
+    _streaming_buffer: str = field(default="", repr=False)
+
+    # ---- per-context message routing ----
+
+    def __post_init__(self):
+        """Wire `self.messages` to the solo-context bucket so that legacy
+        code paths (which all read/write `self.messages` directly) target
+        the right per-context list. The first time an agent is created,
+        `self.messages` is whatever the constructor / from_persist_dict
+        passed in (could be the legacy single list — that becomes the
+        "solo" context).
+
+        from_persist_dict may overwrite `_messages_by_context` AFTER
+        construction with the new multi-context dict; in that case it
+        must call `_switch_context("solo")` (or whatever default) again
+        to rebind `self.messages`.
+        """
+        # If _messages_by_context still has the default singleton {"solo": []}
+        # but `messages` field was passed non-empty (legacy path), seed solo
+        # bucket with that legacy list so we don't lose history.
+        if (self._messages_by_context.get("solo") is None
+                or self._messages_by_context.get("solo") == []):
+            self._messages_by_context["solo"] = self.messages
+        # Bind self.messages to the active context's list (same object,
+        # so existing append() calls write through).
+        self.messages = self._messages_by_context.setdefault(
+            self._active_context_id, [])
+
+    def _switch_context(self, context_id: str) -> None:
+        """Switch the active conversation context.
+
+        After this call:
+          * ``self._active_context_id`` == context_id
+          * ``self.messages`` is the same object as
+            ``self._messages_by_context[context_id]`` — so all
+            ``self.messages.append(...)`` / trim calls write to the
+            right bucket.
+
+        Idempotent. Lazy-creates a new bucket on first use of a context.
+        Caller must hold ``self._lock`` (chat() does).
+        """
+        cid = (context_id or "solo").strip() or "solo"
+        if cid == self._active_context_id and self.messages is self._messages_by_context.get(cid):
+            return
+        if cid not in self._messages_by_context:
+            self._messages_by_context[cid] = []
+        self._active_context_id = cid
+        self.messages = self._messages_by_context[cid]
+
+    def __setattr__(self, name, value):
+        """Keep the per-context message dict in sync when callers
+        reassign ``self.messages = new_list`` (used by trim/compress/
+        recap helpers across agent.py and agent_llm.py). Without this
+        hook those reassignments would orphan the dict's bucket pointer
+        and the next context switch would lose the new list.
+
+        Only the literal name ``messages`` is special-cased; everything
+        else passes through unchanged."""
+        super().__setattr__(name, value)
+        if (name == "messages"
+                and hasattr(self, "_messages_by_context")
+                and hasattr(self, "_active_context_id")
+                and isinstance(value, list)):
+            self._messages_by_context[self._active_context_id] = value
 
     # ---- persistence serialisation ----
 
@@ -2095,7 +2298,20 @@ class Agent:
             "created_at": self.created_at,
             # --- src integration: persist memory ---
             "session_id": self.session_id,
-            "messages": self.messages[-200:],  # last 200 messages for memory
+            # Per-context messages: each surface (solo / project / meeting)
+            # keeps its own bounded history. Limit each bucket to last 200
+            # messages so an agent in many projects doesn't blow up disk.
+            # Empty buckets are dropped on save to keep the file tidy.
+            "messages_by_context": {
+                cid: msgs[-200:]
+                for cid, msgs in (self._messages_by_context or {}).items()
+                if msgs
+            },
+            # Legacy `messages` field kept for back-compat readers — emits
+            # the SOLO bucket only, since that's the closest match to what
+            # the legacy single-list field meant. New readers should prefer
+            # messages_by_context above.
+            "messages": (self._messages_by_context.get("solo") or [])[-200:],
             # Chat UI events (user/assistant bubbles, tool calls, approvals).
             # The UI replays these on load so the conversation history is
             # preserved across app restarts. Keep last 500 to bound file size.
@@ -2184,7 +2400,10 @@ class Agent:
             cost_tracker=ct,
             history_log=hl,
             session_id=d.get("session_id", uuid.uuid4().hex),
-            messages=d.get("messages", []),
+            # `messages` field still passed for back-compat; __post_init__
+            # will route it into the solo bucket if messages_by_context
+            # isn't set below.
+            messages=list(d.get("messages", []) or []),
             total_input_tokens=d.get("total_input_tokens", 0),
             total_output_tokens=d.get("total_output_tokens", 0),
             # --- src memory engine restore ---
@@ -2192,6 +2411,23 @@ class Agent:
             max_turns=d.get("max_turns", 20),
             max_budget_tokens=d.get("max_budget_tokens", 200000),
         )
+        # Restore per-context message buckets. Prefer the new
+        # `messages_by_context` field; fall back to legacy single-list
+        # `messages` (already routed into solo bucket by __post_init__).
+        mbc = d.get("messages_by_context")
+        if isinstance(mbc, dict) and mbc:
+            cleaned: dict[str, list[dict]] = {}
+            for cid, msgs in mbc.items():
+                if not isinstance(msgs, list):
+                    continue
+                cleaned[str(cid)] = list(msgs)
+            if cleaned:
+                if "solo" not in cleaned:
+                    cleaned["solo"] = []
+                agent._messages_by_context = cleaned
+                # Re-bind self.messages to the (possibly new) solo bucket
+                # since __post_init__ aliased it before we overwrote the dict.
+                agent._switch_context("solo")
         # Restore transcript entries
         for entry in d.get("transcript_entries", []):
             agent.transcript.append(entry)
@@ -3028,6 +3264,57 @@ class Agent:
         data_dir = os.environ.get("TUDOU_CLAW_DATA_DIR") or DEFAULT_DATA_DIR
         return str(Path(data_dir) / "workspaces" / "shared" / project_id)
 
+    def get_active_shared_workspace(self) -> str:
+        """Resolve the shared-workspace path for the agent's CURRENT
+        active context — the proper replacement for ``self.shared_workspace``.
+
+        An agent participates in N projects + M meetings at once, so the
+        old single-value field couldn't represent what was correct in
+        any given turn. This method derives the right answer from
+        ``_active_context_id``:
+
+          ``solo``           → "" (no shared workspace; use working_dir)
+          ``project:{pid}``  → the canonical
+                               ``~/.tudou_claw/workspaces/shared/{pid}/``
+                               (also matches ``project.working_directory``
+                                when set on the project)
+          ``meeting:{mid}``  → meeting's ``workspace_dir`` from the registry
+
+        Looks up project / meeting via the active hub. Falls back to "" on
+        any failure — callers are expected to handle empty string as
+        "no shared workspace".
+        """
+        ctx = (getattr(self, "_active_context_id", "") or "solo")
+        if not ctx or ctx == "solo":
+            return ""
+        try:
+            import sys as _sys
+            _llm_mod = _sys.modules.get(__package__ + ".llm") if __package__ else None
+            hub = getattr(_llm_mod, "_active_hub", None) if _llm_mod else None
+        except Exception:
+            hub = None
+        if ctx.startswith("project:"):
+            pid = ctx.split(":", 1)[1]
+            if hub is not None and hasattr(hub, "projects"):
+                proj = hub.projects.get(pid)
+                if proj is not None:
+                    wd = getattr(proj, "working_directory", "") or ""
+                    if wd:
+                        return wd
+            # Fallback to canonical convention even if hub/project lookup
+            # missed — the directory is deterministic per project_id.
+            return self.get_shared_workspace_path(pid)
+        if ctx.startswith("meeting:"):
+            mid = ctx.split(":", 1)[1]
+            if hub is not None and hasattr(hub, "meeting_registry"):
+                try:
+                    mtg = hub.meeting_registry.get(mid)
+                    if mtg is not None:
+                        return getattr(mtg, "workspace_dir", "") or ""
+                except Exception:
+                    pass
+        return ""
+
     def _ensure_workspace_layout(self) -> Path:
         """Create the standard agent directory layout and seed MD templates.
 
@@ -3045,16 +3332,20 @@ class Agent:
         except Exception:
             return ws
 
-        # Create shared workspace symlink if agent is part of a project
-        if self.shared_workspace:
+        # Create shared workspace symlink for the CURRENT active context
+        # (project or meeting). When the agent is in solo, we deliberately
+        # skip the symlink — solo work shouldn't have a "shared" link
+        # pointing at a stale project from a prior turn.
+        _active_sw = self.get_active_shared_workspace()
+        if _active_sw:
             try:
                 shared_link = ws / "shared"
                 if shared_link.exists() or shared_link.is_symlink():
-                    if shared_link.resolve() != Path(self.shared_workspace).resolve():
+                    if shared_link.resolve() != Path(_active_sw).resolve():
                         shared_link.unlink()
-                        shared_link.symlink_to(self.shared_workspace)
+                        shared_link.symlink_to(_active_sw)
                 else:
-                    shared_link.symlink_to(self.shared_workspace)
+                    shared_link.symlink_to(_active_sw)
             except Exception:
                 pass  # Silently fail on symlink creation (may not be supported on all systems)
 
@@ -3125,42 +3416,74 @@ class Agent:
         skills_dir = ws / "skills"
         skills_dir.mkdir(parents=True, exist_ok=True)
 
-        # --- Skills.md (auto-refreshed: reflects loaded enhancement presets) ---
-        skills_md = ws / "Skills.md"
+        # --- granted_skills.md (renamed from Skills.md, 2026-04-28) ---
+        # Slim ID+path manifest of skills granted to this agent — NOT the
+        # full SKILL.md descriptions. Single source of truth for prompt
+        # injection: `_get_scheduled_context` reads this one file; the
+        # old `skills_registry` dynamic-context block (which re-rendered
+        # every granted SKILL.md every turn — ~2K tokens) has been
+        # removed in favour of on-demand reading.
+        #
+        # When the LLM needs a skill's usage, it does:
+        #   read_file <path>/SKILL.md       (raw file)
+        #   get_skill_guide(name=...)       (formatted)
+        granted_md = ws / "granted_skills.md"
         try:
-            lines = ["# Skills — Agent: " + (self.name or self.id), ""]
-            lines.append("Auto-generated summary of skill presets loaded on this agent. "
-                         "Regenerated every time the agent starts. Do NOT hand-edit — "
-                         "manage skills via the Portal (Skills Library) or the "
-                         "`enable_enhancement` API.")
-            lines.append("")
-            if self.enhancer and getattr(self.enhancer, "enabled", False):
-                domain = getattr(self.enhancer, "domain", "") or "custom"
-                lines.append(f"## Loaded ({domain})")
-                lines.append("")
-                knows = getattr(self.enhancer, "knowledge", None)
-                n_know = len(knows.entries) if knows and hasattr(knows, "entries") else 0
-                patterns = getattr(self.enhancer, "reasoning", None)
-                n_pat = len(patterns.patterns) if patterns and hasattr(patterns, "patterns") else 0
-                memory = getattr(self.enhancer, "memory", None)
-                n_mem = len(memory.nodes) if memory and hasattr(memory, "nodes") else 0
-                lines.append(f"- knowledge entries: {n_know}")
-                lines.append(f"- reasoning patterns: {n_pat}")
-                lines.append(f"- memory nodes: {n_mem}")
-                # List constituent domains for composite enhancers
-                for sub in (domain.split("+") if "+" in domain else []):
-                    lines.append(f"  - preset: {sub.strip()}")
+            _lines = [
+                "# Granted Skills — Agent: " + (self.name or self.id),
+                "",
+                "本 agent 授权技能清单(自动维护,请勿手改)。需要某个技能的详细"
+                "用法时,`read_file <path>/SKILL.md` 或 `get_skill_guide(name)`。",
+                "",
+            ]
+            _granted_lines = []
+            try:
+                import sys as _sys
+                _llm_mod = _sys.modules.get(__package__ + ".llm") if __package__ else None
+                _hub = getattr(_llm_mod, "_active_hub", None) if _llm_mod else None
+                if _hub is not None and getattr(_hub, "skill_registry", None) is not None:
+                    # ── Reconcile: registry is the source of truth ──
+                    # If a grant landed in the registry but never made it
+                    # into agent.granted_skills (caller skipped that
+                    # mirror, race during save, etc.), the md would be
+                    # missing entries. Sync both directions so future
+                    # writes are consistent.
+                    _reg_ids = [
+                        getattr(_inst, "id", "")
+                        for _inst in _hub.skill_registry.list_for_agent(self.id)
+                        if getattr(_inst, "id", "")
+                    ]
+                    if _reg_ids:
+                        _gs = list(self.granted_skills or [])
+                        _gs_set = set(_gs)
+                        _added = [r for r in _reg_ids if r not in _gs_set]
+                        if _added:
+                            self.granted_skills = _gs + _added
+                    for _inst in _hub.skill_registry.list_for_agent(self.id):
+                        _m = _inst.manifest
+                        _sid = getattr(_m, "id", "") or getattr(_m, "name", "") or "?"
+                        _path = _inst.install_dir or ""
+                        # One-line description only — agent reads
+                        # SKILL.md at <_path> for the full guide.
+                        _desc_raw = getattr(_m, "description", "") or ""
+                        if isinstance(_desc_raw, dict):
+                            _desc_raw = (_desc_raw.get("zh-CN")
+                                         or _desc_raw.get("en")
+                                         or next(iter(_desc_raw.values()), ""))
+                        _desc = " ".join(str(_desc_raw).split())[:120]
+                        if _desc:
+                            _granted_lines.append(
+                                f"- `{_sid}` — {_desc} (path: `{_path}`)"
+                            )
+                        else:
+                            _granted_lines.append(f"- `{_sid}` (path: `{_path}`)")
+            except Exception as _re:
+                _granted_lines.append(f"- (registry unavailable: {_re})")
+            if _granted_lines:
+                _lines.extend(_granted_lines)
             else:
-                lines.append("## Loaded")
-                lines.append("")
-                lines.append("- (no skills enabled — use Portal → Skills Library to load "
-                             "up to 8 domain presets)")
-            lines.append("")
-            lines.append("## Profile Tags")
-            lines.append("")
-            lines.append(f"- expertise: {', '.join(self.profile.expertise) or '-'}")
-            lines.append(f"- skills (tags): {', '.join(self.profile.skills) or '-'}")
-            skills_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                _lines.append("- (尚无授权技能)")
+            granted_md.write_text("\n".join(_lines) + "\n", encoding="utf-8")
         except Exception:
             pass
 
@@ -3388,17 +3711,41 @@ class Agent:
         return d if d.is_dir() else None
 
     def _get_scheduled_context(self) -> str:
-        """Load Scheduled.md / Tasks.md / Project.md and inject into system prompt."""
+        """Load workspace markdown files and inject into dynamic context.
+
+        Per-context filtering (2026-04-28):
+          * Solo chat       → all 5 files (agent's personal workspace view)
+          * Project / Meeting → only `granted_skills.md` + `MCP.md`
+            (agent's capability list — needed in every context).
+            `Project.md` / `Tasks.md` / `Scheduled.md` are agent's
+            **personal** memos and have no business showing up in a
+            project's group chat — the project's own prompt
+            (`_build_chat_prompt`) already supplies the right context.
+        """
         try:
             ws = self._ensure_workspace_layout()
         except Exception:
             return ""
+        # Pick file set by active context.
+        # NOTE (2026-04-28): granted_skills.md NO LONGER injected here —
+        # it moved to the STATIC system prompt (cache-friendly: only
+        # invalidated on grant/revoke). The on-disk file still exists
+        # as a human-readable mirror but is not part of the prompt
+        # injection path anymore. Agent reads each SKILL.md on demand.
+        _ctx = getattr(self, "_active_context_id", "solo") or "solo"
+        if _ctx.startswith("project:") or _ctx.startswith("meeting:"):
+            _files = (
+                ("MCP.md", "mcp_servers"),
+            )
+        else:
+            _files = (
+                ("Project.md", "project"),
+                ("MCP.md", "mcp_servers"),
+                ("Tasks.md", "tasks"),
+                ("Scheduled.md", "scheduled_tasks"),
+            )
         blocks = []
-        for fname, tag in (("Project.md", "project"),
-                           ("Skills.md", "skills"),
-                           ("MCP.md", "mcp_servers"),
-                           ("Tasks.md", "tasks"),
-                           ("Scheduled.md", "scheduled_tasks")):
+        for fname, tag in _files:
             fp = ws / fname
             if not fp.exists():
                 continue
@@ -3530,7 +3877,8 @@ class Agent:
             ",".join(p.expertise), ",".join(p.skills),
             p.language or "", p.custom_instructions or "",
             self.working_dir or "",
-            self.shared_workspace or "",
+            (self.get_active_shared_workspace()
+             if hasattr(self, "get_active_shared_workspace") else ""),
             self.project_id or "",
             self.project_name or "",
             self.soul_md or "",
@@ -3546,8 +3894,9 @@ class Agent:
             _hdirs: list[str] = []
             if self.working_dir:
                 _hdirs.append(self.working_dir)
-            if self.shared_workspace and self.shared_workspace != self.working_dir:
-                _hdirs.append(self.shared_workspace)
+            _active_sw = self.get_active_shared_workspace()
+            if _active_sw and _active_sw != self.working_dir:
+                _hdirs.append(_active_sw)
             for _d in _hdirs:
                 for _n in ("PROJECT_CONTEXT.md", "TUDOU_CLAW.md",
                            "CLAW.md", "README.md"):
@@ -3557,6 +3906,44 @@ class Agent:
                             parts.append(f"{_n}@{_d}:{_f.stat().st_mtime_ns}")
                     except OSError:
                         continue
+        except Exception:
+            pass
+        # ── Granted-skill freshness ───────────────────────────────────
+        # Skill grants are stable per-agent (changed only via Portal
+        # grant/revoke). Use the **registry**'s view, not
+        # ``self.granted_skills`` — the agent's local copy can drift out
+        # of sync when a grant only updates the registry side (this
+        # actually happened with drawio-skill on 2026-04-30: registry
+        # had the grant, agent's list didn't, so the static prompt
+        # cache key never changed and the agent kept reporting "no
+        # such skill" forever). Falling back to ``self.granted_skills``
+        # keeps the build working even if the registry is unreachable.
+        try:
+            _grant_ids: list[str] = []
+            try:
+                from .skills.engine import get_registry as _grs
+                _r = _grs()
+                if _r is not None:
+                    _grant_ids = [
+                        getattr(i, "id", "") for i in _r.list_for_agent(self.id)
+                        if getattr(i, "id", "")
+                    ]
+            except Exception:
+                _grant_ids = []
+            if not _grant_ids:
+                _grant_ids = list(self.granted_skills or [])
+            parts.append(",".join(sorted(_grant_ids)))
+        except Exception:
+            pass
+        # ── Active context flavor (2026-04-29) ────────────────────────
+        # Static prompt now varies between solo / project / meeting
+        # (shared_workspace is filtered out in solo). Without this
+        # field in the hash, switching from a project chat into solo
+        # would reuse the cached project-flavored prompt and the
+        # filtering wouldn't take effect.
+        try:
+            _ctx_kind = (getattr(self, "_active_context_id", "solo") or "solo").split(":", 1)[0]
+            parts.append(f"ctx_kind={_ctx_kind}")
         except Exception:
             pass
         return hashlib.md5("|".join(parts).encode()).hexdigest()
@@ -3595,7 +3982,7 @@ class Agent:
             language=p.language or "auto",
             ctx_type=getattr(self, "context_type", "solo") or "solo",
             working_dir=str(wd),
-            shared_workspace=getattr(self, "shared_workspace", "") or "",
+            shared_workspace=self.get_active_shared_workspace(),
             project_name=getattr(self, "project_name", "") or "",
             project_id=getattr(self, "project_id", "") or "",
             meeting_id=getattr(self, "source_meeting_id", "") or "",
@@ -3636,9 +4023,13 @@ class Agent:
         # after first turn it's effectively free tokens.
         from pathlib import Path as _PCPath
         _ctx_dirs: list[_PCPath] = [wd]
-        if getattr(self, "shared_workspace", None):
+        # Resolve shared workspace from the CURRENT active context
+        # (multi-project agents get the right project's dir per turn).
+        # Empty string in solo → only working_dir is scanned.
+        _active_sw = self.get_active_shared_workspace()
+        if _active_sw:
             try:
-                _sw = _PCPath(self.shared_workspace)
+                _sw = _PCPath(_active_sw)
                 if _sw.resolve() != wd.resolve():
                     _ctx_dirs.append(_sw)
             except (OSError, ValueError):
@@ -3673,6 +4064,48 @@ class Agent:
                 except OSError:
                     continue
 
+        # ── Granted skills block (moved from dynamic ctx 2026-04-28) ──
+        # Skill grants are stable per-agent — they only change when the
+        # admin grants/revokes via the Portal. By living in the STATIC
+        # prompt, this block hits prompt cache after the first turn
+        # (effectively zero token cost) instead of being re-sent every
+        # turn as it was in the old `scheduled` / `skills_registry`
+        # dynamic-context paths.
+        #
+        # Single source of truth: hub.skill_registry. The on-disk
+        # `granted_skills.md` is just a human-readable mirror — neither
+        # injection layer depends on it.
+        try:
+            import sys as _sys
+            _llm_mod = _sys.modules.get(__package__ + ".llm") if __package__ else None
+            _hub = getattr(_llm_mod, "_active_hub", None) if _llm_mod else None
+            if _hub is not None and getattr(_hub, "skill_registry", None) is not None:
+                _gs_lines: list[str] = []
+                for _inst in _hub.skill_registry.list_for_agent(self.id):
+                    _m = _inst.manifest
+                    _sid = getattr(_m, "id", "") or getattr(_m, "name", "") or "?"
+                    _path = _inst.install_dir or ""
+                    _desc_raw = getattr(_m, "description", "") or ""
+                    if isinstance(_desc_raw, dict):
+                        _desc_raw = (_desc_raw.get("zh-CN")
+                                     or _desc_raw.get("en")
+                                     or next(iter(_desc_raw.values()), ""))
+                    _desc = " ".join(str(_desc_raw).split())[:120]
+                    if _desc:
+                        _gs_lines.append(f"- `{_sid}` — {_desc} (path: `{_path}`)")
+                    else:
+                        _gs_lines.append(f"- `{_sid}` (path: `{_path}`)")
+                if _gs_lines:
+                    parts.append(
+                        "\n## Granted Skills\n\n"
+                        "已授权给本 agent 的技能(ID + 一句话 + 安装路径)。需要某个技能的"
+                        "详细用法时,`read_file <path>/SKILL.md` 或 "
+                        "`get_skill_guide(name)` 拉完整指南。\n\n"
+                        + "\n".join(_gs_lines)
+                    )
+        except Exception as _gse:
+            logger.debug("granted-skills static block skipped: %s", _gse)
+
         # Model-specific tool use guidance (depends on model, rarely changes)
         guidance = security.get_model_tool_guidance(self.model or "")
         if guidance:
@@ -3695,7 +4128,7 @@ class Agent:
             ctx_type=ctx_type,
             use_zh=bool(use_zh),
             working_dir=str(wd),
-            shared_workspace=self.shared_workspace or "",
+            shared_workspace=self.get_active_shared_workspace(),
             project_name=self.project_name or "",
             project_id=self.project_id or "",
         ))
@@ -3860,9 +4293,10 @@ class Agent:
             from pathlib import Path as _PCPath
             wd = self._effective_working_dir()
             _ctx_dirs: list[_PCPath] = [wd]
-            if getattr(self, "shared_workspace", None):
+            _active_sw = self.get_active_shared_workspace()
+            if _active_sw:
                 try:
-                    _sw = _PCPath(self.shared_workspace)
+                    _sw = _PCPath(_active_sw)
                     if _sw.resolve() != wd.resolve():
                         _ctx_dirs.append(_sw)
                 except (OSError, ValueError):
@@ -3903,7 +4337,10 @@ class Agent:
                 "agent_soul_md": getattr(self, "soul_md", "") or "",
                 "agent_custom_instructions": getattr(p, "custom_instructions", "") or "",
                 "working_dir": str(self._effective_working_dir()),
-                "shared_workspace": getattr(self, "shared_workspace", "") or "",
+                "shared_workspace": (
+                    self.get_active_shared_workspace()
+                    if hasattr(self, "get_active_shared_workspace") else ""
+                ),
                 "project_name": getattr(self, "project_name", "") or "",
                 "project_id": getattr(self, "project_id", "") or "",
                 "meeting_id": getattr(self, "source_meeting_id", "") or "",
@@ -3976,6 +4413,57 @@ class Agent:
             return True
 
         # Priority order: most important context first
+
+        # 0.0 Source hint — when this turn was triggered by another agent
+        # (source="agent:<id>") or by a project task / system event, tell
+        # the LLM upfront so it understands the authority chain.
+        # User-driven turns (source="user" / "admin") are the default
+        # path and need no hint. Skipped silently if no last-user msg.
+        try:
+            _last_user = None
+            for _m in reversed(self.messages):
+                if _m.get("role") == "user":
+                    _last_user = _m
+                    break
+            _src_raw = (_last_user or {}).get("source", "") or ""
+            if _src_raw and ":" in _src_raw:
+                _kind, _src_id = _src_raw.split(":", 1)
+            else:
+                _kind, _src_id = _src_raw, ""
+            if _kind == "agent" and _src_id:
+                # Resolve the source agent's display name via hub.
+                import sys as __sys
+                __llm_mod = __sys.modules.get(__package__ + ".llm") if __package__ else None
+                __hub = getattr(__llm_mod, "_active_hub", None) if __llm_mod else None
+                __src_a = __hub.agents.get(_src_id) if (__hub and hasattr(__hub, "agents")) else None
+                if __src_a is not None:
+                    _try_add(
+                        f"## 当前任务来源\n"
+                        f"本轮由 **{__src_a.role}-{__src_a.name}** 派单给你。"
+                        f"完成后请把结论 / 产出回报给他(在当前群聊里 @ 他,或调 "
+                        f"`send_message(to_agent=\"{_src_a.id if False else __src_a.id}\", ...)`)。",
+                        "source_hint",
+                    )
+            elif _kind in ("task", "milestone") and _src_id:
+                _try_add(
+                    f"## 当前任务来源\n"
+                    f"本轮由项目任务 / 里程碑(`{_src_raw}`)触发。"
+                    f"完成后请按提示调 `submit_deliverable` / "
+                    f"`update_milestone_status` 收尾。",
+                    "source_hint",
+                )
+            elif _kind == "system":
+                _try_add(
+                    f"## 当前任务来源\n"
+                    f"本轮由系统事件触发(`{_src_raw}` —— 通常是项目恢复 / 自动唤醒)。",
+                    "source_hint",
+                )
+            # "user" / "admin" / empty → no hint (default human path)
+        except Exception as _she:
+            try:
+                logger.debug("source_hint injection skipped: %s", _she)
+            except Exception:
+                pass
 
         # 0.0 Plan state injection (P0/L1) — authoritative "where am I"
         # snapshot so the LLM doesn't have to reconstruct its own
@@ -4105,19 +4593,13 @@ class Agent:
             except Exception as _we:
                 logger.debug("wiki index injection skipped: %s", _we)
 
-        # 8. Granted skills (from skill registry)
-        if total_chars < max_dynamic_chars:
-            try:
-                import sys as _sys
-                _llm_mod = _sys.modules.get(__package__ + ".llm") if __package__ else None
-                hub = getattr(_llm_mod, "_active_hub", None) if _llm_mod else None
-                if hub is not None and getattr(hub, "skill_registry", None) is not None:
-                    skill_block = hub.skill_registry.build_prompt_block(
-                        self.id, agent_workspace=str(self._get_agent_workspace()))
-                    if skill_block:
-                        _try_add(skill_block, "skills_registry")
-            except Exception as _se:
-                logger.debug("skill prompt injection failed: %s", _se)
+        # 8. (REMOVED 2026-04-28) Granted skills used to be re-rendered
+        #    here every turn via skill_registry.build_prompt_block() —
+        #    ~2K tokens/turn of duplicated content. Single source of
+        #    truth is now `granted_skills.md` (written in
+        #    _ensure_workspace_layout, read in _get_scheduled_context).
+        #    Agent reads each SKILL.md on demand via read_file or
+        #    get_skill_guide(name).
 
         # 9. Structured context bundle via budget allocator (#4 wired-in).
         #    Replaces the ad-hoc "_build_shared_context_summary" path with
@@ -4366,17 +4848,37 @@ class Agent:
             result.append(ctx_msg)
             return result
 
-        # Prepend into the last user message (copy first, never mutate)
+        # Prepend into the last user message (copy first, never mutate).
+        # Handle both string content (text-only turn) and list content
+        # (multimodal: vision turns where content is a list of
+        # {type:text|image_url, ...} blocks). Plain "+" between str and
+        # list raises TypeError — see 2026-04-30 incident.
         last_user = dict(result[last_user_idx])
         if last_user.get("_has_dynamic_ctx"):
             return result  # idempotent
-        original_content = last_user.get("content", "") or ""
-        last_user["content"] = (
+        original_content = last_user.get("content", "")
+        prefix = (
             "[当前动态上下文 · 仅供参考，下方分隔线后才是我的实际请求]\n"
             + dynamic_ctx
             + "\n\n---\n\n"
-            + original_content
         )
+        if isinstance(original_content, list):
+            # Multimodal: prepend dynamic context as a text block. If the
+            # first block is already text, merge into it (saves one block);
+            # otherwise insert a new text block at the head so images keep
+            # their relative position after the prefix.
+            new_content = list(original_content)
+            if (new_content and isinstance(new_content[0], dict)
+                    and new_content[0].get("type") == "text"):
+                first = dict(new_content[0])
+                first["text"] = prefix + str(first.get("text", ""))
+                new_content[0] = first
+            else:
+                new_content = [{"type": "text", "text": prefix}] + new_content
+            last_user["content"] = new_content
+        else:
+            # String content (or None / other) — keep original behavior.
+            last_user["content"] = prefix + str(original_content or "")
         last_user["_has_dynamic_ctx"] = True
         result[last_user_idx] = last_user
         return result
@@ -4387,6 +4889,10 @@ class Agent:
         1. 累计轮次计数，达到阈值时将溢出的 L1 消息压缩为 L2 摘要
         2. 从对话中提取 L3 事实（异步，不阻塞主流程）
         """
+        # Defensive: see agent_llm.py:_memory_write_back for context.
+        user_message = _ensure_str_content(user_message)
+        assistant_response = _ensure_str_content(assistant_response)
+
         mm = self._get_memory_manager()
         if mm is None:
             return
@@ -4657,7 +5163,17 @@ class Agent:
             if facts:
                 facts_by_category[cat] = facts
 
-        if not plan_summary and not facts_by_category:
+        # ---- P1: pull TopicMemory compiled blocks ----
+        # Topics aren't query-filtered — they're "what we know about
+        # this user / this agent's working style", relevant every turn.
+        # Top-10 by recency × confidence (list_topics' default sort).
+        topics: list = []
+        try:
+            topics = mm.list_topics(self.id, limit=10, touch=True)
+        except Exception as _te:
+            logger.debug("list_topics failed in memory ctx: %s", _te)
+
+        if not plan_summary and not facts_by_category and not topics:
             mc = getattr(self, "_memory_hit_counts", None) or {"hits": 0, "misses": 0}
             mc["misses"] = mc.get("misses", 0) + 1
             self._memory_hit_counts = mc
@@ -4691,6 +5207,18 @@ class Agent:
             parts.append(f"【{title}】")
             for f in facts[:max_facts_per_cat]:
                 parts.append(f"- {f.content}")
+            parts.append("")
+
+        # P1: render TopicMemory compiled blocks. These are the
+        # "current best understanding" per topic — reflect lessons
+        # accumulated over many turns. Notably we render ONLY compiled,
+        # not timeline (timeline is for audit / explain, not steady
+        # injection cost).
+        if topics:
+            parts.append("【主题级理解 (compiled)】")
+            for t in topics:
+                low_conf = " ⚠ 近期有冲突，置信度低" if t.confidence < 0.7 else ""
+                parts.append(f"- [{t.topic}] {t.compiled}{low_conf}")
             parts.append("")
 
         parts.append("</memory_context>")
@@ -6532,10 +7060,19 @@ Write only the summary body. Do not include any preamble or prefix."""
         # agents (saved before the dataclass had a default_factory) may
         # have it as None. Defend with `or ()`.
         if tool_name in (self.profile.auto_approve_tools or ()):
+            _t0 = time.time()
             with self._sandbox_scope():
                 result = self._execute_tool_guarded(tool_name, arguments, on_event=on_event)
-            auth.audit("tool_executed", actor=self.name, target=tool_name,
-                       detail=result[:200])
+            _elapsed_ms = int((time.time() - _t0) * 1000)
+            auth.audit(
+                "tool_executed", actor=self.name, target=tool_name,
+                detail=result,
+                agent_id=self.id,
+                project_id=getattr(self, "project_id", "") or "",
+                meeting_id=getattr(self, "source_meeting_id", "") or "",
+                arguments=arguments,
+                elapsed_ms=_elapsed_ms,
+            )
             return result
 
         decision, reason = policy.check_tool(
@@ -6558,8 +7095,14 @@ Write only the summary body. Do not include any preamble or prefix."""
                 decision = "needs_approval"
 
         if decision == "deny":
-            auth.audit("tool_denied", actor=self.name, target=tool_name,
-                       detail=f"Auto-denied: {reason}", success=False)
+            auth.audit(
+                "tool_denied", actor=self.name, target=tool_name,
+                detail=f"Auto-denied: {reason}", success=False,
+                agent_id=self.id,
+                project_id=getattr(self, "project_id", "") or "",
+                meeting_id=getattr(self, "source_meeting_id", "") or "",
+                arguments=arguments,
+            )
             evt = AgentEvent(time.time(), "approval", {
                 "tool": tool_name, "status": "denied", "reason": reason,
                 "agent_name": self.name,
@@ -6590,18 +7133,30 @@ Write only the summary body. Do not include any preamble or prefix."""
             if on_event:
                 on_event(evt)
 
-            auth.audit("tool_approval_requested", actor=self.name,
-                       target=tool_name,
-                       detail=json.dumps(_truncate_dict(arguments),
-                                         ensure_ascii=False)[:300])
+            auth.audit(
+                "tool_approval_requested", actor=self.name,
+                target=tool_name,
+                detail=json.dumps(_truncate_dict(arguments),
+                                  ensure_ascii=False),
+                agent_id=self.id,
+                project_id=getattr(self, "project_id", "") or "",
+                meeting_id=getattr(self, "source_meeting_id", "") or "",
+                arguments=arguments,
+            )
 
             result_status = policy.wait_for_approval(approval)
             self.status = AgentStatus.BUSY
 
             if result_status != "approved":
-                auth.audit("tool_denied", actor=self.name, target=tool_name,
-                           detail=f"Human denied/expired: {approval.decided_by}",
-                           success=False)
+                auth.audit(
+                    "tool_denied", actor=self.name, target=tool_name,
+                    detail=f"Human denied/expired: {approval.decided_by}",
+                    success=False,
+                    agent_id=self.id,
+                    project_id=getattr(self, "project_id", "") or "",
+                    meeting_id=getattr(self, "source_meeting_id", "") or "",
+                    arguments=arguments,
+                )
                 evt = AgentEvent(time.time(), "approval", {
                     "tool": tool_name, "status": "denied",
                     "reason": f"{result_status} by {approval.decided_by or 'timeout'}",
@@ -6639,8 +7194,10 @@ Write only the summary body. Do not include any preamble or prefix."""
         except Exception as _mw_err:
             logger.debug("pre_tool middleware skipped: %s", _mw_err)
 
+        _t0 = time.time()
         with self._sandbox_scope():
             result = self._execute_tool_guarded(tool_name, arguments, on_event=on_event)
+        _elapsed_ms = int((time.time() - _t0) * 1000)
 
         # ── Middleware: POST_TOOL (truncation, etc.) ──
         try:
@@ -6657,8 +7214,20 @@ Write only the summary body. Do not include any preamble or prefix."""
         except Exception as _mw_err:
             logger.debug("post_tool middleware skipped: %s", _mw_err)
 
-        auth.audit("tool_executed", actor=self.name, target=tool_name,
-                   detail=result[:200])
+        # Forensic audit: capture full arguments + result + elapsed.
+        # The smoking gun for the 2026-04-29 self-sent-email incident
+        # was that the audit log only had "SUCCESS [exit code: 0]" with
+        # no trace of what bash ran — now `arguments.command` is logged.
+        auth.audit(
+            "tool_executed", actor=self.name, target=tool_name,
+            detail=result,
+            success=not (isinstance(result, str) and result.lstrip().lower().startswith("error")),
+            agent_id=self.id,
+            project_id=getattr(self, "project_id", "") or "",
+            meeting_id=getattr(self, "source_meeting_id", "") or "",
+            arguments=arguments,
+            elapsed_ms=_elapsed_ms,
+        )
         return result
 
     def _sandbox_scope(self):
@@ -6678,10 +7247,15 @@ Write only the summary body. Do not include any preamble or prefix."""
         mode = getattr(self.profile, "sandbox_mode", "") or ""
         allow_list = list(getattr(self.profile, "sandbox_allow_commands", []) or [])
 
-        # Build allowed_dirs from authorized workspaces + shared workspace
+        # Build allowed_dirs from authorized workspaces + shared workspace.
+        # Resolve the shared workspace for the CURRENT active context
+        # (project/meeting → that surface's dir; solo → empty). Multi-
+        # project agents naturally get the right project's dir per
+        # turn instead of always-pointing-at-first-joined.
         allowed_dirs = []
-        if self.shared_workspace:
-            allowed_dirs.append(self.shared_workspace)
+        _shared_ws = self.get_active_shared_workspace()
+        if _shared_ws:
+            allowed_dirs.append(_shared_ws)
         # Add workspaces of authorized agents
         from . import DEFAULT_DATA_DIR as _DEFAULT_DD2
         data_dir = _os.environ.get("TUDOU_CLAW_DATA_DIR") or _DEFAULT_DD2
@@ -6709,17 +7283,37 @@ Write only the summary body. Do not include any preamble or prefix."""
             # Non-fatal — sandbox without extended skill access is still usable.
             pass
 
+        # ── Read-only allow list ──────────────────────────────────────
+        # Let agents READ any installed skill's source for reference
+        # (manifest patterns, helper module structure, prompt examples)
+        # without granting the skill or risking writes. Writes still
+        # rejected with a clear "request a grant" error message.
+        # Granted skills' install_dirs above are still in allowed_dirs
+        # (read+write); this only opens the broader skills_installed/
+        # tree for read-only reference.
+        readonly_dirs: list[str] = []
+        try:
+            from . import DEFAULT_DATA_DIR as _DEFAULT_DD3
+            _data_dir3 = _os.environ.get("TUDOU_CLAW_DATA_DIR") or _DEFAULT_DD3
+            _skills_root = _os.path.join(_data_dir3, "skills_installed")
+            if _os.path.isdir(_skills_root):
+                readonly_dirs.append(_skills_root)
+        except Exception:
+            pass
+
         policy = _sandbox.SandboxPolicy(
             root=root, mode=mode, allow_list=allow_list,
             agent_id=self.id, agent_name=self.name,
             allowed_dirs=allowed_dirs,
+            readonly_dirs=readonly_dirs,
         )
         return _sandbox.sandbox_scope(policy)
 
     # ---- chat ----
 
     def chat(self, user_message, on_event: Any = None,
-             abort_check: Any = None, source: str = "admin") -> str:
+             abort_check: Any = None, source: str = "admin",
+             context_id: str = "solo") -> str:
         """
         Run a chat turn. If abort_check is a callable returning True,
         the chat loop will stop early.
@@ -6728,6 +7322,12 @@ Write only the summary body. Do not include any preamble or prefix."""
                       (OpenAI vision format: [{type:"text",text:...},{type:"image_url",...}])
         source: "admin" for messages from portal UI, "agent:{agent_name}" for inter-agent,
                 "system" for system messages
+        context_id: which conversation context this turn belongs to —
+                    "solo" (default; direct admin/user chat),
+                    "project:{project_id}" (Project group chat),
+                    "meeting:{meeting_id}" (Meeting). Each context has its
+                    own message history; turns from one context never
+                    leak into another's LLM payload.
         """
         # ── Token logging context: 让本次 chat 内所有 LLM 调用 ──
         # ── 都能归属到这个 agent/project/meeting，token 统计才能落到 ──
@@ -6743,7 +7343,16 @@ Write only the summary body. Do not include any preamble or prefix."""
             pass
 
         with self._lock:
+            # Switch to the right per-context message bucket BEFORE any
+            # _ensure_system_message / append / trim runs — they all read
+            # and write `self.messages`, which now points at the bucket
+            # for this context.
+            self._switch_context(context_id)
             self.status = AgentStatus.BUSY
+            # Reset streaming buffer at the start of every turn so a
+            # previous turn's text doesn't bleed into the "typing"
+            # preview the polling endpoint shows.
+            self._streaming_buffer = ""
 
             # 新 A.8: reset per-turn memory_recall bucket so refs from
             # the previous turn don't leak into this turn's assistant msg.
@@ -7016,6 +7625,20 @@ Write only the summary body. Do not include any preamble or prefix."""
             # "好的，我已经收集到..." bubbles. Squash consecutive duplicates.
             _last_emitted_text_ref = [None]
             def _emit(evt: AgentEvent):
+                # Accumulate streaming text deltas into the public
+                # buffer regardless of whether on_event is bound. This
+                # lets the project chat polling endpoint surface the
+                # in-progress reply ("typing" preview) — option A from
+                # the 2026-04-28 streaming UX discussion.
+                try:
+                    if evt.kind == "text_delta":
+                        _chunk = (evt.data or {}).get("content", "")
+                        if _chunk:
+                            self._streaming_buffer = (
+                                self._streaming_buffer or ""
+                            ) + _chunk
+                except Exception:
+                    pass
                 if on_event:
                     try:
                         # Only dedupe assistant-message events; everything
@@ -7121,10 +7744,89 @@ Write only the summary body. Do not include any preamble or prefix."""
                     "read_file": 6, "bash": 8,
                 }
                 _DEFAULT_SOFT_CAP = 4
-                _PER_TOOL_HARD_CAP = 10  # any single tool name
-                _TOTAL_HARD_CAP = 30     # all tool calls combined
+                # 2026-04-30: We don't hard-cap on total count anymore. Long
+                # research / coding tasks legitimately need 50+ tool calls.
+                # Instead, at AUTH_THRESHOLD we synchronously request user
+                # approval to extend the budget. Each approval grants +AUTH_BUMP.
+                # MAX_EXTENSIONS bounds the absolute ceiling (130 by default)
+                # to keep a runaway loop from being silently approved.
+                _AUTH_THRESHOLD = int(
+                    os.environ.get("TUDOU_TOOL_AUTH_THRESHOLD", "30") or 30)
+                _AUTH_BUMP = int(
+                    os.environ.get("TUDOU_TOOL_AUTH_BUMP", "20") or 20)
+                _AUTH_MAX_EXTENSIONS = int(
+                    os.environ.get("TUDOU_TOOL_AUTH_MAX_EXT", "5") or 5)
+                # Per-turn local state — resets every chat() invocation.
+                _budget_extensions_used = 0
+                _budget_denied = False
+                _milestone_announced: set[int] = set()
+                # Bookkeeping / state-mutation tools — these have legit
+                # reasons to be called many times in a turn (planning,
+                # task tracking, milestone progress). They do no external
+                # I/O and can't loop. Excluded from BOTH the per-tool cap
+                # and the total cap so they don't kill a productive agent.
+                _UNCOUNTED_TOOLS = frozenset({
+                    "plan_update", "complete_step",
+                    "task_update",
+                    "submit_deliverable",
+                    "create_goal", "update_goal_progress",
+                    "create_milestone",
+                    "update_milestone_status",
+                    "update_milestone_responsibility",
+                    "request_tool_budget",  # reserved for future request mechanism
+                })
                 _per_tool_count: dict[str, int] = {}
                 _budget_warned: set[str] = set()
+                # ── Per-(tool, args-signature) repeat detection ──
+                # Loops aren't "called X 10 times" — they're "called X
+                # with the *same args* 5 times". 5 web_searches with 5
+                # different queries = legit research. 5 web_searches with
+                # the same query = stuck. We track signature count per
+                # turn and block the call BEFORE execution once a
+                # signature is repeated past _REPEAT_HARD.
+                #
+                # _DEDUP_KEY[tool] extracts a normalized arg key. Tools
+                # not in the table are NOT dedup-tracked (e.g. plan_update
+                # is fine to call repeatedly with different deltas).
+                # IMPORTANT: the keys here MUST match the actual tool
+                # parameter names exposed in tools.py — otherwise a().get()
+                # returns "" for every call, the signature collapses to
+                # an empty string, and the dedup matches *every* call as
+                # "same args" (false positive). Confirmed against
+                # tools.py: bash uses `command` (not `cmd`), read_file
+                # uses `path` (not `file_path`), search_files uses
+                # `pattern`+`directory`, etc.
+                _DEDUP_KEY: dict[str, callable] = {
+                    "read_file": lambda a: f"path={a.get('path', '') or a.get('file_path', '')}",
+                    "web_search": lambda a: f"q={' '.join(str(a.get('query', '')).lower().split())}",
+                    "web_fetch": lambda a: f"url={a.get('url', '')}",
+                    "web_screenshot": lambda a: f"url={a.get('url', '')}",
+                    "knowledge_lookup": lambda a: f"q={' '.join(str(a.get('query', '')).lower().split())}",
+                    "memory_recall": lambda a: f"q={' '.join(str(a.get('query', '')).lower().split())}",
+                    "mcp_call": lambda a: (
+                        f"mcp={a.get('mcp_id', '')}|tool={a.get('tool', '')}"
+                        f"|args={json.dumps(a.get('arguments', {}) or {}, sort_keys=True, default=str)[:200]}"
+                    ),
+                    "bash": lambda a: f"cmd={' '.join(str(a.get('command', '') or a.get('cmd', '')).split())[:240]}",
+                    "search_files": lambda a: f"q={a.get('pattern', '')}|dir={a.get('directory', '')}",
+                    "glob_files": lambda a: f"pat={a.get('pattern', '')}|dir={a.get('directory', '')}",
+                }
+                # Soft = warn but allow; Hard = block this exact signature
+                # but allow OTHER signatures of the same tool.
+                _REPEAT_SOFT = 2  # 3rd identical call → soft warn
+                _REPEAT_HARD = 4  # 5th identical call → block THIS sig
+                _signature_count: dict[str, int] = {}
+                _signature_warned: set[str] = set()
+                # Per-MCP-id repeat counter — separate from signature
+                # dedup (which keys on full mcp_id|tool|args). When the
+                # LLM keeps hammering the SAME MCP server with slightly-
+                # varying args (the 2026-04-28 incident: 13× calls to
+                # mcp=42d8ca5e trying to send email), per-mcp count
+                # catches it even though no two args are byte-identical.
+                _mcp_id_count: dict[str, int] = {}
+                _mcp_id_warned: set[str] = set()
+                _MCP_REPEAT_SOFT = 3   # 4th call to same MCP → warn
+                _MCP_REPEAT_HARD = 5   # 6th call → block this batch's calls to it
 
                 # ── Task Checkpoint Injection: 任务恢复上下文 ──
                 # [F3] 先老化 stale active plan，防止 phase 卡死
@@ -7242,6 +7944,12 @@ Write only the summary body. Do not include any preamble or prefix."""
                         and (self.multimodal_provider or self.multimodal_model)
                         and not self.multimodal_supports_tools):
                     _effective_tools = None
+
+                # (The previous "lock-out" approach was reverted —
+                # legit deep research needs to keep going. The soft-cap
+                # message + `request_tool_budget` self-service are now
+                # the way to extend; nothing is filtered from the tools
+                # list here.)
 
                 # Narrator-stall nudge: at most one corrective injection per
                 # turn, so a persistently-broken model can't pin us in a loop.
@@ -7639,48 +8347,102 @@ Write only the summary body. Do not include any preamble or prefix."""
                         for tc in tool_calls
                     )
 
-                    # ── Per-tool budget check ──
-                    # Bump per-name counters first so caps include the
-                    # current planned batch. Hard cap → break the loop;
-                    # soft cap → inject system message exactly once per
-                    # tool name so the LLM can self-stop.
-                    _hard_cap_breach = ""
+                    # ── Per-tool budget tracking (2026-04-28 / 2026-04-30) ──
+                    # No hard kills on count alone — long research / coding
+                    # tasks legitimately need many tool calls. Real loop
+                    # guard is signature dedup (same-args repeats).
+                    #
+                    # Counters here drive:
+                    #   • Soft warnings at the per-tool soft cap (one
+                    #     time per tool, advising the agent to wrap up).
+                    #   • Total-count milestones (every 10 calls) — a
+                    #     short system message so the LLM SEES its own
+                    #     pace and self-regulates.
+                    #   • _AUTH_THRESHOLD — synchronously requests
+                    #     user approval to extend the budget.
+                    #   • Telemetry / log lines so admins can see what
+                    #     a turn actually used.
+                    # _capped_tools is no longer populated for total / per-
+                    # tool counts; it's left as an empty placeholder for
+                    # downstream dispatch logic that still references it.
+                    _capped_tools: dict[str, str] = {}
                     for tc in tool_calls:
                         _nm = tc.get("function", {}).get("name", "?")
+                        if _nm in _UNCOUNTED_TOOLS:
+                            continue
                         _per_tool_count[_nm] = _per_tool_count.get(_nm, 0) + 1
                     _total = sum(_per_tool_count.values())
-                    if _total > _TOTAL_HARD_CAP:
-                        _hard_cap_breach = (
-                            f"⚠️ 工具调用总额超出 {_TOTAL_HARD_CAP} 次,"
-                            f"判定为死循环,已强制终止本轮。"
-                            f"已有调用:{dict(_per_tool_count)}"
-                        )
-                    else:
-                        for _nm, _cnt in _per_tool_count.items():
-                            if _cnt > _PER_TOOL_HARD_CAP:
-                                _hard_cap_breach = (
-                                    f"⚠️ 工具 {_nm} 已被调用 {_cnt} 次"
-                                    f"(上限 {_PER_TOOL_HARD_CAP}),"
-                                    f"判定为死循环,已强制终止本轮。"
-                                )
-                                break
-                    if _hard_cap_breach:
-                        logger.error(
-                            "Agent %s: tool-call hard cap breached — %s",
-                            self.id[:8], _hard_cap_breach)
+                    # Total-count milestone — give the LLM visibility on
+                    # its own pace. Once per 10-call boundary; cumulative
+                    # across the turn. Cheap (~30 tokens each).
+                    _milestone = (_total // 10) * 10
+                    if _milestone >= 10 and _milestone not in _milestone_announced:
+                        _milestone_announced.add(_milestone)
+                        _eff_threshold = _AUTH_THRESHOLD + (
+                            _budget_extensions_used * _AUTH_BUMP)
                         try:
                             self.messages.append({
-                                "role": "assistant",
-                                "content": _hard_cap_breach,
-                                "_source": "tool_budget_guard",
+                                "role": "system",
+                                "content": (
+                                    f"[工具用量] 本回合已调用 **{_total}** 次工具。"
+                                    f"超过 {_eff_threshold} 次将向用户请求继续授权，"
+                                    f"如能基于现有结果收尾请优先 submit_deliverable / "
+                                    f"在 reply 中说明结论。"
+                                ),
                             })
                         except Exception:
                             pass
-                        final_content = _hard_cap_breach
-                        break  # exit iteration loop
-                    # Soft cap warnings — inject ONE system message per
-                    # tool that just crossed its soft cap, so the LLM
-                    # gets a clear nudge to stop.
+                        logger.info(
+                            "Agent %s: tool-call milestone total=%d breakdown=%s",
+                            self.id[:8], _total, dict(_per_tool_count),
+                        )
+
+                    # ── Budget authorization check ──
+                    # If user already denied this turn, block all new tool
+                    # calls outright; LLM gets a clear "wrap up" message.
+                    if _budget_denied:
+                        for tc in tool_calls:
+                            _cid = tc.get("id", "")
+                            _nm = tc.get("function", {}).get("name", "")
+                            if _nm and _nm not in _UNCOUNTED_TOOLS and _cid:
+                                _capped_tools.setdefault(
+                                    _nm,
+                                    "用户拒绝继续工具调用，请基于已有结果给最终回复",
+                                )
+                    else:
+                        _eff_threshold = _AUTH_THRESHOLD + (
+                            _budget_extensions_used * _AUTH_BUMP)
+                        if (_total >= _eff_threshold
+                                and _budget_extensions_used < _AUTH_MAX_EXTENSIONS):
+                            # Synchronously request user approval to extend.
+                            # Pattern matches the per-tool risky-call
+                            # approval flow in agent_execution.py — we use
+                            # the same PendingApproval primitive so portal
+                            # UI surfaces it alongside other approvals.
+                            decision = self._request_budget_extension(
+                                _total, _AUTH_BUMP, _budget_extensions_used,
+                            )
+                            if decision == "approved":
+                                _budget_extensions_used += 1
+                            else:
+                                _budget_denied = True
+                                # Block this batch's new calls too — user
+                                # explicitly said no more.
+                                for tc in tool_calls:
+                                    _cid = tc.get("id", "")
+                                    _nm = tc.get("function", {}).get("name", "")
+                                    if (_nm and _nm not in _UNCOUNTED_TOOLS
+                                            and _cid):
+                                        _capped_tools.setdefault(
+                                            _nm,
+                                            "用户拒绝继续工具调用，请基于已有结果给最终回复",
+                                        )
+                    # Soft cap warnings — single nudge per tool when it
+                    # first crosses the soft threshold. NOT a block:
+                    # long research tasks may legitimately keep going.
+                    # Tells the agent to either wrap up OR acknowledge
+                    # in its reply why more is needed (audit trail).
+                    # Real loop protection is signature dedup below.
                     for _nm, _cnt in _per_tool_count.items():
                         _soft = _PER_TOOL_SOFT_CAP.get(_nm, _DEFAULT_SOFT_CAP)
                         if _cnt >= _soft and _nm not in _budget_warned:
@@ -7689,11 +8451,15 @@ Write only the summary body. Do not include any preamble or prefix."""
                                 self.messages.append({
                                     "role": "system",
                                     "content": (
-                                        f"[预算警告] 工具 {_nm} 已调用 {_cnt} 次"
-                                        f"(软上限 {_soft})。请基于已收集的信息"
-                                        f"给出最终结论,不要再继续查询同一类资源。"
-                                        f"若信息不足,直接告诉用户「需要补充 X 才能下结论」"
-                                        f"而不是继续调用工具。"
+                                        f"[预算提醒] 工具 `{_nm}` 已调用 {_cnt} 次"
+                                        f"(参考软上限 {_soft})。\n"
+                                        f"如果你已经收集够,优先收尾:基于现有内容给最终结论 / "
+                                        f"submit_deliverable / 在 reply 里 @ 队友。\n"
+                                        f"如果**确实**还要继续(比如长任务多模块覆盖),"
+                                        f"在你下一段回复正文里**用一句话说明为什么** —— "
+                                        f"这等于自我授权,系统不再拦截。但记住:"
+                                        f"**不要用相同参数重复调**(同 query / file_path / url "
+                                        f"超过 4 次会被签名 dedup 自动拦)。"
                                     ),
                                 })
                             except Exception:
@@ -7722,10 +8488,131 @@ Write only the summary body. Do not include any preamble or prefix."""
                                 arguments = {"raw": str(arguments)}
                         parsed_calls.append((name, arguments, call_id))
 
+                    # ── Block list: signature dedup + per-tool cap ──
+                    # Both guards funnel into _blocked_calls so the
+                    # parallel/sequential executors below can short-
+                    # circuit blocked calls uniformly.
+                    _blocked_calls: dict[str, str] = {}  # call_id -> error msg
+                    # Apply per-tool cap blocks first.
+                    if _capped_tools:
+                        for _name, _args, _cid in parsed_calls:
+                            if _name in _capped_tools:
+                                _blocked_calls[_cid] = _capped_tools[_name]
+                    # ── Signature-based repeat detection ──
+                    # For tools in _DEDUP_KEY, compute a normalized signature
+                    # of (tool, key-args) and bump the per-turn counter.
+                    # If a signature crosses _REPEAT_HARD, REPLACE its tool
+                    # call with a synthetic error result before execution —
+                    # the LLM sees "you already called this with these exact
+                    # args N times; vary or stop" and naturally moves on.
+                    # Soft threshold injects a one-time hint.
+                    # ── Per-mcp_id repeat check ──
+                    # Run BEFORE the per-arg signature loop so a hammered
+                    # MCP gets the right error (clearer message than the
+                    # generic "same params" one). Only counts mcp_call
+                    # tool calls; one bump per call regardless of args.
+                    for _name, _args, _cid in parsed_calls:
+                        if _name != "mcp_call":
+                            continue
+                        _mid = (_args.get("mcp_id") or "").strip()
+                        # list_mcps and the intra-agent redirects have
+                        # already filtered earlier; skip empty mcp_id.
+                        if not _mid or _args.get("list_mcps"):
+                            continue
+                        _mcp_id_count[_mid] = _mcp_id_count.get(_mid, 0) + 1
+                        _mcnt = _mcp_id_count[_mid]
+                        if _mcnt > _MCP_REPEAT_HARD:
+                            _blocked_calls[_cid] = (
+                                f"[Loop guard] 你已对 MCP `{_mid}` 发起 {_mcnt} 次调用,"
+                                f"超过单 MCP 阈值 {_MCP_REPEAT_HARD}。\n"
+                                f"该 MCP 之前的返回应该已经告诉你它能/不能做什么 —— "
+                                f"反复硬调说明:\n"
+                                f"  • 这个 MCP 不是你想要的工具(目标功能在别处) → "
+                                f"不要再调它,改用 built-in 工具或换思路\n"
+                                f"  • 或参数没填对 → 仔细看上次返回的错误信息\n"
+                                f"\n如果你在试图给队友发消息,**用 reply 里 @ 提及**或 "
+                                f"`send_message(to_agent=<id>, ...)`,**不是** mcp_call。\n"
+                                f"如果是其它意图,基于已有信息收尾 / submit_deliverable / 给结论。"
+                            )
+                            logger.warning(
+                                "Agent %s: MCP repeat-block mcp=%s count=%d",
+                                self.id[:8], _mid[:8], _mcnt,
+                            )
+                        elif _mcnt > _MCP_REPEAT_SOFT and _mid not in _mcp_id_warned:
+                            _mcp_id_warned.add(_mid)
+                            try:
+                                self.messages.append({
+                                    "role": "system",
+                                    "content": (
+                                        f"[预算提醒] 你对 MCP `{_mid}` 已经发起 {_mcnt} 次调用。"
+                                        f"再来 {_MCP_REPEAT_HARD - _mcnt + 1} 次,"
+                                        f"系统就会自动拦截后续对该 MCP 的调用。\n"
+                                        f"如果之前的返回已经明确这个 MCP 解决不了你的问题,"
+                                        f"现在就停下,换工具或收尾。"
+                                    ),
+                                })
+                            except Exception:
+                                pass
+
+                    for _name, _args, _cid in parsed_calls:
+                        _key_fn = _DEDUP_KEY.get(_name)
+                        if _key_fn is None:
+                            continue
+                        try:
+                            _sig_inner = _key_fn(_args) or ""
+                        except Exception:
+                            _sig_inner = ""
+                        # Skip if the signature has no actual content —
+                        # e.g. {tool}_KEY returned "path=" with nothing
+                        # after the equals (LLM passed unknown arg name,
+                        # or our key lookup is misconfigured). Counting
+                        # those would falsely block every call as "same
+                        # empty args".
+                        _sig_value = _sig_inner.split("=", 1)[-1].strip()
+                        if not _sig_inner or not _sig_value:
+                            continue
+                        _sig = f"{_name}::{_sig_inner}"
+                        _signature_count[_sig] = _signature_count.get(_sig, 0) + 1
+                        _scnt = _signature_count[_sig]
+                        if _scnt > _REPEAT_HARD:
+                            _blocked_calls[_cid] = (
+                                f"[Loop guard] 你已用**完全相同的参数**调用 `{_name}` "
+                                f"{_scnt} 次,系统判定为重复死循环,已拦截。\n"
+                                f"参数签名: `{_sig_inner[:160]}`\n"
+                                f"如果还需要这类信息,请**换参数**(不同 query / 不同 "
+                                f"file_path / 不同 url)。如果换不了,说明已找不到 —— "
+                                f"基于已有信息给结论,或明确告诉用户「需要补充 X」。"
+                            )
+                            logger.warning(
+                                "Agent %s: signature loop blocked tool=%s sig=%r count=%d",
+                                self.id[:8], _name, _sig_inner[:80], _scnt,
+                            )
+                        elif _scnt > _REPEAT_SOFT and _sig not in _signature_warned:
+                            _signature_warned.add(_sig)
+                            try:
+                                self.messages.append({
+                                    "role": "system",
+                                    "content": (
+                                        f"[Loop guard 提醒] 工具 `{_name}` 用同样的参数调用过 "
+                                        f"{_scnt} 次了 (`{_sig_inner[:120]}`)。"
+                                        f"再多一次同样参数会被自动拦截。请换参数,或基于已有结果收尾。"
+                                    ),
+                                })
+                            except Exception:
+                                pass
+                            logger.info(
+                                "Agent %s: signature soft warn tool=%s sig=%r count=%d",
+                                self.id[:8], _name, _sig_inner[:80], _scnt,
+                            )
+
                     # Execute in parallel if all tools are safe, otherwise sequential
                     if all_parallel_safe and len(parsed_calls) > 1:
                         def _execute_single_tool(name_args_id):
                             name, arguments, call_id = name_args_id
+                            # Loop-guard short-circuit: blocked signature
+                            # returns synthetic error without hitting the tool.
+                            if call_id in _blocked_calls:
+                                return name, _blocked_calls[call_id], call_id
                             # Inject caller agent ID
                             if name in ("team_create", "send_message", "task_update",
                                         "mcp_call", "bash", "write_file", "edit_file",
@@ -7783,6 +8670,15 @@ Write only the summary body. Do not include any preamble or prefix."""
                                               "arguments": _truncate_dict(arguments)})
                             self._log(evt.kind, evt.data)
                             _emit(evt)
+
+                            # Loop-guard short-circuit: blocked signature
+                            # returns the synthetic error without hitting
+                            # the actual tool handler.
+                            if call_id in _blocked_calls:
+                                result = _blocked_calls[call_id]
+                                result = self._handle_large_result(name, result)
+                                results.append((name, result, call_id))
+                                continue
 
                             # Inject caller agent ID for tools that need agent context
                             if name in ("team_create", "send_message", "task_update",
@@ -7955,10 +8851,20 @@ Write only the summary body. Do not include any preamble or prefix."""
             except Exception as e:
                 # Per-agent error isolation: log the error but recover to IDLE
                 # so this agent remains usable and doesn't block the system.
-                evt = AgentEvent(time.time(), "error", {"error": str(e)})
+                # Include the full traceback in the log so post-incident
+                # debugging doesn't need a repro — chat errors are
+                # user-impacting and rare enough that the extra log noise
+                # is worth it.
+                import traceback as _tb
+                _exc_tb = _tb.format_exc()
+                evt = AgentEvent(time.time(), "error", {
+                    "error": str(e),
+                    "traceback": _exc_tb[-2000:],  # tail to avoid 50KB events
+                })
                 self._log(evt.kind, evt.data)
                 _emit(evt)
-                logger.error("Agent %s (%s) chat error: %s", self.name, self.id, e)
+                logger.error("Agent %s (%s) chat error: %s\n%s",
+                              self.name, self.id, e, _exc_tb)
                 try:
                     os.chdir(old_cwd)
                 except Exception:
@@ -8041,6 +8947,11 @@ Write only the summary body. Do not include any preamble or prefix."""
                     self._last_save_time = time.time()
             except Exception as _save_err:
                 logger.debug("post-turn save failed: %s", _save_err)
+            # Clear streaming buffer — the turn's complete reply now
+            # lives in self.messages / final_content. Leaving the
+            # buffer set would make pollers incorrectly believe the
+            # agent is still typing.
+            self._streaming_buffer = ""
             return final_content
 
     def _chat_async_via_langgraph(
@@ -8634,6 +9545,125 @@ Write only the summary body. Do not include any preamble or prefix."""
             "memory_nodes": [n.to_dict() for n in self.enhancer.memory.nodes.values()],
             "tool_chains": [tc.to_dict() for tc in self.enhancer.tool_chains.values()],
         }
+
+    # ---- Tool budget extension (long-task user authorization) ----
+
+    def _request_budget_extension(self, total_so_far: int,
+                                   bump: int, extensions_used: int) -> str:
+        """Synchronously request user approval to continue tool calls
+        past the per-turn budget threshold. Reuses the existing
+        ``PendingApproval`` primitive so the request surfaces in the
+        portal's approval feed alongside risky-tool approvals.
+
+        Returns ``"approved"`` or ``"denied"`` (timeout treated as
+        denied — same as risky-tool approval).
+
+        Logs:
+          * approval event (pending → approved/denied) so the portal
+            can render a card with an "Approve / Deny" button
+          * audit entry for the operator's record
+          * system message into self.messages so the LLM's next turn
+            knows the outcome
+        """
+        try:
+            from .auth import get_auth
+            from .agent_types import AgentStatus, AgentEvent
+        except Exception as e:
+            logger.warning("budget extension: import failed: %s", e)
+            return "denied"
+        auth = get_auth()
+        policy = getattr(auth, "tool_policy", None)
+        if policy is None:
+            return "denied"
+
+        prior_status = self.status
+        self.status = AgentStatus.WAITING_APPROVAL
+
+        reason = (
+            f"Agent 已调用 {total_so_far} 次工具，请求继续 +{bump} 次预算 "
+            f"(已使用 {extensions_used} 次扩展)"
+        )
+        approval = policy.request_approval(
+            tool_name="__budget_extension__",
+            arguments={
+                "calls_so_far": total_so_far,
+                "extensions_used": extensions_used,
+                "bump": bump,
+            },
+            agent_id=self.id,
+            agent_name=self.name,
+            reason=reason,
+        )
+        # Emit approval event so the portal sidebar surfaces a pending
+        # card. The frontend's existing approvals UI handles rendering;
+        # __budget_extension__ has no special wiring — it shows up in
+        # the standard list with the reason text.
+        evt = AgentEvent(time.time(), "approval", {
+            "tool": "__budget_extension__",
+            "status": "pending",
+            "reason": reason,
+            "agent_name": self.name,
+            "approval_id": approval.approval_id,
+            "calls_so_far": total_so_far,
+        })
+        self._log(evt.kind, evt.data)
+        try:
+            auth.audit("budget_extension_requested",
+                       actor=self.name, target=self.id,
+                       detail=reason)
+        except Exception:
+            pass
+
+        decision = policy.wait_for_approval(approval)
+        self.status = prior_status
+
+        if decision == "approved":
+            try:
+                self.messages.append({
+                    "role": "system",
+                    "content": (
+                        f"[预算授权] 用户已授权继续。"
+                        f"当前 {total_so_far} 次 + 新增 {bump} 次预算。"
+                        f"请尽快收尾。"
+                    ),
+                })
+            except Exception:
+                pass
+            self._log("approval", {
+                "tool": "__budget_extension__",
+                "status": "approved",
+                "approval_id": approval.approval_id,
+            })
+            try:
+                auth.audit("budget_extension_approved",
+                           actor=approval.decided_by or "?",
+                           target=self.id, detail=reason)
+            except Exception:
+                pass
+            return "approved"
+        else:
+            try:
+                self.messages.append({
+                    "role": "system",
+                    "content": (
+                        "[预算被拒] 用户拒绝继续工具调用。"
+                        "请基于已有内容给最终回复，不要再调任何 tool。"
+                    ),
+                })
+            except Exception:
+                pass
+            self._log("approval", {
+                "tool": "__budget_extension__",
+                "status": "denied",
+                "approval_id": approval.approval_id,
+            })
+            try:
+                auth.audit("budget_extension_denied",
+                           actor=approval.decided_by or "timeout",
+                           target=self.id, detail=reason, success=False)
+            except Exception:
+                pass
+            return "denied"
 
     # ---- Think button: on-demand self-summary ----
 
@@ -9785,7 +10815,7 @@ Write only the summary body. Do not include any preamble or prefix."""
                 logger.debug("verifier llm_call failed: %s", _llm_err)
                 return {"message": {"content": ""}}
         ctx = VerifyContext(
-            workspace_dir=self.shared_workspace or self.working_dir or "",
+            workspace_dir=self.get_active_shared_workspace() or self.working_dir or "",
             step_started_at=step.started_at,
             acceptance=step.acceptance,
             result_summary=step.result_summary,
@@ -10322,9 +11352,12 @@ Write only the summary body. Do not include any preamble or prefix."""
                 role=self.role,
                 model=self.model,
                 provider=self.provider,
-                # Inherit working directory and shared workspace
+                # Inherit working directory; shared workspace is now
+                # derived from active context, not stored — child will
+                # resolve its own at runtime based on whatever context
+                # it ends up in.
                 working_dir=self.working_dir,
-                shared_workspace=self.shared_workspace,
+                shared_workspace="",
                 system_prompt=self.system_prompt,
                 profile=AgentProfile.from_dict(self.profile.to_dict()),
                 node_id=self.node_id,
@@ -10503,14 +11536,17 @@ Write only the summary body. Do not include any preamble or prefix."""
                         "duration": time.time() - task_start,
                     }
 
-                # Create isolated sub-agent
+                # Create isolated sub-agent. shared_workspace not
+                # passed — sub-agent will derive its own from active
+                # context when it runs (parallel workers always run in
+                # solo unless explicitly attached to a project).
                 sub_agent = Agent(
                     name=f"{self.name}_parallel_{agent_id}",
                     role=self.role,
                     model=self.model,
                     provider=self.provider,
                     working_dir=self.working_dir,
-                    shared_workspace=self.shared_workspace,
+                    shared_workspace="",
                     system_prompt=self.system_prompt,
                     profile=AgentProfile.from_dict(self.profile.to_dict()),
                     node_id=self.node_id,
@@ -10646,20 +11682,47 @@ Write only the summary body. Do not include any preamble or prefix."""
         }
 
     def clear(self):
-        """Wipe agent's chat state — messages, events, and any active plan.
+        """Wipe agent's SOLO chat state — direct-chat messages + events
+        + any active plan. Project / meeting buckets are untouched
+        because they belong to those surfaces, not this one.
+
+        Scope (2026-04-29):
+          * solo bucket in ``_messages_by_context``  → cleared
+          * project:{*} / meeting:{*} buckets        → preserved
+          * ``self.events``                          → cleared
+            (this list backs the direct-agent chat page; project chats
+             read from ``project.chat_history`` instead, so they aren't
+             affected)
+          * active plan                              → marked SKIPPED
 
         Used by:
-          - "Clear Chat" UI button → POST /api/portal/agent/{id}/clear
+          - "Clear Chat" button on the direct agent chat page
+            → POST /api/portal/agent/{id}/clear
           - The persistent ``/new`` slash command (skip_history=true)
 
+        For surgical per-project / per-meeting wipes, use:
+          - DELETE /api/portal/projects/{id}/chat
+          - DELETE /api/portal/meetings/{id}/messages
+
         Why we also abandon ``_current_plan``: the watchdog
-        (``Hub._maybe_wake_stuck_agent``) reads the active plan to decide
-        when to nudge an idle agent. If the user clears chat but the
-        plan remains "active" with open steps, the agent gets re-woken
-        for a task whose context the user just deleted.
+        (``Hub._maybe_wake_stuck_agent``) reads the active plan to
+        decide when to nudge an idle agent. If the user clears chat
+        but the plan remains "active" with open steps, the agent gets
+        re-woken for a task whose context the user just deleted.
         """
         with self._lock:
-            self.messages.clear()
+            # Clear ONLY the solo bucket. self.messages currently
+            # points at whatever context was active; rebind it to the
+            # (now-empty) solo bucket so subsequent writes from
+            # admin-side go to the right place.
+            try:
+                self._messages_by_context["solo"] = []
+                self._active_context_id = "solo"
+                self.messages = self._messages_by_context["solo"]
+            except Exception:
+                # Defensive: if the per-context fields aren't present
+                # (very old agent state), fall back to legacy clear.
+                self.messages.clear()
             self.events.clear()
             # Abandon any in-flight plan so the watchdog doesn't resurrect
             # the cleared task. Mark "completed" with a synthetic note so
@@ -10687,6 +11750,86 @@ Write only the summary body. Do not include any preamble or prefix."""
             except Exception:
                 pass
             self._log("status", {"action": "cleared"})
+
+    def delete_message_at(self, ts: float, role: str,
+                          content_prefix: str = "") -> dict:
+        """Delete a single chat bubble by timestamp + role match.
+
+        The chat UI fetches its history from ``self.events`` (one event
+        per bubble) and the LLM history lives in
+        ``_messages_by_context[active_ctx]``. Both must be removed so
+        the bubble disappears AND the next turn doesn't replay it back
+        into the model.
+
+        Match strategy:
+          • ``events``: find the entry where ``kind == "message"`` and
+            ``timestamp ≈ ts`` (±0.5s) and ``data.role == role``. If a
+            ``content_prefix`` is given, it must also match the first
+            chars (case-sensitive) — disambiguates duplicate-content
+            bubbles posted in the same second.
+          • ``messages``: in the active context bucket, remove the
+            FIRST entry with the same role + content prefix. We don't
+            try to keep events and messages in lock-step indices —
+            that's brittle — content+role is enough because identical
+            consecutive messages are rare and removing one of them is
+            the user's intent anyway.
+
+        Returns ``{"event_removed": bool, "message_removed": bool}``.
+        Caller (the HTTP handler) decides whether to consider the call
+        a success — usually success = at least one of them was found.
+        """
+        out = {"event_removed": False, "message_removed": False}
+        with self._lock:
+            # 1) Drop the event the chat UI is rendering.
+            for i, ev in enumerate(self.events):
+                if ev.kind != "message":
+                    continue
+                if abs(ev.timestamp - ts) > 0.5:
+                    continue
+                if (ev.data or {}).get("role") != role:
+                    continue
+                if content_prefix:
+                    ec = str((ev.data or {}).get("content", ""))
+                    if not ec.startswith(content_prefix[:200]):
+                        continue
+                self.events.pop(i)
+                out["event_removed"] = True
+                break
+
+            # 2) Drop the matching LLM message in the active bucket.
+            # Use the active context's bucket (the user is looking at
+            # whichever context is foregrounded). Match by role +
+            # content prefix; if multiple match we drop the first.
+            try:
+                ctx = self._active_context_id or "solo"
+                bucket = self._messages_by_context.get(ctx)
+                if bucket is None:
+                    bucket = self.messages  # fallback
+                for j, msg in enumerate(bucket):
+                    if msg.get("role") != role:
+                        continue
+                    mc = msg.get("content", "")
+                    if not isinstance(mc, str):
+                        # Multimodal content: skip prefix check, match by role.
+                        # Better than no match for image-only user turns.
+                        bucket.pop(j)
+                        out["message_removed"] = True
+                        break
+                    if content_prefix and not mc.startswith(
+                            content_prefix[:200]):
+                        continue
+                    bucket.pop(j)
+                    out["message_removed"] = True
+                    break
+            except Exception:
+                # Defensive: don't let bucket weirdness break event delete.
+                pass
+
+            if out["event_removed"] or out["message_removed"]:
+                self._log("status", {"action": "delete_message",
+                                     "role": role,
+                                     "ts": ts})
+        return out
 
     def update_profile(self, **kwargs):
         """Update profile fields dynamically."""

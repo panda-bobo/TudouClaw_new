@@ -328,20 +328,59 @@ async def grant_skill_to_agents(
     hub=Depends(get_hub),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Grant skill package to agents."""
+    """Grant a skill package to a single agent.
+
+    Body: ``{"agent_id": "<id>"}``  (legacy frontend sends single id,
+    not a list — match that contract).
+
+    Mirrors the legacy ``portal_routes_post.py:/grant`` handler:
+      1. Registry-level grant via ``reg.grant(skill_id, agent_id)``
+      2. Mirror into ``agent.granted_skills`` for persistence
+      3. GC orphan ids in granted_skills (skills no longer installed)
+      4. Audit + save
+    """
+    agent_id = (body.get("agent_id") or "").strip()
+    reg = getattr(hub, "skill_registry", None)
+    if not reg:
+        raise HTTPException(503, "skill registry unavailable")
+    if not agent_id:
+        raise HTTPException(400, "agent_id required")
     try:
-        skill = _get_skill_or_404(hub, skill_id)
-        agent_ids = body.get("agent_ids", [])
-
-        if hasattr(skill, "grant_to_agents"):
-            result = skill.grant_to_agents(agent_ids)
-            return {"ok": True, "result": result}
-
-        return {"ok": True}
-    except HTTPException:
-        raise
+        reg.grant(skill_id, agent_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(400, str(e))
+    ag = hub.get_agent(agent_id) if hasattr(hub, "get_agent") else None
+    if ag is not None:
+        if skill_id not in ag.granted_skills:
+            ag.granted_skills.append(skill_id)
+        try:
+            live_ids = set(getattr(reg, "_installs", {}).keys())
+            if live_ids:
+                ag.granted_skills[:] = [
+                    s for s in ag.granted_skills if s in live_ids
+                ]
+        except Exception:
+            pass
+        # Sync skill files into the agent's workspace + regenerate
+        # ``granted_skills.md`` so the agent sees the new grant on its
+        # NEXT chat turn (not just after a server restart).
+        try:
+            inst = reg.get(skill_id) if hasattr(reg, "get") else None
+            if inst is not None and hasattr(ag, "sync_skill_to_workspace"):
+                ag.sync_skill_to_workspace(inst)
+        except Exception as _se:
+            logger.debug("sync_skill_to_workspace failed for %s/%s: %s",
+                          skill_id, agent_id, _se)
+        try:
+            if hasattr(ag, "_ensure_workspace_layout"):
+                ag._ensure_workspace_layout()
+        except Exception as _le:
+            logger.debug("_ensure_workspace_layout failed: %s", _le)
+        try:
+            hub._save_agents()
+        except Exception:
+            pass
+    return {"ok": True, "skill_id": skill_id, "agent_id": agent_id}
 
 
 @router.post("/skill-pkgs/{skill_id}/revoke")
@@ -351,20 +390,52 @@ async def revoke_skill_from_agents(
     hub=Depends(get_hub),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Revoke skill package from agents."""
+    """Revoke a skill package from a single agent.
+
+    Body: ``{"agent_id": "<id>"}``  — mirrors legacy contract.
+
+    Mirrors the legacy ``portal_routes_post.py:/revoke`` handler.
+    """
+    agent_id = (body.get("agent_id") or "").strip()
+    reg = getattr(hub, "skill_registry", None)
+    if not reg:
+        raise HTTPException(503, "skill registry unavailable")
+    if not agent_id:
+        raise HTTPException(400, "agent_id required")
     try:
-        skill = _get_skill_or_404(hub, skill_id)
-        agent_ids = body.get("agent_ids", [])
-
-        if hasattr(skill, "revoke_from_agents"):
-            result = skill.revoke_from_agents(agent_ids)
-            return {"ok": True, "result": result}
-
-        return {"ok": True}
-    except HTTPException:
-        raise
+        reg.revoke(skill_id, agent_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(400, str(e))
+    ag = hub.get_agent(agent_id) if hasattr(hub, "get_agent") else None
+    if ag is not None:
+        if skill_id in ag.granted_skills:
+            ag.granted_skills.remove(skill_id)
+        try:
+            live_ids = set(getattr(reg, "_installs", {}).keys())
+            if live_ids:
+                ag.granted_skills[:] = [
+                    s for s in ag.granted_skills if s in live_ids
+                ]
+        except Exception:
+            pass
+        # Remove the skill folder from the agent's workspace + regen
+        # ``granted_skills.md`` so the agent's next chat turn no longer
+        # sees the revoked skill.
+        try:
+            if hasattr(ag, "remove_skill_from_workspace"):
+                ag.remove_skill_from_workspace(skill_id)
+        except Exception as _se:
+            logger.debug("remove_skill_from_workspace failed: %s", _se)
+        try:
+            if hasattr(ag, "_ensure_workspace_layout"):
+                ag._ensure_workspace_layout()
+        except Exception as _le:
+            logger.debug("_ensure_workspace_layout failed: %s", _le)
+        try:
+            hub._save_agents()
+        except Exception:
+            pass
+    return {"ok": True, "skill_id": skill_id, "agent_id": agent_id}
 
 
 # ---------------------------------------------------------------------------
@@ -778,6 +849,43 @@ async def manage_skill_store(
                 raise HTTPException(400, "url is required")
             data = scan_remote_url(url)
             return data
+
+        if action == "import_scanned":
+            # Two-step flow: user did action=scan_url first, picked which
+            # skills they want, now imports a subset. Distinct from
+            # import_from_url (which does scan + import in one shot for
+            # ALL skills found in the URL).
+            from ...skill_store import import_from_scan_result
+            temp_dir = (body.get("temp_dir") or "").strip()
+            skill_names = body.get("skill_names") or []
+            tier = body.get("tier", "community")
+            auto_install = body.get("auto_install", True)
+            if not temp_dir or not skill_names:
+                raise HTTPException(400, "temp_dir and skill_names required")
+            catalog_dir = (store.catalog_dirs[-1]
+                           if getattr(store, "catalog_dirs", None) else "")
+            if not catalog_dir:
+                raise HTTPException(500, "no catalog dir configured")
+            results = import_from_scan_result(
+                temp_dir, skill_names, catalog_dir, tier=tier)
+            if auto_install:
+                store.scan()
+                for r_ in results:
+                    if not r_.get("ok"):
+                        continue
+                    eid = f"imported/{r_['name']}"
+                    entry = store.get_entry(eid)
+                    if entry is None:
+                        entry = store.get_entry(f"community/{r_['name']}")
+                    if entry is not None and not entry.installed:
+                        try:
+                            inst_r = store.install_entry(
+                                entry.id, installed_by="portal")
+                            r_["install"] = inst_r
+                        except Exception as _ie:
+                            r_["install_error"] = str(_ie)
+                store.scan()
+            return {"ok": True, "results": results}
 
         if action == "cleanup_scan":
             from ...skill_store import cleanup_scan_temp
@@ -1397,12 +1505,41 @@ async def preview_file(
 
     suffix = p.suffix.lower()
 
-    # ── Markdown / plain text ──
-    if suffix in (".md", ".markdown", ".txt", ".log"):
+    # ── Markdown / plain text / code / config ──
+    # Code / config files are read as text and rendered in <pre> on the
+    # frontend. Without this the artifact panel shows "(empty)" for any
+    # .py/.js/.json/etc. file the agent produced.
+    _TEXT_LIKE_SUFFIXES = {
+        ".md", ".markdown",            # markdown
+        ".txt", ".log", ".csv", ".tsv",
+        # code
+        ".py", ".pyi", ".js", ".jsx", ".mjs", ".cjs",
+        ".ts", ".tsx",
+        ".sh", ".bash", ".zsh", ".fish",
+        ".rb", ".pl", ".lua",
+        ".go", ".rs", ".java", ".kt", ".kts", ".scala",
+        ".c", ".h", ".cpp", ".cc", ".hpp", ".hh",
+        ".cs", ".swift", ".m", ".mm",
+        ".php", ".r", ".jl",
+        ".sql", ".graphql", ".gql",
+        # config / data
+        ".json", ".yaml", ".yml", ".toml", ".ini", ".conf", ".cfg",
+        ".env", ".dotenv",
+        ".xml", ".plist",
+        # web
+        ".html", ".htm", ".css", ".scss", ".sass", ".less",
+        ".vue", ".svelte",
+        # misc
+        ".dockerfile", ".gitignore", ".gitattributes",
+        ".editorconfig", ".prettierrc", ".eslintrc",
+    }
+    if suffix in _TEXT_LIKE_SUFFIXES:
         try:
             text = p.read_text(encoding="utf-8", errors="replace")
         except Exception as e:
             raise HTTPException(500, f"read failed: {e}")
+        # Tell the frontend whether to invoke markdown rendering or
+        # leave it as plain ``<pre>`` (code / config).
         kind = "markdown" if suffix in (".md", ".markdown") else "text"
         return {
             "kind": kind,
@@ -1410,6 +1547,23 @@ async def preview_file(
             "filename": p.name,
             "size": sz,
         }
+
+    # Files without a recognised extension but with a text-like body
+    # (no null bytes in the first 512 bytes). Catches Dockerfile,
+    # Makefile, LICENSE, README without extension, etc.
+    if not suffix:
+        try:
+            head = p.read_bytes()[:512]
+            if head and b"\x00" not in head:
+                text = p.read_text(encoding="utf-8", errors="replace")
+                return {
+                    "kind": "text",
+                    "text": text,
+                    "filename": p.name,
+                    "size": sz,
+                }
+        except Exception:
+            pass
 
     # ── DOCX → HTML ──
     if suffix == ".docx":

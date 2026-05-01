@@ -1586,11 +1586,13 @@ class ProjectChatEngine:
     4. Agent 回复自动发回群聊
     """
 
-    def __init__(self, agent_chat_fn: Callable[[str, str], str],
+    def __init__(self, agent_chat_fn: Callable[..., str],
                  agent_lookup_fn: Callable[[str], Any],
                  save_fn: Callable[[], None] | None = None):
         """
-        agent_chat_fn(agent_id, prompt) -> str
+        agent_chat_fn(agent_id, prompt, context_id="solo") -> str
+            (context_id is keyword-only; legacy callers without it fall
+             back to "solo" — matches agent.chat()'s default.)
         agent_lookup_fn(agent_id) -> Agent or None
         save_fn() -> None  # called after state changes to persist
         """
@@ -1599,10 +1601,14 @@ class ProjectChatEngine:
         self._save = save_fn or (lambda: None)
 
     def handle_user_message(self, project: Project, content: str,
-                             target_agents: list[str] | None = None):
+                             target_agents: list[str] | None = None,
+                             user_id: str = ""):
         """
         处理用户在项目群聊中的消息。
         target_agents: 指定回复的 Agent 列表，None 则自动决定。
+        user_id:       发起方的 user_id (空 = 未识别 / legacy caller)。
+                       全程作为 source metadata 流转到 agent.chat,落到
+                       per-context message bucket 的 source 字段。
         """
         # 记录用户消息
         project.post_message(
@@ -1715,10 +1721,20 @@ class ProjectChatEngine:
         #      project_context 也更稳定
         # 所有回复仍放在一个后台 daemon 线程里，HTTP 请求立即返回 respondents
         # 用于前端渲染 "agent 正在输入" 气泡。
+        # Build the source string once for this broadcast — includes
+        # user_id when known so multi-admin deployments can tell who
+        # sent what.
+        _src_label = f"user:{user_id}" if user_id else "user"
+
         def _respond_sequentially(agent_ids: list[str]):
             for aid in agent_ids:
                 try:
-                    self._agent_respond(project, aid, content)
+                    # User-originated broadcast: tag every reply with
+                    # source="user[:user_id]" so downstream tooling can
+                    # tell apart human-driven turns from agent → agent
+                    # delegation.
+                    self._agent_respond(project, aid, content,
+                                         source=_src_label)
                 except Exception as e:
                     logger.exception(
                         "Project chat [%s] sequential respond failed for %s: %s",
@@ -1753,6 +1769,94 @@ class ProjectChatEngine:
             ).start()
 
         return respondents
+
+    # ── Unified dispatch entry (2026-04-28) ─────────────────────────────
+    # Single hook for "make agent X work in this project". All triggers
+    # (user @-mention, agent → agent delegation via milestone, workflow
+    # step assignment, project resume auto-wake) should funnel through
+    # here so we get one place to:
+    #   * post the message into project chat history (UI visibility)
+    #   * tag the message with source metadata (who/what/where)
+    #   * spawn the daemon thread under abort scope
+    #   * route to the right context bucket on the target agent
+    #
+    # Source metadata format (consumed by agent.chat, project chat UI,
+    # and audit logs):
+    #   source ∈ {"user", "agent", "workflow", "milestone", "system"}
+    #   source_id   = user_id / source_agent_id (empty for "system")
+    #   source_label= human-readable display ("User" / "general-小土")
+    def dispatch_to_agent(
+        self,
+        project: "Project",
+        agent_id: str,
+        content: str,
+        *,
+        source: str = "user",
+        source_id: str = "",
+        source_label: str = "",
+        post_to_chat: bool = True,
+        msg_type: str = "chat",
+    ) -> bool:
+        """Trigger agent ``agent_id`` to respond in ``project`` with
+        ``content``. Returns True if dispatch was scheduled.
+
+        Bypasses the @-mention parser — caller already knows who to
+        target. If you want @-mention parsing, use
+        ``handle_user_message`` instead.
+        """
+        if project.paused:
+            logger.info(
+                "dispatch_to_agent: project [%s] paused, skipping agent=%s",
+                project.name, agent_id[:8],
+            )
+            return False
+        target = self._lookup(agent_id)
+        if not target:
+            logger.warning(
+                "dispatch_to_agent: agent %s not found", agent_id[:8],
+            )
+            return False
+        # 1) Surface the trigger in chat history so the UI shows it.
+        if post_to_chat:
+            try:
+                project.post_message(
+                    sender=source_id or source or "system",
+                    sender_name=source_label or source or "system",
+                    content=content,
+                    msg_type=msg_type,
+                )
+                self._save()
+            except Exception as _pe:
+                logger.debug("dispatch_to_agent: post_message failed: %s", _pe)
+        # 2) Spawn the responder under abort scope, identical to
+        #    handle_user_message's pattern, so /abort kills it cleanly.
+        from . import abort_registry as _ar
+
+        def _scoped():
+            with _ar.AbortScope(
+                _ar.project_key(project.id),
+                thread=threading.current_thread(),
+            ):
+                try:
+                    self._agent_respond(
+                        project, agent_id, content,
+                        # Pass-through to agent.chat's `source` param
+                        # so the message saved in agent's per-context
+                        # bucket carries the right provenance.
+                        source=f"{source}:{source_id}" if source_id else source,
+                    )
+                except Exception as e:
+                    logger.exception(
+                        "dispatch_to_agent: respond failed for %s: %s",
+                        agent_id[:8], e,
+                    )
+
+        threading.Thread(target=_scoped, daemon=True).start()
+        logger.info(
+            "dispatch_to_agent: project=%s agent=%s source=%s/%s",
+            project.id[:8], agent_id[:8], source, source_id[:8] if source_id else "-",
+        )
+        return True
 
     # ── Block 1 DAG scheduler ──────────────────────────────────────────
     # Consumes ProjectTask.depends_on to parallel-dispatch tasks whose
@@ -1941,6 +2045,12 @@ class ProjectChatEngine:
         prompt = self._build_task_prompt(project, task, member)
 
         def _run():
+            # Pin task_id into thread-local so submit_deliverable
+            # called from within the agent can auto-tag the resulting
+            # Deliverable with this task. Cleared in the finally below
+            # so it never bleeds into a subsequent unrelated turn.
+            from .project_context import set_current_task_id
+            set_current_task_id(task.id)
             try:
                 task.status = ProjectTaskStatus.IN_PROGRESS
                 task.updated_at = time.time()
@@ -1975,7 +2085,11 @@ class ProjectChatEngine:
                             ) + "\n请只完成当前 step，然后简要返回结果。" + review_note
                         )
                         try:
-                            step_result = self._chat(task.assigned_to, step_prompt)
+                            step_result = self._chat(
+                                task.assigned_to, step_prompt,
+                                context_id=f"project:{project.id}",
+                                source=f"task:{task.id}",
+                            )
                             # complete_step honours pending.manual_review automatically:
                             # - manual_review=True  -> status becomes 'awaiting_review'
                             # - manual_review=False -> status becomes 'done'
@@ -2010,7 +2124,11 @@ class ProjectChatEngine:
                     if not paused_for_review and task.has_awaiting_review():
                         paused_for_review = True
                 else:
-                    result = self._chat(task.assigned_to, prompt)
+                    result = self._chat(
+                        task.assigned_to, prompt,
+                        context_id=f"project:{project.id}",
+                        source=f"task:{task.id}",
+                    )
 
                 if paused_for_review:
                     # Task remains IN_PROGRESS; do not post the final ✅ message.
@@ -2073,23 +2191,52 @@ class ProjectChatEngine:
                         )
                 except Exception:
                     pass
+                # Clear thread-local task pin so a subsequent unrelated
+                # turn on this thread doesn't inherit it.
+                try:
+                    set_current_task_id("")
+                except Exception:
+                    pass
 
         threading.Thread(target=_run, daemon=True).start()
 
     # ── 内部方法 ──
 
-    def _resume_auto_wake(self, project: Project) -> None:
+    def wake_agents(self, project: Project,
+                    agent_id: str = "",
+                    reason: str = "") -> int:
+        """Public wake-up entry — kick agents that got stuck mid-turn
+        (hard-cap kill / LLM timeout / user abort) so they pick up
+        their unfinished tasks again.
+
+        ``agent_id`` empty → wake every member with pending tasks.
+        ``agent_id`` set    → wake only that one agent.
+        ``reason``         → optional context appended to the trigger msg.
+
+        Returns count of agents actually woken.
+        """
+        return self._resume_auto_wake(project, only_agent_id=agent_id,
+                                      reason=reason)
+
+    def _resume_auto_wake(self, project: Project,
+                           only_agent_id: str = "",
+                           reason: str = "") -> int:
         """
         项目恢复时：扫描所有成员，给每个有未完成任务的 agent 发送
         "继续干活" 的唤醒消息。这样即使 admin 没有手动点 Wake，
         在 resume 之后流程也能自动续上。
+
+        Also exposed to manual wake-up via :meth:`wake_agents` —
+        ``only_agent_id`` filters to one member.
         """
         if project.paused:
-            return
+            return 0
         woke = 0
         for m in project.members:
             agent_id = m.agent_id
             if not agent_id:
+                continue
+            if only_agent_id and agent_id != only_agent_id:
                 continue
             pending = [
                 t for t in project.tasks
@@ -2097,24 +2244,75 @@ class ProjectChatEngine:
                 and t.status in (ProjectTaskStatus.TODO,
                                  ProjectTaskStatus.IN_PROGRESS)
             ]
-            if not pending:
-                continue
+            # Also pick up milestones the agent owns that aren't done yet —
+            # research-style work often has no ProjectTask but does have
+            # an open milestone, and "wake me to keep going" should still
+            # work in that case.
+            pending_ms = [
+                ms for ms in (project.milestones or [])
+                if ms.responsible_agent_id == agent_id
+                and (ms.status or "pending") not in ("done", "cancelled")
+            ]
+            # Wake every member regardless of explicit task/milestone
+            # state — research-style turns often run without a bound
+            # ProjectTask, and the right behavior is to ping the agent
+            # and let it self-report ("I have X pending" or "nothing
+            # to do, idle"). Filtering on pending lists silently dropped
+            # the only ones the user actually wanted woken.
+            #
+            # The trigger message branches below on whether there's
+            # explicit work — agents with nothing pending just give a
+            # one-line status; no noisy fake-work generation.
+            pass
             agent = self._lookup(agent_id)
             if not agent:
                 continue
             titles = "\n".join(f"  - {t.title}" for t in pending[:5])
-            trigger = (
-                f"【项目恢复】{project.name} 已恢复运行，你还有 "
-                f"{len(pending)} 个未完成任务：\n{titles}\n\n"
-                f"请立即继续。完成后请在回复中包含 ✅ 和 '已完成' 字样。"
-            )
+            ms_titles = "\n".join(f"  - [{m.id}] {m.name}" for m in pending_ms[:5])
+            reason_block = f"\n调用者备注: {reason.strip()}" if reason and reason.strip() else ""
+            if pending or pending_ms:
+                trigger = (
+                    f"【唤醒】项目「{project.name}」让你继续未完成的工作。"
+                    f"{reason_block}"
+                    + (f"\n\n你的未完成任务 ({len(pending)}):\n{titles}" if pending else "")
+                    + (f"\n\n你负责的未完成里程碑 ({len(pending_ms)}):\n{ms_titles}" if pending_ms else "")
+                    + "\n\n请基于已有的进度继续推进 —— 不要从零开始,"
+                    "先 read_file 看看共享目录里你之前的产出再决定下一步。"
+                    "完成后回复里包含 ✅ 和 '已完成' 字样,"
+                    "或调 update_milestone_status 收尾。"
+                )
+            else:
+                # Agent has no open task / milestone — wake-up still
+                # fires (e.g. agent was researching freely and got
+                # aborted), but the trigger explicitly tells it NOT
+                # to fabricate work. Read project chat for context,
+                # report status in one line, then stop.
+                trigger = (
+                    f"【唤醒】项目「{project.name}」管理员手动唤醒了你。"
+                    f"{reason_block}"
+                    "\n\n你目前**没有**绑定的项目 task / 里程碑。"
+                    "请做以下两件事之一:"
+                    "\n  ① 看最近的项目聊天记录,如果有人 @ 你或对你布置工作,"
+                    "继续把那段工作做完(read_file 看你之前的产出别从零开始)。"
+                    "\n  ② 没有任何待办 → 用**一句话**报告当前状态,然后停下。"
+                    "\n\n严禁:不要凭空生成新研究、不要主动 web_search 任何东西、"
+                    "不要 create_milestone / task_update。"
+                )
             try:
-                threading.Thread(
-                    target=self._agent_respond,
-                    args=(project, agent_id, trigger),
-                    daemon=True,
-                ).start()
-                woke += 1
+                # Unified dispatch — handles abort scope + thread spawn
+                # + chat post + source metadata in one place.
+                ok = self.dispatch_to_agent(
+                    project, agent_id, trigger,
+                    source="system",
+                    source_id="",
+                    source_label="System",
+                    msg_type="system",
+                    # Already posting an aggregate "🔔 已唤醒 N 个 agent"
+                    # message at the bottom — don't double-post per agent.
+                    post_to_chat=False,
+                )
+                if ok:
+                    woke += 1
             except Exception as e:
                 logger.warning("Resume auto-wake spawn failed for %s: %s",
                                agent_id[:8], e)
@@ -2124,9 +2322,18 @@ class ProjectChatEngine:
                 content=f"🔔 已唤醒 {woke} 个有未完成任务的 Agent。",
                 msg_type="system",
             )
+        return woke
 
-    def _agent_respond(self, project: Project, agent_id: str, user_msg: str):
-        """让指定 Agent 在项目上下文中回复。"""
+    def _agent_respond(self, project: Project, agent_id: str, user_msg: str,
+                       source: str = "user"):
+        """让指定 Agent 在项目上下文中回复。
+
+        ``source`` is the provenance string passed through to
+        ``agent.chat(source=...)``. Format: ``"<kind>:<id>"`` where kind
+        ∈ {user, agent, workflow, milestone, system}. The default
+        ``"user"`` preserves the legacy semantics for callers that
+        haven't migrated to the unified ``dispatch_to_agent`` entry yet.
+        """
         # Admin 优先级守卫：项目暂停期间，所有 in-flight 的 agent 响应都短路。
         # 由于 agent 调用 LLM 之前会经过这里，可以拦截那些已经被 spawn 但还
         # 没开始跑 LLM 的 daemon 线程，避免暂停后还出现"agent 又在干活"。
@@ -2167,7 +2374,11 @@ class ProjectChatEngine:
             # dedicated agent page shows (UX consistency with agent chat).
             events_cursor = snapshot_event_count(agent)
             try:
-                result = self._chat(agent_id, prompt)
+                result = self._chat(
+                    agent_id, prompt,
+                    context_id=f"project:{project.id}",
+                    source=source,
+                )
             finally:
                 set_project_context("")
             captured_blocks = capture_events_since(agent, events_cursor)
@@ -2183,6 +2394,52 @@ class ProjectChatEngine:
                 msg_type="chat",
                 blocks=captured_blocks,
             )
+            # ── @-mention propagation in agent replies (2026-04-28) ──
+            # When an agent's reply text contains "@<role>-<name>" or just
+            # "@<name>" referring to another team member, that agent gets
+            # triggered to respond — same _parse_mentions path used for
+            # user messages. This is the simplest delegation UX: 小土 just
+            # writes "@小刚 你帮我研究 X" and 小刚 starts working. No need
+            # for the LLM to remember tool names, IDs, or schemas — it
+            # writes natural Chinese mentions.
+            #
+            # Loop-prevention rules:
+            #   * Skip self-mentions (an agent "@-ing itself").
+            #   * Skip the agent that ORIGINALLY triggered this turn (the
+            #     `source` chain) so A→B→A bounces stop. Detected by
+            #     parsing source="agent:<id>" of the user_msg we replied to.
+            try:
+                mentioned_ids = self._parse_mentions(result, project)
+                # Identify source agent (if any) to avoid bouncing back.
+                _src_id = ""
+                if isinstance(source, str) and source.startswith("agent:"):
+                    _src_id = source.split(":", 1)[1]
+                for _mid in mentioned_ids:
+                    if _mid == agent_id:
+                        continue  # skip self
+                    if _mid == _src_id:
+                        logger.info(
+                            "Project chat [%s] skip mention bounce-back: "
+                            "%s -> %s (source chain)",
+                            project.name, agent_id[:8], _mid[:8],
+                        )
+                        continue
+                    self.dispatch_to_agent(
+                        project, _mid, result,
+                        source="agent",
+                        source_id=agent_id,
+                        source_label=name,
+                        # Reply already posted above — don't double-post.
+                        post_to_chat=False,
+                    )
+                    logger.info(
+                        "Project chat [%s] @-mention triggered: %s -> %s",
+                        project.name, agent_id[:8], _mid[:8],
+                    )
+            except Exception as _me:
+                logger.debug(
+                    "@-mention propagation skipped: %s", _me,
+                )
             # B: auto-registration from chat replies is disabled on purpose —
             # deliverables should only come from explicit submit_deliverable tool
             # calls (or manual UI submission). Auto-scanning 📎 markers and
@@ -2639,12 +2896,19 @@ class ProjectChatEngine:
                 f"  - [{t.status.value}] {t.title}" for t in my_tasks[:5]
             )
 
-        # 团队成员
+        # 团队成员 — 必须暴露 agent_id,否则 LLM 没法在
+        # create_milestone / send_message / handoff_request 里指派给具体的人,
+        # 派单链路就废了。格式:
+        #   - <role>-<name> [id=<agent_id>]: <responsibility>
+        # LLM 看到 id=... 就知道这是可以放进 responsible_agent_id /
+        # to_agent 字段的值。
         team_lines = []
         for m in project.members:
             a = self._lookup(m.agent_id)
             if a:
-                team_lines.append(f"  - {a.role}-{a.name}: {m.responsibility}")
+                team_lines.append(
+                    f"  - {a.role}-{a.name} [id={m.agent_id}]: {m.responsibility}"
+                )
 
         # Workflow 步骤提示 + 实时状态
         wf_hint = ""
@@ -2675,6 +2939,118 @@ class ProjectChatEngine:
                 "或使用 [STEP_DONE] 标记，系统会自动更新步骤状态。\n"
             )
 
+        # ── Milestones snapshot ──
+        # Without this block, agents see only their personal tasks
+        # (task_lines above) and can't tell which milestones already
+        # exist or who owns them — they end up creating duplicate
+        # milestones / tasks / deliverables.
+        milestones_block = ""
+        try:
+            ms_lines = []
+            for ms in (project.milestones or []):
+                resp = ""
+                if ms.responsible_agent_id:
+                    a = self._lookup(ms.responsible_agent_id)
+                    if a:
+                        resp = f"{a.role}-{a.name}"
+                    else:
+                        resp = ms.responsible_agent_id[:8]
+                status_tag = (ms.status or "pending")
+                due_tag = f", due={ms.due_date}" if ms.due_date else ""
+                ms_lines.append(
+                    f"  - [{ms.id}] 「{ms.name}」 status={status_tag}"
+                    f", responsible={resp or '-'}{due_tag}"
+                )
+            if ms_lines:
+                milestones_block = (
+                    "\n[里程碑实时清单 — 共享给所有成员的工作分解]\n"
+                    + "\n".join(ms_lines)
+                    + "\n  → 推进自己负责的里程碑时,用 update_milestone_status 改 status,"
+                      "用 submit_deliverable 提交产出(把 milestone_id 关联上)。"
+                      "**不要新建重复的 task/milestone**,"
+                      "已经有就在已有的上面更新。\n"
+                )
+        except Exception as _mb:
+            logger.debug("milestones_block build failed: %s", _mb)
+
+        # ── Project-task snapshot (besides MY tasks above) ──
+        # Show only tasks NOT assigned to me (mine are already in
+        # task_lines). Helps the agent see what others are doing →
+        # avoids duplicate work and overlapping deliverables.
+        other_tasks_block = ""
+        try:
+            agent_id_for_filter = agent.id if agent else ""
+            others = [
+                t for t in (project.tasks or [])
+                if (t.assigned_to or "") != agent_id_for_filter
+                and t.status not in (ProjectTaskStatus.DONE,
+                                       ProjectTaskStatus.CANCELLED)
+            ]
+            if others:
+                ot_lines = []
+                for t in others[:10]:
+                    asg = ""
+                    if t.assigned_to:
+                        a = self._lookup(t.assigned_to)
+                        asg = (f"{a.role}-{a.name}" if a else t.assigned_to[:8])
+                    ot_lines.append(
+                        f"  - [{t.status.value:>11}] {t.title} "
+                        f"({asg or '未派单'})"
+                    )
+                other_tasks_block = (
+                    "\n[团队其他在跑的任务 — 仅供参考,别重复做]\n"
+                    + "\n".join(ot_lines) + "\n"
+                )
+        except Exception:
+            pass
+
+        # ── Per-agent + per-task deliverable save path ──
+        # Path convention (driven by Deliverable.task_id grouping needs):
+        #
+        #   <shared>/task-<task_id_short>/<role>-<name>/<filename>
+        #     ← when agent is mid-task (handle_task_assignment context)
+        #
+        #   <shared>/<role>-<name>/<filename>
+        #     ← solo / @-mention / no specific task bound
+        #
+        # The deliverables UI groups files by top-level subdir, so the
+        # `task-<id>` prefix gives one folder per task instead of a 30-
+        # item flat list. submit_deliverable auto-fills task_id from the
+        # current task context, so registered deliverables get the right
+        # group automatically.
+        save_path_block = ""
+        try:
+            shared_root = (
+                project.working_directory
+                or f"~/.tudou_claw/workspaces/shared/{project.id}"
+            )
+            my_label = f"{agent.role}-{agent.name}" if agent else "me"
+            # Discover any current task ID from thread-local (set by
+            # handle_task_assignment). If not in a task context, the
+            # path drops back to per-agent only.
+            from .project_context import get_current_task_id
+            _cur_task = get_current_task_id()
+            if _cur_task:
+                _task_short = _cur_task[:10]
+                _save_dir = f"{shared_root}/task-{_task_short}/{my_label}"
+                save_path_block = (
+                    f"\n[你的产出落盘位置 — 当前任务 task-{_task_short}]\n"
+                    f"  写交付件请落到: {_save_dir}/\n"
+                    f"  目录不存在就先 `bash mkdir -p {_save_dir}` 建好,"
+                    f"再 write_file → 再 `submit_deliverable(file_path=<上面那个>, "
+                    f"task_id=\"{_cur_task}\", ...)` 登记。"
+                    f"(task_id 系统会自动填充,但显式写一遍更稳。)\n"
+                )
+            else:
+                save_path_block = (
+                    f"\n[你的产出落盘位置]\n"
+                    f"  写交付件请落到: {shared_root}/{my_label}/\n"
+                    f"  目录不存在就先 `bash mkdir -p {shared_root}/{my_label}` 建好,"
+                    f"再 write_file → 再 `submit_deliverable(file_path=<上面那个>, ...)` 登记。\n"
+                )
+        except Exception:
+            pass
+
         project_scope_hint = (
             f"\n[项目上下文] 你正在项目 {project.name!r} 中 (project_id={project.id})。\n"
             f"可用的项目工具 (自动识别当前项目，无需传 project_id):\n"
@@ -2685,8 +3061,50 @@ class ProjectChatEngine:
             f"    ~/.tudou_claw/workspaces/shared/{project.id}/。\n"
             f"  - create_goal(name, metric?, target_value?, target_text?) / update_goal_progress(goal_id, current_value?, done?)\n"
             f"    → 识别到可度量目标时创建；有进展时更新。\n"
-            f"  - create_milestone(name, responsible_agent_id?, due_date?) / update_milestone_status(milestone_id, status?, evidence?)\n"
-            f"    → 规划重大检查点或推进状态时使用。\n"
+            f"  - create_milestone(name, responsible_agent_id?, description?, due_date?) / "
+            f"update_milestone_responsibility(milestone_id, new_responsible_agent_id, reason?) / "
+            f"update_milestone_status(milestone_id, status?, evidence?)\n"
+            f"    → 规划重大检查点 / 重新分配 / 推进状态时使用。\n"
+            f"\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚠️ 派单/通知队员的方式（最高优先级）:\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"团队成员(小土/小刚/小专等)是**和你同进程的 agent**,不是真人,"
+            f"没有邮箱、没有 IM、不会主动看文档。把活分给他们的方式:\n"
+            f"\n"
+            f"✅ **首选 — 在你的回复正文里直接 @ 对方**(像群聊一样自然):\n"
+            f"     例: \"@general-小刚 你负责模块③④,关注本地化合规;\n"
+            f"          @researcher-小专 你负责模块⑤⑥,关注客户洞察。\"\n"
+            f"     系统会自动解析 @ 提及并立刻触发对方开始工作。\n"
+            f"     可识别格式:\n"
+            f"       @<name>             例: @小刚\n"
+            f"       @<role>-<name>      例: @general-小刚\n"
+            f"       @<role>             例: @general (匹配第一个该角色)\n"
+            f"\n"
+            f"✅ **进阶 — 当你需要绑定到具体里程碑/任务结构时**,用工具:\n"
+            f"  ① create_milestone(name=..., responsible_agent_id=<对方 id>) — 新建里程碑 + 派单 + 触发\n"
+            f"  ② update_milestone_responsibility(milestone_id=..., new_responsible_agent_id=<对方 id>) — 重新分配 + 触发\n"
+            f"  ③ send_message(to_agent=<对方 id>, summary=...) — 结构化异步派发(envelope)\n"
+            f"  ④ handoff_request(to_agent=<对方 id>, task=...) — 阻塞握手,等结果\n"
+            f"     工具调用里要用 `[id=...]` 列出的 agent_id,@ 提及里用名字即可。\n"
+            f"\n"
+            f"❌ 以下姿势看着像派单,实际上**对方完全收不到通知**(因为队友是同进程的 AI agent,"
+            f"既没邮箱也没 IM,任何外部通信手段都到不了他):\n"
+            f"  • write_file 到共享目录(`shared/...`)→ 文件躺在那里,没人会主动去读\n"
+            f"  • mcp_call(send_email / 任何邮件 / IM 类 MCP)→ 队友不是邮箱用户,会发到真人邮箱\n"
+            f"  • **自己写一段 Python smtplib / 或 bash sendmail / mail / msmtp / "
+            f"curl smtp:// 脚本**(包括把发邮件的代码 write_file 落盘再 bash 跑)→ 同上,"
+            f"会真的发到外部邮箱,**对方完全收不到**\n"
+            f"  • 任何 HTTP 请求往 IM/Slack/微信/钉钉 webhook → 同上\n"
+            f"  • sc_handoff / shared-context skill 里的任何工具 → pull 模式,"
+            f"对方要等下次活跃才拉,不能用于\"现在就让 X 干活\"\n"
+            f"  • 列一份分工 markdown 表格但**没** @ 任何人 → 表格是给用户看的,不会触发任何人\n"
+            f"\n"
+            f"⛔ **核心铁律**: 队友(小刚/小专)就在这套程序里,你和他们之间的通信**有且仅有**"
+            f"上面 ✅ 4 种姿势(@ 提及 / send_message / handoff_request / "
+            f"create_milestone with responsible_agent_id)。任何\"我自己想办法发邮件给他\""
+            f"的尝试都是**根本性的误判**,赶快停下,直接 @ 提及就好。\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         )
         return (
             f"{admin_cmds_block}"
