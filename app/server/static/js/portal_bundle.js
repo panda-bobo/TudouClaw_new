@@ -22053,7 +22053,8 @@ function _canvasStatusActions(wf) {
     return '<button class="btn btn-sm" onclick="_canvasMarkReady()" title="校验图结构,通过后转为可执行" style="color:#16a34a"><span class="material-symbols-outlined" style="font-size:14px">check_circle</span> 标为可执行</button>';
   }
   if (st === 'ready') {
-    return '<button class="btn btn-sm" onclick="_canvasMarkDisabled()" title="暂停,新一轮不再被引擎挑选" style="color:#ea580c"><span class="material-symbols-outlined" style="font-size:14px">pause_circle</span> 停用</button>'
+    return '<button class="btn btn-sm" onclick="_canvasStartRun()" title="启动执行 — 节点会在画布上实时高亮" style="color:#16a34a;font-weight:600"><span class="material-symbols-outlined" style="font-size:14px">play_arrow</span> 运行</button>'
+         + '<button class="btn btn-sm" onclick="_canvasMarkDisabled()" title="暂停,新一轮不再被引擎挑选" style="color:#ea580c"><span class="material-symbols-outlined" style="font-size:14px">pause_circle</span> 停用</button>'
          + '<button class="btn btn-sm" onclick="_canvasMarkDraft()" title="回到草稿态" style="color:#64748b"><span class="material-symbols-outlined" style="font-size:14px">edit_note</span> 回到草稿</button>';
   }
   if (st === 'disabled') {
@@ -22581,6 +22582,140 @@ window._canvasExportJson = function() {
   a.download = (wf.name || 'workflow').replace(/[^a-zA-Z0-9_一-龥-]/g, '_') + '.json';
   a.click();
   setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
+};
+
+
+// ─────────── Run-state highlighting (HANDOFF [E]) ───────────
+//
+// Visual feedback on the canvas during a workflow execution. Per-node
+// state classes are applied directly to the SVG shape inside each
+// <g data-node-id> via inline style mutation (no external CSS file —
+// portal_bundle.js owns its own styling).
+//
+// State → visual:
+//   pending   → grey outline (default — what _canvasRedrawSvg already paints)
+//   running   → yellow outline + pulsing animation
+//   succeeded → green fill + green outline
+//   failed    → red fill + red outline + brief flash
+//   skipped   → muted grey + dashed outline (upstream broken)
+
+// Inject the keyframe styles once. Idempotent.
+function _canvasEnsureRunStyles() {
+  if (document.getElementById('canvas-run-styles')) return;
+  var s = document.createElement('style');
+  s.id = 'canvas-run-styles';
+  s.textContent = ''
+    + '@keyframes _cvRunPulse { 0%,100% { opacity: 1 } 50% { opacity: 0.55 } }'
+    + '@keyframes _cvFailFlash { 0% { fill-opacity: 0.7 } 50% { fill-opacity: 0.15 } 100% { fill-opacity: 0.5 } }'
+    + '.cv-node-running > rect, .cv-node-running > circle, .cv-node-running > path:first-of-type { stroke: #f59e0b !important; stroke-width: 3 !important; fill: #fef3c7 !important; fill-opacity: 0.7 !important; animation: _cvRunPulse 1.4s ease-in-out infinite }'
+    + '.cv-node-succeeded > rect, .cv-node-succeeded > circle, .cv-node-succeeded > path:first-of-type { stroke: #16a34a !important; stroke-width: 2.5 !important; fill: #bbf7d0 !important; fill-opacity: 0.5 !important }'
+    + '.cv-node-failed > rect, .cv-node-failed > circle, .cv-node-failed > path:first-of-type { stroke: #dc2626 !important; stroke-width: 3 !important; fill: #fecaca !important; fill-opacity: 0.55 !important; animation: _cvFailFlash 0.6s ease-out 2 }'
+    + '.cv-node-skipped > rect, .cv-node-skipped > circle, .cv-node-skipped > path:first-of-type { stroke: #94a3b8 !important; stroke-width: 1.5 !important; stroke-dasharray: 4 3 !important; fill-opacity: 0.1 !important }';
+  document.head.appendChild(s);
+}
+
+// Apply per-node state classes from a runState dict ({nodeId: state, ...}).
+// Mutates DOM directly without re-rendering the whole SVG (so user's
+// drag position / selection / pending edge are preserved).
+function _canvasApplyRunState(stateMap) {
+  _canvasEnsureRunStyles();
+  var svg = document.getElementById('canvas-svg');
+  if (!svg) return;
+  Object.keys(stateMap || {}).forEach(function(nid) {
+    var g = svg.querySelector('g[data-node-id="' + nid + '"]');
+    if (!g) return;
+    // Strip prior cv-node-* classes, add the new one (or none for pending).
+    var st = String(stateMap[nid] || 'pending');
+    var cls = (g.getAttribute('class') || '')
+      .split(/\s+/)
+      .filter(function(c) { return c && c.indexOf('cv-node-') !== 0; });
+    if (st !== 'pending') cls.push('cv-node-' + st);
+    g.setAttribute('class', cls.join(' '));
+  });
+}
+
+// Reset all node visual state — called when starting a new run (so a
+// previous run's red/green colors don't bleed in).
+function _canvasResetRunState() {
+  var svg = document.getElementById('canvas-svg');
+  if (!svg) return;
+  svg.querySelectorAll('g[data-node-id]').forEach(function(g) {
+    var cls = (g.getAttribute('class') || '')
+      .split(/\s+/)
+      .filter(function(c) { return c && c.indexOf('cv-node-') !== 0; });
+    g.setAttribute('class', cls.join(' '));
+  });
+}
+
+// Stop any in-flight EventSource — prevents leaking connections when
+// the user navigates away from the editor mid-run.
+function _canvasStopRunStream() {
+  if (_canvasState._runStream) {
+    try { _canvasState._runStream.close(); } catch (_) {}
+    _canvasState._runStream = null;
+  }
+}
+
+window._canvasStartRun = async function() {
+  var wf = _canvasState.current;
+  if (!wf || !wf.id) { _toast('先保存 workflow', 'error'); return; }
+  if (String(wf.executable_status || '') !== 'ready') {
+    _toast('需要先标为"可执行"', 'error');
+    return;
+  }
+  _canvasStopRunStream();
+  _canvasResetRunState();
+
+  var run;
+  try {
+    run = await api('POST', '/api/portal/canvas-workflows/' + encodeURIComponent(wf.id) + '/runs', {});
+  } catch (e) {
+    _toast('启动失败: ' + e, 'error');
+    return;
+  }
+  _toast('▶ 运行已启动 (run ' + (run.id || '').slice(-8) + ')', 'info');
+  // Mark every node as pending → all run nodes start grey
+  var initial = {};
+  (wf.nodes || []).forEach(function(n) { initial[n.id] = 'pending'; });
+  _canvasApplyRunState(initial);
+
+  // Open SSE stream and apply state on each event. EventSource is
+  // available cross-browser; closes itself when the server sends
+  // type=done.
+  var url = '/api/portal/canvas-workflows/' + encodeURIComponent(wf.id) + '/runs/' + encodeURIComponent(run.id) + '/events';
+  var es = new EventSource(url);
+  _canvasState._runStream = es;
+  es.onmessage = function(msg) {
+    var evt;
+    try { evt = JSON.parse(msg.data); } catch (_) { return; }
+    var t = evt.type || '';
+    var d = evt.data || {};
+    if (t === 'node_started') {
+      var m = {}; m[d.node_id] = 'running'; _canvasApplyRunState(m);
+    } else if (t === 'node_succeeded') {
+      var m = {}; m[d.node_id] = 'succeeded'; _canvasApplyRunState(m);
+    } else if (t === 'node_failed') {
+      var m = {}; m[d.node_id] = 'failed'; _canvasApplyRunState(m);
+      _toast('节点失败: ' + d.node_id + ' — ' + (d.error || '').slice(0, 80), 'error');
+    } else if (t === 'node_skipped') {
+      var m = {}; m[d.node_id] = 'skipped'; _canvasApplyRunState(m);
+    } else if (t === 'run_succeeded') {
+      _toast('✓ 运行成功 (' + (d.duration_s || 0).toFixed(1) + 's)', 'success');
+      _canvasStopRunStream();
+    } else if (t === 'run_failed' || t === 'run_aborted') {
+      _toast('✗ 运行失败: ' + (d.error || '(unknown)').slice(0, 100), 'error');
+      _canvasStopRunStream();
+    } else if (t === 'done' || t === 'timeout') {
+      _canvasStopRunStream();
+    }
+  };
+  es.onerror = function() {
+    // EventSource auto-retries by default — only treat as fatal if
+    // the connection was already closed.
+    if (es.readyState === EventSource.CLOSED) {
+      _canvasStopRunStream();
+    }
+  };
 };
 
 
