@@ -240,45 +240,41 @@ sequence as the engine progresses.
 
 ---
 
-### 🟢 [F] KV cache 刷新机制
+### 🟡 [F] KV cache 刷新机制 — PARTIAL DONE 2026-05-01 (commit `0ece8a0`)
 
 **User priority**: 强烈建议 (P1)
 **Risk**: LOW
-**Scope estimate**: ~150 LoC
-**Status**: Not started. Today's pain point: changing a SKILL.md
-doesn't propagate to active agent KV caches → agent uses stale rules.
+**Status**: **Core fix landed.** Two HANDOFF sub-items DEFERRED based
+on code-reading; they are nice-to-haves, not currently load-bearing.
 
-**Design**
+**What landed (commit `0ece8a0`)**:
 
-```
-app/agent.py  Agent class:
-  _static_prompt_hash recomputed lazily from:
-    - agent.granted_skills (registry truth)
-    - skill manifest hashes for each granted skill
-    - SKILL.md file mtime for each granted skill  ← NEW
+* `_compute_static_prompt_hash` now also folds each granted skill's
+  SKILL.md mtime_ns into the hash inputs. Edit a SKILL.md → next chat
+  turn rebuilds the cached static prompt with fresh content. No restart,
+  no re-grant. +24 LoC in `app/agent.py`.
 
-When mtime advances, hash changes, prompt rebuild on next turn.
-```
+**What was DEFERRED and why**:
 
-**Plus a manual override**:
+1. **Explicit `_invalidate_prompt_cache()` on grant / revoke** —
+   redundant. Read `_compute_static_prompt_hash` in `app/agent.py`:
+   it already pulls `_r.list_for_agent(self.id)` live from the
+   registry, so grant_ids change → hash flips → cache rebuilds. The
+   HANDOFF item was overcautious; the regression it described doesn't
+   exist in current code.
+2. **Manual `POST /api/portal/agent/{id}/refresh-cache` endpoint** —
+   hold for now. mtime-based invalidation should cover real cases.
+   Add later if needed (~15 LoC, just calls `agent._cached_static_prompt
+   = ""; agent._static_prompt_hash = ""` then returns ok). Triggers
+   for adding it: filesystems with coarse mtime resolution, NFS-cached
+   layouts, or evidence agents are still seeing stale prompts after
+   SKILL.md edits.
 
-```
-POST /api/portal/agents/{id}/refresh-cache
-  → invalidates _static_prompt_cache for this agent
-  → next turn sees fresh roster
-```
+**Verification**: smoke test (in commit message) — hash flips on edit
+and on delete; still graceful when SKILL.md missing.
 
-**Plus skill grant/revoke**:
-
-```
-hub.grant_skill / revoke_skill should call
-  agent._invalidate_prompt_cache()
-on the affected agent (currently they don't — that's the regression
-that made small changes feel sticky).
-```
-
-**Acceptance**: edit a SKILL.md → next user message in same chat
-shows agent following the new rule (no need to start a new chat).
+**Acceptance** (original): edit a SKILL.md → next user message in same
+chat shows agent following the new rule. **Met** by the mtime change.
 
 ---
 
