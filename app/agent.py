@@ -7641,9 +7641,27 @@ Write only the summary body. Do not include any preamble or prefix."""
             # Dedup guard — the tool-calling loop sometimes emits the same
             # assistant text multiple times (once per iteration when the LLM
             # keeps repeating a bridge sentence between tool calls, and once
-            # as the final consolidated output). The user sees 4 identical
-            # "好的，我已经收集到..." bubbles. Squash consecutive duplicates.
-            _last_emitted_text_ref = [None]
+            # as the final consolidated output). User reported 4 identical
+            # "任务已完成..." bubbles in 2026-05-01 chat with agent 小刚.
+            #
+            # HANDOFF [B] sliding-window dedup (2026-05-01): replaced the
+            # single-slot `_last_emitted_text_ref` with a per-turn ring of
+            # the last 5 emitted assistant message fingerprints. Matches
+            # exact OR prefix-of so a slightly-extended re-emit (LLM
+            # reformatting between tool calls) is still suppressed. Mirrors
+            # the front-end ring buffer at portal_bundle.js:4285 so once we
+            # have confirmed no escapes, the front-end safety net can be
+            # removed in a follow-up commit.
+            _emit_ring: list[tuple[float, str, str]] = []  # (ts, head300, full)
+            _turn_id_str = f"t{int(time.time() * 1000) % 1_000_000_000:09d}"
+
+            def _fingerprint_msg(content: str) -> tuple[str, str]:
+                """Normalize an assistant message to (head300, full_stripped)."""
+                stripped = (content or "").strip()
+                # Collapse runs of whitespace so "X\n\nY" and "X Y" match
+                normalized = " ".join(stripped.split())
+                return normalized[:300], normalized
+
             def _emit(evt: AgentEvent):
                 # Accumulate streaming text deltas into the public
                 # buffer regardless of whether on_event is bound. This
@@ -7666,10 +7684,68 @@ Write only the summary body. Do not include any preamble or prefix."""
                         # flows through untouched.
                         if (evt.kind == "message"
                                 and evt.data.get("role") == "assistant"):
-                            c = (evt.data.get("content") or "").strip()
-                            if c and c == _last_emitted_text_ref[0]:
-                                return  # suppress exact repeat
-                            _last_emitted_text_ref[0] = c
+                            head, full = _fingerprint_msg(
+                                evt.data.get("content") or ""
+                            )
+                            if not full:
+                                # Empty assistant message — let it through
+                                # (downstream may need it as a turn marker).
+                                pass
+                            else:
+                                _now = time.time()
+                                # Sliding window — keep last 5 within 60s
+                                _alive = [
+                                    e for e in _emit_ring
+                                    if (_now - e[0]) <= 60.0
+                                ]
+                                _emit_ring[:] = _alive
+                                # Match exact OR mutual-prefix (one is a
+                                # prefix of the other — covers the
+                                # "streamed chunk vs final" replay case).
+                                for (_ets, _ehead, _efull) in _emit_ring:
+                                    if (_ehead == head
+                                            or full.startswith(_efull)
+                                            or _efull.startswith(full)):
+                                        # Suppressed — log so the next
+                                        # session can correlate the dup
+                                        # with a backend emit path.
+                                        try:
+                                            import hashlib
+                                            _h = hashlib.md5(
+                                                full.encode()
+                                            ).hexdigest()[:8]
+                                            logger.warning(
+                                                "agent %s turn %s: SUPPRESSED "
+                                                "duplicate assistant emit "
+                                                "(hash=%s, len=%d, "
+                                                "since_first=%.1fs)",
+                                                self.id[:8], _turn_id_str,
+                                                _h, len(full), _now - _ets,
+                                            )
+                                        except Exception:
+                                            pass
+                                        return
+                                _emit_ring.append((_now, head, full))
+                                if len(_emit_ring) > 5:
+                                    _emit_ring.pop(0)
+                                # Diagnostic: log every PASSING emit so
+                                # the live-reproduction trace can show
+                                # which path of the chat loop is firing
+                                # for "duplicate" content even when the
+                                # dedup catches it later.
+                                try:
+                                    import hashlib
+                                    _h = hashlib.md5(
+                                        full.encode()
+                                    ).hexdigest()[:8]
+                                    logger.info(
+                                        "agent %s turn %s: assistant emit "
+                                        "(hash=%s, len=%d, ring=%d)",
+                                        self.id[:8], _turn_id_str, _h,
+                                        len(full), len(_emit_ring),
+                                    )
+                                except Exception:
+                                    pass
                         on_event(evt)
                     except Exception:
                         pass
