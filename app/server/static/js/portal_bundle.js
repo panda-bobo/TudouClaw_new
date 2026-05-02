@@ -23885,13 +23885,13 @@ function _canvasRenderConfigPanel() {
       + '<div style="flex:1"><label style="font-size:11px;color:var(--text3)">重试</label>'
       + '<input data-cfg="retry" type="number" value="' + (n.config.retry || 0) + '" min="0" max="5" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px"></div>'
       + '</div>'
-      // success_when.file_glob — closes the agent node as soon as a
-      // matching file shows up in the run's shared dir, even if the
-      // LLM is still grinding. Solves the "agent finished writing
-      // the file 9s after timeout" race.
-      + '<div style="margin-bottom:4px"><label style="font-size:11px;color:var(--text3)">完成条件 — 文件名 (可选)</label>'
+      // success_when.file_glob — early-termination signal. When the
+      // agent writes a matching file to its node subdir, the canvas
+      // aborts the LLM and marks SUCCEEDED. Independent from the
+      // deliverable variable, which always = the whole subdir.
+      + '<div style="margin-bottom:4px"><label style="font-size:11px;color:var(--text3)">提前结束 — 交付文件名 (可选)</label>'
       + '<input data-cfg="success_when.file_glob" type="text" placeholder="e.g. report_*.md  或  AI热点*.md" value="' + esc(((n.config.success_when || {}).file_glob) || '') + '" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px"></div>'
-      + '<div style="font-size:10px;color:var(--text3);line-height:1.4;margin-bottom:8px">指定后，shared 目录里出现匹配文件就立刻结束（不等 LLM 自报）。留空走标准 LLM-COMPLETED 路径。</div>';
+      + '<div style="font-size:10px;color:var(--text3);line-height:1.4;margin-bottom:8px">填了就：节点子目录里出现匹配文件 → 立刻 abort LLM + 节点 SUCCEEDED（不等 LLM 自报完成）。<br>留空：走标准 LLM-COMPLETED + 兜底 timeout。<br>下游用 <code>{{节点id.deliverable}}</code> 永远拿到子目录路径，不论这里填没填。</div>';
   } else if (n.type === 'decision') {
     typeFields = ''
       + '<div style="margin-bottom:8px"><label style="font-size:11px;color:var(--text3)">条件表达式</label>'
