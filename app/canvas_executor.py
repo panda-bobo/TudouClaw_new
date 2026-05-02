@@ -1027,21 +1027,14 @@ def _exec_agent(engine: WorkflowEngine, run: WorkflowRun,
             "duration_s": task.updated_at - task.created_at,
         }
         # ── deliverable variable ──
-        # Default: the whole node subdir is the deliverable (a directory).
-        # If config.deliverable.file_glob narrowed to a specific file,
-        # use that file's absolute path instead. Either way downstream
-        # references {{nid.deliverable}} as a single string.
+        # The deliverable is ALWAYS the node's subdir (per spec
+        # 2026-05-02 — file vs directory distinction is YAGNI).
+        # If success_when.file_glob fired, the matched file is just
+        # one item inside that subdir; downstream LLM finds it via
+        # ls / read_file.
         if node_dir is not None:
-            if marker_file:
-                deliverable_abs = str(node_dir / marker_file)
-                outputs["deliverable"] = deliverable_abs
-                outputs["deliverable_type"] = "file"
-                outputs["deliverable_relative"] = f"{node_id}/{marker_file}"
-                outputs["success_marker_file"] = marker_file   # legacy alias
-            else:
-                outputs["deliverable"] = str(node_dir)
-                outputs["deliverable_type"] = "directory"
-                outputs["deliverable_relative"] = f"{node_id}/"
+            outputs["deliverable"] = str(node_dir)
+            outputs["deliverable_relative"] = f"{node_id}/"
 
         # ── Artifact closed-loop post-scan ──
         # Diff the node's subdir against the pre-snapshot. Scoping to
@@ -1089,7 +1082,6 @@ def _exec_agent(engine: WorkflowEngine, run: WorkflowRun,
                         "started_at": task.created_at,
                         "finished_at": time.time(),
                         "deliverable": {
-                            "type": outputs.get("deliverable_type", "directory"),
                             "rel_path": outputs.get("deliverable_relative", f"{node_id}/"),
                             "abs_path": outputs.get("deliverable", str(node_dir)),
                         },
