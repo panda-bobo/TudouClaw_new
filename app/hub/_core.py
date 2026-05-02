@@ -316,6 +316,17 @@ class Hub:
         except Exception as _be:
             logger.warning("Branding store init failed: %s", _be)
 
+        # ── System Settings (admin-editable runtime config) ──
+        # Foundation for parallel-execution caps (canvas + delegate).
+        # Module-level singleton mirrors BrandingStore; readers use
+        # app.system_settings.get_store().get("canvas.max_parallel_nodes").
+        try:
+            from .. import system_settings as _sys_mod
+            self.system_settings_store = _sys_mod.init_store(self._data_dir)
+            logger.info("System settings store initialized")
+        except Exception as _sse:
+            logger.warning("System settings store init failed: %s", _sse)
+
         # ── Skill Categories (admin-defined two-dimensional taxonomy) ──
         # Loaded right after skill_store so the API can join entries with
         # their category assignments. Two files:
