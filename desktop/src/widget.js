@@ -11,6 +11,7 @@
 
 const API_BASE = 'http://127.0.0.1:9090/api/portal';
 const STATIC_BASE = 'http://127.0.0.1:9090/static';
+const API_HOST = 'http://127.0.0.1:9090';
 const POLL_MS = 5000;
 const PERSONA_MAX_CHARS = 320;
 
@@ -114,6 +115,64 @@ function avatarInitial(agent) {
   return /[a-z]/i.test(ch) ? ch.toUpperCase() : ch;
 }
 
+// ── Lottie animation (optional, per agent.desktop_lottie_url) ──
+// The animation replaces the initial/robot/face layers when active.
+// On fetch failure (404, malformed JSON, etc) we silently fall back
+// to whatever the identity-layer logic would have shown otherwise.
+let _lottieAnim = null;
+let _lottieLoadedFor = '';   // url currently rendered (or '' if none)
+
+function _resolveLottieUrl(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  if (/^https?:\/\//i.test(s)) return s;
+  if (s.startsWith('/')) return API_HOST + s;
+  return s;  // relative — let the webview resolve
+}
+
+function _destroyLottie() {
+  if (_lottieAnim) {
+    try { _lottieAnim.destroy(); } catch (_) {}
+    _lottieAnim = null;
+  }
+  _lottieLoadedFor = '';
+  const mount = document.getElementById('lottie-mount');
+  if (mount) mount.innerHTML = '';
+}
+
+// Returns true if Lottie is now (or was already) rendering this URL.
+// Calls onFail() asynchronously if the JSON fetch fails or parses bad.
+function _ensureLottie(url, onFail) {
+  if (!url) { _destroyLottie(); return false; }
+  if (typeof lottie === 'undefined') { return false; }
+  if (url === _lottieLoadedFor && _lottieAnim) { return true; }
+
+  _destroyLottie();
+  const mount = document.getElementById('lottie-mount');
+  if (!mount) return false;
+
+  try {
+    _lottieAnim = lottie.loadAnimation({
+      container: mount,
+      renderer: 'svg',
+      loop: true,
+      autoplay: true,
+      path: url,
+    });
+    _lottieLoadedFor = url;
+    _lottieAnim.addEventListener('data_failed', () => {
+      console.warn('[lottie] failed to load', url);
+      _destroyLottie();
+      if (onFail) onFail();
+    });
+    return true;
+  } catch (e) {
+    console.warn('[lottie] init error:', e);
+    _destroyLottie();
+    return false;
+  }
+}
+
 function renderAgent() {
   if (!currentAgent) {
     avatar.classList.add('empty');
@@ -132,26 +191,36 @@ function renderAgent() {
   // Per-agent hue
   avatar.style.setProperty('--avatar-hue', String(avatarHue(currentAgent)));
 
-  // Identity layer: robot_avatar SVG > initial letter > sci-fi face
+  // Identity layer (priority): lottie > robot_avatar > initial > face.
+  // Each layer hides the others; on async failure we fall back one
+  // step. `initialEl` is always pre-set so any fallback has content.
   const robotImg = $('#avatar-robot');
   const initialEl = $('#avatar-initial');
   const faceSvg = $('#avatar-face');
-  if (currentAgent.robot_avatar) {
+  faceSvg.style.display = 'none';
+  initialEl.textContent = avatarInitial(currentAgent);
+
+  const lottieUrl = _resolveLottieUrl(currentAgent.desktop_lottie_url);
+  const lottieOk = _ensureLottie(lottieUrl, () => {
+    // async fail: re-show fallback layer
+    if (currentAgent.robot_avatar) { robotImg.hidden = false; }
+    else { initialEl.hidden = false; }
+  });
+
+  if (lottieOk) {
+    robotImg.hidden = true;
+    initialEl.hidden = true;
+  } else if (currentAgent.robot_avatar) {
     robotImg.src = `${STATIC_BASE}/robots/${currentAgent.robot_avatar}.svg`;
     robotImg.hidden = false;
     initialEl.hidden = true;
-    faceSvg.style.display = 'none';
-    // If robot SVG fails to load (404), fall back to initial
     robotImg.onerror = () => {
       robotImg.hidden = true;
-      initialEl.textContent = avatarInitial(currentAgent);
       initialEl.hidden = false;
     };
   } else {
     robotImg.hidden = true;
-    initialEl.textContent = avatarInitial(currentAgent);
     initialEl.hidden = false;
-    faceSvg.style.display = 'none';
   }
 
   // Status (drives animation + status dot — color stays per-agent)
@@ -165,11 +234,6 @@ function renderAgent() {
   avatar.title = `${currentAgent.name || 'Agent'}` +
     (currentAgent.role_title ? ` · ${currentAgent.role_title}` : '') +
     ` · ${status}`;
-
-  // Lottie mount (placeholder — Phase 4 will load real Lottie JSON)
-  if (currentAgent.desktop_lottie_url) {
-    // TODO: dynamic-load lottie-web from /static and render
-  }
 }
 
 // ── Card open/close ───────────────────────────────
