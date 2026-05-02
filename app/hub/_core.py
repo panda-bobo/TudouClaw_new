@@ -254,7 +254,18 @@ class Hub:
         # non-fatal — the canvas page just shows "store unavailable".
         try:
             from .. import canvas_workflows as _canvas_mod
-            cw_dir = os.path.join(self._data_dir, "workflows")
+            # Renamed 2026-05-02: workflows/ → Orchestration_workflows/ to
+            # disambiguate from the legacy <data_dir>/workflows.json
+            # state-machine templates. Auto-migrate old dir name on first
+            # boot after upgrade so existing workflows aren't lost.
+            cw_dir = os.path.join(self._data_dir, "Orchestration_workflows")
+            old_cw_dir = os.path.join(self._data_dir, "workflows")
+            if os.path.isdir(old_cw_dir) and not os.path.exists(cw_dir):
+                try:
+                    os.rename(old_cw_dir, cw_dir)
+                    logger.info("Migrated workflows/ → Orchestration_workflows/")
+                except OSError as _me:
+                    logger.warning("rename workflows/ failed: %s", _me)
             self.canvas_workflow_store = _canvas_mod.init_store(cw_dir)
             logger.info("Canvas workflow store initialized at %s", cw_dir)
         except Exception as _cwe:
@@ -262,13 +273,22 @@ class Hub:
 
         # ── Canvas Executor (HANDOFF [D]) ──
         # The runtime that picks up `executable_status=ready` workflows
-        # and drives them to completion. Stores per-run state +
-        # event-log under <data_dir>/canvas_runs/. Hub reference is
-        # passed in so agent / tool node executors can resolve agents
-        # and skills from their authoritative source.
+        # and drives them to completion. Stores per-run artifacts at
+        # <data_dir>/canvas_runs/<run_id>/{state.json, events.jsonl,
+        # shared/, artifacts.json, audit.jsonl}.
         try:
             from .. import canvas_executor as _cx_mod
             cx_dir = os.path.join(self._data_dir, "canvas_runs")
+            # Auto-migrate flat run-X.json layout → per-run-dir layout
+            # (one-time, idempotent). Older releases stored state at
+            # canvas_runs/run-X.json; new layout puts it under
+            # canvas_runs/run-X/state.json so all per-run files cluster.
+            try:
+                migrated = _cx_mod.migrate_old_run_layout(cx_dir)
+                if migrated:
+                    logger.info("Migrated %d canvas run(s) to per-run-dir layout", migrated)
+            except Exception as _me:
+                logger.warning("canvas run layout migration failed: %s", _me)
             self.canvas_executor = _cx_mod.init_engine(cx_dir, hub=self)
             logger.info("Canvas executor initialized at %s", cx_dir)
         except Exception as _cxe:

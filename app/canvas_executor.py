@@ -145,7 +145,20 @@ class WorkflowRun:
 
 
 class RunStore:
-    """Persists run state + append-only event log to disk."""
+    """Persists run state + append-only event log to disk.
+
+    Layout (2026-05-02 — was flat ``<root>/<run_id>.json``):
+
+        <root>/<run_id>/state.json          ← run state snapshot
+        <root>/<run_id>/events.jsonl        ← append-only event stream
+        <root>/<run_id>/shared/             ← per-run workspace (artifacts)
+        <root>/<run_id>/artifacts.json      ← artifact index
+        <root>/<run_id>/audit.jsonl         ← artifact audit log
+
+    Per-run dir keeps everything related to that run in one place.
+    Migration from the old flat layout runs once at hub startup —
+    see :func:`migrate_old_run_layout` below.
+    """
 
     def __init__(self, root_dir: str | Path):
         self.root_dir = Path(root_dir)
@@ -161,11 +174,16 @@ class RunStore:
                 self._locks[run_id] = lk
             return lk
 
+    def _run_dir(self, run_id: str) -> Path:
+        d = self.root_dir / run_id
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
     def _state_path(self, run_id: str) -> Path:
-        return self.root_dir / f"{run_id}.json"
+        return self._run_dir(run_id) / "state.json"
 
     def _events_path(self, run_id: str) -> Path:
-        return self.root_dir / f"{run_id}.events.jsonl"
+        return self._run_dir(run_id) / "events.jsonl"
 
     def save_state(self, run: WorkflowRun) -> None:
         path = self._state_path(run.id)
@@ -225,25 +243,90 @@ class RunStore:
         return events, new_offset
 
     def list_runs_for_workflow(self, workflow_id: str) -> list[dict]:
-        """Return run summaries for one workflow, newest first."""
+        """Return run summaries for one workflow, newest first.
+
+        Walks per-run subdirectories under root; reads ``state.json``
+        in each. Skips dirs that don't have a state.json yet (run was
+        created but never completed first save) or that don't match
+        ``workflow_id``.
+        """
         out = []
-        for f in self.root_dir.glob("run-*.json"):
-            if f.name.endswith(".events.jsonl"):
+        if not self.root_dir.exists():
+            return out
+        for d in self.root_dir.iterdir():
+            if not d.is_dir() or not d.name.startswith("run-"):
+                continue
+            state_file = d / "state.json"
+            if not state_file.is_file():
                 continue
             try:
-                d = json.loads(f.read_text(encoding="utf-8"))
-                if d.get("workflow_id") == workflow_id:
+                payload = json.loads(state_file.read_text(encoding="utf-8"))
+                if payload.get("workflow_id") == workflow_id:
                     out.append({
-                        "id": d.get("id"),
-                        "state": d.get("state"),
-                        "started_at": d.get("started_at"),
-                        "finished_at": d.get("finished_at"),
-                        "error": d.get("error", "")[:200],
+                        "id": payload.get("id"),
+                        "state": payload.get("state"),
+                        "started_at": payload.get("started_at"),
+                        "finished_at": payload.get("finished_at"),
+                        "error": payload.get("error", "")[:200],
                     })
             except Exception:
                 continue
         out.sort(key=lambda r: -(r.get("started_at") or 0))
         return out
+
+
+def migrate_old_run_layout(root_dir: str | Path) -> int:
+    """Move legacy flat-layout run files into per-run subdirectories.
+
+    Old:  <root>/run-X.json + run-X.events.jsonl
+    New:  <root>/run-X/state.json + run-X/events.jsonl
+
+    Idempotent: if a per-run dir already exists with the target file,
+    skip rather than overwrite. Returns count of migrated runs.
+    """
+    root = Path(root_dir)
+    if not root.exists():
+        return 0
+    moved = 0
+    for f in list(root.iterdir()):
+        if not f.is_file() or not f.name.startswith("run-") or not f.name.endswith(".json"):
+            continue
+        # Skip the new-layout state.json that doesn't sit at top level
+        # (defensive — shouldn't happen since we glob top-level only)
+        run_id = f.stem
+        target_dir = root / run_id
+        target_dir.mkdir(parents=True, exist_ok=True)
+        new_state = target_dir / "state.json"
+        if not new_state.exists():
+            try:
+                f.rename(new_state)
+                moved += 1
+            except OSError as e:
+                logger.warning("migrate state file failed for %s: %s", run_id, e)
+                continue
+        else:
+            # New layout already populated — drop the stale flat file
+            try:
+                f.unlink()
+            except OSError:
+                pass
+        # Also move the events file
+        old_events = root / f"{run_id}.events.jsonl"
+        new_events = target_dir / "events.jsonl"
+        if old_events.is_file():
+            if not new_events.exists():
+                try:
+                    old_events.rename(new_events)
+                except OSError as e:
+                    logger.warning("migrate events file failed for %s: %s", run_id, e)
+            else:
+                try:
+                    old_events.unlink()
+                except OSError:
+                    pass
+    if moved:
+        logger.info("Migrated %d canvas run(s) to per-run-dir layout under %s", moved, root)
+    return moved
 
 
 # ── Engine ──────────────────────────────────────────────────────────────
