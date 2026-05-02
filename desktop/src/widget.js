@@ -15,6 +15,16 @@ const API_HOST = 'http://127.0.0.1:9090';
 const POLL_MS = 5000;
 const PERSONA_MAX_CHARS = 320;
 
+// Phase 4: each window is bound to one agent via ?agent_id=<id>.
+// Rust supervisor spawns one window per enabled agent. Empty string
+// means legacy single-window mode (this branch is dormant when the
+// Rust supervisor is active — the keepalive "main" window stays
+// hidden — but keeps the file usable in standalone testing).
+const URL_AGENT_ID = (() => {
+  try { return new URLSearchParams(location.search).get('agent_id') || ''; }
+  catch (_) { return ''; }
+})();
+
 let agents = [];
 let currentAgent = null;
 let dragMoved = false;
@@ -59,20 +69,19 @@ picker.addEventListener('change', () => {
 async function loadAgents() {
   try {
     const res = await fetch(`${API_BASE}/agents/desktop`);
-    if (!res.ok) {
-      if (res.status === 403) {
-        // FastAPI not on loopback or blocked
-      }
-      return;
-    }
+    if (!res.ok) return;
     const data = await res.json();
-    agents = Array.isArray(data.agents) ? data.agents : [];
+    let list = Array.isArray(data.agents) ? data.agents : [];
+    // Per-agent window mode: filter to just this window's agent.
+    if (URL_AGENT_ID) {
+      list = list.filter((a) => a.id === URL_AGENT_ID);
+    }
+    agents = list;
     rebuildPicker();
     if (!currentAgent && agents.length) {
       currentAgent = agents[0];
       renderAgent();
     } else if (currentAgent) {
-      // Refresh status for the currently-displayed agent
       const fresh = agents.find((a) => a.id === currentAgent.id);
       if (fresh) { currentAgent = fresh; renderAgent(); }
     }
@@ -83,6 +92,9 @@ async function loadAgents() {
 
 function rebuildPicker() {
   if (!picker) return;
+  // In per-agent mode there's nothing to pick — the window IS the
+  // agent. Hide unconditionally so the card chrome stays clean.
+  if (URL_AGENT_ID) { picker.style.display = 'none'; return; }
   const prev = picker.value;
   picker.innerHTML = '';
   for (const a of agents) {

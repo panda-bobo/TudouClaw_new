@@ -1,40 +1,53 @@
 // TudouClaw desktop floating-agent widget — Mac MVP.
 //
-// Two channels glue the floater to the portal:
+// Architecture (Phase 4 — multi-window):
 //
-//   1. URL scheme (tauri-plugin-deep-link)
-//      tudouclaw://open  → show window, focus
-//      tudouclaw://hide  → hide window
-//      Used for the *cold-launch* case: portal page opens, app isn't
-//      running yet, JS triggers the scheme and macOS launches us.
-//
-//   2. Local HTTP server on 127.0.0.1:9192 (tiny_http)
-//      POST /heartbeat → record now (no UI side-effects)
-//      GET  /health    → 200 OK (lets portal detect we're already up)
-//      POST /show      → show + focus
-//      POST /hide      → hide
-//      Once the app is running, portal pings /heartbeat every 10s.
-//      A watchdog hides the window after 30s of silence — that's
-//      how "portal closed" auto-collapses the floater without
-//      relying on the unreliable browser `beforeunload` event.
-//
-// Window starts hidden (visible: false in tauri.conf.json) so
-// launching the .app from Finder doesn't pop a stray window — it
-// stays invisible until /show or tudouclaw://open arrives.
+//   ┌──────────── Tauri app process ────────────────┐
+//   │                                                │
+//   │  main window  (hidden keepalive, label="main") │
+//   │     never shown — keeps the process alive when │
+//   │     no per-agent windows exist.                │
+//   │                                                │
+//   │  agent supervisor thread (every 5 s):          │
+//   │    GET 127.0.0.1:9090/api/portal/agents/desktop│
+//   │    diff against currently-spawned set:         │
+//   │      added   → WebviewWindowBuilder            │
+//   │                label = sanitize(agent.id),     │
+//   │                URL   = index.html?agent_id=…   │
+//   │                position cascades 100+30·idx    │
+//   │      removed → window.close()                  │
+//   │                                                │
+//   │  local HTTP server (127.0.0.1:9192):           │
+//   │    /heartbeat → reset watchdog timer           │
+//   │    /show /hide → enumerate non-"main" windows  │
+//   │    /health → 200 OK                            │
+//   │                                                │
+//   │  watchdog (every 5 s):                         │
+//   │    if last heartbeat > 30 s ago, hide all      │
+//   │    per-agent windows (main untouched).         │
+//   │                                                │
+//   │  deep-link plugin:                             │
+//   │    tudouclaw://open  → show all per-agent      │
+//   │    tudouclaw://hide  → hide all per-agent      │
+//   └────────────────────────────────────────────────┘
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tiny_http::{Header, Method, Response, Server};
 
 const LOCAL_PORT: u16 = 9192;
 const IDLE_HIDE_AFTER_SECS: u64 = 30;
 const WATCHDOG_TICK_SECS: u64 = 5;
+const AGENT_POLL_SECS: u64 = 5;
+const FASTAPI_AGENTS_URL: &str = "http://127.0.0.1:9090/api/portal/agents/desktop";
+const MAIN_LABEL: &str = "main";
 
 #[derive(Clone)]
 struct ServerState {
@@ -55,42 +68,160 @@ fn main() {
                     }
                 }
             });
-            start_local_server(handle);
+            start_local_server(handle.clone());
+            start_agent_supervisor(handle);
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running TudouClaw desktop");
 }
 
-/// Apply a `tudouclaw://<action>` URL.
+// ── Per-agent windows ───────────────────────────────────────────────
+
+/// Tauri window labels must match `^[a-zA-Z0-9-_]+$` — sanitize the
+/// agent_id (which is hex anyway today, but stay defensive).
+fn label_for(agent_id: &str) -> String {
+    let mut s = String::from("agent-");
+    for c in agent_id.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+            s.push(c);
+        } else {
+            s.push('_');
+        }
+    }
+    s
+}
+
+fn spawn_agent_window(handle: &AppHandle, agent_id: &str, index: usize) {
+    let label = label_for(agent_id);
+    if handle.get_webview_window(&label).is_some() {
+        return; // already spawned
+    }
+    let url = format!("index.html?agent_id={}", agent_id);
+    let offset = (index as f64) * 30.0;
+    let result = WebviewWindowBuilder::new(handle, &label, WebviewUrl::App(url.into()))
+        .title(format!("TudouClaw {}", &agent_id[..agent_id.len().min(6)]))
+        .inner_size(140.0, 140.0)
+        .min_inner_size(120.0, 120.0)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .resizable(true)
+        .skip_taskbar(true)
+        .visible_on_all_workspaces(true)
+        .shadow(false)
+        .visible(false) // /show or scheme makes it visible
+        .position(120.0 + offset, 120.0 + offset)
+        .build();
+    if let Err(e) = result {
+        eprintln!("[tudouclaw] spawn window for {agent_id} failed: {e}");
+    }
+}
+
+fn close_agent_window(handle: &AppHandle, agent_id: &str) {
+    let label = label_for(agent_id);
+    if let Some(win) = handle.get_webview_window(&label) {
+        let _ = win.close();
+    }
+}
+
+/// Enumerate all per-agent windows (skip the hidden keepalive).
+fn for_each_agent_window<F: Fn(&tauri::WebviewWindow)>(handle: &AppHandle, f: F) {
+    for (label, win) in handle.webview_windows() {
+        if label == MAIN_LABEL { continue; }
+        f(&win);
+    }
+}
+
+fn show_all_agent_windows(handle: &AppHandle) {
+    for_each_agent_window(handle, |win| { let _ = win.show(); });
+}
+
+fn hide_all_agent_windows(handle: &AppHandle) {
+    for_each_agent_window(handle, |win| { let _ = win.hide(); });
+}
+
+fn poll_enabled_agent_ids() -> Vec<String> {
+    let resp = match ureq::get(FASTAPI_AGENTS_URL)
+        .timeout(Duration::from_millis(800))
+        .call()
+    {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let s = match resp.into_string() {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let body: serde_json::Value = match serde_json::from_str(&s) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    body["agents"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|a| a["id"].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn start_agent_supervisor(handle: AppHandle) {
+    thread::spawn(move || {
+        let mut known: HashSet<String> = HashSet::new();
+        loop {
+            let current: HashSet<String> =
+                poll_enabled_agent_ids().into_iter().collect();
+
+            // Spawn windows for newly-enabled agents (cascading offset).
+            let mut idx = known.len();
+            for id in current.difference(&known) {
+                spawn_agent_window(&handle, id, idx);
+                idx += 1;
+            }
+
+            // Close windows for newly-disabled agents.
+            for id in known.difference(&current).cloned().collect::<Vec<_>>() {
+                close_agent_window(&handle, &id);
+            }
+
+            known = current;
+            thread::sleep(Duration::from_secs(AGENT_POLL_SECS));
+        }
+    });
+}
+
+// ── URL scheme handler ──────────────────────────────────────────────
+
 fn handle_scheme(app: &AppHandle, url: &url::Url) {
-    let Some(window) = app.get_webview_window("main") else { return; };
     let action = url.host_str().unwrap_or("").to_lowercase();
     match action.as_str() {
         "open" | "show" => {
-            let _ = window.show();
-            let _ = window.set_focus();
+            show_all_agent_windows(app);
+            // Focus the first one we find so it grabs attention.
+            for (label, win) in app.webview_windows() {
+                if label == MAIN_LABEL { continue; }
+                let _ = win.set_focus();
+                break;
+            }
         }
-        "hide" | "dismiss" => {
-            let _ = window.hide();
-        }
+        "hide" | "dismiss" => hide_all_agent_windows(app),
         _ => {}
     }
 }
+
+// ── Local HTTP server (heartbeat + show/hide) ───────────────────────
 
 fn start_local_server(handle: AppHandle) {
     let state = ServerState {
         handle,
         last_heartbeat: Arc::new(Mutex::new(Instant::now())),
     };
-
     spawn_watchdog(state.clone());
     spawn_http_server(state);
 }
 
-/// Hide the window if we haven't heard from the portal in a while.
-/// Doesn't touch the window if no heartbeat has ever been received
-/// since startup (Instant::now() is initial value, elapsed near zero).
 fn spawn_watchdog(state: ServerState) {
     thread::spawn(move || loop {
         thread::sleep(Duration::from_secs(WATCHDOG_TICK_SECS));
@@ -99,9 +230,7 @@ fn spawn_watchdog(state: ServerState) {
             Err(_) => continue,
         };
         if elapsed > Duration::from_secs(IDLE_HIDE_AFTER_SECS) {
-            if let Some(win) = state.handle.get_webview_window("main") {
-                let _ = win.hide();
-            }
+            hide_all_agent_windows(&state.handle);
         }
     });
 }
@@ -129,7 +258,6 @@ fn handle_request(state: &ServerState, request: tiny_http::Request) {
         .unwrap_or("")
         .to_string();
 
-    // CORS preflight — always allow.
     if request.method() == &Method::Options {
         let _ = request.respond(with_cors(Response::empty(204)));
         return;
@@ -144,30 +272,21 @@ fn handle_request(state: &ServerState, request: tiny_http::Request) {
             r#"{"ok":true}"#.to_string()
         }
         "/show" => {
-            if let Some(win) = state.handle.get_webview_window("main") {
-                let _ = win.show();
-                let _ = win.set_focus();
-            }
-            // Treat /show as a heartbeat too — the portal just told us
-            // it's active, no point hiding 30s later if no follow-up.
+            show_all_agent_windows(&state.handle);
             if let Ok(mut t) = state.last_heartbeat.lock() {
                 *t = Instant::now();
             }
             r#"{"ok":true}"#.to_string()
         }
         "/hide" => {
-            if let Some(win) = state.handle.get_webview_window("main") {
-                let _ = win.hide();
-            }
+            hide_all_agent_windows(&state.handle);
             r#"{"ok":true}"#.to_string()
         }
         _ => {
-            let _ = request.respond(
-                with_cors(
-                    Response::from_string(r#"{"error":"not found"}"#)
-                        .with_status_code(404),
-                ),
-            );
+            let _ = request.respond(with_cors(
+                Response::from_string(r#"{"error":"not found"}"#)
+                    .with_status_code(404),
+            ));
             return;
         }
     };
