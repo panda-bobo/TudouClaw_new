@@ -9,6 +9,117 @@ let _adminCtx = { user_id: '', username: '', role: '', display_name: '', agent_i
 let _settingsSubTab = 'providers'; // Current sub-tab inside Settings view
 let _agentsSubTab = null; // Current node tab inside Agents view (null = first node)
 
+// ============ _ui — UI component helpers (Plan A polish, 2026-05-02) ============
+// Centralized HTML builders so we stop hand-writing inline style blocks
+// for chips, badges, buttons, icons, and section headers. Read tokens
+// from portal.html's design system (--chip-*, --ui-shadow-*, etc).
+//
+// Usage:
+//   _ui.chip('已完成', 'success')      → small status chip
+//   _ui.icon('check_circle')            → Material Symbols span
+//   _ui.iconChip('star', '已标记', 'success')  → icon + label chip
+//   _ui.sectionHeader('画布工作流', {icon:'view_kanban', count:3, action:'<button...>'})
+//   _ui.emptyState({icon:'inbox', title:'暂无工作流', hint:'...', cta:'<button...>'})
+//
+// Existing inline-style code keeps working — these are additive.
+window._ui = (function() {
+  function _esc(s) {
+    if (s === null || s === undefined) return '';
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  // Material Symbols icon. size/baseline override CSS variation settings.
+  function icon(name, opts) {
+    opts = opts || {};
+    var size = opts.size || 16;
+    var color = opts.color ? 'color:' + opts.color + ';' : '';
+    var va = opts.va || 'middle';   // vertical-align
+    return '<span class="material-symbols-outlined" style="font-size:' + size + 'px;'
+      + 'vertical-align:' + va + ';' + color + '">' + _esc(name) + '</span>';
+  }
+
+  // Status chip — short label with semantic color. Kind ∈
+  // {success, warning, error, info, neutral}. Defaults to neutral.
+  function chip(text, kind) {
+    var k = kind || 'neutral';
+    return '<span style="display:inline-flex;align-items:center;gap:3px;'
+      + 'padding:1px 8px;font-size:10px;border-radius:10px;font-weight:600;'
+      + 'background:var(--chip-' + k + '-bg);color:var(--chip-' + k + '-fg)">'
+      + _esc(text) + '</span>';
+  }
+
+  // Icon + label chip — one block, semantic color.
+  function iconChip(iconName, text, kind) {
+    var k = kind || 'neutral';
+    return '<span style="display:inline-flex;align-items:center;gap:4px;'
+      + 'padding:2px 9px;font-size:11px;border-radius:11px;font-weight:600;'
+      + 'background:var(--chip-' + k + '-bg);color:var(--chip-' + k + '-fg)">'
+      + icon(iconName, {size: 13, va: '-2px'}) + _esc(text) + '</span>';
+  }
+
+  // Pill button — softer than primary, used for "tap to do something
+  // contextual" actions (e.g. "▶ 运行" / "📦 交付件 N").
+  function pillButton(opts) {
+    opts = opts || {};
+    var k = opts.kind || 'info';
+    var click = opts.onclick ? ' onclick="' + opts.onclick + '"' : '';
+    var title = opts.title ? ' title="' + _esc(opts.title) + '"' : '';
+    var iconHtml = opts.icon ? icon(opts.icon, {size: 14, va: '-3px'}) + ' ' : '';
+    return '<button' + click + title + ' style="display:inline-flex;align-items:center;gap:4px;'
+      + 'padding:4px 12px;font-size:11px;border-radius:11px;font-weight:600;cursor:pointer;'
+      + 'background:var(--chip-' + k + '-bg);color:var(--chip-' + k + '-fg);border:none">'
+      + iconHtml + _esc(opts.text || '') + '</button>';
+  }
+
+  // Section header for a panel: icon + title + optional count + optional
+  // right-side action HTML. Replaces hand-written 18-line headers.
+  function sectionHeader(title, opts) {
+    opts = opts || {};
+    var iconHtml = opts.icon
+      ? icon(opts.icon, {size: 18, va: '-3px', color: 'var(--primary)'}) + ' '
+      : '';
+    var countHtml = (opts.count !== undefined && opts.count !== null)
+      ? '<span style="font-size:11px;color:var(--text3);margin-left:8px">' + _esc(opts.count) + '</span>'
+      : '';
+    var rightHtml = opts.action || '';
+    return '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;padding:0 4px">'
+      + '<div style="display:flex;align-items:baseline;gap:6px">'
+      +   '<div style="font-size:14px;font-weight:700">' + iconHtml + _esc(title) + '</div>'
+      +   countHtml
+      + '</div>'
+      + rightHtml
+      + '</div>';
+  }
+
+  // Friendly empty-state block with optional CTA. Replaces "无 X" gray text.
+  function emptyState(opts) {
+    opts = opts || {};
+    var iconHtml = opts.icon
+      ? icon(opts.icon, {size: 48, color: 'var(--text3)', va: 'middle'})
+      : '<div style="font-size:42px;opacity:0.5">' + _esc(opts.emoji || '📭') + '</div>';
+    return '<div style="padding:48px 30px;text-align:center;background:var(--surface);'
+      + 'border:1px dashed var(--border);border-radius:12px">'
+      + '<div style="margin-bottom:10px">' + iconHtml + '</div>'
+      + '<div style="font-size:14px;color:var(--text2);font-weight:600;margin-bottom:6px">'
+      +   _esc(opts.title || '暂无数据') + '</div>'
+      + (opts.hint ? '<div style="font-size:12px;color:var(--text3);line-height:1.5;'
+        + 'margin-bottom:14px;max-width:360px;margin-left:auto;margin-right:auto">'
+        + _esc(opts.hint) + '</div>' : '')
+      + (opts.cta || '')
+      + '</div>';
+  }
+
+  return {
+    icon: icon,
+    chip: chip,
+    iconChip: iconChip,
+    pillButton: pillButton,
+    sectionHeader: sectionHeader,
+    emptyState: emptyState,
+    _esc: _esc,
+  };
+})();
+
 // ============ Toast / Confirm / Prompt — zero native popups ============
 (function() {
   // ── Toast notifications (stacking, right-aligned) ──
@@ -19840,29 +19951,29 @@ function _renderOrchCanvasWorkflows(d) {
   var workflows = (d && d.workflows) || [];
 
   // Section header — with "新建" CTA so the empty state has a clear next step.
-  var headerHtml = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;padding:0 4px">'
-    + '<div style="display:flex;align-items:baseline;gap:10px">'
-    +   '<div style="font-size:14px;font-weight:700"><span class="material-symbols-outlined" style="font-size:18px;vertical-align:-3px;margin-right:4px;color:var(--primary)">view_kanban</span>画布工作流</div>'
-    +   '<span style="font-size:11px;color:var(--text3)">' + workflows.length + ' 个</span>'
-    + '</div>'
-    + '<button class="btn btn-sm btn-primary" onclick="renderCanvasPage()" title="进入画布编辑器" style="padding:5px 12px;font-size:11px"><span class="material-symbols-outlined" style="font-size:14px">add</span> 新建 / 管理</button>'
-    + '</div>';
+  var headerHtml = _ui.sectionHeader('画布工作流', {
+    icon: 'view_kanban',
+    count: workflows.length + ' 个',
+    action: '<button class="btn btn-sm btn-primary" onclick="renderCanvasPage()" title="进入画布编辑器" style="padding:5px 12px;font-size:11px">'
+      + _ui.icon('add', {size:14}) + ' 新建 / 管理</button>',
+  });
 
-  // Status palette → left-edge stripe color on each card
+  // Left-edge status stripe — token-based for theme awareness.
   var stripeColor = function(st) {
-    if (st === 'ready')    return '#16a34a';
-    if (st === 'disabled') return '#ea580c';
-    return '#94a3b8';   // draft (default)
+    if (st === 'ready')    return 'var(--chip-success-fg)';
+    if (st === 'disabled') return 'var(--chip-warning-fg)';
+    return 'var(--text3)';   // draft
   };
 
   var bodyHtml;
   if (!workflows.length) {
-    bodyHtml = '<div style="padding:48px 30px;text-align:center;background:var(--surface);border:1px dashed var(--border);border-radius:12px">'
-      +   '<div style="font-size:42px;margin-bottom:10px;opacity:0.5">📋</div>'
-      +   '<div style="font-size:14px;color:var(--text2);font-weight:600;margin-bottom:6px">还没有画布工作流</div>'
-      +   '<div style="font-size:12px;color:var(--text3);margin-bottom:14px">从"新建 / 管理"进入编辑器,拖拽节点构建第一个 DAG</div>'
-      +   '<button class="btn btn-sm btn-primary" onclick="renderCanvasPage()" style="padding:6px 16px;font-size:12px"><span class="material-symbols-outlined" style="font-size:14px">add</span> 创建第一个</button>'
-      + '</div>';
+    bodyHtml = _ui.emptyState({
+      icon: 'view_kanban',
+      title: '还没有画布工作流',
+      hint: '从"新建 / 管理"进入编辑器,拖拽节点构建第一个 DAG',
+      cta: '<button class="btn btn-sm btn-primary" onclick="renderCanvasPage()" style="padding:6px 16px;font-size:12px">'
+        + _ui.icon('add', {size:14}) + ' 创建第一个</button>',
+    });
   } else {
     bodyHtml = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px">'
       + workflows.map(function(w) {
@@ -20144,19 +20255,18 @@ function _renderOrchPipelines(d) {
       + '<div style="display:flex;flex-wrap:wrap;gap:4px">'+statusBar+'</div>'
       + preview + '</div>';
   }).join('')
-   : '<div style="padding:48px 30px;text-align:center;background:var(--surface);border:1px dashed var(--border);border-radius:12px">'
-   +   '<div style="font-size:42px;margin-bottom:10px;opacity:0.5">🔭</div>'
-   +   '<div style="font-size:14px;color:var(--text2);font-weight:600;margin-bottom:6px">暂无长任务流水线</div>'
-   +   '<div style="font-size:12px;color:var(--text3);line-height:1.5">长任务由 agent 自动拆分子任务并并行执行 — 给 agent 一个复杂指令试试</div>'
-   + '</div>';
+   : _ui.emptyState({
+       icon: 'travel_explore',
+       title: '暂无长任务流水线',
+       hint: '长任务由 agent 自动拆分子任务并并行执行 — 给 agent 一个复杂指令试试',
+     });
 
-  // Section header (matches canvas section's style)
-  var headerHtml = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;padding:0 4px">'
-    + '<div style="display:flex;align-items:baseline;gap:10px">'
-    +   '<div style="font-size:14px;font-weight:700"><span class="material-symbols-outlined" style="font-size:18px;vertical-align:-3px;margin-right:4px;color:var(--primary)">account_tree</span>长任务流水线</div>'
-    +   '<span style="font-size:11px;color:var(--text3)">' + pipes.length + ' 条 · 进行中优先</span>'
-    + '</div>'
-    + '</div>';
+  // Section header — uses _ui.sectionHeader helper for consistency
+  // with the canvas-workflow section above.
+  var headerHtml = _ui.sectionHeader('长任务流水线', {
+    icon: 'account_tree',
+    count: pipes.length + ' 条 · 进行中优先',
+  });
 
   el.innerHTML = headerHtml
     + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px">' + body + '</div>';
@@ -22402,7 +22512,8 @@ function _canvasRenderEditor() {
     + '    <input id="canvas-name" value="' + esc(wf.name) + '" style="font-weight:600;font-size:14px;padding:4px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);flex:1;max-width:340px">'
     +      _canvasStatusBadge(wf.executable_status || 'draft')
     + '    <span id="canvas-run-status-pill" style="display:none"></span>'
-    + '    <button id="canvas-artifacts-btn" onclick="_canvasOpenArtifactsModal()" style="display:none;padding:3px 10px;font-size:11px;border-radius:10px;background:rgba(99,102,241,0.18);color:#4f46e5;border:none;font-weight:600;cursor:pointer;margin-left:6px"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">folder_zip</span> 交付件 <span id="canvas-artifacts-count">0</span></button>'
+    + '    <button id="canvas-artifacts-btn" onclick="_canvasOpenArtifactsModal()" style="display:none;padding:3px 10px;font-size:11px;border-radius:11px;background:var(--chip-info-bg);color:var(--chip-info-fg);border:none;font-weight:600;cursor:pointer;margin-left:6px;align-items:center;gap:4px">'
+    +      _ui.icon('folder_zip', {size: 14, va: '-3px'}) + ' 交付件 <span id="canvas-artifacts-count">0</span></button>'
     + '    <span style="font-size:11px;color:var(--text3);font-family:monospace">' + esc(wf.id || '(unsaved)') + '</span>'
     + '    <div style="margin-left:auto;display:flex;gap:6px">'
     +        (wf.id ? _canvasStatusActions(wf) : '')
@@ -22808,11 +22919,13 @@ function _canvasRenderRunStatusPill() {
     el.innerHTML = '';
     return;
   }
+  // Token-based palette — picks up theme switch automatically (dark
+  // ↔ light) instead of being hardcoded to a hex.
   var STYLES = {
-    running:   {bg:'rgba(245,158,11,0.18)',  fg:'#b45309', icon:'sync', label:'运行中', pulse:true},
-    succeeded: {bg:'rgba(34,197,94,0.18)',   fg:'#16a34a', icon:'check_circle', label:'运行成功'},
-    failed:    {bg:'rgba(239,68,68,0.18)',   fg:'#dc2626', icon:'error', label:'运行失败'},
-    aborted:   {bg:'rgba(234,88,12,0.18)',   fg:'#ea580c', icon:'stop_circle', label:'已中止'},
+    running:   {kind:'warning', icon:'sync',         label:'运行中',   pulse:true},
+    succeeded: {kind:'success', icon:'check_circle', label:'运行成功'},
+    failed:    {kind:'error',   icon:'error',        label:'运行失败'},
+    aborted:   {kind:'warning', icon:'stop_circle',  label:'已中止'},
   };
   var s = STYLES[rs.status] || STYLES.running;
   var elapsedS = ((Date.now() - rs.startedAt) / 1000);
@@ -22828,9 +22941,12 @@ function _canvasRenderRunStatusPill() {
   if (rs.status === 'failed' && rs.payload && rs.payload.error) {
     detail = ' · ' + esc(String(rs.payload.error).slice(0, 40));
   }
+  // Use --chip-{kind}-{bg,fg} tokens; theme-aware (dark/light auto-swap).
   el.style.display = 'inline-flex';
-  el.style.cssText = 'display:inline-flex;align-items:center;gap:4px;padding:3px 10px;font-size:11px;border-radius:10px;background:'+s.bg+';color:'+s.fg+';font-weight:600;margin-left:6px;'+pulseStyle;
-  el.innerHTML = '<span class="material-symbols-outlined" style="font-size:14px">'+s.icon+'</span>'
+  el.style.cssText = 'display:inline-flex;align-items:center;gap:4px;padding:3px 10px;'
+    + 'font-size:11px;border-radius:11px;font-weight:600;margin-left:6px;'
+    + 'background:var(--chip-'+s.kind+'-bg);color:var(--chip-'+s.kind+'-fg);' + pulseStyle;
+  el.innerHTML = _ui.icon(s.icon, {size: 14})
     + '<span>'+s.label+'</span>'
     + '<span style="opacity:0.75">· '+elapsedTxt+esc(detail)+'</span>';
 }

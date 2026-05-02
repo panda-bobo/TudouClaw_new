@@ -124,6 +124,40 @@
   /* Aliases kept for older callsites — same semantics as overlay-4/8. */
   --overlay-subtle:  var(--overlay-4);
   --overlay-medium:  var(--overlay-8);
+
+  /* ── Layer 2 — chip / badge semantic palette (2026-05-02) ─────────
+     Use these instead of writing rgba(34,197,94,0.18) etc. inline.
+     Each pair: -bg = subtle filled background; -fg = readable text.
+     -border is optional, used when the chip needs a stroke instead
+     of a tint. Theme-aware via the [data-theme="light"] block below. */
+  --chip-success-bg:  color-mix(in srgb, var(--success) 18%, transparent);
+  --chip-success-fg:  var(--success);
+  --chip-warning-bg:  color-mix(in srgb, var(--warning) 18%, transparent);
+  --chip-warning-fg:  var(--warning);
+  --chip-error-bg:    color-mix(in srgb, var(--error)   18%, transparent);
+  --chip-error-fg:    var(--error);
+  --chip-info-bg:     color-mix(in srgb, var(--primary) 18%, transparent);
+  --chip-info-fg:     var(--primary);
+  --chip-neutral-bg:  var(--overlay-6);
+  --chip-neutral-fg:  var(--text3);
+
+  /* ── Layer 2 — elevation / shadow tokens ───────────────────────────
+     ui-shadow-1 = card resting (subtle separation from page)
+     ui-shadow-2 = card hover (lifted, more pronounced)
+     ui-shadow-3 = modal / popover (max elevation) */
+  --ui-shadow-1: 0 1px 2px rgba(0,0,0,0.06), 0 1px 3px rgba(0,0,0,0.04);
+  --ui-shadow-2: 0 4px 12px rgba(0,0,0,0.08), 0 2px 4px rgba(0,0,0,0.06);
+  --ui-shadow-3: 0 16px 40px rgba(0,0,0,0.18), 0 4px 12px rgba(0,0,0,0.08);
+
+  /* ── Layer 2 — spacing scale (4px base) ────────────────────────────
+     Use these instead of magic numbers in padding / margin / gap. */
+  --ui-space-1: 4px;
+  --ui-space-2: 8px;
+  --ui-space-3: 12px;
+  --ui-space-4: 16px;
+  --ui-space-5: 20px;
+  --ui-space-6: 24px;
+  --ui-space-8: 32px;
 }
 
 /* Primary-text overrides live in each [data-theme] block below.
