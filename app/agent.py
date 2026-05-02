@@ -7652,15 +7652,9 @@ Write only the summary body. Do not include any preamble or prefix."""
             # the front-end ring buffer at portal_bundle.js:4285 so once we
             # have confirmed no escapes, the front-end safety net can be
             # removed in a follow-up commit.
-            _emit_ring: list[tuple[float, str, str]] = []  # (ts, head300, full)
+            from ._emit_dedup import EmitDedupState, fingerprint as _fp
+            _dedup = EmitDedupState()
             _turn_id_str = f"t{int(time.time() * 1000) % 1_000_000_000:09d}"
-
-            def _fingerprint_msg(content: str) -> tuple[str, str]:
-                """Normalize an assistant message to (head300, full_stripped)."""
-                stripped = (content or "").strip()
-                # Collapse runs of whitespace so "X\n\nY" and "X Y" match
-                normalized = " ".join(stripped.split())
-                return normalized[:300], normalized
 
             def _emit(evt: AgentEvent):
                 # Accumulate streaming text deltas into the public
@@ -7684,65 +7678,38 @@ Write only the summary body. Do not include any preamble or prefix."""
                         # flows through untouched.
                         if (evt.kind == "message"
                                 and evt.data.get("role") == "assistant"):
-                            head, full = _fingerprint_msg(
-                                evt.data.get("content") or ""
-                            )
-                            if not full:
-                                # Empty assistant message — let it through
-                                # (downstream may need it as a turn marker).
-                                pass
-                            else:
-                                _now = time.time()
-                                # Sliding window — keep last 5 within 60s
-                                _alive = [
-                                    e for e in _emit_ring
-                                    if (_now - e[0]) <= 60.0
-                                ]
-                                _emit_ring[:] = _alive
-                                # Match exact OR mutual-prefix (one is a
-                                # prefix of the other — covers the
-                                # "streamed chunk vs final" replay case).
-                                for (_ets, _ehead, _efull) in _emit_ring:
-                                    if (_ehead == head
-                                            or full.startswith(_efull)
-                                            or _efull.startswith(full)):
-                                        # Suppressed — log so the next
-                                        # session can correlate the dup
-                                        # with a backend emit path.
-                                        try:
-                                            import hashlib
-                                            _h = hashlib.md5(
-                                                full.encode()
-                                            ).hexdigest()[:8]
-                                            logger.warning(
-                                                "agent %s turn %s: SUPPRESSED "
-                                                "duplicate assistant emit "
-                                                "(hash=%s, len=%d, "
-                                                "since_first=%.1fs)",
-                                                self.id[:8], _turn_id_str,
-                                                _h, len(full), _now - _ets,
-                                            )
-                                        except Exception:
-                                            pass
-                                        return
-                                _emit_ring.append((_now, head, full))
-                                if len(_emit_ring) > 5:
-                                    _emit_ring.pop(0)
-                                # Diagnostic: log every PASSING emit so
-                                # the live-reproduction trace can show
-                                # which path of the chat loop is firing
-                                # for "duplicate" content even when the
-                                # dedup catches it later.
+                            content = evt.data.get("content") or ""
+                            allow, dup_age = _dedup.should_emit_assistant(content)
+                            if not allow:
+                                # Suppressed — log so the next session
+                                # can correlate the dup with a backend
+                                # emit path.
                                 try:
                                     import hashlib
-                                    _h = hashlib.md5(
-                                        full.encode()
-                                    ).hexdigest()[:8]
+                                    _, full = _fp(content)
+                                    _h = hashlib.md5(full.encode()).hexdigest()[:8]
+                                    logger.warning(
+                                        "agent %s turn %s: SUPPRESSED "
+                                        "duplicate assistant emit "
+                                        "(hash=%s, len=%d, since_first=%.1fs)",
+                                        self.id[:8], _turn_id_str, _h,
+                                        len(full), dup_age or 0.0,
+                                    )
+                                except Exception:
+                                    pass
+                                return
+                            # Diagnostic: log every PASSING emit so the
+                            # live-reproduction trace can show which path
+                            # of the chat loop is firing.
+                            if content.strip():
+                                try:
+                                    import hashlib
+                                    _, full = _fp(content)
+                                    _h = hashlib.md5(full.encode()).hexdigest()[:8]
                                     logger.info(
                                         "agent %s turn %s: assistant emit "
-                                        "(hash=%s, len=%d, ring=%d)",
-                                        self.id[:8], _turn_id_str, _h,
-                                        len(full), len(_emit_ring),
+                                        "(hash=%s, len=%d)",
+                                        self.id[:8], _turn_id_str, _h, len(full),
                                     )
                                 except Exception:
                                     pass
