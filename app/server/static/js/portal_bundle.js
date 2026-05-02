@@ -21395,6 +21395,12 @@ function _kmShowCreateDomainKb() {
     +   '<select id="km-dkb-embed-model"><option value="">加载中…</option></select>'
     +   '<div id="km-dkb-embed-note" style="font-size:11px;color:var(--text3);margin-top:4px;line-height:1.4"></div>'
     + '</div>'
+    // Cross-encoder reranker — optional. Adds latency, big precision win.
+    + '<div class="form-group">'
+    +   '<label>Reranker 精排模型 <span style="font-size:11px;color:var(--text3);font-weight:400">（可选, 创建后可改）</span></label>'
+    +   '<select id="km-dkb-rerank-model"><option value="">加载中…</option></select>'
+    +   '<div id="km-dkb-rerank-note" style="font-size:11px;color:var(--text3);margin-top:4px;line-height:1.4"></div>'
+    + '</div>'
     + '<div class="form-actions"><button class="btn btn-ghost" onclick="document.getElementById(\'km-dkb-modal\').remove()">取消</button>'
     + '<button class="btn btn-primary" onclick="_kmSaveDomainKb()">创建</button></div>'
     + '</div></div>';
@@ -21468,6 +21474,55 @@ function _kmShowCreateDomainKb() {
     var sel = document.getElementById('km-dkb-embed-model');
     if (sel) sel.innerHTML = '<option value="">默认 (服务器配置)</option>';
   });
+
+  // Reranker model dropdown — same shape as embedding catalog.
+  api('GET', '/api/portal/domain-kb/reranker-models').then(function(data) {
+    var sel = document.getElementById('km-dkb-rerank-model');
+    var note = document.getElementById('km-dkb-rerank-note');
+    if (!sel || !data) return;
+    sel.innerHTML = '';
+    var fmtSize = function(mb) {
+      if (!mb) return '';
+      return ' · ~' + (mb >= 1024 ? (mb/1024).toFixed(1) + 'GB' : mb + 'MB');
+    };
+    var addGroup = function(label, models) {
+      if (!models || !models.length) return;
+      var grp = document.createElement('optgroup');
+      grp.label = label;
+      models.forEach(function(m) {
+        var lab = m.label || m.id || '不使用';
+        if (m.recommended) lab = '⭐ ' + lab + ' (推荐)';
+        if (m.local && !m.recommended) lab = '✓ ' + lab + ' (已下载)';
+        lab += fmtSize(m.size_mb);
+        var opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = lab;
+        opt.dataset.note = m.note || '';
+        if (m.id === '') opt.dataset.preselect = '1';   // default = no rerank
+        grp.appendChild(opt);
+      });
+      sel.appendChild(grp);
+    };
+    addGroup('内置选项', data.models || []);
+    addGroup('本地已缓存（自定义）', data.local_extra || []);
+    // Default to "no rerank" — opt-in, not opt-out, so first-run KBs
+    // don't suddenly need 568MB extra download for one experiment.
+    for (var i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].value === '') { sel.selectedIndex = i; break; }
+    }
+    var update = function() {
+      var sel2 = document.getElementById('km-dkb-rerank-model');
+      var note2 = document.getElementById('km-dkb-rerank-note');
+      if (!sel2 || !note2) return;
+      var opt = sel2.options[sel2.selectedIndex];
+      note2.textContent = (opt && opt.dataset && opt.dataset.note) || '';
+    };
+    sel.addEventListener('change', update);
+    update();
+  }).catch(function(){
+    var sel = document.getElementById('km-dkb-rerank-model');
+    if (sel) sel.innerHTML = '<option value="">不使用 (默认)</option>';
+  });
 }
 
 async function _kmSaveDomainKb() {
@@ -21476,6 +21531,7 @@ async function _kmSaveDomainKb() {
   var tags = ((document.getElementById('km-dkb-tags')||{}).value||'').split(',').map(function(t){return t.trim()}).filter(Boolean);
   var provider = (document.getElementById('km-dkb-provider')||{}).value||'';
   var embedModel = (document.getElementById('km-dkb-embed-model')||{}).value||'';
+  var rerankerModel = (document.getElementById('km-dkb-rerank-model')||{}).value||'';
   if (!name.trim()) { alert('名称不能为空'); return; }
   try {
     await api('POST', '/api/portal/domain-kb/create', {
@@ -21484,6 +21540,7 @@ async function _kmSaveDomainKb() {
       tags: tags,
       provider_id: provider,
       embedding_model: embedModel,
+      reranker_model: rerankerModel,
     });
     var m = document.getElementById('km-dkb-modal'); if(m) m.remove();
     _renderKmPrivate();

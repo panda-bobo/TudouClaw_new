@@ -516,6 +516,58 @@ async def list_embedding_models(user: CurrentUser = Depends(get_current_user)):
     return {"models": curated, "local_extra": extra}
 
 
+# Cross-encoder rerankers — separate catalog from embeddings because the
+# trade-off is different (rerankers are optional; embeddings always run).
+# The flag ``recommended: True`` pre-selects in the UI.
+CURATED_RERANKER_MODELS = [
+    {"id": "", "label": "不使用 (默认)", "size_mb": None,
+     "note": "vector search 结果直接返回, 速度最快"},
+    {"id": "BAAI/bge-reranker-v2-m3", "label": "BAAI/bge-reranker-v2-m3",
+     "size_mb": 568,
+     "note": "多语言精排, 与 bge-m3 embedding 配套使用 (推荐)",
+     "recommended": True},
+    {"id": "BAAI/bge-reranker-large", "label": "BAAI/bge-reranker-large",
+     "size_mb": 1100,
+     "note": "英文精排, 召回侧用 bge-large-en 时配它"},
+    {"id": "BAAI/bge-reranker-base", "label": "BAAI/bge-reranker-base",
+     "size_mb": 280,
+     "note": "轻量版精排, 体积小一半"},
+]
+
+
+def _allowed_reranker_ids() -> set[str]:
+    """Allow-list for reranker model field. Empty string is always
+    valid (== no rerank). Curated catalog ∪ anything cached locally."""
+    ids = {m["id"] for m in CURATED_RERANKER_MODELS}
+    # Local-cache scan: cross-encoders also have config.json with
+    # text-classification head; we re-use the embedding scanner since
+    # the BAAI/bge-reranker-* dirs follow the same models--owner--name
+    # naming, even though they're not technically "sentence transformers".
+    # The act of pre-downloading is itself the vetting.
+    for m in _scan_local_st_models():
+        ids.add(m["id"])
+    return ids
+
+
+@router.get("/domain-kb/reranker-models")
+async def list_reranker_models(user: CurrentUser = Depends(get_current_user)):
+    """Catalog of cross-encoder rerankers for KB creation."""
+    curated = list(CURATED_RERANKER_MODELS)
+    curated_ids = {m["id"] for m in curated}
+    # Show locally-cached models that look reranker-ish (heuristic:
+    # name contains "rerank" or "cross" — avoids polluting the dropdown
+    # with the bi-encoder embedders, which would technically load via
+    # CrossEncoder but produce garbage scores).
+    extra = []
+    for m in _scan_local_st_models():
+        nm = m["id"].lower()
+        if m["id"] in curated_ids:
+            continue
+        if "rerank" in nm or "cross" in nm or "reranker" in nm:
+            extra.append({**m, "label": m["id"]})
+    return {"models": curated, "local_extra": extra}
+
+
 @router.post("/domain-kb/create")
 async def create_domain_knowledge_base(
     body: dict = Body(...),
@@ -551,6 +603,13 @@ async def create_domain_knowledge_base(
                 f"pre-download the model into ~/.tudou_claw/hf_cache/ "
                 f"to whitelist it.",
             )
+        reranker_model = (body.get("reranker_model") or "").strip()
+        if reranker_model and reranker_model not in _allowed_reranker_ids():
+            raise HTTPException(
+                400,
+                f"reranker_model not allowed: {reranker_model!r}. "
+                f"GET /domain-kb/reranker-models for the catalog.",
+            )
         tags = body.get("tags") or []
         if not isinstance(tags, list):
             tags = []
@@ -572,6 +631,7 @@ async def create_domain_knowledge_base(
             provider_id=provider_id,
             tags=[str(t).strip() for t in tags if str(t).strip()],
             embedding_model=embedding_model,
+            reranker_model=reranker_model,
         )
         return {"ok": True, "knowledge_base": kb.to_dict()}
     except HTTPException:

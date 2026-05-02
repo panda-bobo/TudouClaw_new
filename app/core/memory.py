@@ -1252,6 +1252,33 @@ class MemoryManager:
             metadata={"hnsw:space": "cosine"},
         )
 
+    def _resolve_reranker(self, model_name: str | None):
+        """Lazy-load + cache a CrossEncoder for ``model_name``.
+
+        Cross-encoders rescore (query, candidate) pairs after vector
+        search to fix ordering; substantially better precision@1 than
+        bi-encoder cosine alone. ~568MB for bge-reranker-v2-m3, loads
+        in ~3s on CPU first time. Returns None if model_name is empty.
+        """
+        if not model_name:
+            return None
+        cache = getattr(self, "_reranker_cache", None)
+        if cache is None:
+            cache = {}
+            self._reranker_cache = cache
+        if model_name in cache:
+            return cache[model_name]
+        try:
+            from sentence_transformers import CrossEncoder
+            logger.info(f"Loading cross-encoder reranker on demand: {model_name}")
+            ce = CrossEncoder(model_name)
+        except Exception as e:
+            logger.warning(f"Failed to load reranker {model_name!r}: {e}")
+            cache[model_name] = None
+            return None
+        cache[model_name] = ce
+        return ce
+
     # ------------------------------------------------------------------
     # Vector write quality controls
     # ------------------------------------------------------------------

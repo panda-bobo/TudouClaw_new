@@ -131,6 +131,13 @@ class DomainKnowledgeBase:
     # so it should be locked at creation. ALLOWED_EMBEDDING_MODELS in
     # the API layer enforces a known-good allow-list.
     embedding_model: str = ""
+    # Per-KB cross-encoder reranker. Empty = no reranking (vector search
+    # results returned as-is). Set to e.g. "BAAI/bge-reranker-v2-m3" to
+    # post-process vector candidates: chromadb returns top_k*4, the
+    # CrossEncoder rescores each (query, doc) pair, top_k by reranker
+    # score is returned. Adds ~50-200ms per query on CPU but typically
+    # +10-20% precision@1.
+    reranker_model: str = ""
     tags: list[str] = field(default_factory=list)
     doc_count: int = 0
     created_at: float = field(default_factory=time.time)
@@ -141,6 +148,7 @@ class DomainKnowledgeBase:
             "id": self.id, "name": self.name, "description": self.description,
             "collection": self.collection, "provider_id": self.provider_id,
             "embedding_model": self.embedding_model,
+            "reranker_model": self.reranker_model,
             "tags": self.tags, "doc_count": self.doc_count,
             "created_at": self.created_at, "updated_at": self.updated_at,
         }
@@ -154,6 +162,7 @@ class DomainKnowledgeBase:
             collection=d.get("collection", ""),
             provider_id=d.get("provider_id", ""),
             embedding_model=d.get("embedding_model", ""),
+            reranker_model=d.get("reranker_model", ""),
             tags=d.get("tags", []),
             doc_count=d.get("doc_count", 0),
             created_at=d.get("created_at", time.time()),
@@ -195,13 +204,15 @@ class DomainKBStore:
 
     def create(self, name: str, description: str = "", provider_id: str = "",
                tags: list[str] | None = None,
-               embedding_model: str = "") -> DomainKnowledgeBase:
+               embedding_model: str = "",
+               reranker_model: str = "") -> DomainKnowledgeBase:
         kb_id = f"dkb_{uuid.uuid4().hex[:10]}"
         collection = f"domain_{kb_id}"
         kb = DomainKnowledgeBase(
             id=kb_id, name=name, description=description,
             collection=collection, provider_id=provider_id,
             embedding_model=(embedding_model or "").strip(),
+            reranker_model=(reranker_model or "").strip(),
             tags=tags or [],
         )
         self._kbs[kb_id] = kb
@@ -489,16 +500,82 @@ class RAGProviderRegistry:
             pass
         return None
 
+    def _resolve_kb_reranker_model(self, collection: str) -> str | None:
+        """Same lookup as _resolve_kb_embed_model but for the reranker.
+        Returns None when the KB hasn't opted into reranking — caller
+        skips the rescore step in that case."""
+        if not collection or not collection.startswith("domain_"):
+            return None
+        try:
+            store = get_domain_kb_store()
+            kb_id = collection[len("domain_"):]
+            kb = store.get(kb_id)
+            if kb and kb.reranker_model:
+                return kb.reranker_model
+        except Exception:
+            pass
+        return None
+
+    def _rerank_results(self, model_name: str, query: str,
+                        items: "list[RAGResult]",
+                        top_k: int) -> "list[RAGResult]":
+        """Rescore ``items`` with a cross-encoder and return the
+        highest-scoring ``top_k``. The reranker score is stamped onto
+        each surviving result's metadata as ``rerank_score`` so
+        callers can audit ordering.
+
+        Falls through to ``items[:top_k]`` if the reranker fails to
+        load, the candidate list is empty, or the prediction errors —
+        we never silently drop results just because rescoring broke.
+        """
+        if not items:
+            return items
+        if len(items) <= 1:
+            return items[:top_k]
+        mm = self._get_memory_manager()
+        ce = mm._resolve_reranker(model_name) if mm else None
+        if ce is None:
+            return items[:top_k]
+        try:
+            pairs = [(query, (it.content or "")[:2000]) for it in items]
+            scores = ce.predict(pairs, show_progress_bar=False)
+        except Exception as e:
+            logger.warning(f"Cross-encoder predict failed for {model_name!r}: {e}")
+            return items[:top_k]
+        paired = list(zip(items, [float(s) for s in scores]))
+        paired.sort(key=lambda x: x[1], reverse=True)
+        out = []
+        for it, score in paired[:top_k]:
+            it.metadata = dict(it.metadata or {})
+            it.metadata["rerank_score"] = round(score, 6)
+            out.append(it)
+        return out
+
     def _search_local(self, collection: str, query: str,
-                      top_k: int = 5) -> list[RAGResult]:
+                      top_k: int = 5,
+                      apply_rerank: bool = True) -> list[RAGResult]:
+        """Vector search against the local ChromaDB collection.
+
+        ``apply_rerank``: if True (default), the KB's configured
+        cross-encoder rescores the top ~4× candidates and returns the
+        best top_k. Set False from inside hybrid_search to keep the
+        raw vector ranking — hybrid does its OWN rerank pass after
+        RRF fusion so the cross-encoder sees the merged candidate
+        list (vector + BM25), not just the vector half.
+        """
         mm = self._get_memory_manager()
         if not mm:
             return []
         try:
+            reranker_model = self._resolve_kb_reranker_model(collection) if apply_rerank else None
+            # Fetch a bigger pool when reranking — cross-encoder needs
+            # candidates to rescore. Cap at 50 to keep latency bounded.
+            fetch_n = min(top_k * 4, 50) if reranker_model else min(top_k, 20)
+
             coll = mm._get_chroma_collection(collection, model_name=self._resolve_kb_embed_model(collection))
             if coll.count() == 0:
                 return []
-            results = coll.query(query_texts=[query], n_results=min(top_k, 20))
+            results = coll.query(query_texts=[query], n_results=fetch_n)
             items = []
             if results and results.get("ids") and results["ids"][0]:
                 for i, doc_id in enumerate(results["ids"][0]):
@@ -514,6 +591,10 @@ class RAGProviderRegistry:
                         distance=results["distances"][0][i] if results.get("distances") else 0,
                         metadata=dict(meta or {}),
                     ))
+            if reranker_model and len(items) > 1:
+                items = self._rerank_results(reranker_model, query, items, top_k)
+            else:
+                items = items[:top_k]
             return items
         except Exception as e:
             logger.warning("Local RAG search failed (collection=%s): %s", collection, e)
@@ -738,7 +819,11 @@ class RAGProviderRegistry:
         # Local: gather both candidate lists.
         candidate_k = max(top_k * self._HYBRID_CANDIDATE_MULTIPLIER, 20)
 
-        vector_hits = self._search_local(collection, query, top_k=candidate_k)
+        # Don't rerank the inner vector hits — RRF should fuse the
+        # RAW vector and BM25 rankings. Final reranking (if KB
+        # configured) happens at the END on the fused list, so the
+        # cross-encoder sees the union of both candidate sources.
+        vector_hits = self._search_local(collection, query, top_k=candidate_k, apply_rerank=False)
         vector_rank = [(r.id, 1.0 / (1 + r.distance)) for r in vector_hits]
 
         bm25_rank = self._bm25_search(collection, query, top_k=candidate_k)
@@ -800,16 +885,22 @@ class RAGProviderRegistry:
             except Exception:
                 pass
 
-        out = []
-        for doc_id, rrf_score in fused[:top_k]:
+        # Build the fused candidate list FIRST (don't truncate to top_k
+        # yet) so a configured cross-encoder can see all RRF survivors.
+        fused_items: list[RAGResult] = []
+        rerank_pool = min(top_k * 4, 50)
+        for doc_id, rrf_score in fused[:rerank_pool]:
             r = id_to_result.get(doc_id)
             if r is None:
                 continue
-            # Attach the fused score so callers can see it.
             r.metadata = dict(r.metadata or {})
             r.metadata["rrf_score"] = round(rrf_score, 6)
-            out.append(r)
-        return out
+            fused_items.append(r)
+
+        reranker_model = self._resolve_kb_reranker_model(collection)
+        if reranker_model and len(fused_items) > 1:
+            return self._rerank_results(reranker_model, query, fused_items, top_k)
+        return fused_items[:top_k]
 
     def kb_statistics(self, provider_id: str, collection: str,
                       query: str = "") -> dict:
