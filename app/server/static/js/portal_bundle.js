@@ -58,37 +58,80 @@ if (document.readyState === 'loading') {
   _loadBranding();
 }
 
-// ─── Desktop floater auto-activation (Phase A1, 2026-05-02) ───
-// On portal page load, if at least one agent has desktop_enabled=true,
-// fire `tudouclaw://open` so the Mac floater app shows itself.
-// Once per browser session — sessionStorage flag prevents re-firing
-// on every internal navigation. First time ever: macOS asks
-// "Open TudouClaw?"; subsequent loads are silent.
+// ─── Desktop floater integration (Phase A1+A2, 2026-05-02) ───
+//
+// The Mac floater app exposes a tiny HTTP server on 127.0.0.1:9192
+// for everyday signalling, and a `tudouclaw://` URL scheme for
+// cold-launching when the app isn't running yet.
+//
+//   page load
+//   ├─ check /agents/desktop has at least one enabled agent (else no-op)
+//   ├─ probe http://127.0.0.1:9192/health (timeout 800ms)
+//   │     ├─ alive  → POST /show (no jarring scheme dialog)
+//   │     └─ dead   → click hidden <a href="tudouclaw://open"> (URL scheme)
+//   └─ start 10 s heartbeat → POST /heartbeat (silent if app down)
+//
+// Floater watchdog hides itself after 30 s without a heartbeat — that's
+// our "browser closed the portal" signal, and survives crashes / SIGKILL.
+// `/show` is gated by sessionStorage so internal page navigation doesn't
+// re-pop a hidden window the user just dismissed.
+const _FLOATER_BASE = 'http://127.0.0.1:9192';
+const _FLOATER_HEARTBEAT_MS = 10000;
+let _floaterHeartbeatTimer = null;
+
+function _floaterFire(method, path) {
+  // mode:'no-cors' → fire-and-forget; we don't read the response, and
+  // the Tauri server replies with permissive CORS anyway. The catch
+  // swallows network errors when the app isn't up.
+  return fetch(_FLOATER_BASE + path, { method, mode: 'no-cors' }).catch(() => {});
+}
+
+async function _floaterIsAlive() {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 800);
+    const r = await fetch(_FLOATER_BASE + '/health', { signal: ctrl.signal });
+    clearTimeout(t);
+    return r.ok;
+  } catch (_) { return false; }
+}
+
+function _startFloaterHeartbeat() {
+  if (_floaterHeartbeatTimer) return;
+  _floaterFire('POST', '/heartbeat');
+  _floaterHeartbeatTimer = setInterval(
+    () => _floaterFire('POST', '/heartbeat'),
+    _FLOATER_HEARTBEAT_MS,
+  );
+}
+
 async function _maybeActivateDesktopFloater() {
   try {
-    if (sessionStorage.getItem('tudouFloaterActivated')) return;
     const res = await fetch('/api/portal/agents/desktop');
     if (!res.ok) return;
     const data = await res.json();
     if (!data.agents || data.agents.length === 0) return;
-    sessionStorage.setItem('tudouFloaterActivated', '1');
-    const a = document.createElement('a');
-    a.href = 'tudouclaw://open';
-    a.style.display = 'none';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    // Best-effort dismiss when the tab closes — A2 will replace this
-    // with a heartbeat from the desktop app for reliable auto-hide.
-    window.addEventListener('beforeunload', () => {
-      const b = document.createElement('a');
-      b.href = 'tudouclaw://hide';
-      b.style.display = 'none';
-      document.body.appendChild(b);
-      b.click();
-    }, { once: true });
+
+    const alive = await _floaterIsAlive();
+    if (!sessionStorage.getItem('tudouFloaterActivated')) {
+      sessionStorage.setItem('tudouFloaterActivated', '1');
+      if (alive) {
+        await _floaterFire('POST', '/show');
+      } else {
+        // Scheme launches the .app; macOS asks once, then silent.
+        const a = document.createElement('a');
+        a.href = 'tudouclaw://open';
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }
+    }
+    // Always heartbeat — silent when app isn't up yet, recovers
+    // automatically once the launch completes a few hundred ms later.
+    _startFloaterHeartbeat();
   } catch (_) {
-    // Scheme not registered (app not installed) → nothing to do.
+    // Floater not installed / scheme not registered → nothing to do.
   }
 }
 if (document.readyState === 'loading') {
