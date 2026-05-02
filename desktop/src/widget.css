@@ -1,0 +1,130 @@
+/* TudouClaw desktop floating-agent widget */
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  background: transparent !important;
+  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif;
+  color: #e7e9ee;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+/* ── Avatar (small state) ───────────────────────── */
+.avatar {
+  position: fixed;
+  inset: 6px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 32% 30%, #8b9cff 0%, #4253c9 55%, #1a2168 100%);
+  box-shadow:
+    0 0 28px rgba(120, 140, 255, 0.45),
+    inset 0 0 24px rgba(255, 255, 255, 0.08),
+    0 6px 18px rgba(0, 0, 0, 0.55);
+  cursor: grab;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: breathe 4s ease-in-out infinite;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+.avatar:active { cursor: grabbing; }
+
+.avatar .face { width: 62%; height: 62%; opacity: 0.9; }
+.lottie-mount { position: absolute; inset: 0; }
+
+.status-dot {
+  position: absolute;
+  bottom: 10%; right: 10%;
+  width: 18%; height: 18%;
+  border-radius: 50%;
+  background: #4ade80;
+  box-shadow: 0 0 10px rgba(74, 222, 128, 0.7);
+  border: 2px solid rgba(20, 22, 32, 0.85);
+}
+.avatar.busy {
+  background: radial-gradient(circle at 32% 30%, #ffd58b 0%, #c98c42 55%, #683f1a 100%);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.avatar.busy .status-dot { background: #fbbf24; box-shadow: 0 0 10px rgba(251, 191, 36, 0.7); }
+.avatar.error {
+  background: radial-gradient(circle at 32% 30%, #ff8b8b 0%, #c94242 55%, #681a1a 100%);
+}
+.avatar.error .status-dot { background: #ef4444; box-shadow: 0 0 10px rgba(239, 68, 68, 0.7); }
+
+/* ── Card (expanded state) ──────────────────────── */
+.card {
+  position: fixed; inset: 6px;
+  background: rgba(18, 20, 30, 0.92);
+  -webkit-backdrop-filter: blur(22px);
+  backdrop-filter: blur(22px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  padding: 10px 12px 8px;
+  display: flex; flex-direction: column;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+  font-size: 12px;
+}
+.card.hidden { display: none; }
+
+.card-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-bottom: 4px; }
+.card-title { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; }
+.card-title #agent-name { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card-status-pill {
+  display: inline-flex; align-items: center;
+  padding: 1px 6px; border-radius: 10px;
+  font-size: 10px; font-weight: 500;
+  background: rgba(74, 222, 128, 0.18);
+  color: #4ade80;
+}
+.card-status-pill[data-status="busy"] { background: rgba(251, 191, 36, 0.18); color: #fbbf24; }
+.card-status-pill[data-status="error"] { background: rgba(239, 68, 68, 0.18); color: #ef4444; }
+
+.card-actions { display: flex; gap: 4px; align-items: center; }
+.card-actions select {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #e7e9ee; font-size: 11px;
+  padding: 2px 4px; border-radius: 4px; max-width: 100px;
+}
+.card-actions button {
+  background: none; border: 0; color: #9aa0b4;
+  font-size: 14px; line-height: 1; padding: 2px 6px;
+  cursor: pointer; border-radius: 4px;
+}
+.card-actions button:hover { background: rgba(255, 255, 255, 0.06); color: #fff; }
+
+.card-meta { font-size: 10px; color: #9aa0b4; padding-bottom: 6px; }
+.card-persona { font-size: 11px; color: #c2c6d6; padding: 4px 0 6px; line-height: 1.45; max-height: 60px; overflow-y: auto; border-bottom: 1px solid rgba(255,255,255,0.06); }
+.card-chat { flex: 1; overflow-y: auto; padding: 6px 0; min-height: 80px; user-select: text; -webkit-user-select: text; }
+.card-chat .msg { margin-bottom: 6px; line-height: 1.4; }
+.card-chat .msg.user { color: #c8d2ff; }
+.card-chat .msg.agent { color: #e7e9ee; }
+.card-chat .msg.sys { color: #ef4444; font-size: 11px; }
+
+.card-input { display: flex; gap: 4px; padding-top: 4px; border-top: 1px solid rgba(255, 255, 255, 0.06); }
+.card-input input {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #e7e9ee; padding: 5px 8px;
+  border-radius: 6px; font-size: 12px;
+}
+.card-input input:focus { outline: 1px solid #4f5fff; }
+.card-input button {
+  background: #4f5fff; border: 0; color: white;
+  padding: 0 12px; border-radius: 6px; cursor: pointer;
+  font-weight: 600;
+}
+.card-input button:hover { background: #6271ff; }
+.card-input button:disabled { background: #2c3470; cursor: not-allowed; }
+
+/* ── Animations ─────────────────────────────────── */
+@keyframes breathe {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.04); }
+}
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 28px rgba(255, 200, 80, 0.55), 0 6px 18px rgba(0, 0, 0, 0.55); }
+  50%      { box-shadow: 0 0 36px rgba(255, 200, 80, 0.85), 0 6px 20px rgba(0, 0, 0, 0.6); }
+}

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TudouClaw</title>
+  <link rel="stylesheet" href="widget.css" />
+</head>
+<body>
+  <!-- Small state: floating avatar -->
+  <div id="avatar" class="avatar idle" data-tauri-drag-region title="点击展开">
+    <svg class="face" viewBox="0 0 64 64" aria-hidden="true">
+      <!-- simple sci-fi face: two glowing eyes + visor arc -->
+      <defs>
+        <radialGradient id="g-eye" cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stop-color="#fff"/>
+          <stop offset="100%" stop-color="#a8b8ff"/>
+        </radialGradient>
+      </defs>
+      <ellipse cx="22" cy="30" rx="5" ry="6" fill="url(#g-eye)"/>
+      <ellipse cx="42" cy="30" rx="5" ry="6" fill="url(#g-eye)"/>
+      <path d="M16 42 Q32 50 48 42" stroke="rgba(255,255,255,0.65)" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+    </svg>
+    <div class="status-dot" id="status-dot"></div>
+    <div id="lottie-mount" class="lottie-mount"></div>
+  </div>
+
+  <!-- Expanded state: card with name / persona / chat -->
+  <div id="card" class="card hidden">
+    <div class="card-header" data-tauri-drag-region>
+      <div class="card-title">
+        <span id="agent-name">—</span>
+        <span class="card-status-pill" id="agent-status">idle</span>
+      </div>
+      <div class="card-actions">
+        <select id="agent-picker" title="切换 Agent"></select>
+        <button id="close-card" title="收起">✕</button>
+      </div>
+    </div>
+    <div class="card-meta">
+      <span id="agent-role">—</span>
+    </div>
+    <div class="card-persona" id="agent-persona"></div>
+    <div class="card-chat" id="chat-log"></div>
+    <div class="card-input">
+      <input id="chat-input" type="text" placeholder="说点什么…" />
+      <button id="chat-send" title="发送">→</button>
+    </div>
+  </div>
+
+  <script src="widget.js"></script>
+</body>
+</html>

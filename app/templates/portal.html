@@ -1957,6 +1957,19 @@ body {
       </div>
       <div id="ea-exp-info" style="font-size:11px;color:var(--text3);margin-top:6px"></div>
     </div>
+    <div style="margin:12px 0;padding:12px;background:var(--surface2);border-radius:8px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <span class="material-symbols-outlined" style="font-size:18px;color:var(--primary)">desktop_windows</span>
+        <span style="font-weight:600;font-size:13px">桌面悬浮 Desktop Floater</span>
+      </div>
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;margin-bottom:8px">
+        <input type="checkbox" id="ea-desktop-enabled"> 让这个 Agent 出现在桌面浮窗
+      </label>
+      <div style="font-size:12px;color:var(--text2);margin-bottom:4px">Lottie 动画 URL（可选，留空用默认 SVG）</div>
+      <input id="ea-desktop-lottie" type="text" placeholder="https://lottiefiles.com/... 或 /static/lottie/foo.json"
+             style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px">
+      <div style="font-size:11px;color:var(--text3);margin-top:6px">需要先打开 tudou_claw/desktop 桌面端才能看到效果。</div>
+    </div>
     <div class="form-actions">
       <button class="btn btn-ghost" onclick="hideModal('edit-agent')">Cancel</button>
       <button class="btn btn-primary" onclick="saveAgentProfile()">Save</button>

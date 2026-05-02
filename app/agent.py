@@ -2056,6 +2056,14 @@ class Agent:
     authorized_workspaces: list[str] = field(default_factory=list)  # List of agent IDs whose workspaces this agent can access
     soul_md: str = ""  # SOUL.md personality/persona in markdown
     robot_avatar: str = ""  # Robot avatar ID e.g. "robot_ceo"
+    # ── Desktop floating widget (2026-05-02) ─────────────────────────
+    # Opt-in per agent. The Mac sidecar app (tudou_claw/desktop/)
+    # polls /api/portal/agents/desktop and only shows agents whose
+    # owner has flipped this on from the Agent edit page.
+    desktop_enabled: bool = False
+    # Optional Lottie JSON URL/path for the floating avatar animation.
+    # Empty = use the default SVG + CSS breathing animation.
+    desktop_lottie_url: str = ""
     messages: list[dict] = field(default_factory=list)
     # ── Per-context message stores (2026-04-28) ──────────────────────
     # Maps context_id → its own message list. Each call surface (solo
@@ -2288,6 +2296,8 @@ class Agent:
             "authorized_workspaces": self.authorized_workspaces,
             "soul_md": self.soul_md,
             "robot_avatar": self.robot_avatar,
+            "desktop_enabled": bool(self.desktop_enabled),
+            "desktop_lottie_url": self.desktop_lottie_url,
             "channel_ids": self.channel_ids,
             "granted_skills": list(self.granted_skills),
             # Preprocessor settings (per-agent opt-in for small local LLM)
@@ -2388,6 +2398,8 @@ class Agent:
             authorized_workspaces=d.get("authorized_workspaces", []),
             soul_md=d.get("soul_md", ""),
             robot_avatar=d.get("robot_avatar", ""),
+            desktop_enabled=bool(d.get("desktop_enabled", False)),
+            desktop_lottie_url=str(d.get("desktop_lottie_url", "") or ""),
             channel_ids=d.get("channel_ids", []),
             granted_skills=list(d.get("granted_skills", []) or []),
             preprocessor_model=str(d.get("preprocessor_model", "") or ""),

@@ -5,7 +5,7 @@ import logging
 import os
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Body
+from fastapi import APIRouter, Depends, HTTPException, Query, Body, Request
 
 from ..deps.hub import get_hub
 from ..deps.auth import CurrentUser, get_current_user
@@ -179,6 +179,43 @@ async def list_agents(
         agents_list = [a for a in agents_list if _can_see(a)]
 
     return {"agents": agents_list}
+
+
+# ---------------------------------------------------------------------------
+# Desktop sidecar endpoint (loopback-only, no auth)
+# ---------------------------------------------------------------------------
+
+@router.get("/agents/desktop")
+async def list_desktop_agents(
+    request: Request,
+    hub=Depends(get_hub),
+):
+    """Minimal agent payload for the Mac desktop floating-widget app.
+
+    Only returns agents whose owner has flipped ``desktop_enabled`` in
+    the Agent edit page. Loopback-only: requests from non-127.0.0.1
+    clients get 403 since no auth header is required for this surface.
+    """
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403, detail="loopback only")
+
+    agents_raw = hub.list_agents() if hasattr(hub, "list_agents") else []
+    out: list[dict] = []
+    for a in agents_raw:
+        d = a.to_dict() if hasattr(a, "to_dict") else a
+        if not d.get("desktop_enabled"):
+            continue
+        out.append({
+            "id": d.get("id", ""),
+            "name": d.get("name", ""),
+            "soul_md": d.get("soul_md", ""),
+            "robot_avatar": d.get("robot_avatar", ""),
+            "desktop_lottie_url": d.get("desktop_lottie_url", ""),
+            "status": d.get("status", "idle"),
+            "role_title": d.get("role_title", ""),
+        })
+    return {"agents": out}
 
 
 # ---------------------------------------------------------------------------
@@ -855,6 +892,10 @@ async def update_agent_profile(
             agent.department = (body.get("department") or "").strip()
         if "robot_avatar" in body:
             agent.robot_avatar = body["robot_avatar"]
+        if "desktop_enabled" in body:
+            agent.desktop_enabled = bool(body.get("desktop_enabled"))
+        if "desktop_lottie_url" in body:
+            agent.desktop_lottie_url = str(body.get("desktop_lottie_url") or "").strip()
         agent.profile = AgentProfile(
             agent_class=body.get("agent_class", agent.profile.agent_class),
             memory_mode=body.get("memory_mode", agent.profile.memory_mode),

@@ -14032,6 +14032,12 @@ async function editAgentProfile(agentId) {
   _eaRenderDomainKbCheckboxes(prof.rag_collection_ids || []);
   _eaOnRagModeChange(ragModeVal);
 
+  // Desktop floater toggle + lottie URL
+  var deDesk = document.getElementById('ea-desktop-enabled');
+  if (deDesk) deDesk.checked = !!agent.desktop_enabled;
+  var deLot = document.getElementById('ea-desktop-lottie');
+  if (deLot) deLot.value = agent.desktop_lottie_url || '';
+
   // Self-improvement state
   var si = agent.self_improvement;
   document.getElementById('ea-self-improve').checked = !!(si && si.enabled);
@@ -14155,6 +14161,8 @@ async function saveAgentProfile() {
       custom_instructions: promptEl ? promptEl.value.trim() : '',
       rag_mode: (document.getElementById('ea-rag-mode') || {}).value || 'shared',
       rag_collection_ids: _eaCollectRagCollectionIds(),
+      desktop_enabled: !!(document.getElementById('ea-desktop-enabled') || {}).checked,
+      desktop_lottie_url: ((document.getElementById('ea-desktop-lottie') || {}).value || '').trim(),
     };
 
     // Merge tool permission state from the new UI (nov 2026)
