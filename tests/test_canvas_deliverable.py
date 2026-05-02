@@ -7,25 +7,31 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from app import canvas_artifacts as ca
 from app import canvas_executor as ce
 from app.canvas_executor import WorkflowEngine, WorkflowRun, RunState
+from app.chat_task import ChatTaskStatus
 
 
-def test_outputs_dict_has_deliverable_no_legacy_keys(tmp_path, monkeypatch):
-    """Behavior test: outputs returned by _exec_agent contain
-    `deliverable` and `deliverable_relative` but NOT the legacy
-    `deliverable_type` or `success_marker_file` keys.
+@pytest.fixture
+def fake_canvas_env(tmp_path, monkeypatch):
+    """Pre-configured (engine, run, agent, task, store) tuple for
+    _exec_agent unit tests. Caller customizes the agent's chat_async
+    behavior (what files it writes, what status it ends in) and the
+    node config, then invokes ce._exec_agent.
 
-    Drives _exec_agent end-to-end with a mocked agent + chat_async to
-    verify the actual returned dict shape — not just source-grep.
+    The fake agent has all the attributes _exec_agent touches:
+    _lock, _active_context_id, _messages_by_context, _switch_context,
+    working_dir (mutated by executor before chat). chat_async defaults
+    to writing nothing + returning a COMPLETED task; tests override
+    it via fake_agent.chat_async = ...
     """
-    # Reset + init artifact store at tmp dir so each test is hermetic.
     monkeypatch.setattr(ca, "_STORE", None)
     ca.init_store(tmp_path)
     store = ca.get_store()
 
-    # Build a minimal Run + WorkflowEngine mock
     run = WorkflowRun(
         id="run-test",
         workflow_id="wf-test",
@@ -37,9 +43,7 @@ def test_outputs_dict_has_deliverable_no_legacy_keys(tmp_path, monkeypatch):
     engine.hub = MagicMock()
     engine.artifact_store = store
 
-    # Fake task: COMPLETED, with simple result.
     fake_task = MagicMock()
-    from app.chat_task import ChatTaskStatus
     fake_task.status = ChatTaskStatus.COMPLETED
     fake_task.id = "fake-task-id"
     fake_task.result = "fake reply"
@@ -58,17 +62,27 @@ def test_outputs_dict_has_deliverable_no_legacy_keys(tmp_path, monkeypatch):
     fake_agent._switch_context = MagicMock()
     fake_agent.working_dir = ""
 
-    # chat_async writes a real file into the per-node subdir that the
-    # executor sets via agent.working_dir BEFORE this is called. This
-    # also keeps the test valid once Task 3's EMPTY_DELIVERABLE check
-    # lands.
-    def fake_chat_async(prompt, source=""):
+    def default_chat_async(prompt, source=""):
+        # Default: write a real file so EMPTY_DELIVERABLE check (Task 3,
+        # not yet landed) won't trip. Tests can override this.
         Path(fake_agent.working_dir, "x.txt").write_text("y")
         return fake_task
 
-    fake_agent.chat_async = fake_chat_async
+    fake_agent.chat_async = default_chat_async
     engine.hub.get_agent = MagicMock(return_value=fake_agent)
 
+    return engine, run, fake_agent, fake_task, store
+
+
+def test_outputs_dict_has_deliverable_no_legacy_keys(fake_canvas_env):
+    """Behavior test: outputs returned by _exec_agent contain
+    `deliverable` and `deliverable_relative` but NOT the legacy
+    `deliverable_type` or `success_marker_file` keys.
+
+    Drives _exec_agent end-to-end with a mocked agent + chat_async to
+    verify the actual returned dict shape — not just source-grep.
+    """
+    engine, run, fake_agent, fake_task, store = fake_canvas_env
     node = {"id": "n1", "label": "test", "type": "agent", "config": {
         "agent_id": "ag-x", "prompt": "go", "timeout": 5,
     }}
@@ -81,57 +95,18 @@ def test_outputs_dict_has_deliverable_no_legacy_keys(tmp_path, monkeypatch):
     assert "success_marker_file" not in outputs
 
 
-def test_success_when_file_glob_is_canonical_no_alias(tmp_path, monkeypatch):
+def test_success_when_file_glob_is_canonical_no_alias(fake_canvas_env):
     """When config has success_when.file_glob (no deliverable.file_glob),
     early-termination still triggers on the marker file. This locks in
     that success_when is read directly — no alias hop through
     deliverable_cfg."""
-    import time
-    from pathlib import Path
-    from unittest.mock import MagicMock
+    engine, run, fake_agent, fake_task, store = fake_canvas_env
 
-    from app import canvas_executor as ce
-    from app import canvas_artifacts as ca
-    from app.canvas_executor import WorkflowRun, RunState, WorkflowEngine
-    from app.chat_task import ChatTaskStatus
-
-    monkeypatch.setattr(ca, "_STORE", None)
-    ca.init_store(tmp_path)
-    store = ca.get_store()
-
-    run = WorkflowRun(
-        id="run-test-sw",
-        workflow_id="wf-test",
-        workflow_name="t",
-        state=RunState.RUNNING,
-        started_at=time.time(),
-    )
-    engine = MagicMock(spec=WorkflowEngine)
-    engine.hub = MagicMock()
-    engine.artifact_store = store
-
-    fake_task = MagicMock()
-    # Note: we set status=THINKING initially so the executor stays in
-    # the poll loop long enough to scan for the marker file. The
-    # marker scan itself is what should fire termination.
+    # Override chat_async: stay THINKING + write the marker so the
+    # poll loop's marker-scan triggers abort (not the LLM-COMPLETED path).
     fake_task.status = ChatTaskStatus.THINKING
-    fake_task.id = "fake-task-id"
     fake_task.result = ""
-    fake_task.created_at = time.time()
-    fake_task.updated_at = time.time()
-    fake_task.error = None
     fake_task.abort = MagicMock(side_effect=lambda: setattr(fake_task, "status", ChatTaskStatus.ABORTED))
-
-    fake_agent = MagicMock()
-    fake_agent.id = "ag-x"
-    fake_agent.name = "test-agent"
-    fake_agent._lock = MagicMock()
-    fake_agent._lock.__enter__ = MagicMock(return_value=None)
-    fake_agent._lock.__exit__ = MagicMock(return_value=None)
-    fake_agent._active_context_id = "solo"
-    fake_agent._messages_by_context = {}
-    fake_agent._switch_context = MagicMock()
-    fake_agent.working_dir = ""
 
     def fake_chat_async(prompt, source=""):
         # Drop the marker file into the agent's now-set working_dir.
@@ -140,7 +115,6 @@ def test_success_when_file_glob_is_canonical_no_alias(tmp_path, monkeypatch):
         return fake_task
 
     fake_agent.chat_async = fake_chat_async
-    engine.hub.get_agent = MagicMock(return_value=fake_agent)
 
     node = {
         "id": "n_alias_test",
