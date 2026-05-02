@@ -343,6 +343,53 @@ async def agent_abort(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/agent/{agent_id}/refresh-cache")
+async def refresh_agent_prompt_cache(
+    agent_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Force-invalidate the agent's static prompt cache.
+
+    HANDOFF [F] escape hatch: complements the SKILL.md mtime-based
+    invalidation (commit 0ece8a0) for cases where mtime detection
+    might miss — coarse-mtime filesystems (HFS+, FAT), NFS-cached
+    layouts, or just to force-rebuild after edits to other inputs
+    (system prompt, role, model, soul.md, project context files).
+
+    Effect: clears ``_cached_static_prompt`` and ``_static_prompt_hash``
+    so the next ``chat()`` call computes a fresh hash and rebuilds
+    the static prompt from current state. No active turn is interrupted
+    — this only affects the NEXT turn.
+    """
+    try:
+        agent = _get_agent_or_404(hub, agent_id)
+        from ...permissions import require, Permission
+        require(user, Permission.MANAGE_AGENT, resource=agent)
+
+        prior_hash = getattr(agent, "_static_prompt_hash", "") or ""
+        prior_len = len(getattr(agent, "_cached_static_prompt", "") or "")
+        agent._cached_static_prompt = ""
+        agent._static_prompt_hash = ""
+        logger.info(
+            "agent %s: prompt cache cleared by %s "
+            "(was hash=%s, len=%d)",
+            agent.id[:8], getattr(user, "user_id", "") or "?",
+            prior_hash[:8] or "(empty)", prior_len,
+        )
+        return {
+            "ok": True,
+            "agent_id": agent.id,
+            "prior_hash": prior_hash[:8] or "(empty)",
+            "prior_cached_bytes": prior_len,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("refresh_agent_prompt_cache failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/agent/{agent_id}/events")
 async def get_agent_events(
     agent_id: str,
