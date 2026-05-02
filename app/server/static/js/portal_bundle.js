@@ -20127,9 +20127,17 @@ function _renderOrchCanvasWorkflows(d) {
             else if (ageS < 86400) ageHint = Math.floor(ageS/3600) + '小时前';
             else ageHint = Math.floor(ageS/86400) + '天前';
           }
-          var runBtn = (st === 'ready')
-            ? '<button class="btn btn-sm" onclick="event.stopPropagation();_orchRunCanvasFromOverview(\'' + esc(w.id).replace(/'/g, "\\'") + '\')" title="启动一次执行" style="padding:5px 10px;font-size:11px;background:#16a34a22;color:#16a34a;border:1px solid #16a34a44;font-weight:600;border-radius:6px"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:-2px">play_arrow</span> 运行</button>'
-            : '';
+          var runState = window._orchRunStates ? window._orchRunStates[w.id] : null;
+          var isRunning = runState && runState.status === 'running';
+          var runStatusPill = _orchRunStatusPill(runState);
+          var runBtn;
+          if (st !== 'ready') {
+            runBtn = '';
+          } else if (isRunning) {
+            runBtn = '<button class="btn btn-sm" disabled title="已有 run 在执行中,等它完成再点" style="padding:5px 10px;font-size:11px;color:#9ca3af;cursor:not-allowed;opacity:0.6;font-weight:600;border-radius:6px"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:-2px;animation:spin 1.2s linear infinite">progress_activity</span> 运行中…</button>';
+          } else {
+            runBtn = '<button class="btn btn-sm" onclick="event.stopPropagation();_orchRunCanvasFromOverview(\'' + esc(w.id).replace(/'/g, "\\'") + '\')" title="启动一次执行" style="padding:5px 10px;font-size:11px;background:#16a34a22;color:#16a34a;border:1px solid #16a34a44;font-weight:600;border-radius:6px"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:-2px">play_arrow</span> 运行</button>';
+          }
           var openInline = '_canvasOpenEditor(\'' + esc(w.id).replace(/'/g, "\\'") + '\').then(function(){renderCanvasPage();})';
           return '<div onclick="' + openInline + '" '
             + 'onmouseenter="this.style.transform=\'translateY(-2px)\';this.style.boxShadow=\'0 6px 16px rgba(0,0,0,0.08)\'" '
@@ -20143,7 +20151,10 @@ function _renderOrchCanvasWorkflows(d) {
             +     '<div style="font-size:14px;font-weight:700;color:var(--text);line-height:1.3;margin-bottom:3px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">' + esc(w.name || '(未命名)') + '</div>'
             +     '<div style="font-size:10px;color:var(--text3);font-family:ui-monospace,SFMono-Regular,Menlo,monospace">' + esc(w.id) + '</div>'
             +   '</div>'
-            +   statusBadge
+            +   '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">'
+            +     statusBadge
+            +     runStatusPill
+            +   '</div>'
             + '</div>'
             // Metadata pills row
             + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;font-size:10px">'
@@ -20172,18 +20183,85 @@ function _renderOrchCanvasWorkflows(d) {
   el.innerHTML = headerHtml + bodyHtml;
 }
 
+// Per-workflow run-status cache for the orchestration overview cards.
+// Lives on window so it survives tab switches within the same page
+// (page refresh wipes it — see _orchAttachOverviewRunStream comment).
+//   Shape: { [wfId]: { status, runId, startedAt, es? } }
+//   status ∈ 'running' | 'succeeded' | 'failed' | 'aborted'
+window._orchRunStates = window._orchRunStates || {};
+
+function _orchRunStatusPill(rs) {
+  if (!rs) return '';
+  var palette = {
+    running:   { bg: 'rgba(202,138,4,0.18)',  fg: '#ca8a04', icon: 'progress_activity', label: '运行中', spin: true },
+    succeeded: { bg: 'rgba(34,197,94,0.18)',  fg: '#16a34a', icon: 'check_circle',      label: '成功' },
+    failed:    { bg: 'rgba(239,68,68,0.18)',  fg: '#ef4444', icon: 'error',              label: '失败' },
+    aborted:   { bg: 'rgba(100,116,139,0.18)',fg: '#64748b', icon: 'stop_circle',        label: '已中止' },
+  };
+  var p = palette[rs.status]; if (!p) return '';
+  var spin = p.spin ? ' style="font-size:11px;animation:spin 1.2s linear infinite"' : ' style="font-size:11px"';
+  return '<span style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;background:' + p.bg + ';color:' + p.fg + ';border-radius:10px;font-size:10px;font-weight:600">'
+    + '<span class="material-symbols-outlined"' + spin + '>' + p.icon + '</span>'
+    + p.label + '</span>';
+}
+
 window._orchRunCanvasFromOverview = async function(wfId) {
-  // Trigger a run from the overview without going through the editor.
-  // The editor's live highlighting won't apply here (no SVG to paint),
-  // so just kick off + toast result; user can open the editor for
-  // visual progress.
+  // Block double-click while the previous overview-spawned run is
+  // still going. Editor-side has its own guard; this one defends the
+  // overview surface in isolation.
+  var existing = window._orchRunStates[wfId];
+  if (existing && existing.status === 'running') {
+    _toast('已有 run 在执行中,请等它完成', 'info');
+    return;
+  }
   try {
     var run = await api('POST', '/api/portal/canvas-workflows/' + encodeURIComponent(wfId) + '/runs', {});
-    _toast('▶ 已启动 (run ' + (run.id || '').slice(-8) + ')。打开编辑器查看节点高亮', 'success');
+    window._orchRunStates[wfId] = { status: 'running', runId: run.id, startedAt: Date.now() };
+    _renderOrchTabContent();   // re-render the cards so this one shows "运行中"
+    _toast('▶ 已启动 (run ' + (run.id || '').slice(-8) + ')', 'success');
+    _orchAttachOverviewRunStream(wfId, run.id);
   } catch (e) {
     _toast('启动失败: ' + e, 'error');
   }
 };
+
+function _orchAttachOverviewRunStream(wfId, runId) {
+  // Lightweight SSE listener — only watches for terminal events, no
+  // per-node updates (those are visible in the editor). When the run
+  // ends, flip the card pill to succeeded/failed/aborted and clear
+  // after 30 s so the overview doesn't get stale.
+  var url = '/api/portal/canvas-workflows/' + encodeURIComponent(wfId) + '/runs/' + encodeURIComponent(runId) + '/events';
+  var es = new EventSource(url);
+  if (window._orchRunStates[wfId]) window._orchRunStates[wfId].es = es;
+  es.onmessage = function(msg) {
+    var evt;
+    try { evt = JSON.parse(msg.data); } catch (_) { return; }
+    var t = evt.type;
+    var newStatus = null;
+    if (t === 'run_succeeded') newStatus = 'succeeded';
+    else if (t === 'run_failed') newStatus = 'failed';
+    else if (t === 'run_aborted') newStatus = 'aborted';
+    if (newStatus) {
+      var prev = window._orchRunStates[wfId] || {};
+      window._orchRunStates[wfId] = { status: newStatus, runId: runId, startedAt: prev.startedAt || Date.now() };
+      es.close();
+      _renderOrchTabContent();
+      setTimeout(function() {
+        var rs = window._orchRunStates[wfId];
+        if (rs && rs.runId === runId && rs.status !== 'running') {
+          delete window._orchRunStates[wfId];
+          _renderOrchTabContent();
+        }
+      }, 30000);
+    }
+  };
+  es.onerror = function() {
+    // EventSource auto-retries; only treat fully-closed as fatal.
+    if (es.readyState === EventSource.CLOSED) {
+      // Leave state alone — terminal event may have arrived just before
+    }
+  };
+}
 
 function _orchSkelBlock(title) {
   return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px">'
