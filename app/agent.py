@@ -7713,6 +7713,25 @@ Write only the summary body. Do not include any preamble or prefix."""
                                     )
                                 except Exception:
                                     pass
+                                # HANDOFF [C] hook 3: completion-claim
+                                # detection. Warning-only — see
+                                # qa_gate.validate_completion_claim
+                                # docstring for the rationale.
+                                try:
+                                    from . import qa_gate as _qg
+                                    _gate = _qg.validate_completion_claim(
+                                        content,
+                                        getattr(self, "_current_plan", None),
+                                    )
+                                    if not _gate.ok:
+                                        logger.warning(
+                                            "agent %s turn %s: COMPLETION-CLAIM "
+                                            "MISMATCH — %s",
+                                            self.id[:8], _turn_id_str,
+                                            _gate.reason,
+                                        )
+                                except Exception:
+                                    pass
                         on_event(evt)
                     except Exception:
                         pass

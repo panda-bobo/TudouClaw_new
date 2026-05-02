@@ -167,3 +167,81 @@ def test_4x_bubble_symptom_reproduction():
         "If this fails, the 4x-bubble symptom is back — check the "
         "EmitDedupState ring/TTL settings in app/_emit_dedup.py."
     )
+
+
+# ── HANDOFF [C] hook 3 — completion-claim detection ──────────────────
+
+
+from app.qa_gate import (
+    detect_completion_claim, validate_completion_claim, OK as _GATE_OK,
+)
+from app.agent_types import StepStatus, ExecutionStep, ExecutionPlan
+
+
+def _make_plan(*step_statuses):
+    """Helper: build a minimal ExecutionPlan with the given step statuses."""
+    steps = []
+    for i, s in enumerate(step_statuses):
+        st = ExecutionStep(id=f"s{i}", title=f"step {i}")
+        st.status = s
+        steps.append(st)
+    plan = ExecutionPlan(id="p1", task_summary="test plan")
+    plan.steps = steps
+    plan.status = "active"
+    return plan
+
+
+def test_detect_completion_claim_zh():
+    assert detect_completion_claim("任务已完成,准备交付")
+    assert detect_completion_claim("好的,搞定了。")
+    assert detect_completion_claim("我已经完成了所有步骤")
+
+
+def test_detect_completion_claim_en():
+    assert detect_completion_claim("Task is complete. ready for review")
+    assert detect_completion_claim("All done — see attached")
+    assert detect_completion_claim("I have completed the analysis")
+
+
+def test_detect_completion_claim_negative():
+    assert not detect_completion_claim("")
+    assert not detect_completion_claim("ok")  # too short
+    assert not detect_completion_claim("Let me start by exploring the code")
+    assert not detect_completion_claim("I need to think about this more")
+
+
+def test_validate_completion_claim_no_plan():
+    """No plan → claim is fine (we can't second-guess it)."""
+    r = validate_completion_claim("任务已完成", None)
+    assert r.ok
+
+
+def test_validate_completion_claim_plan_done():
+    """Plan exists but all steps already done → claim is consistent."""
+    plan = _make_plan(StepStatus.COMPLETED, StepStatus.COMPLETED)
+    r = validate_completion_claim("All done!", plan)
+    assert r.ok
+
+
+def test_validate_completion_claim_no_claim():
+    """No claim made → always passes regardless of plan state."""
+    plan = _make_plan(StepStatus.PENDING, StepStatus.IN_PROGRESS)
+    r = validate_completion_claim("Let me work on the next step", plan)
+    assert r.ok
+
+
+def test_validate_completion_claim_mismatch():
+    """Claim made but plan has open steps → flagged."""
+    plan = _make_plan(StepStatus.COMPLETED, StepStatus.PENDING)
+    r = validate_completion_claim("任务已完成,可以交付了", plan)
+    assert not r.ok
+    assert "1 open step" in r.reason
+
+
+def test_validate_completion_claim_truncates_step_list():
+    """Many open steps → reason mentions only first 3 + '...'"""
+    plan = _make_plan(*([StepStatus.PENDING] * 5))
+    r = validate_completion_claim("All done!", plan)
+    assert not r.ok
+    assert "5 open step" in r.reason
+    assert r.reason.endswith("...")

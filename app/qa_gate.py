@@ -167,3 +167,83 @@ def _validate_drawio(content: str) -> GateResult:
             'drawio file would render as empty canvas'
         )
     return OK
+
+
+# ── Completion-claim detection (HANDOFF [C] hook 3) ───────────────────
+#
+# Catch the pattern "agent says it's done while the plan still has open
+# steps". MVP behavior: log a structured warning so the next session
+# can see how often this fires before deciding whether to escalate to
+# in-band correction (e.g., inject a system message saying "you claimed
+# done but step X is still open — please verify").
+#
+# Why warning-only: the existing meta-promise dup-guard at
+# agent.py:8140 already aborts the turn when the LLM emits 2 consecutive
+# "I'll do X" without a tool call. A "claims done" hook is more nuanced
+# — sometimes the agent legitimately delivers a partial result and the
+# user is fine with it. Hard-blocking would create false positives.
+
+# Phrases that strongly suggest completion. Conservative set — better
+# to miss than to false-positive on a tentative "almost done".
+_COMPLETION_PHRASES = (
+    # zh
+    "任务已完成", "已经完成", "全部完成", "都完成了", "搞定了",
+    "已交付", "完成交付", "已经搞定",
+    # en
+    "task is complete", "task complete", "all done", "fully complete",
+    "task has been completed", "i have completed", "task finished",
+    "ready for review",
+)
+
+
+def detect_completion_claim(content: str) -> bool:
+    """True if the assistant message contains a claim of completion.
+
+    Case-insensitive substring match against ``_COMPLETION_PHRASES``.
+    Conservative phrase set — favors false negatives over false
+    positives so logging stays signal, not noise. A bare "done"
+    isn't in the phrase set (could be acknowledgement); only stronger
+    forms like "all done", "task complete", "任务已完成", "搞定了"
+    trigger.
+    """
+    if not content:
+        return False
+    lc = content.lower()
+    return any(phrase in lc for phrase in _COMPLETION_PHRASES)
+
+
+def validate_completion_claim(content: str, plan: Any) -> GateResult:
+    """Cross-check a completion claim against the agent's active plan.
+
+    ``plan`` is an ``ExecutionPlan`` (or ``None`` if no plan). Returns:
+      * ``OK`` — no completion claim, OR claim is supported (plan is
+        complete / no plan exists).
+      * ``GateResult(ok=False, reason="...")`` — claim made but plan
+        has open steps. Caller is expected to LOG the warning and
+        optionally inject a corrective system message; this gate
+        intentionally does NOT block message emit because the agent
+        may have legitimately partial-delivered.
+    """
+    if not detect_completion_claim(content):
+        return OK
+    if plan is None:
+        return OK   # no plan to check against
+    if getattr(plan, "status", "") != "active":
+        return OK   # plan already done — claim is consistent
+
+    open_steps = []
+    for s in (getattr(plan, "steps", None) or []):
+        st = getattr(s, "status", None)
+        st_value = getattr(st, "value", st)
+        if str(st_value) in ("pending", "in_progress"):
+            title = getattr(s, "title", "") or getattr(s, "id", "")
+            open_steps.append(title)
+    if not open_steps:
+        return OK   # all steps terminal — claim is consistent
+
+    return GateResult(
+        False,
+        f"agent claimed completion but plan has {len(open_steps)} open "
+        f"step(s): {', '.join(open_steps[:3])}"
+        + ("..." if len(open_steps) > 3 else "")
+    )
