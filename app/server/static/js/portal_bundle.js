@@ -21382,17 +21382,24 @@ async function _renderKmPrivate() {
 
 function _kmShowCreateDomainKb() {
   var html = '<div class="modal-overlay" id="km-dkb-modal" onclick="if(event.target===this)this.remove()">'
-    + '<div class="modal" style="max-width:500px">'
+    + '<div class="modal" style="max-width:540px">'
     + '<h3>新建专业领域知识库</h3>'
     + '<div class="form-group"><label>知识库名称 *</label><input id="km-dkb-name" placeholder="e.g. 法律知识库、财务知识库"></div>'
     + '<div class="form-group"><label>描述</label><input id="km-dkb-desc" placeholder="e.g. 包含劳动法、合同法等法律文档"></div>'
     + '<div class="form-group"><label>标签 (逗号分隔)</label><input id="km-dkb-tags" placeholder="法律,劳动法,合同法"></div>'
     + '<div class="form-group"><label>存储提供方</label><select id="km-dkb-provider"><option value="">本地 ChromaDB (默认)</option></select></div>'
+    // Embedding model picker — locked at creation time. Switching it
+    // later would invalidate the existing collection (dim mismatch).
+    + '<div class="form-group">'
+    +   '<label>Embedding 模型 <span style="font-size:11px;color:var(--text3);font-weight:400">（创建后不可改）</span></label>'
+    +   '<select id="km-dkb-embed-model"><option value="">加载中…</option></select>'
+    +   '<div id="km-dkb-embed-note" style="font-size:11px;color:var(--text3);margin-top:4px;line-height:1.4"></div>'
+    + '</div>'
     + '<div class="form-actions"><button class="btn btn-ghost" onclick="document.getElementById(\'km-dkb-modal\').remove()">取消</button>'
     + '<button class="btn btn-primary" onclick="_kmSaveDomainKb()">创建</button></div>'
     + '</div></div>';
   document.body.insertAdjacentHTML('beforeend', html);
-  // Load remote providers into dropdown
+
   api('GET', '/api/portal/rag/providers').then(function(data) {
     var sel = document.getElementById('km-dkb-provider');
     if (!sel || !data || !data.providers) return;
@@ -21404,6 +21411,38 @@ function _kmShowCreateDomainKb() {
       sel.appendChild(opt);
     });
   }).catch(function(){});
+
+  // Load embedding model catalog. Stash on the dropdown for the
+  // change handler so we can paint the description without a 2nd
+  // round-trip.
+  api('GET', '/api/portal/domain-kb/embedding-models').then(function(data) {
+    var sel = document.getElementById('km-dkb-embed-model');
+    var note = document.getElementById('km-dkb-embed-note');
+    if (!sel || !data || !data.models) return;
+    sel.innerHTML = '';
+    data.models.forEach(function(m) {
+      var label = m.label || m.id || '默认';
+      if (m.dim) label += ' · ' + m.dim + ' dim';
+      if (m.size_mb) label += ' · ~' + (m.size_mb >= 1024 ? (m.size_mb/1024).toFixed(1)+'GB' : m.size_mb+'MB');
+      var opt = document.createElement('option');
+      opt.value = m.id;
+      opt.textContent = label;
+      opt.dataset.note = m.note || '';
+      sel.appendChild(opt);
+    });
+    var update = function() {
+      var sel2 = document.getElementById('km-dkb-embed-model');
+      var note2 = document.getElementById('km-dkb-embed-note');
+      if (!sel2 || !note2) return;
+      var opt = sel2.options[sel2.selectedIndex];
+      note2.textContent = (opt && opt.dataset && opt.dataset.note) || '';
+    };
+    sel.addEventListener('change', update);
+    update();
+  }).catch(function(){
+    var sel = document.getElementById('km-dkb-embed-model');
+    if (sel) sel.innerHTML = '<option value="">默认 (服务器配置)</option>';
+  });
 }
 
 async function _kmSaveDomainKb() {
@@ -21411,9 +21450,16 @@ async function _kmSaveDomainKb() {
   var desc = (document.getElementById('km-dkb-desc')||{}).value||'';
   var tags = ((document.getElementById('km-dkb-tags')||{}).value||'').split(',').map(function(t){return t.trim()}).filter(Boolean);
   var provider = (document.getElementById('km-dkb-provider')||{}).value||'';
+  var embedModel = (document.getElementById('km-dkb-embed-model')||{}).value||'';
   if (!name.trim()) { alert('名称不能为空'); return; }
   try {
-    await api('POST', '/api/portal/domain-kb/create', {name:name, description:desc, tags:tags, provider_id:provider});
+    await api('POST', '/api/portal/domain-kb/create', {
+      name: name,
+      description: desc,
+      tags: tags,
+      provider_id: provider,
+      embedding_model: embedModel,
+    });
     var m = document.getElementById('km-dkb-modal'); if(m) m.remove();
     _renderKmPrivate();
   } catch(e) { alert('创建失败: '+e); }

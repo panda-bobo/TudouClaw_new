@@ -124,6 +124,13 @@ class DomainKnowledgeBase:
     description: str = ""
     collection: str = ""               # RAG collection name (e.g. "domain_law")
     provider_id: str = ""              # empty = local ChromaDB
+    # Per-KB embedding model. Empty string = use the server default
+    # (DEFAULT_EMBEDDING_MODEL). Each KB's ChromaDB collection is bound
+    # to whatever model was used at INGEST time — switching this field
+    # on an existing KB will cause dim-mismatch errors on next query,
+    # so it should be locked at creation. ALLOWED_EMBEDDING_MODELS in
+    # the API layer enforces a known-good allow-list.
+    embedding_model: str = ""
     tags: list[str] = field(default_factory=list)
     doc_count: int = 0
     created_at: float = field(default_factory=time.time)
@@ -133,6 +140,7 @@ class DomainKnowledgeBase:
         return {
             "id": self.id, "name": self.name, "description": self.description,
             "collection": self.collection, "provider_id": self.provider_id,
+            "embedding_model": self.embedding_model,
             "tags": self.tags, "doc_count": self.doc_count,
             "created_at": self.created_at, "updated_at": self.updated_at,
         }
@@ -145,6 +153,7 @@ class DomainKnowledgeBase:
             description=d.get("description", ""),
             collection=d.get("collection", ""),
             provider_id=d.get("provider_id", ""),
+            embedding_model=d.get("embedding_model", ""),
             tags=d.get("tags", []),
             doc_count=d.get("doc_count", 0),
             created_at=d.get("created_at", time.time()),
@@ -185,12 +194,14 @@ class DomainKBStore:
         return self._kbs.get(kb_id)
 
     def create(self, name: str, description: str = "", provider_id: str = "",
-               tags: list[str] | None = None) -> DomainKnowledgeBase:
+               tags: list[str] | None = None,
+               embedding_model: str = "") -> DomainKnowledgeBase:
         kb_id = f"dkb_{uuid.uuid4().hex[:10]}"
         collection = f"domain_{kb_id}"
         kb = DomainKnowledgeBase(
             id=kb_id, name=name, description=description,
             collection=collection, provider_id=provider_id,
+            embedding_model=(embedding_model or "").strip(),
             tags=tags or [],
         )
         self._kbs[kb_id] = kb
@@ -456,13 +467,35 @@ class RAGProviderRegistry:
         except Exception:
             return None
 
+    def _resolve_kb_embed_model(self, collection: str) -> str | None:
+        """If ``collection`` belongs to a domain KB with a per-KB
+        ``embedding_model`` set, return that model name. Otherwise
+        return None so the caller falls back to the server default.
+
+        Conv: domain KB collections are named ``domain_<kb_id>``. We
+        avoid the lookup for the (more frequent) memory_facts /
+        memory_episodes / knowledge collections so the hot path stays
+        cheap.
+        """
+        if not collection or not collection.startswith("domain_"):
+            return None
+        try:
+            store = get_domain_kb_store()
+            kb_id = collection[len("domain_"):]
+            kb = store.get(kb_id)
+            if kb and kb.embedding_model:
+                return kb.embedding_model
+        except Exception:
+            pass
+        return None
+
     def _search_local(self, collection: str, query: str,
                       top_k: int = 5) -> list[RAGResult]:
         mm = self._get_memory_manager()
         if not mm:
             return []
         try:
-            coll = mm._get_chroma_collection(collection)
+            coll = mm._get_chroma_collection(collection, model_name=self._resolve_kb_embed_model(collection))
             if coll.count() == 0:
                 return []
             results = coll.query(query_texts=[query], n_results=min(top_k, 20))
@@ -502,7 +535,7 @@ class RAGProviderRegistry:
             return 0
         count = 0
         try:
-            coll = mm._get_chroma_collection(collection)
+            coll = mm._get_chroma_collection(collection, model_name=self._resolve_kb_embed_model(collection))
 
             # Collect content_hashes already in the collection so we
             # can skip duplicates. ChromaDB's `where` filter handles
@@ -607,7 +640,7 @@ class RAGProviderRegistry:
         if not mm:
             return []
         try:
-            coll = mm._get_chroma_collection(collection)
+            coll = mm._get_chroma_collection(collection, model_name=self._resolve_kb_embed_model(collection))
             count = coll.count()
             if count == 0:
                 return []
@@ -720,7 +753,7 @@ class RAGProviderRegistry:
             # Re-fetch missing docs so callers still get full content/metadata.
             mm = self._get_memory_manager()
             try:
-                coll = mm._get_chroma_collection(collection)
+                coll = mm._get_chroma_collection(collection, model_name=self._resolve_kb_embed_model(collection))
                 probe = coll.get(include=["documents", "metadatas"])
                 doc_map = {
                     probe["ids"][i]: (
@@ -751,7 +784,7 @@ class RAGProviderRegistry:
         if missing_ids:
             mm = self._get_memory_manager()
             try:
-                coll = mm._get_chroma_collection(collection)
+                coll = mm._get_chroma_collection(collection, model_name=self._resolve_kb_embed_model(collection))
                 probe = coll.get(ids=missing_ids,
                                  include=["documents", "metadatas"])
                 for i, doc_id in enumerate(probe.get("ids", []) or []):
@@ -819,7 +852,7 @@ class RAGProviderRegistry:
                     "by_source_file": [], "filter": query or "",
                     "filter_matched": 0}
         try:
-            coll = mm._get_chroma_collection(collection)
+            coll = mm._get_chroma_collection(collection, model_name=self._resolve_kb_embed_model(collection))
             probe = coll.get(include=["metadatas", "documents"])
         except Exception as e:
             logger.debug("kb_statistics get failed: %s", e)
@@ -893,7 +926,7 @@ class RAGProviderRegistry:
         if not mm:
             return {"items": [], "total": 0, "truncated": False}
         try:
-            coll = mm._get_chroma_collection(collection)
+            coll = mm._get_chroma_collection(collection, model_name=self._resolve_kb_embed_model(collection))
             probe = coll.get(include=["metadatas"])
         except Exception as e:
             logger.debug("kb_list get failed: %s", e)
@@ -938,7 +971,7 @@ class RAGProviderRegistry:
         mm = self._get_memory_manager()
         if mm:
             try:
-                mm._get_chroma_collection(name)  # creates if not exist
+                mm._get_chroma_collection(name, model_name=self._resolve_kb_embed_model(name))  # creates if not exist
             except Exception as e:
                 logger.warning("Create local collection failed: %s", e)
         return RAGCollection(id=name, name=name, description=description,

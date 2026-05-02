@@ -406,6 +406,32 @@ async def list_domain_knowledge_bases(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# Allow-list of embedding models the user can pick at KB-creation time.
+# Each entry: (model_id, dim, ~download_size, one-line tag for the UI).
+# Adding a new option requires verifying SentenceTransformer can load it
+# offline / via HF Hub. Empty model_id = use server default.
+ALLOWED_EMBEDDING_MODELS = [
+    {"id": "", "label": "默认 (服务器配置)", "dim": None, "size_mb": None,
+     "note": "fallback to DEFAULT_EMBEDDING_MODEL"},
+    {"id": "all-MiniLM-L6-v2", "label": "all-MiniLM-L6-v2", "dim": 384, "size_mb": 80,
+     "note": "英文为主, 体积小, 速度快"},
+    {"id": "BAAI/bge-m3", "label": "BAAI/bge-m3", "dim": 1024, "size_mb": 2300,
+     "note": "多语言, 召回最强 (推荐), 首次下载较慢"},
+    {"id": "BAAI/bge-large-zh-v1.5", "label": "BAAI/bge-large-zh-v1.5", "dim": 1024, "size_mb": 1300,
+     "note": "中文优化"},
+    {"id": "paraphrase-multilingual-MiniLM-L12-v2",
+     "label": "paraphrase-multilingual-MiniLM-L12-v2", "dim": 384, "size_mb": 470,
+     "note": "多语言 + 体积小"},
+]
+_ALLOWED_MODEL_IDS = {m["id"] for m in ALLOWED_EMBEDDING_MODELS}
+
+
+@router.get("/domain-kb/embedding-models")
+async def list_embedding_models(user: CurrentUser = Depends(get_current_user)):
+    """Catalog of selectable embedding models for KB creation."""
+    return {"models": ALLOWED_EMBEDDING_MODELS}
+
+
 @router.post("/domain-kb/create")
 async def create_domain_knowledge_base(
     body: dict = Body(...),
@@ -427,6 +453,16 @@ async def create_domain_knowledge_base(
 
         description = body.get("description", "") or ""
         provider_id = body.get("provider_id", "") or ""
+        embedding_model = (body.get("embedding_model") or "").strip()
+        # Empty string = use server default (existing behavior). Otherwise
+        # must be in the allow-list — random HF model names could be huge,
+        # untrusted, or fail to load and leave the KB in a broken state.
+        if embedding_model and embedding_model not in _ALLOWED_MODEL_IDS:
+            raise HTTPException(
+                400,
+                f"embedding_model not allowed: {embedding_model!r}. "
+                f"GET /domain-kb/embedding-models for the catalog.",
+            )
         tags = body.get("tags") or []
         if not isinstance(tags, list):
             tags = []
@@ -447,6 +483,7 @@ async def create_domain_knowledge_base(
             description=description,
             provider_id=provider_id,
             tags=[str(t).strip() for t in tags if str(t).strip()],
+            embedding_model=embedding_model,
         )
         return {"ok": True, "knowledge_base": kb.to_dict()}
     except HTTPException:

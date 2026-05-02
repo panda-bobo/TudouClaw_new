@@ -1204,15 +1204,51 @@ class MemoryManager:
             self._chroma_embed_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
                 model_name=model_name
             )
-            logger.info(f"ChromaDB client initialized: {persist_dir}")
+            # Lazily-populated cache for non-default embedding models
+            # (one entry per model_name). Keeps memory bounded — typical
+            # deployment uses 1-3 models. SentenceTransformer instances
+            # are NOT cheap to create so cache hits matter.
+            self._chroma_embed_fns_by_model: dict = {model_name: self._chroma_embed_fn}
+            logger.info(f"ChromaDB client initialized: {persist_dir} (default embed model: {model_name})")
         return self._chroma_client
 
-    def _get_chroma_collection(self, name: str):
-        """Get or create a ChromaDB collection."""
+    def _resolve_embed_fn(self, model_name: str | None):
+        """Return the SentenceTransformerEmbeddingFunction for ``model_name``,
+        loading + caching on demand. None / empty / equal to default returns
+        the pre-warmed default function."""
+        # Ensure client + default embed_fn are initialized
+        self._get_chromadb_client()
+        if not model_name or model_name == DEFAULT_EMBEDDING_MODEL:
+            return self._chroma_embed_fn
+        cache = getattr(self, "_chroma_embed_fns_by_model", None)
+        if cache is None:
+            cache = {DEFAULT_EMBEDDING_MODEL: self._chroma_embed_fn}
+            self._chroma_embed_fns_by_model = cache
+        if model_name in cache:
+            return cache[model_name]
+        from chromadb.utils import embedding_functions
+        logger.info(f"Loading embedding model on demand: {model_name}")
+        fn = embedding_functions.SentenceTransformerEmbeddingFunction(
+            model_name=model_name
+        )
+        cache[model_name] = fn
+        return fn
+
+    def _get_chroma_collection(self, name: str, model_name: str | None = None):
+        """Get or create a ChromaDB collection.
+
+        ``model_name`` selects which SentenceTransformer model produces
+        embeddings for this collection. Empty / None falls back to
+        ``DEFAULT_EMBEDDING_MODEL``. Each domain KB stores its own
+        model in DomainKnowledgeBase.embedding_model — pass it through
+        here so the collection's embeddings stay dim-consistent across
+        ingest + query.
+        """
         client = self._get_chromadb_client()
+        embed_fn = self._resolve_embed_fn(model_name)
         return client.get_or_create_collection(
             name=f"tudou_{name}",
-            embedding_function=self._chroma_embed_fn,
+            embedding_function=embed_fn,
             metadata={"hnsw:space": "cosine"},
         )
 
