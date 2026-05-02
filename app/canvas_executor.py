@@ -857,6 +857,27 @@ def _exec_agent(engine: WorkflowEngine, run: WorkflowRun,
     if agent is None:
         raise RuntimeError(f"agent {agent_id!r} not found in hub")
 
+    # ── Per-run isolated chat context ──
+    # Each canvas-run-of-this-node gets a FRESH conversation bucket so
+    # the agent's solo / project chat history can't leak in. Without
+    # this, `agent.chat_async(prompt)` appends to whatever the agent
+    # was last talking about — we hit a real contamination case where
+    # an agent asked to "search AI hot news" returned content from a
+    # previous unrelated Gumroad / gcplist conversation that lived in
+    # solo. Switch back + drop the bucket in the finally below so the
+    # agent's persisted message dict doesn't accumulate one entry per
+    # canvas run.
+    canvas_ctx_id = f"canvas:{run.id[:12]}:{node.get('id','x')}"
+    prior_ctx_id = getattr(agent, "_active_context_id", "solo") or "solo"
+    try:
+        with agent._lock:
+            # Replace any leftover bucket so retries also start fresh
+            agent._messages_by_context[canvas_ctx_id] = []
+            agent._switch_context(canvas_ctx_id)
+    except Exception as _ce:
+        logger.warning("canvas: failed to switch agent context: %s", _ce)
+        canvas_ctx_id = None  # signal: nothing to restore
+
     # ── Artifact closed-loop setup ──
     # Pre-scan + redirect agent's working_dir to the shared workspace.
     # Engine restores the prior working_dir + sandbox in the `finally`
@@ -1015,6 +1036,19 @@ def _exec_agent(engine: WorkflowEngine, run: WorkflowRun,
                 if pol is not None and artifact_store is not None:
                     sd = str(artifact_store.shared_dir(run.id))
                     pol.allowed_dirs[:] = [d for d in pol.allowed_dirs if d != sd]
+            except Exception:
+                pass
+        if canvas_ctx_id:
+            # Restore prior context + drop the canvas bucket. We don't
+            # want one entry per canvas run accumulating in
+            # _messages_by_context (would bloat the agent.json on disk
+            # over weeks of running). The conversation log is also
+            # captured in the run's events.jsonl, so dropping is lossless
+            # for audit purposes.
+            try:
+                with agent._lock:
+                    agent._switch_context(prior_ctx_id)
+                    agent._messages_by_context.pop(canvas_ctx_id, None)
             except Exception:
                 pass
 
