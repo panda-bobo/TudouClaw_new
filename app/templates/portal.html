@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Tudou Claws Portal</title>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Inter:wght@300;400;500;600;700&family=Lora:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
 <style>
 .material-symbols-outlined {
@@ -221,7 +221,14 @@
   --warning-bg:      var(--raw-warning-bg-light);
   --error-bg:        var(--raw-error-bg-light);
   --success-bg:      var(--raw-success-bg-light);
-  --primary-text:    #ffffff;  /* white on Vercel Black primary */
+  --primary-text:    #ffffff;  /* white on Claude coral primary */
+  /* Light theme uses Lora serif for displays — matches Claude's
+     "Copernicus" editorial aesthetic. Body stays Inter (sans). */
+  --font-display: 'Lora', 'Charter', 'Iowan Old Style', Georgia, serif;
+}
+/* Dark theme keeps the original geometric sans for displays. */
+:root, [data-theme="dark"] {
+  --font-display: 'Plus Jakarta Sans', 'Inter', sans-serif;
 }
 * { margin:0; padding:0; box-sizing:border-box; }
 body {
@@ -497,38 +504,42 @@ body {
 .content::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 /* ---- Buttons ---- */
 .btn {
-  padding: 10px 20px;
-  border-radius: 10px;
+  padding: 8px 14px;
+  border-radius: 8px;
   font-size: 13px;
   cursor: pointer;
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text);
   font-family: inherit;
-  font-weight: 600;
+  font-weight: 500;
+  letter-spacing: -0.005em;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  transition: all 0.2s;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
   outline: none;
 }
 .btn:hover {
   background: var(--surface2);
   border-color: var(--text3);
 }
+.btn:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--primary) 50%, transparent);
+  outline-offset: 1px;
+}
 .btn-primary {
-  background: linear-gradient(135deg, var(--primary), var(--primary-container));
+  background: var(--primary);
   color: var(--primary-text);
-  font-weight: 700;
-  border: none;
-  box-shadow: 0 2px 12px color-mix(in srgb, var(--primary) 25%, transparent);
+  font-weight: 500;
+  border: 1px solid var(--primary);
 }
 .btn-primary:hover {
-  box-shadow: 0 4px 16px color-mix(in srgb, var(--primary) 40%, transparent);
-  transform: translateY(-1px);
+  background: var(--primary-container);
+  border-color: var(--primary-container);
 }
-.btn-primary:active { transform: translateY(0); }
+.btn-primary:active { background: var(--primary); }
 .btn-danger { background: transparent; color: var(--error); border: 1px solid rgba(255,100,100,0.3); }
 .btn-danger:hover { background: rgba(255,100,100,0.08); border-color: var(--error); }
 .btn-success { background: transparent; color: var(--success); border: 1px solid rgba(100,255,100,0.3); }
@@ -540,17 +551,25 @@ body {
 .card {
   background: var(--surface);
   border: 1px solid var(--border-light);
-  border-radius: 14px;
+  border-radius: 12px;
   padding: 20px;
   margin-bottom: 16px;
-  transition: all 0.2s;
+  transition: border-color 0.15s, background 0.15s;
 }
 .card:hover {
   border-color: var(--border);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
 }
 .card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
-.card-title { font-family: 'Plus Jakarta Sans', sans-serif; font-size: 14px; font-weight: 600; }
+.card-title { font-family: var(--font-display); font-size: 14px; font-weight: 600; letter-spacing: -0.005em; }
+
+/* ── Heading tracking (Linear/Claude refined) ──────────────────────
+   Negative tracking scales with size. The em-based values produce
+   roughly Linear's spec at the relevant sizes (-3px @ 80px ≈ -0.04em).
+   Display headings use --font-display (sans for dark, serif for light). */
+h1 { font-family: var(--font-display); letter-spacing: -0.025em; }
+h2 { font-family: var(--font-display); letter-spacing: -0.02em; }
+h3 { font-family: var(--font-display); letter-spacing: -0.015em; }
+h4, h5 { letter-spacing: -0.01em; }
 .card-subtitle { font-size: 12px; color: var(--text3); }
 /* ---- Grid ---- */
 .grid { display: grid; gap: 16px; }
