@@ -22648,6 +22648,10 @@ async function _canvasPreloadEntityLists() {
   // that the list arrived (vs. the placeholder that rendered before
   // fetch finished).
   if (_canvasState.selectedNodeId) _canvasRenderConfigPanel();
+  // Also redraw the SVG — agent node labels resolve agent NAMES from
+  // this list, so before it arrived they showed "(未绑定)" or the id
+  // prefix. After it arrives we want the friendly name.
+  if (document.getElementById('canvas-svg')) _canvasRedrawSvg();
 }
 
 // Tool-node migration: legacy workflows with type:tool nodes get
@@ -23262,10 +23266,55 @@ function _canvasRenderNode(n) {
   } else {
     shapeSvg = '<rect x="2" y="2" width="' + (w-4) + '" height="' + (h-4) + '" rx="6" ry="6" fill="' + nt.color + '" fill-opacity="0.15" stroke="' + stroke + '" stroke-width="' + sw + '"/>';
   }
-  // Label
-  var labelTxt = (n.label || nt.label).slice(0, 16);
-  var labelSvg = '<text x="' + (w/2) + '" y="' + (h/2 + 4) + '" text-anchor="middle" font-size="12" fill="var(--text)" pointer-events="none">'
-               + esc(labelTxt) + '</text>';
+  // Label — for agent nodes, surface the BOUND AGENT'S NAME so the
+  // canvas isn't a sea of identical "Agent 节点" boxes. Falls back to
+  // user's custom label / generic type label if no agent bound or
+  // agent list hasn't loaded yet. "未绑定" is shown in error color so
+  // the author catches missing agent_id BEFORE running.
+  var primaryLabel, secondaryLabel = '';
+  var secondaryColor = 'var(--text3)';
+  if (n.type === 'agent') {
+    var agentId = (n.config || {}).agent_id || '';
+    var customLabel = (n.label && n.label !== nt.label) ? n.label : '';
+    var resolvedAgentName = '';
+    if (agentId) {
+      var agentList = _canvasState._agentsList || [];
+      var hit = agentList.find(function(a) { return a.id === agentId; });
+      if (hit) resolvedAgentName = hit.name + (hit.role ? '·' + hit.role : '');
+      else resolvedAgentName = agentId.slice(0, 8);  // cache miss, show prefix
+    }
+    if (customLabel && resolvedAgentName) {
+      primaryLabel = customLabel;
+      secondaryLabel = '👤 ' + resolvedAgentName;
+    } else if (resolvedAgentName) {
+      primaryLabel = resolvedAgentName;
+      secondaryLabel = 'Agent';
+    } else if (customLabel) {
+      primaryLabel = customLabel;
+      secondaryLabel = '⚠ 未绑定 agent';
+      secondaryColor = 'var(--chip-error-fg)';
+    } else {
+      primaryLabel = 'Agent 节点';
+      secondaryLabel = '⚠ 未绑定';
+      secondaryColor = 'var(--chip-error-fg)';
+    }
+  } else {
+    primaryLabel = n.label || nt.label;
+  }
+  primaryLabel = primaryLabel.slice(0, 18);
+  var labelSvg;
+  if (secondaryLabel) {
+    labelSvg = '<text x="' + (w/2) + '" y="' + (h/2 - 2) + '" text-anchor="middle" '
+      + 'font-size="12" font-weight="600" fill="var(--text)" pointer-events="none">'
+      + esc(primaryLabel) + '</text>'
+      + '<text x="' + (w/2) + '" y="' + (h/2 + 14) + '" text-anchor="middle" '
+      + 'font-size="10" fill="' + secondaryColor + '" pointer-events="none">'
+      + esc(secondaryLabel.slice(0, 22)) + '</text>';
+  } else {
+    labelSvg = '<text x="' + (w/2) + '" y="' + (h/2 + 4) + '" text-anchor="middle" '
+      + 'font-size="12" fill="var(--text)" pointer-events="none">'
+      + esc(primaryLabel) + '</text>';
+  }
   // Icon (top-left for rect, hidden for circle/diamond)
   var iconSvg = (nt.shape === 'rect')
     ? '<text x="8" y="16" font-size="13" fill="' + nt.color + '" pointer-events="none">' + nt.icon + '</text>'
