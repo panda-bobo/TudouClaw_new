@@ -74,6 +74,11 @@ TERMINAL_NODE_STATES = {NodeState.SUCCEEDED, NodeState.FAILED,
                         NodeState.SKIPPED, NodeState.ABORTED}
 
 
+class _NodeAbortedSibling(Exception):
+    """Raised inside _exec_agent when run._cancel_event fires —
+    _execute_node maps this to NodeState.ABORTED rather than FAILED."""
+
+
 # ── Variable substitution ───────────────────────────────────────────────
 
 
@@ -635,26 +640,39 @@ class WorkflowEngine:
             if src in nodes_by_id and dst in nodes_by_id:
                 deps[dst].append(src)
 
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        try:
+            from .system_settings import get_store as _get_settings_store
+            _ss = _get_settings_store()
+            max_workers = int((_ss.get("canvas.max_parallel_nodes", 6) if _ss else 6) or 6)
+        except Exception:
+            max_workers = 6
+        max_workers = max(1, min(max_workers, 32))
+
+        # Cancel flag for fail-fast — set when any node fails
+        cancel_event = threading.Event()
+        # Stash on the run so _execute_node + agent poll loop can read it
+        run._cancel_event = cancel_event   # type: ignore[attr-defined]
+
         while True:
-            ready = self._pick_ready(run, nodes_by_id, deps)
-            if ready is None:
-                # Nothing ready — either we're done, or we've stalled.
+            ready = self._pick_all_ready(run, nodes_by_id, deps)
+            if not ready:
                 if all(s in TERMINAL_NODE_STATES
                        for s in run.node_states.values()):
-                    # All nodes terminal → run done.
                     any_failed = any(
                         s == NodeState.FAILED
                         for s in run.node_states.values()
                     )
-                    if any_failed:
-                        self._finish(run, RunState.FAILED,
-                                     "one or more nodes failed")
+                    any_aborted = any(
+                        s == NodeState.ABORTED
+                        for s in run.node_states.values()
+                    )
+                    if any_failed or any_aborted:
+                        self._finish(run, RunState.ABORTED,
+                                     "one or more nodes failed/aborted")
                     else:
                         self._finish(run, RunState.SUCCEEDED, "")
                     return
-                # Stalled — some nodes pending but no deps satisfied.
-                # Means a cycle (validate should've caught this) or a
-                # disconnected subgraph. Bail.
                 pending = [nid for nid, s in run.node_states.items()
                            if s == NodeState.PENDING]
                 self._finish(run, RunState.FAILED,
@@ -662,8 +680,26 @@ class WorkflowEngine:
                              f"deps: {pending[:5]}")
                 return
 
-            node = nodes_by_id[ready]
-            self._execute_node(run, node, edges)
+            # Run this batch of ready nodes concurrently
+            with ThreadPoolExecutor(max_workers=max_workers) as exe:
+                futures = {
+                    exe.submit(self._execute_node, run, nodes_by_id[nid], edges): nid
+                    for nid in ready
+                }
+                for f in as_completed(futures):
+                    nid = futures[f]
+                    try:
+                        f.result()
+                    except Exception as e:
+                        # _execute_node already marked FAILED. Trigger
+                        # fail-fast so siblings still in their poll
+                        # loop will abort.
+                        cancel_event.set()
+                        logger.warning(
+                            "canvas: node %s failed (%s); cancel_event set",
+                            nid, e,
+                        )
+            # End of batch — loop back to find next ready set
 
     def _pick_ready(self, run: WorkflowRun,
                     nodes_by_id: dict[str, dict],
@@ -692,6 +728,33 @@ class WorkflowEngine:
             if all(s == NodeState.SUCCEEDED for s in dep_states):
                 return nid
         return None
+
+    def _pick_all_ready(self, run: WorkflowRun,
+                        nodes_by_id: dict[str, dict],
+                        deps: dict[str, list[str]]) -> list[str]:
+        """Return the ids of ALL nodes whose deps are satisfied. Drives
+        the parallel _drive_loop scheduler — _pick_ready is preserved
+        for legacy / single-tick retry callers."""
+        ready: list[str] = []
+        for nid, node in nodes_by_id.items():
+            if run.node_states.get(nid) != NodeState.PENDING:
+                continue
+            dep_states = [run.node_states.get(d, NodeState.PENDING)
+                          for d in deps.get(nid, [])]
+            if any(s in (NodeState.FAILED, NodeState.SKIPPED, NodeState.ABORTED)
+                   for s in dep_states):
+                # Cascade-skip — same logic as _pick_ready but inline
+                run.node_states[nid] = NodeState.SKIPPED
+                run.node_finished[nid] = time.time()
+                self.store.save_state(run)
+                self._emit(run, "node_skipped", {
+                    "node_id": nid, "node_type": node.get("type"),
+                    "reason": "upstream failed/skipped/aborted",
+                })
+                continue
+            if all(s == NodeState.SUCCEEDED for s in dep_states):
+                ready.append(nid)
+        return ready
 
     def _execute_node(self, run: WorkflowRun, node: dict,
                       edges: list[dict]) -> None:
@@ -748,6 +811,17 @@ class WorkflowEngine:
                 self._skip_unchosen_branches(
                     run, nid, str(outputs.get("branch", "")), edges
                 )
+        except _NodeAbortedSibling:
+            # Sibling fail-fast — this node didn't fail its own logic;
+            # its chat task was aborted because a parallel branch failed.
+            run.node_states[nid] = NodeState.ABORTED
+            run.node_finished[nid] = time.time()
+            self.store.save_state(run)
+            self._emit(run, "node_aborted", {
+                "node_id": nid, "node_type": ntype,
+                "reason": "sibling_failed",
+            })
+            return
         except Exception as e:
             run.node_states[nid] = NodeState.FAILED
             run.node_finished[nid] = time.time()
@@ -985,6 +1059,15 @@ def _exec_agent(engine: WorkflowEngine, run: WorkflowRun,
                                ChatTaskStatus.FAILED,
                                ChatTaskStatus.ABORTED):
                 break
+            # Fail-fast: a sibling parallel node failed; abort our LLM.
+            if getattr(run, "_cancel_event", None) is not None and run._cancel_event.is_set():
+                try:
+                    task.abort()
+                except Exception:
+                    pass
+                # Mark this node ABORTED in the engine — raise a special
+                # exception that _execute_node maps to NodeState.ABORTED.
+                raise _NodeAbortedSibling()
             if success_file_glob and artifact_store is not None and node_dir is not None:
                 # Scope the marker scan to THIS node's subdir only —
                 # otherwise an unrelated sibling node landing a matching
