@@ -63,11 +63,15 @@ class NodeState(str, Enum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     SKIPPED = "skipped"
+    # New: a sibling parallel node failed → cancel_event flipped →
+    # this node's chat_async was task.abort()-ed mid-flight. Distinct
+    # from FAILED (which means "this node's own logic broke").
+    ABORTED = "aborted"
 
 
 TERMINAL_RUN_STATES = {RunState.SUCCEEDED, RunState.FAILED, RunState.ABORTED}
 TERMINAL_NODE_STATES = {NodeState.SUCCEEDED, NodeState.FAILED,
-                        NodeState.SKIPPED}
+                        NodeState.SKIPPED, NodeState.ABORTED}
 
 
 # ── Variable substitution ───────────────────────────────────────────────
@@ -673,7 +677,7 @@ class WorkflowEngine:
             # — its inputs never landed, so it never had a chance).
             dep_states = [run.node_states.get(d, NodeState.PENDING)
                           for d in deps.get(nid, [])]
-            if any(s in (NodeState.FAILED, NodeState.SKIPPED)
+            if any(s in (NodeState.FAILED, NodeState.SKIPPED, NodeState.ABORTED)
                    for s in dep_states):
                 # Skip this node — upstream is broken
                 run.node_states[nid] = NodeState.SKIPPED
