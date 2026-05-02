@@ -53,32 +53,33 @@
   --raw-error-bg-dark:   #2d1114;
   --raw-success-bg-dark: #12261e;
 
-  /* ── Layer 1 — raw light palette (Vercel design system, 2026-05-02) ──
-     Migrated from the prior Clowder warm-cream palette to Vercel's
-     monochromatic precision. Pure white canvas + Vercel Black ink +
-     hairline borders mirror Linear's hairline-first dark aesthetic.
-     Primary is pure ink (#171717) — Vercel uses black-on-white for
-     CTAs, with blue reserved for links. */
-  --raw-light-bg:         #ffffff;
-  --raw-light-bg2:        #fafafa;
-  --raw-light-surface:    #ffffff;
-  --raw-light-surface2:   #fafafa;
-  --raw-light-surface3:   #f4f4f4;
-  --raw-light-border:     #ebebeb;  /* light_ring */
-  --raw-light-border-fade: rgba(0,0,0,0.04);
-  --raw-light-text:       #171717;  /* Vercel Black */
-  --raw-light-text2:      #4d4d4d;  /* Gray 600 */
-  --raw-light-text3:      #808080;  /* Gray 400 */
+  /* ── Layer 1 — raw light palette (Claude design system, 2026-05-02) ──
+     Warm cream canvas (#faf9f5) + signature coral accent (#cc785c) +
+     deep ink (#141413). Surface ladder uses 4 stops of cream that get
+     progressively saturated. Pairs well with Linear's lavender dark
+     theme — both use hairline-first depth, just different hue families:
+     Linear is cool blue-black, Claude is warm cream-brown. */
+  --raw-light-bg:         #faf9f5;  /* canvas */
+  --raw-light-bg2:        #f5f0e8;  /* surface-soft */
+  --raw-light-surface:    #faf9f5;  /* canvas (matches bg) */
+  --raw-light-surface2:   #efe9de;  /* surface-card */
+  --raw-light-surface3:   #e8e0d2;  /* surface-cream-strong */
+  --raw-light-border:     #e6dfd8;  /* hairline */
+  --raw-light-border-fade: rgba(20,20,19,0.04);
+  --raw-light-text:       #141413;  /* ink */
+  --raw-light-text2:      #6c6a64;  /* muted */
+  --raw-light-text3:      #8e8b82;  /* muted-soft */
 
-  /* Light-theme primary: pure ink. Vercel uses #171717 for primary
-     CTA — black-on-white for maximum contrast and hairline elegance.
-     Link blue (#0072f5) lives in semantic-link, not primary. */
-  --raw-primary-light:    #171717;
-  --raw-primary-container-light: #000000;  /* hover deepens to true black */
-  --raw-secondary-light:  #0072f5;  /* link blue, accent only */
-  --raw-error-light:      #c93838;
-  --raw-success-light:    #2d7a39;
-  --raw-warning-light:    #b45309;
+  /* Light-theme primary: Claude's signature coral (#cc785c). Used for
+     primary CTA, brand mark, focus rings. Hover deepens to active
+     coral (#a9583e). Teal (#5db8a6) lives in --secondary as a
+     restrained second accent; only used decoratively, never as fill. */
+  --raw-primary-light:    #cc785c;  /* coral */
+  --raw-primary-container-light: #a9583e;  /* primary-active */
+  --raw-secondary-light:  #5db8a6;  /* accent-teal */
+  --raw-error-light:      #c64545;
+  --raw-success-light:    #5db872;
+  --raw-warning-light:    #d4a017;
   --raw-warning-bg-light: #fef3c7;
   --raw-error-bg-light:   #fee2e2;
   --raw-success-bg-light: #dcfce7;
