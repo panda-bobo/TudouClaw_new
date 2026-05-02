@@ -19714,42 +19714,89 @@ function _orchOpenTask(projId, taskId) {
   _orchOpenProject(projId);
 }
 
-// ============ Orchestration Page (top-level) ============
-// 2026-05-02 redesign per user direction: drop the 4-card stat strip,
-// the Agent leaderboard, and the preprocessor-metrics block. The page
-// now shows only the two things workflow authors actually navigate
-// from here:
-//   1. 画布工作流 — saved canvas DAGs (open editor / run if ready)
-//   2. 长任务流水线 — in-flight + completed long-task pipelines
-// Auxiliary diagnostics moved to the top-bar buttons (关系图 / 项目状态
-// / Context 预览). System-health stats live on the Dashboard page.
+// ============ Orchestration Page (top-level, tabs) ============
+// 2026-05-02 v2: tab layout per user direction. Each tab fetches its
+// own data on activation (no waste on tabs the user never opens).
+//   • 画布工作流 (default)  — saved canvas DAGs
+//   • 长任务流水线           — in-flight + completed pipelines
+//   • Agent 排行             — success-rate leaderboard
+//   • 预处理 metrics         — phase calls, cache, breakers
+//   • 系统概览               — 4-card stat strip
+// Tab state lives on _orchActiveTab (module-level) so it survives
+// re-renders triggered by filter changes inside a tab.
+
+var _orchActiveTab = 'canvas';
+var _orchPageRoleFilter = '';
 
 function renderOrchestrationPage() {
   var c = document.getElementById('content');
-  // Header buttons live in the global page chrome (set in showView for
-  // case 'orchestration' — 编排画布 + 刷新). This page renders only its
-  // own content area: a single row of two columns.
   c.innerHTML =
-    '<div style="padding:18px">'
-    + '<div style="margin-bottom:16px">'
+    '<div style="padding:18px;display:flex;flex-direction:column;height:calc(100vh - 80px)">'
+    + '<div style="margin-bottom:14px">'
     + '<h2 style="margin:0;font-family:\'Plus Jakarta Sans\',sans-serif;font-size:22px;font-weight:800">编排总览</h2>'
-    + '<p style="font-size:12px;color:var(--text3);margin-top:4px">画布工作流 · 长任务流水线</p>'
+    + '<p style="font-size:12px;color:var(--text3);margin-top:4px">画布工作流 · 长任务流水线 · Agent 表现 · 系统健康</p>'
     + '</div>'
-    + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:16px">'
-    + '<div id="orch-canvas-section"></div>'
-    + '<div id="orch-pipelines-section"></div>'
-    + '</div></div>';
+    + '<div id="orch-tabbar" style="display:flex;gap:2px;border-bottom:1px solid var(--border);margin-bottom:16px;flex-wrap:wrap"></div>'
+    + '<div id="orch-tab-content" style="flex:1;min-height:0;overflow:auto"></div>'
+    + '</div>';
+  _renderOrchTabBar();
+  _renderOrchTabContent();
+}
 
-  document.getElementById('orch-canvas-section').innerHTML = _orchSkelBlock('画布工作流');
-  document.getElementById('orch-pipelines-section').innerHTML = _orchSkelBlock('长任务流水线');
+function _renderOrchTabBar() {
+  var bar = document.getElementById('orch-tabbar');
+  if (!bar) return;
+  var tabs = [
+    {key: 'canvas',    label: '画布工作流',     icon: 'account_tree'},
+    {key: 'pipelines', label: '长任务流水线',   icon: 'timeline'},
+    {key: 'agents',    label: 'Agent 排行',     icon: 'leaderboard'},
+    {key: 'preproc',   label: '预处理 metrics', icon: 'bolt'},
+    {key: 'overview',  label: '系统概览',       icon: 'insights'},
+  ];
+  bar.innerHTML = tabs.map(function(t) {
+    var active = (_orchActiveTab === t.key);
+    return '<button onclick="_switchOrchTab(\'' + t.key + '\')" class="btn btn-ghost btn-sm" '
+      + 'style="border-radius:0;border-bottom:2px solid '+(active?'var(--primary)':'transparent')
+      + ';color:'+(active?'var(--primary)':'var(--text2)')
+      + ';font-weight:'+(active?'700':'500')+';padding:10px 16px">'
+      + '<span class="material-symbols-outlined" style="font-size:16px;margin-right:4px;vertical-align:middle">'+t.icon+'</span>'
+      + t.label + '</button>';
+  }).join('');
+}
 
-  Promise.all([
-    fetch('/api/portal/canvas-workflows').then(function(r){return r.json();}).catch(function(e){return {_err: String(e)};}),
-    fetch('/api/portal/orchestration/pipelines?limit=10').then(function(r){return r.json();}).catch(function(e){return {_err: String(e)};}),
-  ]).then(function(results) {
-    _renderOrchCanvasWorkflows(results[0]);
-    _renderOrchPipelines(results[1]);
-  });
+window._switchOrchTab = function(key) {
+  _orchActiveTab = key;
+  _renderOrchTabBar();
+  _renderOrchTabContent();
+};
+
+function _renderOrchTabContent() {
+  var c = document.getElementById('orch-tab-content');
+  if (!c) return;
+  var tab = _orchActiveTab;
+
+  if (tab === 'canvas') {
+    c.innerHTML = '<div id="orch-canvas-section">' + _orchSkelBlock('画布工作流') + '</div>';
+    fetch('/api/portal/canvas-workflows').then(function(r){return r.json();}).catch(function(e){return {_err: String(e)};})
+      .then(_renderOrchCanvasWorkflows);
+  } else if (tab === 'pipelines') {
+    c.innerHTML = '<div id="orch-pipelines-section">' + _orchSkelBlock('长任务流水线') + '</div>';
+    fetch('/api/portal/orchestration/pipelines?limit=20').then(function(r){return r.json();}).catch(function(e){return {_err: String(e)};})
+      .then(_renderOrchPipelines);
+  } else if (tab === 'agents') {
+    c.innerHTML = '<div id="orch-agents-section">' + _orchSkelBlock('Agent 排行') + '</div>';
+    fetch('/api/portal/orchestration/agents?limit=50').then(function(r){return r.json();}).catch(function(e){return {_err: String(e)};})
+      .then(_renderOrchAgents);
+  } else if (tab === 'preproc') {
+    c.innerHTML = '<div id="orch-preprocessor-section">' + _orchSkelBlock('⚡ 预处理 metrics') + '</div>';
+    fetch('/api/portal/orchestration/preprocessor-metrics').then(function(r){return r.json();}).catch(function(e){return {_err: String(e)};})
+      .then(_renderOrchPreprocessor);
+  } else if (tab === 'overview') {
+    c.innerHTML = '<div id="orch-overview-cards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">'
+      + _orchSkelCards(4) + '</div>';
+    fetch('/api/portal/orchestration/overview').then(function(r){return r.json();}).catch(function(e){return {_err: String(e)};})
+      .then(_renderOrchOverview);
+  }
 }
 
 function _renderOrchCanvasWorkflows(d) {
@@ -19824,6 +19871,176 @@ function _orchSkelBlock(title) {
   return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px">'
     + '<div style="font-size:13px;font-weight:700;margin-bottom:8px">'+title+'</div>'
     + '<div style="height:200px;opacity:0.4;background:var(--surface2);border-radius:6px"></div></div>';
+}
+
+function _orchSkelCards(n) {
+  var s = '';
+  for (var i = 0; i < n; i++) {
+    s += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;height:80px;opacity:0.5"></div>';
+  }
+  return s;
+}
+
+function _renderOrchOverview(d) {
+  var el = document.getElementById('orch-overview-cards');
+  if (!el) return;
+  if (d && d._err) {
+    el.innerHTML = '<div style="grid-column:1/-1;color:var(--error);font-size:12px">加载失败: '+esc(d._err)+'</div>';
+    return;
+  }
+  d = d || {};
+  var st = d.agent_status || {};
+  var tk = d.tokens || {};
+  var pj = d.projects || {};
+  var cards = [
+    {label: 'Agents',       big: String(d.agent_count || 0),     sub: '空闲 '+(st.idle||0)+' · 忙 '+(st.busy||0)+' · 错 '+(st.error||0), color:'#5b8def', icon:'smart_toy'},
+    {label: '事件总数',     big: _formatNum(d.total_events || 0), sub: '所有 agent 累计', color:'#22c55e', icon:'bolt'},
+    {label: 'Token 使用',   big: _formatNum(tk.total || 0),       sub: '入 '+_formatNum(tk.in||0)+' · 出 '+_formatNum(tk.out||0), color:'#f59e0b', icon:'data_usage'},
+    {label: '长任务流水线', big: String(pj.parent_tasks || 0),    sub: '在执行 '+(pj.in_flight_subtasks||0)+' · 已聚合 '+(pj.aggregated||0), color:'#a855f7', icon:'account_tree'},
+  ];
+  el.innerHTML = cards.map(function(c) {
+    return '<div style="background:var(--surface);border:1px solid var(--border);border-left:3px solid '+c.color+';border-radius:10px;padding:14px 16px">'
+      + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">'
+      + '<div style="font-size:11px;color:var(--text3);font-weight:600;text-transform:uppercase;letter-spacing:0.4px">'+c.label+'</div>'
+      + '<span class="material-symbols-outlined" style="font-size:18px;color:'+c.color+';opacity:0.85">'+c.icon+'</span>'
+      + '</div>'
+      + '<div style="font-size:24px;font-weight:800;color:var(--text);line-height:1">'+c.big+'</div>'
+      + '<div style="font-size:11px;color:var(--text3);margin-top:6px">'+c.sub+'</div>'
+      + '</div>';
+  }).join('');
+}
+
+function _renderOrchAgents(d) {
+  var el = document.getElementById('orch-agents-section');
+  if (!el) return;
+  if (d && d._err) {
+    el.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;color:var(--error);font-size:12px">Agent 排行加载失败: '+esc(d._err)+'</div>';
+    return;
+  }
+  var rows = (d && d.agents) || [];
+  window._orchAgentRows = rows;   // cache for the Context Preview modal
+  var roles = {};
+  rows.forEach(function(r){ if (r.role) roles[r.role] = true; });
+  var roleOptions = '<option value="">所有角色</option>'
+    + Object.keys(roles).map(function(r){
+        return '<option value="'+esc(r)+'"'+(_orchPageRoleFilter===r?' selected':'')+'>'+esc(r)+'</option>';
+      }).join('');
+  var filtered = _orchPageRoleFilter
+    ? rows.filter(function(r){ return r.role === _orchPageRoleFilter; })
+    : rows;
+  var tableRows = filtered.length ? filtered.map(function(r, i) {
+    var hasData = (r.total_count || 0) > 0;
+    var rate = hasData ? ((r.success_rate * 100).toFixed(1) + '%') : '—';
+    var rateColor = !hasData ? 'var(--text3)' :
+      (r.success_rate >= 0.7 ? '#22c55e' : (r.success_rate >= 0.4 ? '#f59e0b' : '#ef4444'));
+    var rateTitle = hasData ? '' : ' title="尚无任务完成记录，无法计算成功率"';
+    var stColor = r.status === 'idle' ? '#22c55e' : (r.status === 'busy' ? '#f59e0b' : (r.status === 'error' ? '#ef4444' : '#94a3b8'));
+    var medal = (hasData && i === 0) ? 'workspace_premium' :
+                (hasData && i === 1) ? 'military_tech' :
+                (hasData && i === 2) ? 'emoji_events' : '';
+    var medalSpan = medal ? '<span class="material-symbols-outlined" style="font-size:14px;color:#f59e0b;vertical-align:middle">'+medal+'</span> ' : '';
+    var counts = hasData ? (r.success_count + ' / ' + r.fail_count) : '0 / 0';
+    return '<tr style="border-bottom:1px solid var(--border-light);cursor:pointer" onclick="_orchOpenAgent(\''+esc(r.id)+'\')">'
+      + '<td style="padding:8px 6px;font-size:12px">'+medalSpan+'<b>'+esc(r.name||r.id)+'</b><div style="font-size:10px;color:var(--text3)">'+esc(r.role||'-')+'</div></td>'
+      + '<td style="padding:8px 6px;text-align:right;font-size:12px;font-weight:700;color:'+rateColor+'"'+rateTitle+'>'+rate+'</td>'
+      + '<td style="padding:8px 6px;text-align:right;font-size:11px;color:var(--text3)">'+counts+'</td>'
+      + '<td style="padding:8px 6px;text-align:right"><span style="font-size:10px;padding:2px 6px;background:'+stColor+'22;color:'+stColor+';border-radius:4px;font-weight:600">'+esc(r.status||'?')+'</span></td>'
+      + '</tr>';
+  }).join('') : '<tr><td colspan="4" style="padding:40px;text-align:center;color:var(--text3);font-size:12px">暂无 Agent 数据</td></tr>';
+  // onChange re-renders just THIS tab's content (not the whole page —
+  // that would reset _orchActiveTab back to default).
+  el.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px">'
+    + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">'
+    + '<div style="font-size:13px;font-weight:700"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle;margin-right:4px">leaderboard</span>Agent 排行</div>'
+    + '<select onchange="_orchPageRoleFilter=this.value;_renderOrchTabContent()" style="font-size:11px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface)">'+roleOptions+'</select>'
+    + '</div>'
+    + '<div style="font-size:10px;color:var(--text3);margin-bottom:6px">按平滑后成功率排序 · (s+1)/(s+f+2)</div>'
+    + '<div style="overflow:auto;max-height:520px"><table style="width:100%;border-collapse:collapse">'
+    + '<thead><tr style="border-bottom:1px solid var(--border)"><th style="padding:6px;text-align:left;font-size:10px;color:var(--text3);font-weight:600">名称 / 角色</th>'
+    + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">成功率</th>'
+    + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">成功 / 失败</th>'
+    + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">状态</th></tr></thead>'
+    + '<tbody>'+tableRows+'</tbody></table></div></div>';
+}
+
+function _renderOrchPreprocessor(d) {
+  var el = document.getElementById('orch-preprocessor-section');
+  if (!el) return;
+  if (d && d._err) {
+    el.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;color:var(--error);font-size:12px">⚡ 预处理 metrics 加载失败: '+esc(d._err)+'</div>';
+    return;
+  }
+  d = d || {};
+  var phases = d.phases || [];
+  var enabledAgents = d.enabled_agents || [];
+  var breaker = d.breaker || [];
+  var pausedCount = d.breaker_paused_count || 0;
+  var cache = d.cache || {};
+  var headerHtml = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">'
+    + '<div style="font-size:13px;font-weight:700">⚡ 预处理 metrics</div>'
+    + '<div style="font-size:11px;color:var(--text3)">'
+    +   enabledAgents.length + ' agent 启用 · cache ' + (cache.size||0) + '/' + (cache.capacity||256)
+    +   ' · hits ' + (cache.hits||0) + ' / misses ' + (cache.misses||0)
+    +   (pausedCount > 0 ? ' · <span style="color:#f59e0b;font-weight:600">⏸ ' + pausedCount + ' phase 熔断中</span>' : '')
+    + '</div></div>';
+  var phasesHtml = '';
+  if (!phases.length) {
+    phasesHtml = '<div style="padding:30px;text-align:center;color:var(--text3);font-size:12px">尚无预处理调用 — 启用 agent 的 preprocessor 后这里会出现 phase 数据</div>';
+  } else {
+    phasesHtml = '<div style="overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:11px">'
+      + '<thead><tr style="border-bottom:1px solid var(--border)">'
+      + '<th style="padding:6px;text-align:left;font-size:10px;color:var(--text3);font-weight:600">PHASE</th>'
+      + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">CALLS</th>'
+      + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">CACHE 命中率</th>'
+      + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">FALLBACK</th>'
+      + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">TOKENS in/out</th>'
+      + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">平均延迟</th>'
+      + '</tr></thead><tbody>';
+    phases.forEach(function(p) {
+      var hitPct = (p.cache_hit_rate * 100).toFixed(0) + '%';
+      var hitColor = p.cache_hit_rate >= 0.5 ? '#22c55e' : (p.cache_hit_rate >= 0.2 ? '#f59e0b' : 'var(--text3)');
+      var fbColor = p.fallbacks > 0 ? '#ef4444' : 'var(--text3)';
+      phasesHtml += '<tr style="border-bottom:1px solid var(--border-light)">'
+        + '<td style="padding:6px"><b>'+esc(p.kind)+'</b></td>'
+        + '<td style="padding:6px;text-align:right">'+p.calls+'</td>'
+        + '<td style="padding:6px;text-align:right;color:'+hitColor+';font-weight:600">'+hitPct+' ('+p.cache_hits+')</td>'
+        + '<td style="padding:6px;text-align:right;color:'+fbColor+'">'+p.fallbacks+'</td>'
+        + '<td style="padding:6px;text-align:right;color:var(--text2)">'+_formatNum(p.tokens_in)+' / '+_formatNum(p.tokens_out)+'</td>'
+        + '<td style="padding:6px;text-align:right">'+p.latency_ms_avg+'ms</td>'
+        + '</tr>';
+    });
+    phasesHtml += '</tbody></table></div>';
+  }
+  var breakerHtml = '';
+  var pausedBreakers = breaker.filter(function(b){ return b.paused; });
+  if (pausedBreakers.length) {
+    breakerHtml = '<div style="margin-top:12px;padding:10px;background:#f59e0b11;border-left:3px solid #f59e0b;border-radius:4px">'
+      + '<div style="font-size:11px;font-weight:600;color:#f59e0b;margin-bottom:6px">⏸ 熔断中（失败率超阈值，自动暂停 60s）</div>';
+    pausedBreakers.forEach(function(b) {
+      breakerHtml += '<div style="font-size:11px;margin-bottom:3px">'
+        + '<code>'+esc(b.kind)+'</code> on agent <code>'+esc(b.agent_id.slice(0,12))+'</code>'
+        + ' · 失败 '+b.fail_count+'/'+b.history_size+'  · 剩余 '+b.paused_remaining_s+'s'
+        + '</div>';
+    });
+    breakerHtml += '</div>';
+  }
+  var agentsHtml = '';
+  if (enabledAgents.length) {
+    agentsHtml = '<div style="margin-top:12px;font-size:11px;color:var(--text3)">'
+      + '<div style="font-weight:600;margin-bottom:6px">已启用 agent</div>';
+    enabledAgents.forEach(function(a) {
+      var modeLabel = (a.modes||[]).map(function(m){
+        return m === 'optimize_prompt' ? 'prompt' : (m === 'task_understanding' ? '理解' : m);
+      }).join('+') || '默认';
+      agentsHtml += '<div style="margin-bottom:3px"><b>'+esc(a.name)+'</b>: '
+        + '<code style="font-size:10px">'+esc(a.model.split(':')[0])+'</code>'
+        + ' @ <code style="font-size:10px">'+esc(a.endpoint || 'default')+'</code>'
+        + ' (' + esc(modeLabel) + ')</div>';
+    });
+    agentsHtml += '</div>';
+  }
+  el.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px">'
+    + headerHtml + phasesHtml + breakerHtml + agentsHtml + '</div>';
 }
 
 function _renderOrchPipelines(d) {
