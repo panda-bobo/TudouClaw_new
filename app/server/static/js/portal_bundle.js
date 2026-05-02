@@ -9663,23 +9663,23 @@ async function renderScheduler() {
 }
 
 async function showCreateJob() {
-  const [agentsData, presetsData, workflowsData] = await Promise.all([
+  const [agentsData, presetsData, workflowsData, canvasWfsData] = await Promise.all([
     api('GET', '/api/portal/agents'),
     api('GET', '/api/portal/scheduler/presets'),
     api('GET', '/api/portal/workflows').catch(function(){ return {workflows:[]}; }),
+    api('GET', '/api/portal/canvas-workflows').catch(function(){ return {workflows:[]}; }),
   ]);
   const agents = agentsData.agents || [];
   const presets = presetsData.presets || {};
-  // /api/portal/workflows returns mixed templates + instances. Templates
-  // have a "steps" array but no "instance_id" / no terminal status; we
-  // include anything with an id + name and let the user pick.
+  // Legacy workflow templates (state-machine engine)
   const allWfs = (workflowsData && workflowsData.workflows) || [];
   const templates = allWfs.filter(function(w){
-    // Heuristic: skip running/completed instances; keep entries with no
-    // instance-only fields ("status" == "draft" or absent)
     var st = (w.status || '').toLowerCase();
     return !st || st === 'draft' || st === 'template';
   });
+  // Canvas (dynamic DAG) workflows — only "ready" ones can be scheduled
+  const canvasWfs = ((canvasWfsData && canvasWfsData.workflows) || [])
+    .filter(function(w){ return (w.executable_status||'') === 'ready'; });
 
   let presetOpts = '<option value="">-- Custom --</option>';
   Object.entries(presets).forEach(([k,v]) => {
@@ -9690,13 +9690,18 @@ async function showCreateJob() {
     templates.map(function(w){
       return '<option value="'+esc(w.id||w.template_id||'')+'">'+esc(w.name||'(unnamed)')+'</option>';
     }).join('');
+  let canvasWfOpts = '<option value="">-- select canvas workflow --</option>' +
+    canvasWfs.map(function(w){
+      return '<option value="'+esc(w.id||'')+'">'+esc(w.name||'(unnamed)')+' ('+(w.node_count||0)+' 节点)</option>';
+    }).join('');
 
   const html = '<div style="padding:20px;max-width:600px">' +
     '<h3 style="margin-bottom:16px">Create Scheduled Job</h3>' +
     '<label>Preset</label><select id="job-preset" onchange="applyJobPreset(this.value)" class="input" style="margin-bottom:8px">'+presetOpts+'</select>' +
     '<label>Target Type</label><select id="job-target-type" class="input" style="margin-bottom:8px" onchange="_jobTargetTypeChanged()">' +
       '<option value="chat">Agent Chat — call agent.chat with prompt</option>' +
-      '<option value="workflow">Workflow — run a workflow template</option>' +
+      '<option value="workflow">Workflow — 固定流程模板 (legacy state-machine)</option>' +
+      '<option value="canvas_workflow">Canvas Workflow — 动态编排 DAG (画布)</option>' +
     '</select>' +
     '<div id="job-workflow-row" style="display:none;margin-bottom:8px">' +
       '<label>Workflow Template</label>' +
@@ -9705,6 +9710,14 @@ async function showCreateJob() {
         'If step assignments are not provided below, every step will run as the selected default agent.' +
       '</div>' +
       '<div id="job-step-assignments" style="margin-top:8px"></div>' +
+    '</div>' +
+    '<div id="job-canvas-workflow-row" style="display:none;margin-bottom:8px">' +
+      '<label>Canvas Workflow</label>' +
+      '<select id="job-canvas-workflow-id" class="input">'+canvasWfOpts+'</select>' +
+      '<div style="font-size:11px;color:var(--muted);margin-top:4px">' +
+        '只列出状态为"可执行"的画布工作流。Agent 分配 / prompt 由画布自身节点定义,任务级 Agent / Prompt 字段会被忽略。' +
+        (canvasWfs.length === 0 ? '<br><span style="color:var(--error)">⚠ 当前没有可执行的画布工作流。先到"编排"页创建并标记为"可执行"。</span>' : '') +
+      '</div>' +
     '</div>' +
     '<label id="job-agent-label">Agent</label><select id="job-agent" class="input" style="margin-bottom:8px"><option value="">-- none --</option>'+agentOpts+'</select>' +
     '<label>Name</label><input id="job-name" class="input" style="margin-bottom:8px" placeholder="Daily AIGC Digest">' +
@@ -9717,24 +9730,32 @@ async function showCreateJob() {
     '<div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="saveNewJob()">Create</button>' +
     '<button class="btn" onclick="closeModal()">Cancel</button></div></div>';
   showModalHTML(html);
-  // Store templates + agent options for step assignment rendering
   window._jobWfTemplates = templates;
   window._jobAgentOpts = agentOpts;
+  window._jobCanvasWfs = canvasWfs;
 }
 
 function _jobTargetTypeChanged() {
   var t = document.getElementById('job-target-type').value;
-  var row = document.getElementById('job-workflow-row');
+  var legacyRow = document.getElementById('job-workflow-row');
+  var canvasRow = document.getElementById('job-canvas-workflow-row');
   var label = document.getElementById('job-agent-label');
   var promptLabel = document.getElementById('job-prompt-label');
   var promptEl = document.getElementById('job-prompt');
+  if (legacyRow) legacyRow.style.display = (t === 'workflow') ? 'block' : 'none';
+  if (canvasRow) canvasRow.style.display = (t === 'canvas_workflow') ? 'block' : 'none';
   if (t === 'workflow') {
-    if (row) row.style.display = 'block';
     if (label) label.textContent = 'Default Agent (used for unassigned workflow steps)';
     if (promptLabel) promptLabel.textContent = 'Workflow Input (passed as input_data)';
     if (promptEl) promptEl.placeholder = 'Initial input passed to the workflow. Optional — leave empty to use job name.';
+  } else if (t === 'canvas_workflow') {
+    // Canvas workflow defines its own agents per node + own prompts.
+    // Agent / prompt fields at the job level are unused — gray them
+    // out visually so users don't waste effort filling them in.
+    if (label) label.textContent = 'Agent (ignored for canvas workflow)';
+    if (promptLabel) promptLabel.textContent = 'Prompt (ignored for canvas workflow)';
+    if (promptEl) promptEl.placeholder = '画布工作流自含 prompt — 此字段可留空';
   } else {
-    if (row) row.style.display = 'none';
     if (label) label.textContent = 'Agent';
     if (promptLabel) promptLabel.textContent = 'Prompt Template';
     if (promptEl) promptEl.placeholder = 'Use {date}, {time}, {weekday} variables...';
@@ -9797,7 +9818,17 @@ async function saveNewJob() {
     tags: document.getElementById('job-tags').value.split(',').map(s=>s.trim()).filter(Boolean),
     target_type: targetType,
   };
-  if (targetType === 'workflow') {
+  if (targetType === 'canvas_workflow') {
+    var cwEl = document.getElementById('job-canvas-workflow-id');
+    body.canvas_workflow_id = cwEl ? cwEl.value : '';
+    if (!body.canvas_workflow_id) {
+      alert('请选择一个画布工作流。');
+      return;
+    }
+    // Canvas workflow ignores agent_id + prompt at the job level
+    body.agent_id = '';
+    body.prompt_template = '';
+  } else if (targetType === 'workflow') {
     var wfEl = document.getElementById('job-workflow-id');
     body.workflow_id = wfEl ? wfEl.value : '';
     if (!body.workflow_id) {

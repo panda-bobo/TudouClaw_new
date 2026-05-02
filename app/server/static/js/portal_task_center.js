@@ -27,25 +27,36 @@ async function loadTaskCenter() {
       api('GET', '/api/portal/standalone-tasks'),
       api('GET', '/api/portal/agents').catch(function(){ return {agents: []}; }),
       api('GET', '/api/portal/workflows').catch(function(){ return {workflows: []}; }),
+      api('GET', '/api/portal/canvas-workflows').catch(function(){ return {workflows: []}; }),
     ]);
     var jobsResp = results[0] || {};
     var stResp = results[1] || {};
     var agentsResp = results[2] || {};
     var wfResp = results[3] || {};
+    var canvasWfResp = results[4] || {};
     var jobs = jobsResp.jobs || [];
     var standaloneTasks = (stResp.tasks || []).map(function(t){ t._src='standalone'; return t; });
     var agentsList = agentsResp.agents || [];
     var wfList = wfResp.workflows || [];
+    var canvasWfList = canvasWfResp.workflows || [];
     var agentNameById = {};
     agentsList.forEach(function(a){ agentNameById[a.id] = (a.role?a.role+'-':'')+a.name; });
     var wfNameById = {};
     wfList.forEach(function(w){ wfNameById[w.id||w.template_id] = w.name||'(unnamed)'; });
+    var canvasWfNameById = {};
+    canvasWfList.forEach(function(w){ canvasWfNameById[w.id] = w.name||'(unnamed)'; });
 
-    // Split scheduled jobs into agent-chat targets vs workflow targets
+    // 3 categories of scheduled jobs:
+    // - chat: target an agent directly
+    // - workflow: legacy state-machine workflow (固定流程)
+    // - canvas_workflow: dynamic DAG via canvas executor (动态编排)
     var chatJobs = [];
     var workflowJobs = [];
+    var canvasWorkflowJobs = [];
     jobs.forEach(function(j){
-      if ((j.target_type||'chat') === 'workflow' || j.workflow_id) workflowJobs.push(j);
+      var tt = j.target_type || 'chat';
+      if (tt === 'canvas_workflow' || j.canvas_workflow_id) canvasWorkflowJobs.push(j);
+      else if (tt === 'workflow' || j.workflow_id) workflowJobs.push(j);
       else chatJobs.push(j);
     });
 
@@ -57,14 +68,21 @@ async function loadTaskCenter() {
       var nextRun = job.next_run_at ? new Date(job.next_run_at*1000).toLocaleString() : '-';
       var lastRun = job.last_run_at ? new Date(job.last_run_at*1000).toLocaleString() : '从未';
       var targetLine = '';
-      if (kind === 'workflow') {
+      if (kind === 'canvas_workflow') {
+        var cwName = canvasWfNameById[job.canvas_workflow_id] || job.canvas_workflow_id || '(未指定)';
+        targetLine =
+          '<div style="font-size:11px;color:var(--text2);margin-top:4px">' +
+            '🎨 Canvas: <strong>'+esc(cwName)+'</strong>' +
+          '</div>' +
+          '<div style="font-size:10px;color:var(--text3);margin-top:2px">动态编排 · agent 由画布节点定义</div>';
+      } else if (kind === 'workflow') {
         var wfName = wfNameById[job.workflow_id] || job.workflow_id || '(未指定)';
         var defaultAgent = job.agent_id ? (agentNameById[job.agent_id] || job.agent_id) : '(全部默认)';
         targetLine =
           '<div style="font-size:11px;color:var(--text2);margin-top:4px">' +
             '🔀 Workflow: <strong>'+esc(wfName)+'</strong>' +
           '</div>' +
-          '<div style="font-size:10px;color:var(--text3);margin-top:2px">默认 Agent: '+esc(defaultAgent)+'</div>';
+          '<div style="font-size:10px;color:var(--text3);margin-top:2px">固定流程 · 默认 Agent: '+esc(defaultAgent)+'</div>';
       } else {
         var agName = job.agent_id ? (agentNameById[job.agent_id] || job.agent_id) : '(未指定)';
         targetLine =
@@ -91,7 +109,9 @@ async function loadTaskCenter() {
     var chatJobsHtml = chatJobs.map(function(j){ return renderJobCard(j, 'chat'); }).join('')
       || '<div style="color:var(--text3);font-size:12px;padding:12px;text-align:center">无 Agent 定时任务</div>';
     var wfJobsHtml = workflowJobs.map(function(j){ return renderJobCard(j, 'workflow'); }).join('')
-      || '<div style="color:var(--text3);font-size:12px;padding:12px;text-align:center">无 Workflow 定时任务</div>';
+      || '<div style="color:var(--text3);font-size:12px;padding:12px;text-align:center">无固定流程 Workflow 定时任务</div>';
+    var canvasJobsHtml = canvasWorkflowJobs.map(function(j){ return renderJobCard(j, 'canvas_workflow'); }).join('')
+      || '<div style="color:var(--text3);font-size:12px;padding:12px;text-align:center">无动态编排定时任务<br><span style="font-size:10px">需要先到"编排"页创建 + 标记为可执行</span></div>';
 
     var stRows = standaloneTasks.map(function(t){
       var icon = t.status==='done'?'✅':t.status==='in_progress'?'⏳':t.status==='blocked'?'🚫':t.status==='cancelled'?'❌':'📋';
@@ -111,10 +131,14 @@ async function loadTaskCenter() {
       '</div>';
     }).join('') || '<div style="color:var(--text3);font-size:12px;padding:12px;text-align:center">无独立任务</div>';
 
+    // 4 columns now (was 3): added 🎨 canvas workflow column.
+    // Use auto-fit so on narrow viewports it wraps to 2x2 instead of
+    // squishing each column to 25%.
     area.innerHTML =
-      '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:18px">' +
-        '<div><div style="font-size:12px;font-weight:700;text-transform:uppercase;color:var(--text3);margin-bottom:10px">⏱ 定时任务 · Agent ('+chatJobs.length+')</div>'+chatJobsHtml+'</div>' +
-        '<div><div style="font-size:12px;font-weight:700;text-transform:uppercase;color:var(--text3);margin-bottom:10px">🔀 定时任务 · Workflow ('+workflowJobs.length+')</div>'+wfJobsHtml+'</div>' +
+      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:18px">' +
+        '<div><div style="font-size:12px;font-weight:700;text-transform:uppercase;color:var(--text3);margin-bottom:10px">⏱ Agent 定时 ('+chatJobs.length+')</div>'+chatJobsHtml+'</div>' +
+        '<div><div style="font-size:12px;font-weight:700;text-transform:uppercase;color:var(--text3);margin-bottom:10px">🔀 Workflow 定时 · 固定流程 ('+workflowJobs.length+')</div>'+wfJobsHtml+'</div>' +
+        '<div><div style="font-size:12px;font-weight:700;text-transform:uppercase;color:var(--text3);margin-bottom:10px">🎨 编排定时 · 动态画布 ('+canvasWorkflowJobs.length+')</div>'+canvasJobsHtml+'</div>' +
         '<div><div style="font-size:12px;font-weight:700;text-transform:uppercase;color:var(--text3);margin-bottom:10px">⚡ 独立任务 ('+standaloneTasks.length+')</div>'+stRows+'</div>' +
       '</div>';
   } catch(e) {

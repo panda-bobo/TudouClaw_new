@@ -109,15 +109,19 @@ class ScheduledJob:
     timeout: int = 600  # seconds, default 10 minutes
 
     # ── Workflow targeting ──
-    # target_type: "chat" (default — call agent.chat with prompt_template)
-    #              "workflow" (call WorkflowEngine.create_instance + start_instance)
+    # target_type: "chat"            — call agent.chat with prompt_template (default)
+    #              "workflow"        — legacy WorkflowEngine.create_instance
+    #                                  + start_instance (固定流程节点)
+    #              "canvas_workflow" — new dynamic DAG via canvas_executor
+    #                                  (动态编排,2026-05-02)
     target_type: str = "chat"
-    workflow_id: str = ""                                # WorkflowTemplate id
+    workflow_id: str = ""                                # WorkflowTemplate id (legacy)
     workflow_step_assignments: list[dict] = field(       # [{step_index, agent_id}]
         default_factory=list)
     workflow_input: str = ""                             # initial input_data;
                                                          # falls back to expanded
                                                          # prompt_template if empty
+    canvas_workflow_id: str = ""                         # Canvas workflow id (new)
 
     def to_dict(self) -> dict:
         return {
@@ -147,6 +151,7 @@ class ScheduledJob:
             "workflow_id": self.workflow_id,
             "workflow_step_assignments": list(self.workflow_step_assignments),
             "workflow_input": self.workflow_input,
+            "canvas_workflow_id": self.canvas_workflow_id,
         }
 
     @staticmethod
@@ -178,6 +183,7 @@ class ScheduledJob:
             workflow_id=d.get("workflow_id", ""),
             workflow_step_assignments=list(d.get("workflow_step_assignments", []) or []),
             workflow_input=d.get("workflow_input", ""),
+            canvas_workflow_id=d.get("canvas_workflow_id", ""),
         )
 
 
@@ -659,8 +665,13 @@ class TaskScheduler:
             if not self._hub:
                 raise RuntimeError("Hub not configured")
 
-            if job.target_type == "workflow" or job.workflow_id:
-                # ─────────────── Workflow execution ───────────────
+            if job.target_type == "canvas_workflow" or job.canvas_workflow_id:
+                # ─────────── Canvas workflow execution (动态编排) ───────────
+                result_text = self._execute_canvas_workflow_job(job, prompt)
+                record.result = (result_text or "")[:2000]
+                record.status = "success"
+            elif job.target_type == "workflow" or job.workflow_id:
+                # ─────────── Legacy workflow execution (固定流程) ───────────
                 result_text = self._execute_workflow_job(job, prompt)
                 record.result = (result_text or "")[:2000]
                 record.status = "success"
@@ -848,6 +859,115 @@ class TaskScheduler:
             # scheduler level so notifications fire; the failure is encoded in
             # the result text.
         return "\n".join(summary_lines)
+
+    def _execute_canvas_workflow_job(self, job: ScheduledJob,
+                                      expanded_prompt: str) -> str:
+        """Trigger a canvas (dynamic DAG) workflow run on schedule.
+
+        2026-05-02 — companion to ``_execute_workflow_job``. Distinct
+        because canvas workflows have a totally different runtime
+        (canvas_executor.WorkflowEngine: per-run shared dir + artifact
+        store + var substitution + daemon thread per node), and
+        because the user explicitly wanted both kinds of workflow
+        scheduling to coexist (legacy state-machine vs new dynamic).
+
+        Resolution rules:
+          * canvas_workflow_id must point to a saved canvas workflow
+            with executable_status == "ready"
+          * job.agent_id is IGNORED — agent assignments live in the
+            canvas workflow's individual agent nodes, not at the job
+            level. (Legacy workflows have a default-agent fallback;
+            canvas workflows don't need one.)
+          * job.workflow_input + expanded_prompt are NOT used. The
+            canvas workflow's own start node + agent prompts are
+            self-contained. Future: could inject as a workflow-level
+            variable {{__schedule.prompt}} if a real use case appears.
+          * polls run state up to job.timeout seconds; on timeout,
+            best-effort marks the run as failed (no abort API yet)
+            and raises TimeoutError.
+        """
+        store = getattr(self._hub, "canvas_workflow_store", None)
+        engine = getattr(self._hub, "canvas_executor", None)
+        if store is None or engine is None:
+            raise RuntimeError(
+                "canvas_workflow_store / canvas_executor not available "
+                "on hub — server may need restart"
+            )
+
+        wf_id = (job.canvas_workflow_id or "").strip()
+        if not wf_id:
+            raise ValueError(
+                "canvas_workflow target requires job.canvas_workflow_id"
+            )
+
+        wf = store.get(wf_id)
+        if not wf:
+            raise ValueError(f"canvas workflow not found: {wf_id}")
+        if str(wf.get("executable_status", "")) != "ready":
+            raise ValueError(
+                f"canvas workflow {wf_id} is in status "
+                f"{wf.get('executable_status', 'draft')!r}; only 'ready' "
+                f"workflows can be scheduled"
+            )
+
+        try:
+            run = engine.trigger(wf, started_by=f"scheduler:{job.id}")
+        except ValueError as ve:
+            # Pre-flight validation failure (e.g., a referenced agent
+            # was deleted between marking ready and the schedule firing).
+            raise ValueError(f"canvas workflow trigger refused: {ve}")
+
+        logger.info(
+            "scheduled canvas workflow started: job=%s wf=%s run=%s",
+            job.id, wf_id, run.id,
+        )
+
+        # Poll the run state. Canvas executor writes state.json after
+        # each transition, so we re-read from disk.
+        terminal_states = {"succeeded", "failed", "aborted"}
+        deadline = time.time() + max(int(job.timeout or 600), 30)
+        final_state = None
+        while time.time() < deadline:
+            state = engine.store.load_state(run.id) or {}
+            if state.get("state") in terminal_states:
+                final_state = state
+                break
+            time.sleep(2)
+        if final_state is None:
+            # Timeout — there's no abort API on canvas executor in MVP,
+            # but the run keeps going in the background. Just record the
+            # timeout in the job result.
+            raise TimeoutError(
+                f"canvas workflow run {run.id} did not reach a terminal "
+                f"state within {job.timeout}s (still executing in background)"
+            )
+
+        # Build summary
+        run_state = final_state.get("state", "?")
+        node_states = final_state.get("node_states", {})
+        succeeded = sum(1 for s in node_states.values() if s == "succeeded")
+        failed = sum(1 for s in node_states.values() if s == "failed")
+        skipped = sum(1 for s in node_states.values() if s == "skipped")
+        # Artifact count (best-effort — store may be unavailable in tests)
+        artifact_count = 0
+        try:
+            from . import canvas_artifacts as _ca
+            ast = _ca.get_store()
+            if ast is not None:
+                artifact_count = len(ast.list_artifacts(run.id))
+        except Exception:
+            pass
+
+        lines = [
+            f"canvas workflow={wf.get('name', wf_id)} run={run.id} "
+            f"state={run_state}",
+            f"nodes: {succeeded} ok / {failed} failed / {skipped} skipped",
+        ]
+        if artifact_count:
+            lines.append(f"artifacts: {artifact_count}")
+        if final_state.get("error"):
+            lines.append(f"error: {final_state['error'][:300]}")
+        return "\n".join(lines)
 
     def _call_agent_with_timeout(self, agent: Any, prompt: str,
                                   timeout_sec: int = 600) -> str:

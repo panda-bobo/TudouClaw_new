@@ -94,8 +94,17 @@ async def manage_jobs(
             agent_id = body.get("agent_id", "")
             target_type = body.get("target_type", "chat")
             workflow_id = body.get("workflow_id", "")
-            if not agent_id and target_type != "workflow" and not workflow_id:
-                raise HTTPException(400, "agent_id required")
+            canvas_workflow_id = body.get("canvas_workflow_id", "")
+            # agent_id is required ONLY for chat target. Both legacy
+            # workflow + canvas workflow scheduling source the agent
+            # from the workflow definition itself.
+            if (target_type == "chat"
+                    and not agent_id
+                    and not workflow_id
+                    and not canvas_workflow_id):
+                raise HTTPException(400, "agent_id required for chat target")
+            if target_type == "canvas_workflow" and not canvas_workflow_id:
+                raise HTTPException(400, "canvas_workflow_id required for canvas_workflow target")
             # Support creating from preset
             preset_id = body.get("preset_id", "")
             from ...scheduler import PRESET_JOBS
@@ -122,6 +131,7 @@ async def manage_jobs(
                     workflow_id=workflow_id,
                     workflow_step_assignments=body.get("workflow_step_assignments", []) or [],
                     workflow_input=body.get("workflow_input", ""),
+                    canvas_workflow_id=canvas_workflow_id,
                 )
             return job.to_dict()
 
