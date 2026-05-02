@@ -23858,9 +23858,62 @@ function _canvasRenderConfigPanel() {
     // the panel once the fetch lands.
     var agentList = _canvasState._agentsList;
     var curAgentId = n.config.agent_id || '';
+    // Same-agent-in-parallel exclusion: drop agents that are already
+    // assigned to a parallel-reachable sibling node (Layer 1 prevention,
+    // matches the canvas validator's structural check).
+    var parallelUsedAgents = (function() {
+      var wf = _canvasState && _canvasState.current;
+      if (!wf || !wf.nodes || !wf.edges || !nid) return new Set();
+      function ancestors(start) {
+        var seen = new Set();
+        var stack = [start];
+        while (stack.length) {
+          var cur = stack.pop();
+          (wf.edges || []).forEach(function(e) {
+            if (e.to === cur && e.from && !seen.has(e.from)) {
+              seen.add(e.from);
+              stack.push(e.from);
+            }
+          });
+        }
+        return seen;
+      }
+      var myAncestors = ancestors(nid);
+      var myDescendants = (function() {
+        var seen = new Set();
+        var stack = [nid];
+        while (stack.length) {
+          var cur = stack.pop();
+          (wf.edges || []).forEach(function(e) {
+            if (e.from === cur && e.to && !seen.has(e.to)) {
+              seen.add(e.to);
+              stack.push(e.to);
+            }
+          });
+        }
+        return seen;
+      })();
+      var blocked = new Set();
+      (wf.nodes || []).forEach(function(other) {
+        if (other.id === nid) return;
+        if (other.type !== 'agent') return;
+        // parallel-reachable = neither is ancestor of the other
+        if (myAncestors.has(other.id) || myDescendants.has(other.id)) return;
+        var oa = (other.config || {}).agent_id;
+        if (oa) blocked.add(oa);
+      });
+      return blocked;
+    })();
+    var availableAgents = (agentList || []).filter(function(a) {
+      // Always show the currently-selected agent (don't hide your own choice)
+      if (a.id === curAgentId) return true;
+      return !parallelUsedAgents.has(a.id);
+    });
+    var hiddenCount = (agentList || []).length - availableAgents.length;
+    if (hiddenCount < 0) hiddenCount = 0;
     var agentOpts = '<option value=""' + (!curAgentId ? ' selected' : '') + '>— 任意空闲 agent —</option>';
     if (agentList && agentList.length) {
-      agentList.forEach(function(a) {
+      availableAgents.forEach(function(a) {
         var sel = (a.id === curAgentId) ? ' selected' : '';
         var label = a.name + (a.role ? ' · ' + a.role : '') + ' [' + a.id.slice(0, 8) + ']';
         agentOpts += '<option value="' + esc(a.id) + '"' + sel + '>' + esc(label) + '</option>';
@@ -23876,7 +23929,9 @@ function _canvasRenderConfigPanel() {
       + '<div style="margin-bottom:8px"><label style="font-size:11px;color:var(--text3)">绑定 Agent</label>'
       + '<select data-cfg="agent_id" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px">'
       +   agentOpts
-      + '</select></div>'
+      + '</select>'
+      + (hiddenCount > 0 ? '<div style="font-size:10px;color:var(--text3);margin-top:4px;line-height:1.4">已隐藏 ' + hiddenCount + ' 个 agent (已在并行分支使用 — 同 agent 不能在并行分支同时跑)</div>' : '')
+      + '</div>'
       + '<div style="margin-bottom:8px"><label style="font-size:11px;color:var(--text3)">提示词 (Prompt)</label>'
       + '<textarea data-cfg="prompt" placeholder="给 agent 的指令" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px;min-height:80px;resize:vertical">' + esc(n.config.prompt || '') + '</textarea></div>'
       + '<div style="display:flex;gap:6px;margin-bottom:8px">'
