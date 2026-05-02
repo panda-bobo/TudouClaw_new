@@ -22467,11 +22467,10 @@ window._canvasOpenEditor = async function(wfId) {
     _canvasState._runEvents = [];
     _canvasState._runArtifacts = [];
     _canvasState._runStatus = null;
+    _canvasState._nodeRunStates = {};
+    _canvasState._currentRunState = null;
     _canvasRenderEditor();
     _canvasPreloadEntityLists();
-    // Auto-load the latest run's log so users who switch out and
-    // back see "the last thing that happened" instead of a blank
-    // drawer. Failure is silent — workflow may have no runs yet.
     _canvasLoadLatestRunLog(wfId);
   } catch (e) {
     _toast('打开失败: ' + e, 'error');
@@ -22498,7 +22497,16 @@ async function _canvasLoadLatestRunLog(wfId) {
 
 async function _canvasLoadRunLog(wfId, runId, silent) {
   try {
-    var d = await api('GET', '/api/portal/canvas-workflows/' + encodeURIComponent(wfId) + '/runs/' + encodeURIComponent(runId) + '/log');
+    // Fetch log + full run state in parallel — the state.json gives us
+    // per-node started_at / finished_at / errors / vars that the
+    // event log doesn't preserve in compact form.
+    var both = await Promise.all([
+      api('GET', '/api/portal/canvas-workflows/' + encodeURIComponent(wfId) + '/runs/' + encodeURIComponent(runId) + '/log'),
+      api('GET', '/api/portal/canvas-workflows/' + encodeURIComponent(wfId) + '/runs/' + encodeURIComponent(runId)).catch(function(){ return null; }),
+    ]);
+    var d = both[0];
+    var fullState = both[1];
+    if (fullState) _canvasState._currentRunState = fullState;
     var events = d.events || [];
     _canvasState._runEvents = events;
     // Reconstruct run-status pill from terminal event in the log
@@ -23203,6 +23211,42 @@ function _nodeAnchorPoint(node, anchor) {
   return { x: node.x + w/2, y: node.y + h/2 };
 }
 
+// ─────────── Per-node run-state badge (2026-05-02) ───────────
+// State source of truth lives on _canvasState._nodeRunStates so the
+// SVG redraw (drag, layout change, edge add) doesn't lose visual state.
+//
+// Badge palette: small filled circle in the top-right corner of the
+// node, with a Material Symbol indicating the state. Pending = no
+// badge (default look — implies "waiting").
+//
+//   running   → orange spinner, with a CSS rotate animation
+//   succeeded → green check
+//   failed    → red x
+//   skipped   → grey dash (upstream broken)
+
+var _NODE_BADGE_STYLES = {
+  running:   {fill: 'var(--chip-warning-fg)', icon: 'M -3,0 a 3,3 0 1,0 6,0 a 3,3 0 1,0 -6,0', label: '⟳'},
+  succeeded: {fill: 'var(--chip-success-fg)', label: '✓'},
+  failed:    {fill: 'var(--chip-error-fg)',   label: '✕'},
+  skipped:   {fill: 'var(--text3)',           label: '⊘'},
+};
+
+function _canvasNodeStatusBadge(state, nodeW) {
+  if (!state || state === 'pending') return '';
+  var s = _NODE_BADGE_STYLES[state] || _NODE_BADGE_STYLES.skipped;
+  var cx = nodeW - 4;   // top-right corner overlap
+  var cy = 4;
+  var pulseAttr = (state === 'running')
+    ? ' style="animation:_cvRunPulse 1.4s ease-in-out infinite"'
+    : '';
+  return '<g class="cv-node-badge" pointer-events="none"' + pulseAttr + '>'
+    + '<circle cx="' + cx + '" cy="' + cy + '" r="9" fill="' + s.fill + '" stroke="var(--surface)" stroke-width="2"/>'
+    + '<text x="' + cx + '" y="' + (cy + 4) + '" text-anchor="middle" font-size="11" font-weight="700" fill="#fff">'
+    +    s.label
+    + '</text>'
+    + '</g>';
+}
+
 function _canvasRenderNode(n) {
   var nt = _NODE_TYPES[n.type] || _NODE_TYPES.agent;
   var isSel = (_canvasState.selectedNodeId === n.id);
@@ -23235,11 +23279,16 @@ function _canvasRenderNode(n) {
          + 'onmouseenter="this.style.opacity=1" '
          + 'onmouseleave="this.style.opacity=0"/>';
   }).join('');
+  // Run-state badge (pending = nothing). Read from in-memory dict so
+  // it survives SVG redraws; _canvasApplyRunState updates the dict
+  // whenever a state event arrives.
+  var nodeState = (_canvasState._nodeRunStates || {})[n.id];
+  var badgeSvg = _canvasNodeStatusBadge(nodeState, w);
   return '<g data-node-id="' + n.id + '" transform="translate(' + n.x + ',' + n.y + ')" style="cursor:move">'
        + '<rect x="-2" y="-2" width="' + (w+4) + '" height="' + (h+4) + '" fill="transparent" '
        +   'onmouseenter="this.parentNode.querySelectorAll(\'.cv-anchor\').forEach(function(a){a.style.opacity=1})" '
        +   'onmouseleave="this.parentNode.querySelectorAll(\'.cv-anchor\').forEach(function(a){a.style.opacity=0})"/>'
-       + shapeSvg + iconSvg + labelSvg + anchors + '</g>';
+       + shapeSvg + iconSvg + labelSvg + anchors + badgeSvg + '</g>';
 }
 
 function _canvasRenderEdge(e) {
@@ -23518,12 +23567,16 @@ function _canvasRenderConfigPanel() {
     }
   }
 
+  // ── Run-result section (appears at top when this node has run state) ──
+  var runResultBlock = _canvasRenderNodeRunResult(nid);
+
   box.innerHTML =
       '<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid var(--border)">'
     + '  <span style="color:' + nt.color + ';font-size:18px">' + nt.icon + '</span>'
     + '  <div style="font-weight:600;font-size:13px">' + esc(nt.label) + '</div>'
     + '  <span style="margin-left:auto;font-size:10px;color:var(--text3);font-family:monospace">' + esc(n.id) + '</span>'
     + '</div>'
+    + runResultBlock
     + '<div style="margin-bottom:8px"><label style="font-size:11px;color:var(--text3)">显示标签</label>'
     + '<input data-cfg="__label" value="' + esc(n.label || '') + '" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px"></div>'
     + typeFields
@@ -23540,6 +23593,79 @@ function _canvasRenderConfigPanel() {
     el.addEventListener('input', _canvasLintVarRefs);
   });
   _canvasLintVarRefs();
+}
+
+// Per-node run-result block — appears at top of the config panel
+// when this node has run state (running / succeeded / failed / skipped).
+// Reads from _canvasState._nodeRunStates (current state) + ._currentRunState
+// (full per-node started_at / finished_at / errors / vars from state.json).
+function _canvasRenderNodeRunResult(nid) {
+  var state = (_canvasState._nodeRunStates || {})[nid];
+  if (!state) return '';   // node hasn't run / no state
+  var rs = _canvasState._currentRunState || {};
+  var startedAt = (rs.node_started || {})[nid];
+  var finishedAt = (rs.node_finished || {})[nid];
+  var nodeErr = (rs.node_errors || {})[nid];
+  var dur = (startedAt && finishedAt) ? ((finishedAt - startedAt).toFixed(2) + 's') : null;
+  var STATE_LABEL = {
+    running: '运行中', succeeded: '成功', failed: '失败', skipped: '跳过', pending: '等待',
+  };
+  var STATE_KIND = {
+    running: 'warning', succeeded: 'success', failed: 'error', skipped: 'neutral', pending: 'neutral',
+  };
+  var chip = _ui.chip(STATE_LABEL[state] || state, STATE_KIND[state] || 'neutral');
+
+  // Collect vars produced by this node — keys with prefix "{nid}."
+  var prefix = nid + '.';
+  var vars = rs.vars || {};
+  var nodeVars = [];
+  Object.keys(vars).forEach(function(k) {
+    if (k.indexOf(prefix) === 0) {
+      nodeVars.push({key: k.slice(prefix.length), value: vars[k]});
+    }
+  });
+
+  var rows = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">'
+    +   chip
+    +   (dur ? '<span style="font-size:11px;color:var(--text3)">' + dur + '</span>' : '')
+    + '</div>';
+
+  if (startedAt) {
+    rows += '<div style="font-size:10px;color:var(--text3);margin-bottom:2px">开始: '
+         + new Date(startedAt * 1000).toLocaleTimeString('zh-CN', {hour12: false}) + '</div>';
+  }
+  if (finishedAt) {
+    rows += '<div style="font-size:10px;color:var(--text3);margin-bottom:6px">完成: '
+         + new Date(finishedAt * 1000).toLocaleTimeString('zh-CN', {hour12: false}) + '</div>';
+  }
+
+  if (nodeErr) {
+    rows += '<div style="margin-top:6px;padding:6px 8px;background:var(--chip-error-bg);color:var(--chip-error-fg);border-radius:6px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-word">'
+         + esc(nodeErr) + '</div>';
+  }
+
+  if (nodeVars.length) {
+    rows += '<div style="margin-top:8px"><div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.4px;margin-bottom:4px">输出变量 (' + nodeVars.length + ')</div>';
+    nodeVars.slice(0, 10).forEach(function(v) {
+      var vStr;
+      if (typeof v.value === 'string') vStr = v.value;
+      else { try { vStr = JSON.stringify(v.value); } catch(_) { vStr = String(v.value); } }
+      var truncated = (vStr.length > 100) ? (vStr.slice(0, 100) + '…') : vStr;
+      rows += '<div style="margin-bottom:4px;padding:5px 7px;background:var(--surface2,rgba(0,0,0,0.04));border-radius:4px;font-size:11px">'
+        + '<div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--primary);font-weight:600">' + esc(v.key) + '</div>'
+        + '<div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--text2);word-break:break-word;margin-top:1px">' + esc(truncated) + '</div>'
+        + '</div>';
+    });
+    if (nodeVars.length > 10) {
+      rows += '<div style="font-size:10px;color:var(--text3)">… + ' + (nodeVars.length - 10) + ' more (use {{ ' + esc(nid) + '.* }} substitution)</div>';
+    }
+    rows += '</div>';
+  }
+
+  return '<div style="margin-bottom:14px;padding:10px 12px;background:var(--surface);border:1px solid var(--border);border-radius:8px">'
+    + '<div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.4px;margin-bottom:6px;font-weight:600">运行结果</div>'
+    + rows
+    + '</div>';
 }
 
 // HANDOFF [H] — copy a {{node_id.key}} reference to clipboard.
@@ -23727,24 +23853,62 @@ function _canvasEnsureRunStyles() {
 // drag position / selection / pending edge are preserved).
 function _canvasApplyRunState(stateMap) {
   _canvasEnsureRunStyles();
+  // Update the in-memory state dict so SVG redraws (drag, layout
+  // refresh, edge add) keep showing the correct badges. This dict is
+  // the source of truth; the CSS class on the <g> is just the visual
+  // output computed FROM it.
+  if (!_canvasState._nodeRunStates) _canvasState._nodeRunStates = {};
+  Object.keys(stateMap || {}).forEach(function(nid) {
+    var st = String(stateMap[nid] || 'pending');
+    if (st === 'pending') {
+      delete _canvasState._nodeRunStates[nid];
+    } else {
+      _canvasState._nodeRunStates[nid] = st;
+    }
+  });
   var svg = document.getElementById('canvas-svg');
   if (!svg) return;
   Object.keys(stateMap || {}).forEach(function(nid) {
     var g = svg.querySelector('g[data-node-id="' + nid + '"]');
     if (!g) return;
-    // Strip prior cv-node-* classes, add the new one (or none for pending).
     var st = String(stateMap[nid] || 'pending');
     var cls = (g.getAttribute('class') || '')
       .split(/\s+/)
       .filter(function(c) { return c && c.indexOf('cv-node-') !== 0; });
     if (st !== 'pending') cls.push('cv-node-' + st);
     g.setAttribute('class', cls.join(' '));
+    // Re-render the node's badge by replacing the existing badge group
+    // (if any). Cheaper than full SVG redraw.
+    var oldBadge = g.querySelector(':scope > .cv-node-badge');
+    if (oldBadge) oldBadge.remove();
+    if (st !== 'pending') {
+      var nodeType = (function() {
+        var n = _findNode(nid);
+        return n ? n.type : 'agent';
+      })();
+      var nw = (nodeType === 'start' || nodeType === 'end') ? 50 : _NODE_W;
+      var badgeStr = _canvasNodeStatusBadge(st, nw);
+      if (badgeStr) {
+        // SVG innerHTML doesn't accept fragments cleanly cross-browser;
+        // use a temporary svg holder + appendChild.
+        var tmp = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        tmp.innerHTML = badgeStr;
+        var badgeNode = tmp.firstElementChild;
+        if (badgeNode) g.appendChild(badgeNode);
+      }
+    }
   });
+  // If the config panel is open on a node whose state just changed,
+  // refresh it so the run-result section reflects the new state.
+  if (_canvasState.selectedNodeId && stateMap[_canvasState.selectedNodeId]) {
+    _canvasRenderConfigPanel();
+  }
 }
 
 // Reset all node visual state — called when starting a new run (so a
 // previous run's red/green colors don't bleed in).
 function _canvasResetRunState() {
+  _canvasState._nodeRunStates = {};
   var svg = document.getElementById('canvas-svg');
   if (!svg) return;
   svg.querySelectorAll('g[data-node-id]').forEach(function(g) {
@@ -23752,6 +23916,8 @@ function _canvasResetRunState() {
       .split(/\s+/)
       .filter(function(c) { return c && c.indexOf('cv-node-') !== 0; });
     g.setAttribute('class', cls.join(' '));
+    var badge = g.querySelector(':scope > .cv-node-badge');
+    if (badge) badge.remove();
   });
 }
 
@@ -23789,6 +23955,8 @@ window._canvasStartRun = async function() {
   // if the SSE stream takes a moment to deliver the first event.
   _canvasState._runEvents = [];
   _canvasState._runArtifacts = [];   // reset so previous run doesn't leak in
+  _canvasState._nodeRunStates = {};
+  _canvasState._currentRunState = null;
   _canvasState._logExpanded = true;
   _canvasRenderEditor();   // re-render to apply the expanded drawer
   _canvasSetRunStatus('running', {run_id: run.id});
