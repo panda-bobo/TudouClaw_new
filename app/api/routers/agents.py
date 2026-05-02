@@ -196,9 +196,7 @@ async def list_desktop_agents(
     the Agent edit page. Loopback-only: requests from non-127.0.0.1
     clients get 403 since no auth header is required for this surface.
     """
-    client_host = request.client.host if request.client else ""
-    if client_host not in ("127.0.0.1", "::1", "localhost"):
-        raise HTTPException(status_code=403, detail="loopback only")
+    _require_loopback(request)
 
     agents_raw = hub.list_agents() if hasattr(hub, "list_agents") else []
     out: list[dict] = []
@@ -216,6 +214,43 @@ async def list_desktop_agents(
             "role_title": d.get("role_title", ""),
         })
     return {"agents": out}
+
+
+# ── Loopback helpers (shared by all /agents/desktop/* endpoints) ──
+# All desktop endpoints assume "the request comes from the same Mac
+# as the FastAPI server" and skip JWT. This is consistent with the
+# single-deployment-per-company model — there's exactly one human
+# operating the floater and the API at the same time.
+
+def _require_loopback(request: Request) -> None:
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403, detail="loopback only")
+
+
+def _desktop_loopback_user() -> CurrentUser:
+    """Synthesize a super-admin user for loopback desktop requests so
+    the existing chat handlers' permission checks pass without us
+    duplicating their bodies."""
+    return CurrentUser(user_id="__desktop__", role="superAdmin")
+
+
+@router.post("/agents/desktop/{agent_id}/chat")
+async def desktop_send_chat(
+    request: Request,
+    agent_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+):
+    """Loopback-only mirror of /agent/{id}/chat for the Mac floater.
+    Delegates to the same handler with a synthesized super-admin user."""
+    _require_loopback(request)
+    return await send_chat(
+        agent_id=agent_id,
+        body=body,
+        hub=hub,
+        user=_desktop_loopback_user(),
+    )
 
 
 # ---------------------------------------------------------------------------

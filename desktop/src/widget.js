@@ -255,33 +255,129 @@ function appendChat(role, text) {
   log.scrollTop = log.scrollHeight;
 }
 
+// Streaming state — reset on every new send. The bubble is created
+// when we open the EventSource so text_delta can append in place;
+// closing/cancelling guarantees we don't leak stale streams when the
+// user fires another message before the previous reply finished.
+let _activeStream = null;          // EventSource | null
+let _activeBubble = null;          // <div.msg.agent> currently being filled
+let _sendInFlight = false;
+
 async function sendChat() {
+  if (_sendInFlight) return;
   if (!currentAgent) { appendChat('sys', '没有可用的 Agent'); return; }
   const inp = $('#chat-input');
+  const sendBtn = $('#chat-send');
   const msg = inp.value.trim();
   if (!msg) return;
   appendChat('user', msg);
   inp.value = '';
+  _sendInFlight = true;
+  if (sendBtn) sendBtn.disabled = true;
+
   try {
-    const res = await fetch(`${API_BASE}/agent/${currentAgent.id}/chat`, {
+    const res = await fetch(`${API_BASE}/agents/desktop/${currentAgent.id}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: msg }),
     });
-    if (res.status === 401) {
-      appendChat('sys', '需要登录令牌（Phase 3 会接通）');
+    if (res.status === 409) {
+      // NO_LLM_CONFIGURED — agent has no provider/model
+      const data = await res.json().catch(() => ({}));
+      const m = (data.detail && data.detail.message) || 'Agent 未配置 LLM';
+      appendChat('sys', m);
       return;
     }
-    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      const m = (data.detail && (data.detail.message || data.detail)) || `HTTP ${res.status}`;
+      appendChat('sys', typeof m === 'string' ? m : JSON.stringify(m));
+      return;
+    }
+    const data = await res.json();
     if (data.task_id) {
-      appendChat('agent', `（任务已派发: ${data.task_id.slice(0, 8)} — 暂未连流）`);
-    } else if (data.detail) {
-      appendChat('sys', typeof data.detail === 'string' ? data.detail : (data.detail.message || JSON.stringify(data.detail)));
+      _streamResponse(data.task_id);
     } else {
-      appendChat('agent', '（已发送，但未返回 task_id）');
+      appendChat('sys', 'no task_id returned');
     }
   } catch (e) {
     appendChat('sys', e.message || String(e));
+  } finally {
+    _sendInFlight = false;
+    if (sendBtn) sendBtn.disabled = false;
+  }
+}
+
+function _closeActiveStream() {
+  if (_activeStream) {
+    try { _activeStream.close(); } catch (_) {}
+    _activeStream = null;
+  }
+  _activeBubble = null;
+}
+
+function _streamResponse(taskId) {
+  _closeActiveStream();
+  const log = $('#chat-log');
+  _activeBubble = document.createElement('div');
+  _activeBubble.className = 'msg agent';
+  _activeBubble.textContent = '…';
+  log.appendChild(_activeBubble);
+  log.scrollTop = log.scrollHeight;
+
+  const url = `${API_BASE}/agents/desktop/chat-task/${taskId}/stream`;
+  const es = new EventSource(url);
+  _activeStream = es;
+
+  let firstDelta = true;
+
+  es.onmessage = (ev) => {
+    if (ev.data === '[DONE]') { _closeActiveStream(); return; }
+    let evt;
+    try { evt = JSON.parse(ev.data); }
+    catch (_) { return; }
+    _handleStreamEvent(evt, () => { firstDelta = false; }, () => firstDelta);
+  };
+  es.onerror = () => { _closeActiveStream(); };
+}
+
+function _handleStreamEvent(evt, markDelta, isFirstDelta) {
+  const log = $('#chat-log');
+  switch (evt.type) {
+    case 'text_delta':
+      if (!_activeBubble) return;
+      if (isFirstDelta()) { _activeBubble.textContent = ''; markDelta(); }
+      _activeBubble.textContent += evt.content || '';
+      log.scrollTop = log.scrollHeight;
+      break;
+    case 'text':
+      // Final assembled message — replace whatever was streaming.
+      if (!_activeBubble) return;
+      if (evt.content) {
+        _activeBubble.textContent = evt.content;
+        markDelta();
+        log.scrollTop = log.scrollHeight;
+      }
+      break;
+    case 'tool_call': {
+      const note = document.createElement('div');
+      note.className = 'msg agent';
+      note.style.fontStyle = 'italic';
+      note.style.color = '#9aa0b4';
+      note.textContent = '→ ' + (evt.name || 'tool');
+      log.appendChild(note);
+      log.scrollTop = log.scrollHeight;
+      break;
+    }
+    case 'error':
+      appendChat('sys', evt.content || 'error');
+      break;
+    case 'done':
+    case 'status':
+      // status is a heartbeat; done = task finished (next iter sends [DONE]).
+      break;
+    default:
+      // ignore: thinking, plan_update, tool_result, etc. (not surfaced in MVP)
   }
 }
 

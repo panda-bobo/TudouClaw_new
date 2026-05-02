@@ -6,7 +6,7 @@ import json
 import logging
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from ..deps.hub import get_hub
@@ -88,6 +88,29 @@ async def stream_task_events(
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Desktop loopback SSE — same body as stream_task_events, but no JWT.
+# Used by the Mac floater app; permission to chat with the agent was
+# already granted (or denied) at /agents/desktop/{id}/chat time, so by
+# the time we have a task_id, the read side is fine to expose.
+# ---------------------------------------------------------------------------
+
+@router.get("/agents/desktop/chat-task/{task_id}/stream")
+async def desktop_stream_task_events(
+    request: Request,
+    task_id: str,
+    cursor: int = Query(0, ge=0),
+):
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403, detail="loopback only")
+    return await stream_task_events(
+        task_id=task_id,
+        cursor=cursor,
+        user=CurrentUser(user_id="__desktop__", role="superAdmin"),
     )
 
 
