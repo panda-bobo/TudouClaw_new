@@ -23884,7 +23884,14 @@ function _canvasRenderConfigPanel() {
       + '<input data-cfg="timeout" type="number" value="' + (n.config.timeout || 300) + '" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px"></div>'
       + '<div style="flex:1"><label style="font-size:11px;color:var(--text3)">重试</label>'
       + '<input data-cfg="retry" type="number" value="' + (n.config.retry || 0) + '" min="0" max="5" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px"></div>'
-      + '</div>';
+      + '</div>'
+      // success_when.file_glob — closes the agent node as soon as a
+      // matching file shows up in the run's shared dir, even if the
+      // LLM is still grinding. Solves the "agent finished writing
+      // the file 9s after timeout" race.
+      + '<div style="margin-bottom:4px"><label style="font-size:11px;color:var(--text3)">完成条件 — 文件名 (可选)</label>'
+      + '<input data-cfg="success_when.file_glob" type="text" placeholder="e.g. report_*.md  或  AI热点*.md" value="' + esc(((n.config.success_when || {}).file_glob) || '') + '" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px"></div>'
+      + '<div style="font-size:10px;color:var(--text3);line-height:1.4;margin-bottom:8px">指定后，shared 目录里出现匹配文件就立刻结束（不等 LLM 自报）。留空走标准 LLM-COMPLETED 路径。</div>';
   } else if (n.type === 'decision') {
     typeFields = ''
       + '<div style="margin-bottom:8px"><label style="font-size:11px;color:var(--text3)">条件表达式</label>'
@@ -24104,16 +24111,43 @@ window._canvasApplyConfig = function() {
     var val = el.value;
     if (key === '__label') {
       n.label = val;
-    } else {
-      // Try parsing JSON for the args field
-      if (key === 'args' && val.trim()) {
-        try { n.config[key] = JSON.parse(val); }
-        catch (e) { n.config[key] = val; /* keep as string */ }
-      } else if (el.type === 'number') {
-        n.config[key] = parseInt(val, 10) || 0;
-      } else {
-        n.config[key] = val;
+      return;
+    }
+    // Dot-notation = nested dict key (e.g. "success_when.file_glob")
+    if (key.indexOf('.') >= 0) {
+      var parts = key.split('.');
+      // Empty val → delete leaf + prune empty parent so the JSON stays
+      // tidy (no `success_when: {}` with no real fields).
+      if (val === '' || (typeof val === 'string' && val.trim() === '')) {
+        var holder = n.config;
+        for (var i = 0; i < parts.length - 1; i++) {
+          if (!holder[parts[i]] || typeof holder[parts[i]] !== 'object') return;
+          holder = holder[parts[i]];
+        }
+        delete holder[parts[parts.length - 1]];
+        if (parts.length === 2 && Object.keys(n.config[parts[0]] || {}).length === 0) {
+          delete n.config[parts[0]];
+        }
+        return;
       }
+      var holder = n.config;
+      for (var j = 0; j < parts.length - 1; j++) {
+        if (!holder[parts[j]] || typeof holder[parts[j]] !== 'object') {
+          holder[parts[j]] = {};
+        }
+        holder = holder[parts[j]];
+      }
+      holder[parts[parts.length - 1]] = (el.type === 'number') ? (parseInt(val, 10) || 0) : val;
+      return;
+    }
+    // Try parsing JSON for the args field
+    if (key === 'args' && val.trim()) {
+      try { n.config[key] = JSON.parse(val); }
+      catch (e) { n.config[key] = val; /* keep as string */ }
+    } else if (el.type === 'number') {
+      n.config[key] = parseInt(val, 10) || 0;
+    } else {
+      n.config[key] = val;
     }
   });
   _canvasRedrawSvg();

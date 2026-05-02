@@ -76,6 +76,44 @@ TERMINAL_NODE_STATES = {NodeState.SUCCEEDED, NodeState.FAILED,
 _VAR_PATTERN = re.compile(r"\{\{\s*([A-Za-z0-9_.\-]+)\s*\}\}")
 
 
+def _scan_for_marker_file(shared_dir: "Path | str",
+                          file_glob: str,
+                          pre_snapshot: dict[str, float]) -> str | None:
+    """Find a NEW file under ``shared_dir`` whose basename or relative
+    path matches ``file_glob`` (fnmatch syntax). "New" = its rel-path
+    is NOT in ``pre_snapshot`` (the dir snapshot taken before the
+    agent's chat turn started).
+
+    Used by the agent node executor's success_when.file_glob path so
+    we can declare the node done as soon as the deliverable lands,
+    without waiting for the LLM to also finish narrating.
+
+    Returns the relative path string, or None if nothing matches.
+    Catches OSError silently (e.g. shared_dir vanished) — caller will
+    just keep polling until timeout.
+    """
+    from fnmatch import fnmatch
+    from pathlib import Path as _P
+    base = _P(str(shared_dir))
+    if not base.is_dir():
+        return None
+    try:
+        for p in base.rglob("*"):
+            if not p.is_file():
+                continue
+            try:
+                rel = str(p.relative_to(base))
+            except ValueError:
+                continue
+            if rel in pre_snapshot:
+                continue
+            if fnmatch(p.name, file_glob) or fnmatch(rel, file_glob):
+                return rel
+    except OSError:
+        return None
+    return None
+
+
 def _substitute_vars(template: Any, vars_dict: dict[str, Any]) -> Any:
     """Replace ``{{node_id.key}}`` references in any string field.
 
@@ -797,6 +835,23 @@ def _exec_agent(engine: WorkflowEngine, run: WorkflowRun,
     if not prompt or not str(prompt).strip():
         raise ValueError("agent node missing config.prompt")
 
+    # ── success_when: declarative termination by deliverable ──
+    # Optional dict with one or more matchers. When ANY matcher fires
+    # in the shared workspace before the LLM self-reports COMPLETED,
+    # we abort the chat task and mark the node SUCCEEDED. This solves
+    # the "agent finished writing the file 9 seconds after canvas
+    # timeout" race — the file IS the deliverable, no need to wait
+    # for the LLM to also finish narrating about it.
+    #
+    # Supported matchers (MVP):
+    #   file_glob: "report_*.md"   — basename or rel-path matches the
+    #                                 fnmatch glob; only NEW files
+    #                                 (not in pre_snapshot) count.
+    success_when = config.get("success_when") or {}
+    if not isinstance(success_when, dict):
+        success_when = {}
+    success_file_glob = str(success_when.get("file_glob") or "").strip()
+
     agent = engine.hub.get_agent(agent_id) if hasattr(
         engine.hub, "get_agent") else None
     if agent is None:
@@ -842,16 +897,36 @@ def _exec_agent(engine: WorkflowEngine, run: WorkflowRun,
         task = agent.chat_async(str(prompt),
                                 source=f"canvas:{run.workflow_id}:{node['id']}")
 
-        # Poll until terminal. ChatTaskStatus enum has terminal members
-        # COMPLETED / FAILED / ABORTED.
+        # Poll until terminal OR success_when matcher fires. ChatTaskStatus
+        # enum has terminal members COMPLETED / FAILED / ABORTED. If
+        # the matcher fires first we abort the task and treat as success.
         from .chat_task import ChatTaskStatus
         deadline = time.time() + timeout
+        marker_file: str | None = None
+        # When polling for a marker we go a bit faster so the agent
+        # doesn't keep grinding for several seconds after producing
+        # the file. 0.5s is fine when only checking task.status.
+        poll_interval = 0.3 if success_file_glob else 0.5
+
         while time.time() < deadline:
             if task.status in (ChatTaskStatus.COMPLETED,
                                ChatTaskStatus.FAILED,
                                ChatTaskStatus.ABORTED):
                 break
-            time.sleep(0.5)
+            if success_file_glob and artifact_store is not None:
+                marker_file = _scan_for_marker_file(
+                    artifact_store.shared_dir(run.id),
+                    success_file_glob,
+                    pre_snapshot,
+                )
+                if marker_file:
+                    # Stop the LLM loop ASAP — the deliverable is in.
+                    try:
+                        task.abort()
+                    except Exception:
+                        pass
+                    break
+            time.sleep(poll_interval)
         else:
             # Timeout — try to abort the task so we don't leave it running
             try:
@@ -863,17 +938,30 @@ def _exec_agent(engine: WorkflowEngine, run: WorkflowRun,
                 f"(task {task.id}, status {task.status.value})"
             )
 
-        if task.status != ChatTaskStatus.COMPLETED:
+        # If success_when fired, treat as success regardless of LLM state.
+        # Otherwise require the chat task to have ended in COMPLETED.
+        if marker_file:
+            logger.info(
+                "agent node %s closed early by file marker: %s "
+                "(LLM state was %s)", node.get("id", ""),
+                marker_file, task.status.value,
+            )
+        elif task.status != ChatTaskStatus.COMPLETED:
             raise RuntimeError(
                 f"agent task {task.id} ended in {task.status.value}: "
                 f"{(task.error or task.result or '')[:200]}"
             )
 
         outputs: dict[str, Any] = {
-            "output": task.result or "",
+            "output": task.result or (
+                f"(closed early by file marker: {marker_file})"
+                if marker_file else ""
+            ),
             "task_id": task.id,
             "duration_s": task.updated_at - task.created_at,
         }
+        if marker_file:
+            outputs["success_marker_file"] = marker_file
 
         # ── Artifact closed-loop post-scan ──
         # Diff the shared dir against the pre-snapshot; register every

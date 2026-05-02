@@ -286,6 +286,17 @@ class WorkflowStore:
             if t == "decision":
                 if not cfg.get("condition"):
                     issues.append(f"decision node '{n.get('label') or n['id']}' missing config.condition")
+            if t == "agent":
+                # success_when (optional) must be a dict; if file_glob is
+                # set it must be a non-empty string. Saves the user from
+                # discovering the bug at runtime when nothing matches.
+                sw = cfg.get("success_when")
+                if sw is not None and not isinstance(sw, dict):
+                    issues.append(f"agent node '{n.get('label') or n['id']}' has success_when that isn't a dict")
+                elif isinstance(sw, dict):
+                    fg = sw.get("file_glob")
+                    if fg is not None and not (isinstance(fg, str) and fg.strip()):
+                        issues.append(f"agent node '{n.get('label') or n['id']}' has empty success_when.file_glob")
             # Non-end nodes need at least one outgoing edge
             if t != "end" and not adj.get(n["id"]):
                 issues.append(f"node '{n.get('label') or n['id']}' ({t}) has no outgoing edge — execution would dead-end here")
