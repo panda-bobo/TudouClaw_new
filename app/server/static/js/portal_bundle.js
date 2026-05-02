@@ -22371,6 +22371,7 @@ function _canvasRenderEditor() {
     + '    <input id="canvas-name" value="' + esc(wf.name) + '" style="font-weight:600;font-size:14px;padding:4px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);flex:1;max-width:340px">'
     +      _canvasStatusBadge(wf.executable_status || 'draft')
     + '    <span id="canvas-run-status-pill" style="display:none"></span>'
+    + '    <button id="canvas-artifacts-btn" onclick="_canvasOpenArtifactsModal()" style="display:none;padding:3px 10px;font-size:11px;border-radius:10px;background:rgba(99,102,241,0.18);color:#4f46e5;border:none;font-weight:600;cursor:pointer;margin-left:6px"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">folder_zip</span> 交付件 <span id="canvas-artifacts-count">0</span></button>'
     + '    <span style="font-size:11px;color:var(--text3);font-family:monospace">' + esc(wf.id || '(unsaved)') + '</span>'
     + '    <div style="margin-left:auto;display:flex;gap:6px">'
     +        (wf.id ? _canvasStatusActions(wf) : '')
@@ -22555,6 +22556,217 @@ function _canvasSetRunStatus(status, payload) {
     }, 30000);
   }
 }
+
+// ─────────── Artifacts panel (HANDOFF closed-loop UI) ───────────
+//
+// Per-run shared workspace lives at <data_dir>/canvas_runs/<run_id>/shared/.
+// Engine post-scans after each agent node + auto-registers new files
+// as artifacts. UI:
+//   • toolbar pill with count, opens a modal
+//   • modal lists artifacts (marked deliverables first), per-row:
+//     name + size + producer node + download / mark / delete actions
+//   • polled every 2s while a run is active, refreshed on terminal events
+
+function _canvasUpdateArtifactsButton() {
+  var btn = document.getElementById('canvas-artifacts-btn');
+  var cnt = document.getElementById('canvas-artifacts-count');
+  if (!btn || !cnt) return;
+  var artifacts = _canvasState._runArtifacts || [];
+  var n = artifacts.length;
+  if (n > 0) {
+    btn.style.display = 'inline-flex';
+    btn.style.alignItems = 'center';
+    btn.style.gap = '4px';
+    cnt.textContent = String(n);
+  } else {
+    btn.style.display = 'none';
+  }
+}
+
+async function _canvasRefreshArtifactsList() {
+  var wf = _canvasState.current;
+  var rs = _canvasState._runStatus;
+  if (!wf || !wf.id || !rs || !rs.payload || !rs.payload.run_id) {
+    _canvasState._runArtifacts = [];
+    _canvasUpdateArtifactsButton();
+    return;
+  }
+  var runId = rs.payload.run_id;
+  try {
+    var d = await api('GET', '/api/portal/canvas-workflows/' + encodeURIComponent(wf.id)
+      + '/runs/' + encodeURIComponent(runId) + '/artifacts');
+    _canvasState._runArtifacts = d.artifacts || [];
+  } catch (e) {
+    // Ignore — likely no artifacts endpoint or no run yet
+  }
+  _canvasUpdateArtifactsButton();
+  // If the modal is open, re-render its body too
+  if (document.getElementById('canvas-artifacts-modal')) {
+    _canvasRenderArtifactsModalBody();
+  }
+}
+
+function _canvasFmtBytes(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / (1024 * 1024)).toFixed(2) + ' MB';
+}
+
+window._canvasOpenArtifactsModal = function() {
+  var existing = document.getElementById('canvas-artifacts-modal');
+  if (existing) { existing.remove(); return; }
+  var modal = document.createElement('div');
+  modal.id = 'canvas-artifacts-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9998;display:flex;align-items:center;justify-content:center;padding:24px';
+  modal.innerHTML =
+      '<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;width:min(820px,100%);max-height:84vh;display:flex;flex-direction:column;overflow:hidden">'
+    + '  <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border-light)">'
+    + '    <div><div style="font-size:14px;font-weight:700"><span class="material-symbols-outlined" style="font-size:18px;vertical-align:-4px;color:#4f46e5">folder_zip</span> 运行交付件</div>'
+    + '         <div style="font-size:11px;color:var(--text3);margin-top:2px">★ 标记的交付件靠前;其余为自动检测的中间文件</div></div>'
+    + '    <div style="display:flex;gap:6px">'
+    + '      <button class="btn btn-ghost btn-sm" onclick="_canvasOpenArtifactsAuditModal()" title="查看审计日志"><span class="material-symbols-outlined" style="font-size:14px">history</span> 审计</button>'
+    + '      <button class="btn btn-ghost btn-sm" onclick="_canvasRefreshArtifactsList()" title="刷新"><span class="material-symbols-outlined" style="font-size:14px">refresh</span></button>'
+    + '      <button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'canvas-artifacts-modal\').remove()"><span class="material-symbols-outlined" style="font-size:16px">close</span></button>'
+    + '    </div>'
+    + '  </div>'
+    + '  <div id="canvas-artifacts-modal-body" style="flex:1;overflow:auto;padding:14px 18px"></div>'
+    + '</div>';
+  modal.addEventListener('click', function(e){ if (e.target === modal) modal.remove(); });
+  document.body.appendChild(modal);
+  _canvasRenderArtifactsModalBody();
+};
+
+function _canvasRenderArtifactsModalBody() {
+  var body = document.getElementById('canvas-artifacts-modal-body');
+  if (!body) return;
+  var artifacts = _canvasState._runArtifacts || [];
+  if (!artifacts.length) {
+    body.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text3);font-size:12px">暂无交付件 — agent 节点写入 <code>working_dir</code> 的文件会自动出现在这里</div>';
+    return;
+  }
+  var wf = _canvasState.current;
+  var rs = _canvasState._runStatus;
+  var runId = rs && rs.payload && rs.payload.run_id;
+  if (!wf || !runId) {
+    body.innerHTML = '<div style="color:var(--text3);font-size:12px">no active run</div>';
+    return;
+  }
+  var dlBase = '/api/portal/canvas-workflows/' + encodeURIComponent(wf.id) + '/runs/' + encodeURIComponent(runId) + '/artifacts/';
+  body.innerHTML = artifacts.map(function(a) {
+    var markChip = a.marked
+      ? '<span style="font-size:10px;padding:1px 7px;background:rgba(34,197,94,0.18);color:#16a34a;border-radius:9px;font-weight:600;margin-right:6px">★ 已标记</span>'
+      : '<span style="font-size:10px;padding:1px 7px;background:var(--surface2,rgba(0,0,0,0.05));color:var(--text3);border-radius:9px;margin-right:6px">自动检测</span>';
+    var tagChips = (a.tags || []).map(function(t) {
+      return '<span style="font-size:10px;padding:1px 6px;background:rgba(99,102,241,0.15);color:#4f46e5;border-radius:9px;margin-right:3px">' + esc(t) + '</span>';
+    }).join('');
+    var descLine = a.description
+      ? '<div style="font-size:11px;color:var(--text3);margin-top:4px;font-style:italic">' + esc(a.description) + '</div>'
+      : '';
+    return '<div style="border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:10px;background:var(--bg)">'
+      + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px">'
+      +   '<div style="flex:1;min-width:0">'
+      +     '<div style="display:flex;align-items:center;gap:4px;margin-bottom:4px">' + markChip + tagChips + '</div>'
+      +     '<div style="font-size:14px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(a.name) + '</div>'
+      +     '<div style="font-size:11px;color:var(--text3);margin-top:3px">'
+      +       _canvasFmtBytes(a.size_bytes||0) + ' · ' + esc(a.mime || '')
+      +       ' · 来自 <b style="color:var(--text2)">' + esc(a.producer_node_id) + '</b>'
+      +       (a.producer_agent_id ? ' (' + esc(a.producer_agent_id.slice(0,8)) + ')' : '')
+      +     '</div>'
+      +     descLine
+      +     '<div style="font-size:10px;color:var(--text3);margin-top:4px;font-family:monospace">vars: ' + esc(a.vars_key) + '</div>'
+      +   '</div>'
+      +   '<div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">'
+      +     '<a href="' + dlBase + encodeURIComponent(a.id) + '" download="' + esc(a.name) + '" class="btn btn-sm" style="padding:4px 10px;font-size:11px;text-decoration:none"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:-2px">download</span> 下载</a>'
+      +     (a.marked ? '' : '<button onclick="_canvasMarkArtifact(\'' + esc(a.id) + '\')" class="btn btn-sm" style="padding:4px 10px;font-size:11px;color:#16a34a"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:-2px">star</span> 标记</button>')
+      +     '<button onclick="_canvasDeleteArtifact(\'' + esc(a.id) + '\',\'' + esc(a.name).replace(/'/g, "\\'") + '\')" class="btn btn-sm" style="padding:4px 10px;font-size:11px;color:var(--error)"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:-2px">delete</span></button>'
+      +   '</div>'
+      + '</div>'
+      + '</div>';
+  }).join('');
+}
+
+window._canvasMarkArtifact = async function(artifactId) {
+  var wf = _canvasState.current;
+  var runId = _canvasState._runStatus && _canvasState._runStatus.payload && _canvasState._runStatus.payload.run_id;
+  if (!wf || !runId) return;
+  var desc = prompt('描述(可选):', '') || '';
+  var tagsRaw = prompt('标签(逗号分隔,可选):', '') || '';
+  var tags = tagsRaw.split(',').map(function(s){return s.trim();}).filter(Boolean);
+  try {
+    await api('POST', '/api/portal/canvas-workflows/' + encodeURIComponent(wf.id)
+      + '/runs/' + encodeURIComponent(runId) + '/artifacts/' + encodeURIComponent(artifactId) + '/mark',
+      {description: desc, tags: tags});
+    _toast('✓ 已标记为交付件', 'success');
+    await _canvasRefreshArtifactsList();
+  } catch (e) {
+    _toast('标记失败: ' + e, 'error');
+  }
+};
+
+window._canvasDeleteArtifact = async function(artifactId, name) {
+  if (!confirm('删除 "' + name + '"?\n文件和索引都会移除,审计记录保留。')) return;
+  var wf = _canvasState.current;
+  var runId = _canvasState._runStatus && _canvasState._runStatus.payload && _canvasState._runStatus.payload.run_id;
+  if (!wf || !runId) return;
+  try {
+    await api('DELETE', '/api/portal/canvas-workflows/' + encodeURIComponent(wf.id)
+      + '/runs/' + encodeURIComponent(runId) + '/artifacts/' + encodeURIComponent(artifactId));
+    _toast('已删除', 'info');
+    await _canvasRefreshArtifactsList();
+  } catch (e) {
+    _toast('删除失败: ' + e, 'error');
+  }
+};
+
+window._canvasOpenArtifactsAuditModal = async function() {
+  var wf = _canvasState.current;
+  var runId = _canvasState._runStatus && _canvasState._runStatus.payload && _canvasState._runStatus.payload.run_id;
+  if (!wf || !runId) return;
+  var existing = document.getElementById('canvas-audit-modal');
+  if (existing) existing.remove();
+  var modal = document.createElement('div');
+  modal.id = 'canvas-audit-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px';
+  modal.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;width:min(820px,100%);max-height:84vh;display:flex;flex-direction:column;overflow:hidden">'
+    + '<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border-light)">'
+    + '<div style="font-size:14px;font-weight:700"><span class="material-symbols-outlined" style="font-size:18px;vertical-align:-4px">history</span> Artifact 审计日志</div>'
+    + '<button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'canvas-audit-modal\').remove()"><span class="material-symbols-outlined" style="font-size:16px">close</span></button>'
+    + '</div>'
+    + '<div id="canvas-audit-body" style="flex:1;overflow:auto;padding:14px 18px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px">加载中…</div>'
+    + '</div>';
+  modal.addEventListener('click', function(e){ if (e.target === modal) modal.remove(); });
+  document.body.appendChild(modal);
+  try {
+    var d = await api('GET', '/api/portal/canvas-workflows/' + encodeURIComponent(wf.id) + '/runs/' + encodeURIComponent(runId) + '/audit');
+    var rows = d.audit || [];
+    var ACTION_COLORS = {
+      register: '#16a34a', mark: '#4f46e5', read: '#3b82f6',
+      delete: '#dc2626', scan_start: '#94a3b8', scan_end: '#94a3b8',
+    };
+    document.getElementById('canvas-audit-body').innerHTML = rows.length
+      ? rows.map(function(r) {
+          var ts = r.ts ? new Date(r.ts * 1000).toLocaleTimeString('zh-CN', {hour12: false}) + '.' + String(Math.floor((r.ts*1000)%1000)).padStart(3,'0') : '';
+          var color = ACTION_COLORS[r.action] || 'var(--text3)';
+          var detail = '';
+          if (r.action === 'register') detail = ' size=' + (r.size_bytes||0) + ' sha=' + (r.sha256||'').slice(0,8);
+          else if (r.action === 'mark') detail = ' tags=' + JSON.stringify(r.tags||[]);
+          else if (r.action === 'scan_start') detail = ' pre=' + (r.pre_files||0) + ' files';
+          else if (r.action === 'scan_end') detail = ' new=' + (r.new_artifacts||0);
+          return '<div style="display:flex;gap:8px;padding:3px 0;border-bottom:1px solid var(--border-light)">'
+            + '<span style="color:var(--text3);flex-shrink:0">' + ts + '</span>'
+            + '<span style="color:' + color + ';font-weight:700;min-width:80px">' + esc(r.action || '?') + '</span>'
+            + '<span style="color:var(--text2);flex:1;min-width:0;word-break:break-word">'
+            +   (r.actor_agent_id ? '<b>' + esc(r.actor_agent_id.slice(0,8)) + '</b>@' : '')
+            +   esc(r.actor_node_id || '') + ' · ' + esc(r.name || r.artifact_id || '')
+            +   '<span style="color:var(--text3)">' + detail + '</span>'
+            + '</span>'
+            + '</div>';
+        }).join('')
+      : '<div style="color:var(--text3);text-align:center;padding:30px">暂无审计记录</div>';
+  } catch (e) {
+    document.getElementById('canvas-audit-body').innerHTML = '<div style="color:var(--error)">加载失败: ' + esc(String(e)) + '</div>';
+  }
+};
 
 function _canvasRenderRunStatusPill() {
   var el = document.getElementById('canvas-run-status-pill');
@@ -23236,9 +23448,11 @@ window._canvasStartRun = async function() {
   // there's always SOMETHING in the log when the drawer opens, even
   // if the SSE stream takes a moment to deliver the first event.
   _canvasState._runEvents = [];
+  _canvasState._runArtifacts = [];   // reset so previous run doesn't leak in
   _canvasState._logExpanded = true;
   _canvasRenderEditor();   // re-render to apply the expanded drawer
   _canvasSetRunStatus('running', {run_id: run.id});
+  _canvasUpdateArtifactsButton();    // hide the button until artifacts arrive
   _canvasAppendLogEvent({
     ts: Date.now()/1000,
     type: 'run_created',
@@ -23270,6 +23484,10 @@ window._canvasStartRun = async function() {
       var m = {}; m[d.node_id] = 'running'; _canvasApplyRunState(m);
     } else if (t === 'node_succeeded') {
       var m = {}; m[d.node_id] = 'succeeded'; _canvasApplyRunState(m);
+      // Each node completion may have produced new artifacts —
+      // refresh the toolbar pill + list so the user sees them
+      // appear in real time.
+      _canvasRefreshArtifactsList();
     } else if (t === 'node_failed') {
       var m = {}; m[d.node_id] = 'failed'; _canvasApplyRunState(m);
       _toast('节点失败: ' + d.node_id + ' — ' + (d.error || '').slice(0, 80), 'error');
