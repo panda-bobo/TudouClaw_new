@@ -835,33 +835,17 @@ def _exec_agent(engine: WorkflowEngine, run: WorkflowRun,
     if not prompt or not str(prompt).strip():
         raise ValueError("agent node missing config.prompt")
 
-    # ── deliverable: declarative output of this agent node ──
-    # Optional dict that ties three concerns together:
-    #   1. WHAT this node produces (passed to downstream as
-    #      {{nid.deliverable}})
-    #   2. WHEN to consider the node done (declarative termination —
-    #      file lands → we abort the chat + mark SUCCEEDED, even if
-    #      the LLM is still narrating; solves the "finished 9s after
-    #      timeout" race)
-    #   3. Provenance — _meta.json captures the resolved path.
-    #
-    # Default (no config): deliverable = the entire node subdir.
-    # Narrow shapes:
-    #   deliverable.file_glob: "report_*.md"   → single file (or first
-    #                                           matching new file)
-    # Legacy alias accepted for back-compat:
-    #   success_when.file_glob (committed in d2a14a6, never used in
-    #   prod) maps to deliverable.file_glob.
-    deliverable_cfg = config.get("deliverable") or {}
-    if not isinstance(deliverable_cfg, dict):
-        deliverable_cfg = {}
-    legacy_sw = config.get("success_when") or {}
-    if isinstance(legacy_sw, dict) and not deliverable_cfg.get("file_glob"):
-        legacy_glob = str(legacy_sw.get("file_glob") or "").strip()
-        if legacy_glob:
-            deliverable_cfg = dict(deliverable_cfg)
-            deliverable_cfg["file_glob"] = legacy_glob
-    success_file_glob = str(deliverable_cfg.get("file_glob") or "").strip()
+    # ── success_when: optional early-termination by file marker ──
+    # When configured, executor polls the node's subdir for a NEW
+    # file matching the glob. First match → task.abort() + node
+    # SUCCEEDED, even if the LLM is still narrating. Solves the
+    # "finished 9s after timeout" race seen on 2026-05-02.
+    # The deliverable variable is unaffected — always points at
+    # the whole subdir per the design spec.
+    success_when = config.get("success_when") or {}
+    if not isinstance(success_when, dict):
+        success_when = {}
+    success_file_glob = str(success_when.get("file_glob") or "").strip()
 
     agent = engine.hub.get_agent(agent_id) if hasattr(
         engine.hub, "get_agent") else None
@@ -941,7 +925,7 @@ def _exec_agent(engine: WorkflowEngine, run: WorkflowRun,
                 "agent_id": agent_id,
                 "agent_name": getattr(agent, "name", ""),
                 "started_at": time.time(),
-                "deliverable_cfg": deliverable_cfg,
+                "success_when": success_when if success_file_glob else {},
             })
         except Exception:
             pass
