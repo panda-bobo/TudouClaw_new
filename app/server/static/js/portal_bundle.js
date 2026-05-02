@@ -22455,21 +22455,163 @@ window._canvasNewWorkflow = function() {
 window._canvasOpenEditor = async function(wfId) {
   try {
     var wf = await api('GET', '/api/portal/canvas-workflows/' + encodeURIComponent(wfId));
-    // Belt-and-suspenders: migrate any legacy tool nodes the API
-    // might still return (older backend without the read-side
-    // migration). Silent — the persisted file gets locked into
-    // the migrated form on the next save; toast on every open
-    // would just be noise once the backend catches up.
     var migCount = _canvasMigrateToolNodesInPlace(wf.nodes || []);
     if (migCount > 0) {
       console.info('[canvas] silently migrated ' + migCount + ' tool node(s) to agent for ' + wfId);
     }
     _canvasState.current = wf;
     _canvasState.selectedNodeId = null;
+    // Reset prior-run UI state so a different workflow doesn't show
+    // the LAST workflow's run log/artifacts. Latest-run auto-load
+    // (below) refills these for THIS workflow if it has any history.
+    _canvasState._runEvents = [];
+    _canvasState._runArtifacts = [];
+    _canvasState._runStatus = null;
     _canvasRenderEditor();
     _canvasPreloadEntityLists();
+    // Auto-load the latest run's log so users who switch out and
+    // back see "the last thing that happened" instead of a blank
+    // drawer. Failure is silent — workflow may have no runs yet.
+    _canvasLoadLatestRunLog(wfId);
   } catch (e) {
     _toast('打开失败: ' + e, 'error');
+  }
+};
+
+// ─────────── Run history — load past runs from backend ───────────
+// Companion to the in-memory log drawer. Backend persists every run
+// at <data_dir>/canvas_runs/<run_id>.events.jsonl so we can replay
+// any past run's log into the UI.
+
+async function _canvasLoadLatestRunLog(wfId) {
+  try {
+    var d = await api('GET', '/api/portal/canvas-workflows/' + encodeURIComponent(wfId) + '/runs');
+    var runs = (d.runs || []);
+    if (!runs.length) return;
+    // List is newest-first per backend contract.
+    var latest = runs[0];
+    await _canvasLoadRunLog(wfId, latest.id, /*silent=*/true);
+  } catch (e) {
+    // No /runs endpoint or no runs — fine, leave drawer empty.
+  }
+}
+
+async function _canvasLoadRunLog(wfId, runId, silent) {
+  try {
+    var d = await api('GET', '/api/portal/canvas-workflows/' + encodeURIComponent(wfId) + '/runs/' + encodeURIComponent(runId) + '/log');
+    var events = d.events || [];
+    _canvasState._runEvents = events;
+    // Reconstruct run-status pill from terminal event in the log
+    var terminal = null;
+    for (var i = events.length - 1; i >= 0; i--) {
+      var t = events[i].type;
+      if (t === 'run_succeeded' || t === 'run_failed' || t === 'run_aborted') {
+        terminal = events[i];
+        break;
+      }
+    }
+    if (terminal) {
+      var statusKind = terminal.type.replace('run_', '');
+      _canvasState._runStatus = {
+        status: statusKind,
+        startedAt: events[0] ? events[0].ts * 1000 : Date.now(),
+        payload: Object.assign({run_id: runId}, terminal.data || {}),
+      };
+      _canvasRenderRunStatusPill();
+    } else if (events.length) {
+      // No terminal event — run still going (or crashed without recording)
+      _canvasState._runStatus = {
+        status: 'running',
+        startedAt: events[0].ts * 1000,
+        payload: {run_id: runId},
+      };
+      _canvasRenderRunStatusPill();
+    }
+    // Reapply node visual state from the events (last write wins)
+    var nodeStates = {};
+    events.forEach(function(e) {
+      if (!e.data || !e.data.node_id) return;
+      if (e.type === 'node_started')   nodeStates[e.data.node_id] = 'running';
+      if (e.type === 'node_succeeded') nodeStates[e.data.node_id] = 'succeeded';
+      if (e.type === 'node_failed')    nodeStates[e.data.node_id] = 'failed';
+      if (e.type === 'node_skipped')   nodeStates[e.data.node_id] = 'skipped';
+    });
+    if (Object.keys(nodeStates).length) {
+      _canvasResetRunState();
+      _canvasApplyRunState(nodeStates);
+    }
+    // Refresh the log drawer
+    _canvasRenderLogBody();
+    // Refresh artifacts for this run too
+    _canvasRefreshArtifactsList();
+    if (!silent) {
+      _toast('已加载 run ' + runId.slice(-8) + ' 的日志 (' + events.length + ' 条)', 'info');
+    }
+  } catch (e) {
+    if (!silent) _toast('加载失败: ' + e, 'error');
+  }
+}
+
+window._canvasOpenRunHistoryModal = async function() {
+  var wf = _canvasState.current;
+  if (!wf || !wf.id) { _toast('先保存 workflow', 'error'); return; }
+  var existing = document.getElementById('canvas-history-modal');
+  if (existing) { existing.remove(); return; }
+  var modal = document.createElement('div');
+  modal.id = 'canvas-history-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9998;display:flex;align-items:center;justify-content:center;padding:24px';
+  modal.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;width:min(720px,100%);max-height:84vh;display:flex;flex-direction:column;overflow:hidden">'
+    + '<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border-light)">'
+    +   '<div><div style="font-size:14px;font-weight:700">' + _ui.icon('history', {size: 18, va: '-4px', color: 'var(--primary)'}) + ' 运行历史</div>'
+    +        '<div style="font-size:11px;color:var(--text3);margin-top:2px">点击任一行加载该次运行的日志 + 节点状态 + artifact</div></div>'
+    +   '<button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'canvas-history-modal\').remove()">' + _ui.icon('close', {size: 16}) + '</button>'
+    + '</div>'
+    + '<div id="canvas-history-body" style="flex:1;overflow:auto;padding:14px 18px">加载中…</div>'
+    + '</div>';
+  modal.addEventListener('click', function(e){ if (e.target === modal) modal.remove(); });
+  document.body.appendChild(modal);
+  try {
+    var d = await api('GET', '/api/portal/canvas-workflows/' + encodeURIComponent(wf.id) + '/runs');
+    var runs = d.runs || [];
+    var body = document.getElementById('canvas-history-body');
+    if (!runs.length) {
+      body.innerHTML = _ui.emptyState({
+        icon: 'history',
+        title: '此工作流还没运行过',
+        hint: '点右上角 ▶ 运行 启动一次,完成后会出现在这里',
+      });
+      return;
+    }
+    var STATE_KIND = {succeeded:'success', failed:'error', aborted:'warning', running:'warning', pending:'neutral'};
+    body.innerHTML = '<div style="font-size:11px;color:var(--text3);margin-bottom:10px">共 ' + runs.length + ' 次运行 · 最新在前</div>'
+      + runs.map(function(r, i) {
+          var startedTxt = r.started_at ? new Date(r.started_at * 1000).toLocaleString() : '-';
+          var dur = (r.finished_at && r.started_at) ? ((r.finished_at - r.started_at).toFixed(1) + 's') : '-';
+          var kind = STATE_KIND[r.state] || 'neutral';
+          var idxBadge = (i === 0)
+            ? '<span style="font-size:10px;padding:1px 7px;background:var(--chip-info-bg);color:var(--chip-info-fg);border-radius:9px;font-weight:600">最近</span>'
+            : '<span style="font-size:10px;color:var(--text3)">#' + (runs.length - i) + '</span>';
+          var errLine = r.error
+            ? '<div style="font-size:11px;color:var(--error);margin-top:4px;font-family:monospace">' + esc(r.error.slice(0, 200)) + '</div>'
+            : '';
+          return '<div onclick="_canvasLoadRunLog(\'' + esc(wf.id) + '\',\'' + esc(r.id) + '\');document.getElementById(\'canvas-history-modal\').remove()" '
+            + 'style="border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:8px;cursor:pointer;background:var(--bg);transition:transform 0.1s,box-shadow 0.1s" '
+            + 'onmouseenter="this.style.transform=\'translateY(-1px)\';this.style.boxShadow=\'var(--ui-shadow-2)\'" '
+            + 'onmouseleave="this.style.transform=\'\';this.style.boxShadow=\'\'">'
+            + '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px">'
+            +   '<div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">'
+            +     idxBadge
+            +     _ui.chip(r.state || '?', kind)
+            +     '<span style="font-size:11px;color:var(--text3);font-family:monospace">' + esc(r.id) + '</span>'
+            +   '</div>'
+            +   '<span style="font-size:11px;color:var(--text2);font-weight:600">' + dur + '</span>'
+            + '</div>'
+            + '<div style="font-size:11px;color:var(--text3)">' + esc(startedTxt) + '</div>'
+            + errLine
+            + '</div>';
+        }).join('');
+  } catch (e) {
+    document.getElementById('canvas-history-body').innerHTML = '<div style="color:var(--error)">加载失败: ' + esc(String(e)) + '</div>';
   }
 };
 
@@ -22563,6 +22705,8 @@ function _canvasRenderEditor() {
     + '    <span id="canvas-run-status-pill" style="display:none"></span>'
     + '    <button id="canvas-artifacts-btn" onclick="_canvasOpenArtifactsModal()" style="display:none;padding:3px 10px;font-size:11px;border-radius:11px;background:var(--chip-info-bg);color:var(--chip-info-fg);border:none;font-weight:600;cursor:pointer;margin-left:6px;align-items:center;gap:4px">'
     +      _ui.icon('folder_zip', {size: 14, va: '-3px'}) + ' 交付件 <span id="canvas-artifacts-count">0</span></button>'
+    + (wf.id ? '    <button onclick="_canvasOpenRunHistoryModal()" title="查看历史运行 + 加载任意一次的日志" style="padding:3px 10px;font-size:11px;border-radius:11px;background:var(--overlay-6);color:var(--text2);border:none;font-weight:600;cursor:pointer;margin-left:6px;display:inline-flex;align-items:center;gap:4px">'
+    +      _ui.icon('history', {size: 14, va: '-3px'}) + ' 运行历史</button>' : '')
     + '    <span style="font-size:11px;color:var(--text3);font-family:monospace">' + esc(wf.id || '(unsaved)') + '</span>'
     + '    <div style="margin-left:auto;display:flex;gap:6px">'
     +        (wf.id ? _canvasStatusActions(wf) : '')

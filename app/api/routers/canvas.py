@@ -230,6 +230,25 @@ async def get_canvas_run(wf_id: str, run_id: str,
     return state
 
 
+@router.get("/canvas-workflows/{wf_id}/runs/{run_id}/log")
+async def get_canvas_run_log(wf_id: str, run_id: str,
+                              user: CurrentUser = Depends(get_current_user)):
+    """Return the full event log for one run as a JSON array.
+
+    Companion to ``/events`` (which is SSE for live streaming) — this
+    one is a plain GET that the UI can use to load a past run's log
+    without opening a stream. Same data source: events.jsonl.
+
+    Returns ``{events: [{ts, type, data}, ...], count, byte_offset}``.
+    The byte_offset lets a caller resume incremental reads later
+    (e.g., poll while a run is still active).
+    """
+    engine = _engine_or_503()
+    _verify_run_belongs_to_workflow(engine, wf_id, run_id)
+    events, offset = engine.store.read_events(run_id)
+    return {"events": events, "count": len(events), "byte_offset": offset}
+
+
 @router.get("/canvas-workflows/{wf_id}/runs/{run_id}/events")
 async def stream_canvas_run_events(wf_id: str, run_id: str,
                                     user: CurrentUser = Depends(get_current_user)):
