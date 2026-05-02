@@ -19803,55 +19803,92 @@ function _renderOrchCanvasWorkflows(d) {
   var el = document.getElementById('orch-canvas-section');
   if (!el) return;
   if (d && d._err) {
-    el.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;color:var(--error);font-size:12px">画布工作流加载失败: '+esc(d._err)+'</div>';
+    el.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px;color:var(--error);font-size:12px">画布工作流加载失败: '+esc(d._err)+'</div>';
     return;
   }
   var workflows = (d && d.workflows) || [];
-  var headerHtml = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">'
-    + '<div style="font-size:13px;font-weight:700">📋 画布工作流</div>'
-    + '<span style="font-size:11px;color:var(--text3)">' + workflows.length + ' 个</span>'
+
+  // Section header — with "新建" CTA so the empty state has a clear next step.
+  var headerHtml = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;padding:0 4px">'
+    + '<div style="display:flex;align-items:baseline;gap:10px">'
+    +   '<div style="font-size:14px;font-weight:700"><span class="material-symbols-outlined" style="font-size:18px;vertical-align:-3px;margin-right:4px;color:var(--primary)">view_kanban</span>画布工作流</div>'
+    +   '<span style="font-size:11px;color:var(--text3)">' + workflows.length + ' 个</span>'
+    + '</div>'
+    + '<button class="btn btn-sm btn-primary" onclick="renderCanvasPage()" title="进入画布编辑器" style="padding:5px 12px;font-size:11px"><span class="material-symbols-outlined" style="font-size:14px">add</span> 新建 / 管理</button>'
     + '</div>';
+
+  // Status palette → left-edge stripe color on each card
+  var stripeColor = function(st) {
+    if (st === 'ready')    return '#16a34a';
+    if (st === 'disabled') return '#ea580c';
+    return '#94a3b8';   // draft (default)
+  };
 
   var bodyHtml;
   if (!workflows.length) {
-    bodyHtml = '<div style="padding:30px;text-align:center;color:var(--text3);font-size:12px">尚无画布工作流 — 进入"打开编辑器"创建第一个</div>';
+    bodyHtml = '<div style="padding:48px 30px;text-align:center;background:var(--surface);border:1px dashed var(--border);border-radius:12px">'
+      +   '<div style="font-size:42px;margin-bottom:10px;opacity:0.5">📋</div>'
+      +   '<div style="font-size:14px;color:var(--text2);font-weight:600;margin-bottom:6px">还没有画布工作流</div>'
+      +   '<div style="font-size:12px;color:var(--text3);margin-bottom:14px">从"新建 / 管理"进入编辑器,拖拽节点构建第一个 DAG</div>'
+      +   '<button class="btn btn-sm btn-primary" onclick="renderCanvasPage()" style="padding:6px 16px;font-size:12px"><span class="material-symbols-outlined" style="font-size:14px">add</span> 创建第一个</button>'
+      + '</div>';
   } else {
-    bodyHtml = workflows.map(function(w) {
-      var st = String(w.executable_status || 'draft');
-      var statusBadge = _canvasStatusBadge(st);
-      var ageHint = '';
-      if (w.updated_at) {
-        var ageS = (Date.now()/1000) - w.updated_at;
-        if (ageS < 60) ageHint = '刚刚';
-        else if (ageS < 3600) ageHint = Math.floor(ageS/60) + '分钟前';
-        else if (ageS < 86400) ageHint = Math.floor(ageS/3600) + '小时前';
-        else ageHint = Math.floor(ageS/86400) + '天前';
-      }
-      var runBtn = (st === 'ready')
-        ? '<button class="btn btn-sm" onclick="_orchRunCanvasFromOverview(\'' + esc(w.id).replace(/'/g, "\\'") + '\')" title="启动一次执行" style="padding:3px 8px;font-size:11px;color:#16a34a;font-weight:600"><span class="material-symbols-outlined" style="font-size:13px">play_arrow</span> 运行</button>'
-        : '';
-      return '<div style="border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:8px;background:var(--bg)">'
-        + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:6px">'
-        +   '<div style="flex:1;min-width:0">'
-        +     '<div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(w.name || '(未命名)') + '</div>'
-        +     '<div style="font-size:10px;color:var(--text3);font-family:monospace">' + esc(w.id) + '</div>'
-        +   '</div>'
-        +   statusBadge
-        + '</div>'
-        + '<div style="font-size:11px;color:var(--text3);margin-bottom:8px">'
-        +   (w.node_count || 0) + ' 节点 · ' + (w.edge_count || 0) + ' 边'
-        +   (ageHint ? ' · 更新于 ' + ageHint : '')
-        + '</div>'
-        + '<div style="display:flex;gap:6px">'
-        +   '<button class="btn btn-sm btn-ghost" onclick="_canvasOpenEditor(\'' + esc(w.id).replace(/'/g, "\\'") + '\'); renderCanvasPage();" style="padding:3px 8px;font-size:11px"><span class="material-symbols-outlined" style="font-size:13px">edit</span> 编辑</button>'
-        +   runBtn
-        + '</div>'
-        + '</div>';
-    }).join('');
+    bodyHtml = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px">'
+      + workflows.map(function(w) {
+          var st = String(w.executable_status || 'draft');
+          var stripe = stripeColor(st);
+          var statusBadge = _canvasStatusBadge(st);
+          var ageHint = '';
+          if (w.updated_at) {
+            var ageS = (Date.now()/1000) - w.updated_at;
+            if (ageS < 60) ageHint = '刚刚';
+            else if (ageS < 3600) ageHint = Math.floor(ageS/60) + '分钟前';
+            else if (ageS < 86400) ageHint = Math.floor(ageS/3600) + '小时前';
+            else ageHint = Math.floor(ageS/86400) + '天前';
+          }
+          var runBtn = (st === 'ready')
+            ? '<button class="btn btn-sm" onclick="event.stopPropagation();_orchRunCanvasFromOverview(\'' + esc(w.id).replace(/'/g, "\\'") + '\')" title="启动一次执行" style="padding:5px 10px;font-size:11px;background:#16a34a22;color:#16a34a;border:1px solid #16a34a44;font-weight:600;border-radius:6px"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:-2px">play_arrow</span> 运行</button>'
+            : '';
+          var openInline = '_canvasOpenEditor(\'' + esc(w.id).replace(/'/g, "\\'") + '\').then(function(){renderCanvasPage();})';
+          return '<div onclick="' + openInline + '" '
+            + 'onmouseenter="this.style.transform=\'translateY(-2px)\';this.style.boxShadow=\'0 6px 16px rgba(0,0,0,0.08)\'" '
+            + 'onmouseleave="this.style.transform=\'\';this.style.boxShadow=\'\'" '
+            + 'style="position:relative;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px 12px 18px;cursor:pointer;transition:transform 0.15s ease, box-shadow 0.15s ease;overflow:hidden">'
+            // Left-edge color stripe — status at-a-glance
+            + '<div style="position:absolute;top:0;bottom:0;left:0;width:4px;background:' + stripe + '"></div>'
+            // Header row: title + status badge
+            + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:10px">'
+            +   '<div style="flex:1;min-width:0">'
+            +     '<div style="font-size:14px;font-weight:700;color:var(--text);line-height:1.3;margin-bottom:3px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">' + esc(w.name || '(未命名)') + '</div>'
+            +     '<div style="font-size:10px;color:var(--text3);font-family:ui-monospace,SFMono-Regular,Menlo,monospace">' + esc(w.id) + '</div>'
+            +   '</div>'
+            +   statusBadge
+            + '</div>'
+            // Metadata pills row
+            + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;font-size:10px">'
+            +   '<span style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;background:var(--surface2,rgba(0,0,0,0.04));border-radius:10px;color:var(--text2);font-weight:500">'
+            +     '<span class="material-symbols-outlined" style="font-size:11px">circle</span>'
+            +     (w.node_count || 0) + ' 节点'
+            +   '</span>'
+            +   '<span style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;background:var(--surface2,rgba(0,0,0,0.04));border-radius:10px;color:var(--text2);font-weight:500">'
+            +     '<span class="material-symbols-outlined" style="font-size:11px">trending_flat</span>'
+            +     (w.edge_count || 0) + ' 边'
+            +   '</span>'
+            +   (ageHint ? '<span style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;background:var(--surface2,rgba(0,0,0,0.04));border-radius:10px;color:var(--text3)">'
+            +     '<span class="material-symbols-outlined" style="font-size:11px">schedule</span>'
+            +     ageHint + '</span>' : '')
+            + '</div>'
+            // Action row
+            + '<div style="display:flex;gap:6px;justify-content:flex-end;border-top:1px solid var(--border-light);padding-top:10px;margin-top:auto">'
+            +   '<button class="btn btn-sm btn-ghost" onclick="event.stopPropagation();_canvasOpenEditor(\'' + esc(w.id).replace(/'/g, "\\'") + '\').then(function(){renderCanvasPage();})" style="padding:5px 10px;font-size:11px"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:-2px">edit</span> 编辑</button>'
+            +   runBtn
+            + '</div>'
+            + '</div>';
+        }).join('')
+      + '</div>';
   }
 
-  el.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px">'
-    + headerHtml + bodyHtml + '</div>';
+  el.innerHTML = headerHtml + bodyHtml;
 }
 
 window._orchRunCanvasFromOverview = async function(wfId) {
@@ -20065,20 +20102,33 @@ function _renderOrchPipelines(d) {
       ? '<span style="font-size:10px;padding:2px 6px;background:#22c55e22;color:#22c55e;border-radius:4px;font-weight:600">已聚合 · '+esc(p.aggregator_mode||'')+'</span>'
       : '<span style="font-size:10px;padding:2px 6px;background:#f59e0b22;color:#f59e0b;border-radius:4px;font-weight:600">进行中</span>';
     var preview = p.result_preview ? '<div style="font-size:11px;color:var(--text3);margin-top:6px;padding:6px 8px;background:var(--surface2);border-radius:4px;max-height:50px;overflow:hidden">'+esc(p.result_preview)+'</div>' : '';
-    return '<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px;cursor:pointer" onclick="_orchOpenDAGModal(\''+esc(p.parent_task_id)+'\')" title="点击查看 DAG">'
-      + '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px">'
-      + '<div style="font-size:13px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(p.parent_title||'')+'">'+esc(p.parent_title||'(untitled)')+'</div>'
+    return '<div onclick="_orchOpenDAGModal(\''+esc(p.parent_task_id)+'\')" title="点击查看 DAG" '
+      + 'onmouseenter="this.style.transform=\'translateY(-2px)\';this.style.boxShadow=\'0 6px 16px rgba(0,0,0,0.08)\'" '
+      + 'onmouseleave="this.style.transform=\'\';this.style.boxShadow=\'\'" '
+      + 'style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;cursor:pointer;transition:transform 0.15s ease, box-shadow 0.15s ease">'
+      + '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">'
+      + '<div style="font-size:14px;font-weight:700;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)" title="'+esc(p.parent_title||'')+'">'+esc(p.parent_title||'(untitled)')+'</div>'
       + aggBadge + '</div>'
-      + '<div style="font-size:10px;color:var(--text3);margin-bottom:4px">'+esc(p.project_name||'')+' · '+p.child_count+' 子任务 · <span style="color:var(--primary)">点击看 DAG</span></div>'
-      + '<div>'+statusBar+'</div>'
+      + '<div style="font-size:11px;color:var(--text3);margin-bottom:8px">'+esc(p.project_name||'')+' · '+p.child_count+' 子任务 · <span style="color:var(--primary)">点击看 DAG</span></div>'
+      + '<div style="display:flex;flex-wrap:wrap;gap:4px">'+statusBar+'</div>'
       + preview + '</div>';
-  }).join('') : '<div style="padding:40px;text-align:center;color:var(--text3);font-size:12px">暂无长任务流水线</div>';
+  }).join('')
+   : '<div style="padding:48px 30px;text-align:center;background:var(--surface);border:1px dashed var(--border);border-radius:12px">'
+   +   '<div style="font-size:42px;margin-bottom:10px;opacity:0.5">🔭</div>'
+   +   '<div style="font-size:14px;color:var(--text2);font-weight:600;margin-bottom:6px">暂无长任务流水线</div>'
+   +   '<div style="font-size:12px;color:var(--text3);line-height:1.5">长任务由 agent 自动拆分子任务并并行执行 — 给 agent 一个复杂指令试试</div>'
+   + '</div>';
 
-  el.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px">'
-    + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">'
-    + '<div style="font-size:13px;font-weight:700"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle;margin-right:4px">account_tree</span>长任务流水线</div>'
-    + '<div style="font-size:10px;color:var(--text3)">最多 10 条 · 进行中优先</div></div>'
-    + '<div style="overflow:auto;max-height:540px">'+body+'</div></div>';
+  // Section header (matches canvas section's style)
+  var headerHtml = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;padding:0 4px">'
+    + '<div style="display:flex;align-items:baseline;gap:10px">'
+    +   '<div style="font-size:14px;font-weight:700"><span class="material-symbols-outlined" style="font-size:18px;vertical-align:-3px;margin-right:4px;color:var(--primary)">account_tree</span>长任务流水线</div>'
+    +   '<span style="font-size:11px;color:var(--text3)">' + pipes.length + ' 条 · 进行中优先</span>'
+    + '</div>'
+    + '</div>';
+
+  el.innerHTML = headerHtml
+    + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px">' + body + '</div>';
 }
 
 // ============ DAG modal — task decomposition visualization ============
