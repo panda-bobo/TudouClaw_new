@@ -127,3 +127,47 @@ n_review.config.prompt:
 - **Specific prompts**: tell the agent the exact filename you want (e.g., "写到 trends.md") — then `success_when.file_glob: "trends.md"` becomes a reliable end-signal.
 - **Keep timeouts realistic**: web-search agents often take 5-15 minutes. Set `timeout: 1200` or higher when you're going to crawl pages.
 - **Use the retry button**, not the run button, when fixing a single-node failure mid-DAG. Run starts everything from scratch; retry only does the failed node + downstream.
+
+## Parallel Execution (added 2026-05-02)
+
+The canvas executor runs all ready nodes concurrently up to a configurable cap. Linear DAGs stay sequential (only one node ready at a time); branched DAGs fan out automatically.
+
+### Implicit parallel — just draw branches
+
+```
+                ┌─→ [agent A: 抓社交媒体]
+[start]         ├─→ [agent B: 抓新闻]
+                └─→ [agent C: 抓 GitHub]   →  [汇总分析]  →  [end]
+```
+
+When `start` completes, A/B/C all become ready and run on three threads simultaneously. The downstream `汇总分析` node waits for all three to succeed before starting (existing DAG-deps behavior).
+
+### Concurrency cap
+
+`Settings → 系统配置 → 画布编排 → Max parallel nodes per run` (default 6, range 1..32). Reads the live value at the start of each run iteration.
+
+### Failure mode — fail-fast
+
+If any parallel branch fails, the engine cancels the others (`task.abort()` on their LLM calls) and the run state goes to `ABORTED` (not `FAILED`). Sibling nodes that were aborted mid-flight show `NodeState.ABORTED`. Use the existing **重试** button on the failed node — only the failed branch + downstream get re-run.
+
+### Same-agent rule
+
+The same `agent_id` cannot appear in two parallel-reachable nodes. The canvas editor's agent picker hides already-used agents in sibling parallel branches. The validator double-checks at `mark ready` time. Reason: `chat_async` serializes per-agent — two parallel nodes sharing an agent would queue, defeating the parallelism.
+
+## Agent-Internal Parallelism — `delegate_parallel`
+
+When an agent needs to fan-out at runtime (parent decomposes a task only after seeing the input), use the `delegate_parallel` tool inside the agent's prompt/code:
+
+```python
+# Inside an agent's reasoning
+results = self.delegate_parallel([
+    {"task": "write FastAPI backend in backend/", "child_role": "coder"},
+    {"task": "write React frontend in frontend/", "child_role": "coder"},
+    {"task": "write pytest suite in tests/", "child_role": "coder", "hint_subdir": "tests"},
+])
+# results: list of {status, output, error, working_subdir, child_role}
+```
+
+Each child gets its own subdir under the parent's working_dir (default `child_<idx>_<role>` or the `hint_subdir` you provided). Cap is `Settings → 系统配置 → Agent 委派 → Max parallel children per call` (default 6, range 1..32).
+
+Same fail-fast contract: one child's exception sets a cancel flag; siblings receive `status: aborted`. Parent decides whether to retry, escalate, or proceed with partial results.
