@@ -24,47 +24,58 @@
  * Setting data-theme="dark" explicitly does the same as default.
  * ========================================================== */
 :root {
-  /* ── Layer 1 — raw dark palette ── */
-  --raw-dark-bg:         #0e141b;
-  --raw-dark-bg2:        #1a2027;
-  --raw-dark-surface:    #161c23;
-  --raw-dark-surface2:   #242a32;
-  --raw-dark-surface3:   #2f353d;
-  --raw-dark-border:     #474651;
+  /* ── Layer 1 — raw dark palette (Linear Design System, 2026-05-02) ──
+     Migrated from the prior github-dark palette to Linear's tokens.
+     The "surface ladder" approach uses 4 near-black shades for
+     hierarchy instead of drop shadows: canvas → surface-1 →
+     surface-2 → surface-3, each ~3-5 lumens apart. Lavender
+     (#5e6ad2) is the single brand accent — reserved for primary CTA,
+     focus rings, selected state. Never used as a section fill. */
+  --raw-dark-bg:         #010102;  /* canvas */
+  --raw-dark-bg2:        #0f1011;  /* surface-1 */
+  --raw-dark-surface:    #0f1011;  /* surface-1 */
+  --raw-dark-surface2:   #141516;  /* surface-2 */
+  --raw-dark-surface3:   #18191a;  /* surface-3 */
+  --raw-dark-border:     #23252a;  /* hairline */
   --raw-dark-border-fade: var(--overlay-5);
-  --raw-dark-text:       #dde3ed;
-  --raw-dark-text2:      #8b949e;
-  --raw-dark-text3:      #6e7681;
+  --raw-dark-text:       #f7f8f8;  /* ink */
+  --raw-dark-text2:      #8a8f98;  /* ink-subtle */
+  --raw-dark-text3:      #62666d;  /* ink-tertiary */
 
   /* Shared accents (same hue across themes, different saturation tuned per-theme) */
-  --raw-primary-dark:    #cbc9ff;
-  --raw-primary-container-dark: #acaaff;
+  --raw-primary-dark:    #5e6ad2;  /* Linear lavender */
+  --raw-primary-container-dark: #828fff;  /* primary-hover */
   --raw-secondary-dark:  #ffb4aa;
   --raw-error-dark:      #f85149;
-  --raw-success-dark:    #3fb950;
+  --raw-success-dark:    #27a644;  /* Linear semantic-success */
   --raw-warning-dark:    #d29922;
   --raw-warning-bg-dark: #2a2017;
   --raw-error-bg-dark:   #2d1114;
   --raw-success-bg-dark: #12261e;
 
-  /* ── Layer 1 — raw light palette (Clowder-inspired warm cream) ── */
-  --raw-light-bg:         #fdf8f3;  /* cream white */
-  --raw-light-bg2:        #f5ede3;  /* light sand */
+  /* ── Layer 1 — raw light palette (Vercel design system, 2026-05-02) ──
+     Migrated from the prior Clowder warm-cream palette to Vercel's
+     monochromatic precision. Pure white canvas + Vercel Black ink +
+     hairline borders mirror Linear's hairline-first dark aesthetic.
+     Primary is pure ink (#171717) — Vercel uses black-on-white for
+     CTAs, with blue reserved for links. */
+  --raw-light-bg:         #ffffff;
+  --raw-light-bg2:        #fafafa;
   --raw-light-surface:    #ffffff;
-  --raw-light-surface2:   #f0e8dd;  /* sunken */
-  --raw-light-surface3:   #ebe3d9;  /* deeper sunken */
-  --raw-light-border:     #e0d5c7;  /* border tan */
-  --raw-light-border-fade: rgba(30,30,36,0.06);
-  --raw-light-text:       #1e1e24;  /* deep ink */
-  --raw-light-text2:      #4a4a52;
-  --raw-light-text3:      #888888;
+  --raw-light-surface2:   #fafafa;
+  --raw-light-surface3:   #f4f4f4;
+  --raw-light-border:     #ebebeb;  /* light_ring */
+  --raw-light-border-fade: rgba(0,0,0,0.04);
+  --raw-light-text:       #171717;  /* Vercel Black */
+  --raw-light-text2:      #4d4d4d;  /* Gray 600 */
+  --raw-light-text3:      #808080;  /* Gray 400 */
 
-  /* Light-theme primary: warm brown (not purple). Clowder's
-     --cat-warm-brown / --cafe-interactive palette — reads well on
-     cream bg without the dark-theme lavender clashing against it. */
-  --raw-primary-light:    #85655a;  /* cafe-interactive / warm stone */
-  --raw-primary-container-light: #6d4c41;  /* deeper brown for hover/filled */
-  --raw-secondary-light:  #e29578;  /* warm coral — only used as accent */
+  /* Light-theme primary: pure ink. Vercel uses #171717 for primary
+     CTA — black-on-white for maximum contrast and hairline elegance.
+     Link blue (#0072f5) lives in semantic-link, not primary. */
+  --raw-primary-light:    #171717;
+  --raw-primary-container-light: #000000;  /* hover deepens to true black */
+  --raw-secondary-light:  #0072f5;  /* link blue, accent only */
   --raw-error-light:      #c93838;
   --raw-success-light:    #2d7a39;
   --raw-warning-light:    #b45309;
@@ -93,9 +104,9 @@
   --error-bg:        var(--raw-error-bg-dark);
   --success-bg:      var(--raw-success-bg-dark);
   /* Text color to use ON TOP of primary (e.g. filled buttons).
-     Dark theme primary is pale lavender → dark text reads well.
-     Light theme primary is deep warm brown → needs light text. */
-  --primary-text:    #0e141b;
+     Linear lavender (#5e6ad2) needs white text for AA contrast.
+     Light theme primary is deep warm brown → also wants light text. */
+  --primary-text:    #ffffff;
   --radius:          8px;
   --radius-lg:       12px;
 
@@ -141,13 +152,14 @@
   --chip-neutral-bg:  var(--overlay-6);
   --chip-neutral-fg:  var(--text3);
 
-  /* ── Layer 2 — elevation / shadow tokens ───────────────────────────
-     ui-shadow-1 = card resting (subtle separation from page)
-     ui-shadow-2 = card hover (lifted, more pronounced)
-     ui-shadow-3 = modal / popover (max elevation) */
-  --ui-shadow-1: 0 1px 2px rgba(0,0,0,0.06), 0 1px 3px rgba(0,0,0,0.04);
-  --ui-shadow-2: 0 4px 12px rgba(0,0,0,0.08), 0 2px 4px rgba(0,0,0,0.06);
-  --ui-shadow-3: 0 16px 40px rgba(0,0,0,0.18), 0 4px 12px rgba(0,0,0,0.08);
+  /* ── Layer 2 — elevation / shadow tokens (Linear: hairline-first) ──
+     Linear avoids drop shadows almost entirely — depth comes from the
+     surface ladder + 1px hairline borders. We keep the tokens defined
+     so existing callers don't break, but cards & hovers now use a
+     hairline ring; only modals get a real cast shadow. */
+  --ui-shadow-1: 0 0 0 1px var(--border);
+  --ui-shadow-2: 0 1px 2px rgba(0,0,0,0.35), 0 0 0 1px var(--border);
+  --ui-shadow-3: 0 12px 32px rgba(0,0,0,0.5), 0 0 0 1px var(--border);
 
   /* ── Layer 2 — spacing scale (4px base) ────────────────────────────
      Use these instead of magic numbers in padding / margin / gap. */
@@ -208,7 +220,7 @@
   --warning-bg:      var(--raw-warning-bg-light);
   --error-bg:        var(--raw-error-bg-light);
   --success-bg:      var(--raw-success-bg-light);
-  --primary-text:    #fdf8f3;  /* cream text on deep-brown primary */
+  --primary-text:    #ffffff;  /* white on Vercel Black primary */
 }
 * { margin:0; padding:0; box-sizing:border-box; }
 body {
