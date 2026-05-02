@@ -76,6 +76,29 @@ TERMINAL_NODE_STATES = {NodeState.SUCCEEDED, NodeState.FAILED,
 _VAR_PATTERN = re.compile(r"\{\{\s*([A-Za-z0-9_.\-]+)\s*\}\}")
 
 
+def _has_real_deliverable(node_dir: "Path | str") -> bool:
+    """Return True iff the agent node's subdir contains any file
+    other than _meta.json. Used by _exec_agent to fail-fast on
+    EMPTY_DELIVERABLE per spec 2026-05-02 — protects against the
+    silent "LLM said it wrote a file but actually didn't" failure
+    mode.
+
+    A nonexistent path returns False (caller wants the same
+    "no real output" semantics).
+    """
+    from pathlib import Path as _P
+    base = _P(str(node_dir))
+    if not base.is_dir():
+        return False
+    try:
+        for p in base.rglob("*"):
+            if p.is_file() and p.name != "_meta.json":
+                return True
+    except OSError:
+        return False
+    return False
+
+
 def _scan_for_marker_file(shared_dir: "Path | str",
                           file_glob: str,
                           pre_snapshot: dict[str, float]) -> str | None:
@@ -1076,6 +1099,18 @@ def _exec_agent(engine: WorkflowEngine, run: WorkflowRun,
             except Exception as _pse:
                 logger.warning("artifact post-scan failed for %s/%s: %s",
                                run.id, node_id, _pse)
+
+        # EMPTY_DELIVERABLE check (spec 2026-05-02): even if the
+        # LLM reported COMPLETED or success_when fired, if the agent
+        # produced no real files we treat the node as FAILED. The
+        # error code is grep-friendly so the UI can color it
+        # specifically and the user knows to retry the agent (rather
+        # than blame timeout / LLM).
+        if node_dir is not None and not _has_real_deliverable(node_dir):
+            raise RuntimeError(
+                f"agent {agent_id} produced no deliverable in "
+                f"shared/{node_id}/ (error_code: EMPTY_DELIVERABLE)"
+            )
 
         return outputs
     finally:

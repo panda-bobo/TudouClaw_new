@@ -135,3 +135,56 @@ def test_success_when_file_glob_is_canonical_no_alias(fake_canvas_env):
     # marker.md was registered + abort was called
     assert outputs.get("artifact_count", 0) >= 1
     fake_task.abort.assert_called()
+
+
+def test_empty_deliverable_check_helper(tmp_path):
+    """The helper that decides whether a node produced something.
+    Returns False when the subdir is empty or contains only _meta.json."""
+    # Empty dir
+    empty = tmp_path / "n_empty"
+    empty.mkdir()
+    assert ce._has_real_deliverable(empty) is False
+
+    # Only _meta.json — still empty
+    only_meta = tmp_path / "n_only_meta"
+    only_meta.mkdir()
+    (only_meta / "_meta.json").write_text("{}")
+    assert ce._has_real_deliverable(only_meta) is False
+
+    # Real file
+    has_file = tmp_path / "n_real"
+    has_file.mkdir()
+    (has_file / "report.md").write_text("hello")
+    assert ce._has_real_deliverable(has_file) is True
+
+    # Nested file
+    nested = tmp_path / "n_nested"
+    (nested / "app/backend").mkdir(parents=True)
+    (nested / "app/backend/server.py").write_text("# code")
+    assert ce._has_real_deliverable(nested) is True
+
+    # Nonexistent dir
+    missing = tmp_path / "n_never"
+    assert ce._has_real_deliverable(missing) is False
+
+
+def test_exec_agent_raises_on_empty_subdir(fake_canvas_env):
+    """When an agent leaves its subdir empty (only _meta.json),
+    _exec_agent raises RuntimeError with error_code: EMPTY_DELIVERABLE.
+    Reuses the fake_canvas_env fixture; overrides chat_async to write
+    NOTHING (default fixture writes x.txt; here we override to no-op).
+    """
+    engine, run, fake_agent, fake_task, store = fake_canvas_env
+
+    # Override default_chat_async — return COMPLETED but write no file
+    def empty_chat_async(prompt, source=""):
+        return fake_task
+
+    fake_agent.chat_async = empty_chat_async
+
+    node = {"id": "n_empty", "label": "test", "config": {
+        "agent_id": "ag-x", "prompt": "do nothing", "timeout": 5,
+    }}
+
+    with pytest.raises(RuntimeError, match="EMPTY_DELIVERABLE"):
+        ce._exec_agent(engine, run, node, node["config"])
