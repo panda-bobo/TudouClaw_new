@@ -71,3 +71,118 @@ def test_module_singleton(tmp_path, monkeypatch):
     s1 = ss.init_store(tmp_path)
     s2 = ss.get_store()
     assert s1 is s2
+
+
+def test_endpoint_get_returns_settings_and_defaults(tmp_path, monkeypatch):
+    """GET /system-settings returns {settings: {...}, defaults: {...}}.
+
+    Uses TestClient with a synthesized hub. Verifies the dual-keyed
+    response shape that the UI's Reset button depends on.
+    """
+    from fastapi.testclient import TestClient
+    from app import system_settings as ss
+    from app.api.routers import system_settings as sys_router
+
+    monkeypatch.setattr(ss, "_STORE", None)
+    ss.init_store(tmp_path)
+
+    # Build a minimal app with just this router
+    from fastapi import FastAPI
+    from app.api.deps.auth import get_current_user, CurrentUser
+    app = FastAPI()
+    app.include_router(sys_router.router)
+    # Bypass auth for the test
+    app.dependency_overrides[get_current_user] = lambda: CurrentUser(
+        user_id="t", role="superAdmin"
+    )
+
+    client = TestClient(app)
+    r = client.get("/api/portal/system-settings")
+    assert r.status_code == 200
+    data = r.json()
+    assert "settings" in data and "defaults" in data
+    # Default canvas cap is 6
+    assert data["settings"]["canvas"]["max_parallel_nodes"] == 6
+    assert data["defaults"]["canvas"]["max_parallel_nodes"] == 6
+
+
+def test_endpoint_patch_updates_value(tmp_path, monkeypatch):
+    """PATCH /system-settings with {path, value} updates the store."""
+    from fastapi.testclient import TestClient
+    from app import system_settings as ss
+    from app.api.routers import system_settings as sys_router
+    monkeypatch.setattr(ss, "_STORE", None)
+    ss.init_store(tmp_path)
+    from fastapi import FastAPI
+    from app.api.deps.auth import get_current_user, CurrentUser
+    app = FastAPI()
+    app.include_router(sys_router.router)
+    app.dependency_overrides[get_current_user] = lambda: CurrentUser(
+        user_id="t", role="superAdmin"
+    )
+    client = TestClient(app)
+
+    r = client.patch(
+        "/api/portal/system-settings",
+        json={"path": "canvas.max_parallel_nodes", "value": 4},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["settings"]["canvas"]["max_parallel_nodes"] == 4
+
+    # Roundtrip via GET
+    r2 = client.get("/api/portal/system-settings")
+    assert r2.json()["settings"]["canvas"]["max_parallel_nodes"] == 4
+
+
+def test_endpoint_patch_rejects_out_of_range(tmp_path, monkeypatch):
+    """Validators: max_parallel_* must be int in [1, 32]."""
+    from fastapi.testclient import TestClient
+    from app import system_settings as ss
+    from app.api.routers import system_settings as sys_router
+    monkeypatch.setattr(ss, "_STORE", None)
+    ss.init_store(tmp_path)
+    from fastapi import FastAPI
+    from app.api.deps.auth import get_current_user, CurrentUser
+    app = FastAPI()
+    app.include_router(sys_router.router)
+    app.dependency_overrides[get_current_user] = lambda: CurrentUser(
+        user_id="t", role="superAdmin"
+    )
+    client = TestClient(app)
+
+    r = client.patch(
+        "/api/portal/system-settings",
+        json={"path": "canvas.max_parallel_nodes", "value": 100},
+    )
+    assert r.status_code == 400
+    assert "1..32" in r.text or "out of range" in r.text.lower()
+
+    r = client.patch(
+        "/api/portal/system-settings",
+        json={"path": "delegate.max_parallel_children", "value": 0},
+    )
+    assert r.status_code == 400
+
+
+def test_endpoint_patch_rejects_unknown_path(tmp_path, monkeypatch):
+    """Patch path must match a known DEFAULTS key — random paths rejected."""
+    from fastapi.testclient import TestClient
+    from app import system_settings as ss
+    from app.api.routers import system_settings as sys_router
+    monkeypatch.setattr(ss, "_STORE", None)
+    ss.init_store(tmp_path)
+    from fastapi import FastAPI
+    from app.api.deps.auth import get_current_user, CurrentUser
+    app = FastAPI()
+    app.include_router(sys_router.router)
+    app.dependency_overrides[get_current_user] = lambda: CurrentUser(
+        user_id="t", role="superAdmin"
+    )
+    client = TestClient(app)
+
+    r = client.patch(
+        "/api/portal/system-settings",
+        json={"path": "random.key", "value": "anything"},
+    )
+    assert r.status_code == 400
+    assert "unknown" in r.text.lower() or "not allowed" in r.text.lower()
