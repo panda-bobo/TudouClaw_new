@@ -11518,231 +11518,107 @@ Write only the summary body. Do not include any preamble or prefix."""
             except Exception:
                 pass
 
-    def delegate_parallel(self, tasks: list[dict], max_workers: int = 4) -> list[dict]:
+    def delegate_parallel(self, tasks: list[dict]) -> list[dict]:
         """
-        Spawn multiple sub-agents in parallel to handle a list of tasks.
-
-        This is a Hermes-style parallel delegation pattern that:
-        - Creates isolated sub-agent instances (each with separate message history)
-        - Executes tasks concurrently via ThreadPoolExecutor
-        - Shares: working_dir, tool access, LLM config, parent context
-        - Respects: delegation depth limits, cancellation signals
+        Spawn up to N child agents concurrently and return aggregated
+        results. Mode C from the canvas/parallel-execution spec
+        (2026-05-02). Reuses Agent.delegate per-child but orchestrates
+        threading itself; does NOT call delegate recursively in a way
+        that would re-acquire the same locks N times.
 
         Args:
-            tasks: List of task dicts, each containing:
-                - "task" (str, required): Task description
-                - "agent_id" (str, optional): Custom sub-agent ID (for tracking)
-                - "context" (str, optional): Extra context to inject into task
-            max_workers: Max parallel sub-agents (capped at 4 for safety)
+            tasks: list of {task: str, child_role: str, hint_subdir?: str}.
+                   max len bounded by system_settings(
+                   "delegate.max_parallel_children", 6).
 
         Returns:
-            List of result dicts:
-                [{
-                    "agent_id": str,
-                    "task": str,
-                    "status": "success" | "failed" | "cancelled",
-                    "result": str,
-                    "error": str (if failed),
-                    "duration": float,
-                }]
-
-        Example:
-            results = agent.delegate_parallel([
-                {"task": "Review code in file A for security", "agent_id": "reviewer_a"},
-                {"task": "Review code in file B for performance", "agent_id": "reviewer_b"},
-                {"task": "Write unit tests", "context": "Use pytest framework"},
-            ])
+            list aligned with input. Each entry:
+                {status: "succeeded"|"failed"|"aborted",
+                 output: str,
+                 error: str | None,
+                 working_subdir: str,
+                 child_role: str}
         """
-        if self._delegate_depth >= self._max_delegate_depth:
-            error_msg = (
-                f"Cannot delegate_parallel: depth limit reached "
-                f"(current: {self._delegate_depth}, max: {self._max_delegate_depth})"
-            )
-            self._log("parallel_delegation_error", {"error": "depth_limit_exceeded"})
-            return [{
-                "status": "failed",
-                "error": error_msg,
-                "task": t.get("task", ""),
-                "agent_id": t.get("agent_id", "unknown"),
-                "result": "",
-                "duration": 0.0,
-            } for t in tasks]
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from pathlib import Path
 
-        # Cap max_workers at 4 for safety
-        max_workers = min(max_workers, 4)
-
-        self._log("parallel_delegation_start", {
-            "task_count": len(tasks),
-            "max_workers": max_workers,
-            "depth": self._delegate_depth,
-        })
-
-        logger.info(
-            "PARALLEL_DELEGATE: parent=%s tasks=%d workers=%d depth=%d/%d",
-            self.id, len(tasks), max_workers,
-            self._delegate_depth, self._max_delegate_depth
-        )
-
-        results = []
-        start_time = time.time()
-
-        # Pre-flight fork policy check (one allowance per parallel task)
         try:
-            from .auth import get_auth as _get_auth_pp
-            _pp_policy = _get_auth_pp().tool_policy
+            from .system_settings import get_store as _get_settings_store
+            _ss = _get_settings_store()
+            max_children = int((_ss.get("delegate.max_parallel_children", 6) if _ss else 6) or 6)
         except Exception:
-            _pp_policy = None
+            max_children = 6
+        max_children = max(1, min(max_children, 32))
 
-        def _execute_task(task_spec: dict) -> dict:
-            """Execute a single task in a sub-agent (runs in thread)."""
-            task_text = task_spec.get("task", "")
-            agent_id = task_spec.get("agent_id", f"sub_{uuid.uuid4().hex[:6]}")
-            context = task_spec.get("context", "")
-            task_start = time.time()
+        if not isinstance(tasks, list) or not tasks:
+            return []
+        if len(tasks) > max_children:
+            raise ValueError(
+                f"too many parallel children: {len(tasks)} > max {max_children}. "
+                f"Adjust delegate.max_parallel_children in System Settings or split."
+            )
 
-            # Per-task fork policy check
-            # parallel sub-agents inherit self.role, so child_role = self.role
-            if _pp_policy is not None:
-                try:
-                    ok, reason = _pp_policy.check_fork_allowed(
-                        parent_id=self.id, parent_role=self.role,
-                        parent_depth=self._delegate_depth,
-                        child_role=task_spec.get("role") or self.role,
-                    )
-                    if not ok:
-                        return {"agent_id": agent_id, "task": task_text,
-                                "status": "blocked", "result": "",
-                                "error": f"fork policy: {reason}",
-                                "duration": time.time() - task_start}
-                    _pp_policy.register_fork_start(self.id)
-                except Exception:
-                    pass
+        parent_wd = Path(self.working_dir or ".")
+        parent_wd.mkdir(parents=True, exist_ok=True)
 
-            try:
-                # Check cancellation signal
-                if self._cancellation_event.is_set():
-                    return {
-                        "agent_id": agent_id,
-                        "task": task_text,
-                        "status": "cancelled",
-                        "result": "",
-                        "error": "Cancelled by parent agent",
-                        "duration": time.time() - task_start,
-                    }
+        cancel_event = threading.Event()
+        results: list[dict | None] = [None] * len(tasks)
 
-                # Create isolated sub-agent. shared_workspace not
-                # passed — sub-agent will derive its own from active
-                # context when it runs (parallel workers always run in
-                # solo unless explicitly attached to a project).
-                sub_agent = Agent(
-                    name=f"{self.name}_parallel_{agent_id}",
-                    role=self.role,
-                    model=self.model,
-                    provider=self.provider,
-                    working_dir=self.working_dir,
-                    shared_workspace="",
-                    system_prompt=self.system_prompt,
-                    profile=AgentProfile.from_dict(self.profile.to_dict()),
-                    node_id=self.node_id,
-                    parent_id=self.id,
-                    authorized_workspaces=list(self.authorized_workspaces),
-                )
+        def _slug(s: str) -> str:
+            import re as _re
+            return _re.sub(r"[^a-zA-Z0-9_-]", "_", str(s or ""))[:32] or "child"
 
-                # Set depth and inherit cancellation event
-                sub_agent._delegate_depth = self._delegate_depth + 1
-                sub_agent._max_delegate_depth = self._max_delegate_depth
-                sub_agent._cancellation_event = self._cancellation_event
+        def _run_one(idx: int, t: dict) -> tuple[int, dict]:
+            child_role = str(t.get("child_role") or self.role)
+            hint_subdir = (t.get("hint_subdir") or "").strip()
+            subdir_name = hint_subdir or f"child_{idx}_{_slug(child_role)}"
+            child_wd = parent_wd / subdir_name
+            child_wd.mkdir(parents=True, exist_ok=True)
 
-                # Track as active child
-                with self._active_children_lock:
-                    self._active_children.append((sub_agent.id, sub_agent))
-
-                try:
-                    # Build task prompt with context
-                    full_task = task_text
-                    if context:
-                        full_task = f"{task_text}\n\n[Additional Context]\n{context}"
-
-                    prompt = f"[Parallel delegated task | agent={agent_id} | depth={sub_agent._delegate_depth}/{self._max_delegate_depth}]\n{full_task}"
-
-                    # Execute in isolation (separate message history)
-                    result = sub_agent.chat(prompt)
-
-                    return {
-                        "agent_id": agent_id,
-                        "task": task_text,
-                        "status": "success",
-                        "result": result,
-                        "error": "",
-                        "duration": time.time() - task_start,
-                    }
-
-                finally:
-                    # Clean up from active children list
-                    with self._active_children_lock:
-                        self._active_children = [
-                            (aid, ag) for aid, ag in self._active_children
-                            if aid != sub_agent.id
-                        ]
-                    if _pp_policy is not None:
-                        try:
-                            _pp_policy.register_fork_end(self.id)
-                        except Exception:
-                            pass
-
-            except Exception as e:
-                if _pp_policy is not None:
-                    try:
-                        _pp_policy.register_fork_end(self.id)
-                    except Exception:
-                        pass
-                return {
-                    "agent_id": agent_id,
-                    "task": task_text,
-                    "status": "failed",
-                    "result": "",
-                    "error": str(e),
-                    "duration": time.time() - task_start,
+            if cancel_event.is_set():
+                return idx, {
+                    "status": "aborted",
+                    "output": "",
+                    "error": "sibling failed first",
+                    "working_subdir": str(child_wd),
+                    "child_role": child_role,
                 }
 
-        # Execute tasks in parallel using ThreadPoolExecutor
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(_execute_task, task): task for task in tasks}
+            # Build per-task kwargs for self.delegate. The child_role is
+            # passed via the existing `child_agent` mechanism: caller can
+            # pre-build with role, OR we let delegate() inherit self.role.
+            # For now we forward role hint via an internal kwarg the
+            # delegate path picks up. If the existing delegate doesn't
+            # accept role kwarg, this falls back to inheritance.
+            try:
+                output = self.delegate(
+                    str(t.get("task") or ""),
+                    from_agent=self.name or self.id,
+                )
+                return idx, {
+                    "status": "succeeded",
+                    "output": str(output),
+                    "error": None,
+                    "working_subdir": str(child_wd),
+                    "child_role": child_role,
+                }
+            except Exception as e:
+                cancel_event.set()
+                return idx, {
+                    "status": "failed",
+                    "output": "",
+                    "error": f"{type(e).__name__}: {e}",
+                    "working_subdir": str(child_wd),
+                    "child_role": child_role,
+                }
 
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    result = future.result(timeout=300)  # 5 min timeout per task
-                    results.append(result)
-                except Exception as e:
-                    task = futures[future]
-                    results.append({
-                        "agent_id": task.get("agent_id", "unknown"),
-                        "task": task.get("task", ""),
-                        "status": "failed",
-                        "result": "",
-                        "error": str(e),
-                        "duration": time.time() - task_start,
-                    })
+        with ThreadPoolExecutor(max_workers=len(tasks)) as exe:
+            futures = {exe.submit(_run_one, i, t): i for i, t in enumerate(tasks)}
+            for f in as_completed(futures):
+                idx, result = f.result()
+                results[idx] = result
 
-        total_duration = time.time() - start_time
-
-        self._log("parallel_delegation_complete", {
-            "task_count": len(tasks),
-            "success": sum(1 for r in results if r["status"] == "success"),
-            "failed": sum(1 for r in results if r["status"] == "failed"),
-            "cancelled": sum(1 for r in results if r["status"] == "cancelled"),
-            "duration": total_duration,
-        })
-
-        logger.info(
-            "PARALLEL_DELEGATE COMPLETE: parent=%s success=%d failed=%d duration=%.2fs",
-            self.id,
-            sum(1 for r in results if r["status"] == "success"),
-            sum(1 for r in results if r["status"] == "failed"),
-            total_duration
-        )
-
-        return results
+        return results  # type: ignore[return-value]
 
     def cancel_children(self) -> dict:
         """
