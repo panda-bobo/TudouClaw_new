@@ -1749,6 +1749,11 @@ class AgentProfile:
     skill_capabilities: list[str] = field(default_factory=list)
     # Permanently granted skill capabilities, e.g. ["pdf:rw", "docx:rw"]
     # Populated automatically when a skill is granted to the agent.
+    knowledge_templates: list[str] = field(default_factory=list)
+    # Spec 2026-05-03: template IDs explicitly bound to this agent.
+    # Always rendered FIRST inside the template-context block on each
+    # chat turn; auto-match (match_templates) fills the remaining
+    # token budget on top, dedup'd by id. Empty = pure auto-match.
 
     # ══════════════════════════════════════════════════════════════════════
     # RolePresetV2 — 7-dimensional role enhancement (all fields optional, V1 agents keep defaults)
@@ -1834,6 +1839,7 @@ class AgentProfile:
             "sandbox_mode": self.sandbox_mode,
             "sandbox_allow_commands": self.sandbox_allow_commands,
             "skill_capabilities": self.skill_capabilities,
+            "knowledge_templates": list(self.knowledge_templates or []),
             # RolePresetV2 fields (all optional)
             "role_preset_id": self.role_preset_id,
             "role_preset_version": self.role_preset_version,
@@ -1885,6 +1891,7 @@ class AgentProfile:
             sandbox_mode=d.get("sandbox_mode", ""),
             sandbox_allow_commands=d.get("sandbox_allow_commands") or [],
             skill_capabilities=d.get("skill_capabilities") or [],
+            knowledge_templates=list(d.get("knowledge_templates", []) or []),
             # RolePresetV2 fields (all with safe defaults → V1 agents compatible)
             role_preset_id=d.get("role_preset_id", ""),
             role_preset_version=int(d.get("role_preset_version", 1)),
