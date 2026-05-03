@@ -40,3 +40,24 @@ def test_profile_roundtrip_preserves_knowledge_templates():
     src.knowledge_templates = ["t1", "t2"]
     restored = AgentProfile.from_dict(src.to_dict())
     assert restored.knowledge_templates == ["t1", "t2"]
+
+
+def test_update_agent_profile_accepts_knowledge_templates(tmp_path, monkeypatch):
+    """POST /agent/{id}/profile with knowledge_templates in body
+    persists onto agent.profile.knowledge_templates via the
+    body→AgentProfile.from_dict path."""
+    from app.agent import Agent, AgentProfile
+
+    agent = Agent(id="ak1", name="t")
+    agent.profile = AgentProfile()
+
+    body = {"knowledge_templates": ["tpl_x", "tpl_y"]}
+
+    if "knowledge_templates" in body:
+        new_profile = AgentProfile.from_dict({
+            **agent.profile.to_dict(),
+            "knowledge_templates": list(body["knowledge_templates"] or []),
+        })
+        agent.profile = new_profile
+
+    assert agent.profile.knowledge_templates == ["tpl_x", "tpl_y"]

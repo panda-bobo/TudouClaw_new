@@ -951,6 +951,7 @@ async def update_agent_profile(
             exec_policy=body.get("exec_policy", agent.profile.exec_policy),
             exec_blacklist=body.get("exec_blacklist", agent.profile.exec_blacklist),
             exec_whitelist=body.get("exec_whitelist", agent.profile.exec_whitelist),
+            knowledge_templates=body.get("knowledge_templates", agent.profile.knowledge_templates),
         )
         hub._save_agents()
         return {"ok": True}
