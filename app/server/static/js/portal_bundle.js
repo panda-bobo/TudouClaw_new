@@ -13881,6 +13881,70 @@ function _eaCollectRagCollectionIds() {
   return ids;
 }
 
+// ── Knowledge Templates checkbox list (spec 2026-05-03) ──
+async function _eaRenderKnowledgeTemplates(boundIds) {
+  var listEl = document.getElementById('ea-knowledge-templates-list');
+  if (!listEl) return;
+  boundIds = Array.isArray(boundIds) ? boundIds : [];
+
+  var data;
+  try {
+    data = await api('GET', '/api/portal/templates');
+  } catch (_) { data = null; }
+
+  var templates = (data && data.templates) || [];
+  if (templates.length === 0) {
+    listEl.innerHTML =
+      '<div style="font-size:12px;color:var(--text3);padding:12px;text-align:center">'
+      + '尚未创建任何模版<br>'
+      + '<a href="javascript:hideModal(\'edit-agent\');renderTemplateLibrary()" '
+      + 'style="color:var(--primary);text-decoration:underline">去创建 →</a>'
+      + '</div>';
+    _eaUpdateKnowledgeTemplatesCounter();
+    return;
+  }
+
+  // Sort: by category, then name. Category badge in muted pill.
+  templates.sort(function(a, b) {
+    var ca = (a.category || 'general').localeCompare(b.category || 'general');
+    if (ca !== 0) return ca;
+    return (a.name || '').localeCompare(b.name || '');
+  });
+
+  var bound = new Set(boundIds);
+  listEl.innerHTML = templates.map(function(t) {
+    var checked = bound.has(t.id) ? 'checked' : '';
+    var cat = esc(t.category || 'general');
+    return '<label style="display:flex;align-items:center;gap:8px;padding:6px 4px;cursor:pointer;font-size:12px;border-radius:4px"'
+      + ' onmouseenter="this.style.background=\'var(--surface2)\'" onmouseleave="this.style.background=\'\'">'
+      + '<input type="checkbox" data-tpl-id="' + esc(t.id) + '" ' + checked
+      + ' onchange="_eaUpdateKnowledgeTemplatesCounter()">'
+      + '<span style="flex:1">' + esc(t.name || '(unnamed)') + '</span>'
+      + '<span style="font-size:10px;padding:2px 6px;background:var(--surface3);color:var(--text3);border-radius:8px">' + cat + '</span>'
+      + '</label>';
+  }).join('');
+  _eaUpdateKnowledgeTemplatesCounter();
+}
+
+function _eaUpdateKnowledgeTemplatesCounter() {
+  var counter = document.getElementById('ea-knowledge-templates-counter');
+  var listEl = document.getElementById('ea-knowledge-templates-list');
+  if (!counter || !listEl) return;
+  var n = listEl.querySelectorAll('input[type="checkbox"]:checked').length;
+  counter.textContent = '已选 ' + n + ' 个';
+}
+
+function _eaCollectKnowledgeTemplates() {
+  var listEl = document.getElementById('ea-knowledge-templates-list');
+  if (!listEl) return [];
+  var ids = [];
+  listEl.querySelectorAll('input[type="checkbox"]:checked').forEach(function(cb) {
+    var tid = cb.getAttribute('data-tpl-id');
+    if (tid) ids.push(tid);
+  });
+  return ids;
+}
+
 // ── Tool permission editor (used inside editAgentProfile modal) ──
 // Master list: all tools the agent could possibly have. Populated from
 // the first call to _eaFetchToolCatalog and reused afterwards.
@@ -14138,6 +14202,12 @@ async function editAgentProfile(agentId) {
   try {
     _eaRenderToolsGrid(prof.allowed_tools || [], prof.denied_tools || []);
   } catch(e) { console.warn('tools grid render failed:', e); }
+
+  // Knowledge Templates checkbox list (spec 2026-05-03)
+  try {
+    var boundIds = (agent.profile && agent.profile.knowledge_templates) || [];
+    _eaRenderKnowledgeTemplates(boundIds);
+  } catch(e) { console.warn('knowledge_templates populate failed:', e); }
   showModal('edit-agent');
 }
 
@@ -14243,6 +14313,7 @@ async function saveAgentProfile() {
       custom_instructions: promptEl ? promptEl.value.trim() : '',
       rag_mode: (document.getElementById('ea-rag-mode') || {}).value || 'shared',
       rag_collection_ids: _eaCollectRagCollectionIds(),
+      knowledge_templates: _eaCollectKnowledgeTemplates(),
       desktop_enabled: !!(document.getElementById('ea-desktop-enabled') || {}).checked,
       desktop_lottie_url: ((document.getElementById('ea-desktop-lottie') || {}).value || '').trim(),
     };
