@@ -1500,40 +1500,53 @@ async def manage_templates(
     hub=Depends(get_hub),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Template library management (create, update, delete)."""
+    """Template library management (create, update, delete).
+
+    2026-05-03 fix: was calling hub.{create,update,delete}_template
+    which the Hub never exposed → every request returned 501. The
+    real implementation lives on TemplateLibrary (singleton via
+    get_template_library()), with method names add/update/remove.
+    Map them here.
+    """
     try:
+        from ...template_library import get_template_library
+        lib = get_template_library()
         action = body.get("action", "create")
 
         if action == "create":
-            if not hasattr(hub, "create_template"):
-                raise HTTPException(501, "template management not available")
-            tmpl = hub.create_template(
+            tmpl = lib.add_template(
                 name=body.get("name", ""),
                 content=body.get("content", ""),
                 description=body.get("description", ""),
                 roles=body.get("roles", []),
                 tags=body.get("tags", []),
                 category=body.get("category", "general"),
+                created_by=getattr(user, "user_id", "") or "admin",
             )
-            return tmpl.to_dict() if hasattr(tmpl, "to_dict") else {"ok": True, "template": tmpl}
+            return {"ok": True, "template": tmpl.to_dict(include_content=True)}
 
         if action == "update":
-            if not hasattr(hub, "update_template"):
-                raise HTTPException(501, "template management not available")
             tmpl_id = body.get("id", "")
+            if not tmpl_id:
+                raise HTTPException(400, "missing template id")
             kwargs = {k: v for k, v in body.items()
-                      if k in ("name", "content", "description", "roles", "tags", "category") and v is not None}
-            tmpl = hub.update_template(tmpl_id, **kwargs)
+                      if k in ("name", "content", "description", "roles", "tags") and v is not None}
+            # `category` isn't accepted by update_template (file-on-disk
+            # would also need to move) — silently drop to keep the
+            # endpoint forgiving.
+            tmpl = lib.update_template(tmpl_id, **kwargs)
             if tmpl:
-                return tmpl.to_dict() if hasattr(tmpl, "to_dict") else {"ok": True}
+                return {"ok": True, "template": tmpl.to_dict(include_content=True)}
             raise HTTPException(404, "Template not found")
 
         if action == "delete":
-            if not hasattr(hub, "delete_template"):
-                raise HTTPException(501, "template management not available")
             tmpl_id = body.get("id", "")
-            ok = hub.delete_template(tmpl_id)
-            return {"ok": ok}
+            if not tmpl_id:
+                raise HTTPException(400, "missing template id")
+            ok = lib.remove_template(tmpl_id)
+            if not ok:
+                raise HTTPException(404, "Template not found")
+            return {"ok": True}
 
         raise HTTPException(400, f"Unknown template action: {action}")
     except HTTPException:
