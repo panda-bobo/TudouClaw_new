@@ -18513,13 +18513,35 @@ function renderSelfImprovement() {
 
   // ── Row 1: closed-loop KPI cards ──
   // Goal → Plan → Completion → Conversion
-  html += '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:18px">';
-  html += '<div class="card" style="padding:14px 16px;text-align:center"><div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Plans</div><div id="si-metric-plans" style="font-size:26px;font-weight:800;color:var(--primary);line-height:1">-</div><div style="font-size:10px;color:var(--text3);margin-top:4px">学习计划总数</div></div>';
-  html += '<div class="card" style="padding:14px 16px;text-align:center"><div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">In Progress</div><div id="si-metric-running" style="font-size:26px;font-weight:800;color:#FF9800;line-height:1">-</div><div style="font-size:10px;color:var(--text3);margin-top:4px">排队 / 进行中</div></div>';
-  html += '<div class="card" style="padding:14px 16px;text-align:center"><div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Completion</div><div id="si-metric-completion" style="font-size:26px;font-weight:800;color:#4CAF50;line-height:1">-</div><div style="font-size:10px;color:var(--text3);margin-top:4px">完成率</div></div>';
-  html += '<div class="card" style="padding:14px 16px;text-align:center"><div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Conversion</div><div id="si-metric-conversion" style="font-size:26px;font-weight:800;color:#2196F3;line-height:1">-</div><div style="font-size:10px;color:var(--text3);margin-top:4px">经验转化率</div></div>';
-  html += '<div class="card" style="padding:14px 16px;text-align:center"><div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Experiences</div><div id="si-metric-exp" style="font-size:26px;font-weight:800;color:var(--primary);line-height:1">-</div><div style="font-size:10px;color:var(--text3);margin-top:4px">已沉淀经验</div></div>';
-  html += '</div>';
+  if (_techMode) {
+    var siKpi = function(label, id, color, hint) {
+      return '<div class="tc-card-glass" style="padding:18px;border-top:1px solid rgba(255,255,255,0.10)">' +
+        '<div class="tc-mono-label" style="color:var(--outline);margin-bottom:10px">' + label + '</div>' +
+        '<div style="display:flex;align-items:flex-end;justify-content:space-between">' +
+          '<span id="' + id + '" style="font-size:30px;font-weight:700;color:' + color + ';font-family:var(--font-mono);letter-spacing:-0.02em;line-height:1">-</span>' +
+          '<span class="tc-text-dim" style="font-size:10px;font-family:var(--font-mono)">' + hint + '</span>' +
+        '</div>' +
+        '<div style="margin-top:14px;height:3px;width:100%;background:rgba(255,255,255,0.05);border-radius:2px;overflow:hidden">' +
+          '<div style="height:100%;background:' + color + ';width:50%;opacity:0.7"></div>' +
+        '</div>' +
+      '</div>';
+    };
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:var(--s-md);margin-bottom:var(--s-lg)">' +
+      siKpi('PLANS',      'si-metric-plans',      'var(--primary)',           'TOTAL') +
+      siKpi('IN PROGRESS','si-metric-running',    'var(--cyber-orange)',      'ACTIVE') +
+      siKpi('COMPLETION', 'si-metric-completion', 'var(--cyber-lime)',        'RATE') +
+      siKpi('CONVERSION', 'si-metric-conversion', 'var(--secondary)',         'YIELD') +
+      siKpi('EXPERIENCES','si-metric-exp',        'var(--primary)',           'STORED') +
+    '</div>';
+  } else {
+    html += '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:18px">';
+    html += '<div class="card" style="padding:14px 16px;text-align:center"><div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Plans</div><div id="si-metric-plans" style="font-size:26px;font-weight:800;color:var(--primary);line-height:1">-</div><div style="font-size:10px;color:var(--text3);margin-top:4px">学习计划总数</div></div>';
+    html += '<div class="card" style="padding:14px 16px;text-align:center"><div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">In Progress</div><div id="si-metric-running" style="font-size:26px;font-weight:800;color:#FF9800;line-height:1">-</div><div style="font-size:10px;color:var(--text3);margin-top:4px">排队 / 进行中</div></div>';
+    html += '<div class="card" style="padding:14px 16px;text-align:center"><div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Completion</div><div id="si-metric-completion" style="font-size:26px;font-weight:800;color:#4CAF50;line-height:1">-</div><div style="font-size:10px;color:var(--text3);margin-top:4px">完成率</div></div>';
+    html += '<div class="card" style="padding:14px 16px;text-align:center"><div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Conversion</div><div id="si-metric-conversion" style="font-size:26px;font-weight:800;color:#2196F3;line-height:1">-</div><div style="font-size:10px;color:var(--text3);margin-top:4px">经验转化率</div></div>';
+    html += '<div class="card" style="padding:14px 16px;text-align:center"><div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Experiences</div><div id="si-metric-exp" style="font-size:26px;font-weight:800;color:var(--primary);line-height:1">-</div><div style="font-size:10px;color:var(--text3);margin-top:4px">已沉淀经验</div></div>';
+    html += '</div>';
+  }
   // Secondary line: agents with SI + roles
   html += '<div style="display:flex;gap:16px;margin-bottom:18px;font-size:11px;color:var(--text3)">';
   html += '<span>自改进启用: <b style="color:var(--text1)">'+siCount+'/'+agents.length+'</b></span>';
@@ -25149,16 +25171,38 @@ var _NODE_W = 140, _NODE_H = 60;        // standard rect dims; circle/diamond ov
 
 async function renderCanvasPage() {
   var c = document.getElementById('content');
-  c.innerHTML =
-      '<div style="padding:18px">'
-    + '  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">'
-    + '    <div><h2 style="margin:0">编排画布 / Visual Orchestration</h2>'
-    + '      <div style="font-size:12px;color:var(--text3);margin-top:4px">拖拽式 DAG 设计器,把多 Agent 协作流程画成图。MVP 阶段:画 + 存,执行引擎在后续版本上线。</div>'
-    + '    </div>'
-    + '    <button class="btn btn-primary btn-sm" onclick="_canvasNewWorkflow()"><span class="material-symbols-outlined" style="font-size:16px">add</span> 新建 Workflow</button>'
-    + '  </div>'
-    + '  <div id="canvas-list-box" style="color:var(--text3)">加载中…</div>'
-    + '</div>';
+  var _techCv = false;
+  try { _techCv = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+  if (_techCv) {
+    c.innerHTML = '' +
+      '<div style="padding:var(--s-lg)">' +
+        '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:var(--s-lg);gap:var(--s-md);flex-wrap:wrap">' +
+          '<div style="flex:1;min-width:240px">' +
+            '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px">' +
+              '<span>VISUAL ORCHESTRATION</span>' +
+              '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
+            '</div>' +
+            '<h1 class="tc-h2" style="margin-top:6px">Workflow Editor</h1>' +
+            '<p class="tc-text-dim" style="font-size:12px;margin-top:6px;line-height:1.55">Drag-and-drop DAG designer. Compose multi-agent flows visually.</p>' +
+          '</div>' +
+          '<button class="tc-btn tc-btn-primary tc-btn-sm" onclick="_canvasNewWorkflow()">' +
+            '<span class="material-symbols-outlined" style="font-size:14px">add</span> NEW WORKFLOW' +
+          '</button>' +
+        '</div>' +
+        '<div id="canvas-list-box" class="tc-text-dim">LOADING…</div>' +
+      '</div>';
+  } else {
+    c.innerHTML =
+        '<div style="padding:18px">'
+      + '  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">'
+      + '    <div><h2 style="margin:0">编排画布 / Visual Orchestration</h2>'
+      + '      <div style="font-size:12px;color:var(--text3);margin-top:4px">拖拽式 DAG 设计器,把多 Agent 协作流程画成图。MVP 阶段:画 + 存,执行引擎在后续版本上线。</div>'
+      + '    </div>'
+      + '    <button class="btn btn-primary btn-sm" onclick="_canvasNewWorkflow()"><span class="material-symbols-outlined" style="font-size:16px">add</span> 新建 Workflow</button>'
+      + '  </div>'
+      + '  <div id="canvas-list-box" style="color:var(--text3)">加载中…</div>'
+      + '</div>';
+  }
   await _loadCanvasList();
 }
 
@@ -30712,25 +30756,34 @@ async function renderPendingSkills() {
     : '    <div><h2 style="margin:0">技能锻造 / SkillForge Drafts</h2>' +
       '      <div style="font-size:12px;color:var(--text3);margin-top:4px">Agent 从经验库中提炼出的技能草稿，等待管理员审核后导入技能商店。</div>' +
       '    </div>';
+  var psImportLabel = _techPs ? 'IMPORT FROM AGENT' : '从 Agent 工作区导入';
+  var psRefreshLabel = _techPs ? 'REFRESH' : '刷新';
+  var psStatusOpts = _techPs
+    ? '<option value="">ALL STATUSES</option>' +
+      '<option value="draft">DRAFT</option>' +
+      '<option value="exported">EXPORTED</option>' +
+      '<option value="approved">APPROVED</option>' +
+      '<option value="rejected">REJECTED</option>'
+    : '<option value="">全部状态</option>' +
+      '<option value="draft">draft 草稿</option>' +
+      '<option value="exported">exported 已导出</option>' +
+      '<option value="approved">approved 已批准</option>' +
+      '<option value="rejected">rejected 已拒绝</option>';
   c.innerHTML = ''
-    + '<div style="padding:18px">'
+    + '<div style="padding:' + (_techPs ? 'var(--s-lg)' : '18px') + '">'
     + '  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;gap:12px">'
     + headerHtml
-    + '    <div style="display:flex;gap:8px">'
-    + '      <button class="btn btn-sm" onclick="importSkillFromWorkspace()"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">upload_file</span> 从 Agent 工作区导入</button>'
-    + '      <button class="btn btn-sm" onclick="loadPendingSkills()"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">refresh</span> 刷新</button>'
+    + '    <div style="display:flex;gap:8px;flex-shrink:0">'
+    + '      <button class="btn btn-sm" onclick="importSkillFromWorkspace()"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">upload_file</span> ' + psImportLabel + '</button>'
+    + '      <button class="btn btn-sm" onclick="loadPendingSkills()"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">refresh</span> ' + psRefreshLabel + '</button>'
     + '    </div>'
     + '  </div>'
     + '  <div style="display:flex;gap:10px;margin-bottom:12px">'
-    + '    <select id="pending-status-filter" onchange="_pendingSkillsState.status=this.value;loadPendingSkills()" style="padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">'
-    + '      <option value="">全部状态</option>'
-    + '      <option value="draft">draft 草稿</option>'
-    + '      <option value="exported">exported 已导出</option>'
-    + '      <option value="approved">approved 已批准</option>'
-    + '      <option value="rejected">rejected 已拒绝</option>'
+    + '    <select id="pending-status-filter" onchange="_pendingSkillsState.status=this.value;loadPendingSkills()">'
+    +        psStatusOpts
     + '    </select>'
     + '  </div>'
-    + '  <div id="pending-list" style="color:var(--text3)">加载中…</div>'
+    + '  <div id="pending-list" style="color:var(--text3)">' + (_techPs ? 'LOADING…' : '加载中…') + '</div>'
     + '</div>';
   loadPendingSkills();
 }
