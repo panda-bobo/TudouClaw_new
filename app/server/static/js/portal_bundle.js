@@ -29226,7 +29226,24 @@ async function submitAnnotate(installedId, btn) {
 // ============ Skill Packages (new SkillRegistry-backed UI) ============
 function renderSkillPkgs() {
   var c = document.getElementById('content');
-  c.innerHTML = '<div style="padding:18px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px"><h2 style="margin:0">技能库 / Skill Packages</h2><button class="btn btn-primary btn-sm" onclick="showInstallSkillPkg()"><span class="material-symbols-outlined" style="font-size:16px">add</span> 安装技能</button></div><div id="skill-pkgs-list" style="color:var(--text3)">加载中…</div></div>';
+  var _techSp = false;
+  try { _techSp = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+  if (_techSp) {
+    c.innerHTML = '' +
+      '<div style="padding:var(--s-lg)">' +
+        '<div style="display:flex;justify-content:space-between;align-items:flex-end;gap:var(--s-md);margin-bottom:var(--s-lg);flex-wrap:wrap">' +
+          '<div style="flex:1;min-width:240px">' +
+            '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px"><span>INSTALLED CAPABILITIES</span><span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span></div>' +
+            '<h2 style="font-family:var(--font-display);font-size:24px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:8px 0 6px">Skill Packages</h2>' +
+            '<p class="tc-text-dim" style="font-size:13px;line-height:1.55;max-width:680px">Locally-installed Anthropic Agent Skills (SKILL.md) and TudouClaw manifest.yaml bundles, with per-agent grant management.</p>' +
+          '</div>' +
+          '<button onclick="showInstallSkillPkg()" style="background:var(--primary-fixed);color:var(--on-primary-fixed);padding:10px 20px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:8px;box-shadow:0 4px 14px rgba(192,193,255,0.20)"><span class="material-symbols-outlined" style="font-size:16px">add_circle</span> INSTALL SKILL</button>' +
+        '</div>' +
+        '<div id="skill-pkgs-list" class="tc-text-dim">Loading…</div>' +
+      '</div>';
+  } else {
+    c.innerHTML = '<div style="padding:18px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px"><h2 style="margin:0">技能库 / Skill Packages</h2><button class="btn btn-primary btn-sm" onclick="showInstallSkillPkg()"><span class="material-symbols-outlined" style="font-size:16px">add</span> 安装技能</button></div><div id="skill-pkgs-list" style="color:var(--text3)">加载中…</div></div>';
+  }
   fetch('/api/portal/skill-pkgs').then(function(r){return r.json();}).then(function(d){
     var box = document.getElementById('skill-pkgs-list');
     var items = (d && d.skills) || [];
