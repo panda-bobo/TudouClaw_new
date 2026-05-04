@@ -27553,24 +27553,18 @@ window._skillStoreFilterByTag = function(tag) {
 function _renderTagFilterBar() {
   var bar = document.getElementById('store-tag-filters');
   if (!bar) return;
-  var tags = _skillStoreState.allTags || [];
+  // The two-row category filter (业务场景 + Agent 类型) above already
+  // covers structured browsing. The auto-extracted tag list pollutes
+  // the chrome with low-signal "·1" chips (e.g. "发邮件·1" /
+  // "send email·1" / "email·1" being 3 names for the same concept).
+  // Show ONLY when an active tag is filtering — as a status pill so
+  // the user can clear it. Otherwise leave empty.
   var active = (_skillStoreState.tag || '').toLowerCase();
-  if (!tags.length) {
+  if (!active) {
     bar.innerHTML = '';
     return;
   }
-  var clearChip = active
-    ? '<span style="padding:3px 10px;font-size:11px;border-radius:12px;background:var(--surface3);color:var(--text2);cursor:pointer;border:1px solid var(--border)" onclick="_skillStoreState.tag=\'\';loadSkillStore()" title="清除筛选">✕ 清除</span>'
-    : '';
-  var chips = tags.slice(0, 30).map(function(item) {
-    var t = item.tag, n = item.count;
-    var isActive = (t.toLowerCase() === active);
-    var style = isActive
-      ? 'padding:3px 10px;font-size:11px;border-radius:12px;background:var(--primary);color:#fff;cursor:pointer;border:1px solid var(--primary)'
-      : 'padding:3px 10px;font-size:11px;border-radius:12px;background:var(--surface3);color:var(--text2);cursor:pointer;border:1px solid var(--border)';
-    return '<span style="'+style+'" onclick="_skillStoreFilterByTag(\''+esc(t)+'\')">'+esc(t)+' <span style="opacity:0.7">·'+n+'</span></span>';
-  }).join('');
-  bar.innerHTML = clearChip + chips;
+  bar.innerHTML = '<span style="padding:3px 10px;font-size:11px;border-radius:12px;background:var(--primary);color:#fff;cursor:pointer;border:1px solid var(--primary)" onclick="_skillStoreState.tag=\'\';loadSkillStore()" title="Clear tag filter">✕ Tag: ' + esc(active) + '</span>';
 }
 
 // ─────────── Skill category dual-dimension filter ───────────
