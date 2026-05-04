@@ -3030,6 +3030,31 @@ function _techHubSwitch(key, tabId) {
 window._techHubSwitch = _techHubSwitch;
 
 
+// Wrap a top-level page renderer with a tech-style page header. The
+// legacy fn writes into a sub div (id-swapped), so any of its inline
+// styles still apply — but the OUTER chrome (header + container) is
+// tech. Use this for pages that don't have hub-style sub-tabs but
+// still need the new page-level header pattern.
+function _techWrapTopLevel(opts, legacyFn) {
+  var c = document.getElementById('content');
+  if (!c) return;
+  c.innerHTML = _techPageHeader(opts) + '<div id="tech-tl-body"></div>';
+  var sc = document.getElementById('tech-tl-body');
+  if (!sc) return;
+  var _orig = c;
+  sc.id = 'content'; if (_orig !== sc) _orig.id = 'content-outer';
+  try {
+    if (typeof legacyFn === 'function') legacyFn();
+  } catch (e) {
+    sc.innerHTML = '<div class="tc-card" style="color:var(--error);padding:var(--s-lg)">' + esc(e.message) + '</div>';
+  } finally {
+    sc.id = 'tech-tl-body';
+    if (_orig !== sc) _orig.id = 'content';
+  }
+}
+window._techWrapTopLevel = _techWrapTopLevel;
+
+
 // ── renderRolesSkillsHub — tech port ──
 function renderRolesSkillsHubTech() {
   var c = document.getElementById('content');
@@ -19808,6 +19833,17 @@ function _renderHubTabs(hubId, tabs) {
 }
 
 function renderProjectsHub() {
+  try {
+    if (localStorage.getItem('tudou_theme') === 'tech') {
+      return _techWrapTopLevel(
+        { label: 'Workspace', title: 'Project Management' },
+        _renderProjectsHubLegacy
+      );
+    }
+  } catch (e) {}
+  return _renderProjectsHubLegacy();
+}
+function _renderProjectsHubLegacy() {
   var c = document.getElementById('content');
   var actionsEl = document.getElementById('topbar-actions');
   // All action buttons live inside each tab's own content header (top-right),
@@ -21659,6 +21695,17 @@ var _orchActiveTab = 'canvas';
 var _orchPageRoleFilter = '';
 
 function renderOrchestrationPage() {
+  try {
+    if (localStorage.getItem('tudou_theme') === 'tech') {
+      return _techWrapTopLevel(
+        { label: 'Workflow Engine', title: 'Orchestration' },
+        _renderOrchestrationPageLegacy
+      );
+    }
+  } catch (e) {}
+  return _renderOrchestrationPageLegacy();
+}
+function _renderOrchestrationPageLegacy() {
   var c = document.getElementById('content');
   c.innerHTML =
     '<div style="padding:18px;display:flex;flex-direction:column;height:calc(100vh - 80px)">'
@@ -28274,6 +28321,7 @@ async function toggleToolDenied(tool, checkbox) {
 }
 
 function renderIntegrationsHub() {
+  try { if (localStorage.getItem('tudou_theme') === 'tech') return renderIntegrationsHubTech(); } catch (e) {}
   var c = document.getElementById('content');
   var sc;
   c.innerHTML = '<div id="integrations-channels-wrap"></div>';
@@ -28284,6 +28332,39 @@ function renderIntegrationsHub() {
   catch(e) { sc.innerHTML = '<div style="color:var(--error);padding:20px">'+e.message+'</div>'; }
   finally { sc.id = 'integrations-channels-wrap'; _orig.id = 'content'; }
 }
+
+function renderIntegrationsHubTech() {
+  var c = document.getElementById('content');
+  if (!c) return;
+  var tabs = [
+    { id: 'channels', label: 'Channels', icon: 'forum' },
+    { id: 'inbox',    label: 'Inbox',    icon: 'inbox'  },
+    { id: 'meetings', label: 'Meetings', icon: 'groups' },
+  ];
+  var r = _techHubPage({ label: 'System Feed', title: 'Integrations & Notifications' }, tabs, 'integrations');
+  c.innerHTML = r.html;
+  var sc = document.getElementById(r.bodyId);
+  if (!sc) return;
+  var _orig = document.getElementById('content');
+  sc.id = 'content'; if (_orig !== sc) _orig.id = 'content-outer';
+  try {
+    if (r.current === 'channels' && typeof renderChannels === 'function') {
+      renderChannels(sc);
+    } else if (r.current === 'inbox' && typeof renderInbox === 'function') {
+      renderInbox();
+    } else if (r.current === 'meetings' && typeof renderMeetingsTab === 'function') {
+      renderMeetingsTab();
+    } else {
+      sc.innerHTML = '<div class="tc-card tc-text-dim" style="padding:var(--s-lg)">Tab not yet implemented.</div>';
+    }
+  } catch (e) {
+    sc.innerHTML = '<div class="tc-card" style="color:var(--error);padding:var(--s-lg)">' + esc(e.message) + '</div>';
+  } finally {
+    sc.id = r.bodyId;
+    if (_orig !== sc) _orig.id = 'content';
+  }
+}
+window.renderIntegrationsHubTech = renderIntegrationsHubTech;
 
 function renderSettingsHub() {
   try { if (localStorage.getItem('tudou_theme') === 'tech') return renderSettingsHubTech(); } catch (e) {}
