@@ -3009,11 +3009,15 @@ function _techHubPage(opts, tabs, key) {
   }).join('');
 
   var bodyId = 'tech-hub-' + key + '-body';
+  // No hub-level page header in tech mode — the topbar already shows
+  // the view name, and each sub-page renders its own hero. Stitch
+  // designs (16/26/27/etc.) all show a single hero per page; nesting
+  // a "CONFIGURATION + Roles & Skills" h2 above tabs duplicates the
+  // identity the topbar + active tab pill already convey.
   return {
     current: current,
     bodyId: bodyId,
-    html: _techPageHeader(opts) +
-          '<div class="tc-row-sm" style="flex-wrap:wrap;gap:var(--s-sm);margin-bottom:var(--s-lg)">' +
+    html: '<div class="tc-row-sm" style="flex-wrap:wrap;gap:var(--s-sm);margin-bottom:var(--s-lg)">' +
             tabHtml +
           '</div>' +
           '<div id="' + bodyId + '"></div>',
@@ -27493,44 +27497,86 @@ async function renderSkillStore() {
   var c = document.getElementById('content');
   var _techSs = false;
   try { _techSs = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
-  var ssHeader = _techSs
-    ? '    <div style="flex:1;min-width:240px">' +
-        '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px">' +
-          '<span>SKILL MARKETPLACE</span>' +
-          '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
+
+  if (_techSs) {
+    // Stitch_27 layout: large hero glass-panel with subtle data-flow
+    // backdrop, inline action buttons (replaces "Quick Deploy / How It
+    // Works" with our actual import flows). No category/tag filter
+    // rows above the cards — those structured filters and the auto-
+    // extracted tag list pollute chrome with low-signal chips. Search
+    // + source select + sort sit in a compact row below the hero.
+    c.innerHTML = '' +
+      '<div style="padding:var(--s-lg);display:flex;flex-direction:column;gap:var(--s-lg)">' +
+        // ── Hero ──
+        '<section class="tc-card-glass" style="position:relative;overflow:hidden;padding:var(--s-xl);display:flex;flex-direction:column;gap:18px;border-top:1px solid rgba(255,255,255,0.10);min-height:240px">' +
+          // Subtle decorative gradient on the right (data-flow vibe)
+          '<div style="position:absolute;top:0;right:0;width:55%;height:100%;background:radial-gradient(ellipse at top right,rgba(137,206,255,0.10),transparent 60%),radial-gradient(ellipse at bottom right,rgba(192,193,255,0.08),transparent 55%);pointer-events:none"></div>' +
+          '<div style="position:absolute;inset:0;background-image:linear-gradient(rgba(192,193,255,0.025) 1px,transparent 1px),linear-gradient(90deg,rgba(192,193,255,0.025) 1px,transparent 1px);background-size:24px 24px;pointer-events:none"></div>' +
+          '<div style="position:relative;z-index:1;max-width:680px;display:flex;flex-direction:column;gap:14px">' +
+            '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px">' +
+              '<span>AETHER ECOSYSTEM</span>' +
+              '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
+            '</div>' +
+            '<h1 style="font-family:var(--font-display);font-size:36px;font-weight:600;letter-spacing:-0.02em;color:var(--on-surface);margin:0;line-height:1.1">Skill Marketplace</h1>' +
+            '<p class="tc-text-dim" style="font-size:14px;line-height:1.6;margin:0">Empower your agents with advanced processing capabilities — Anthropic Agent Skills (SKILL.md) + TudouClaw manifest.yaml. Browse by trust tier, install, grant to agents.</p>' +
+            '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px">' +
+              '<button onclick="_showLocalImportModal()" style="background:var(--primary-fixed);color:var(--on-primary-fixed);padding:10px 20px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:8px;box-shadow:0 4px 14px rgba(192,193,255,0.20);transition:all 0.15s" onmouseover="this.style.filter=\'brightness(1.08)\'" onmouseout="this.style.filter=\'\'"><span class="material-symbols-outlined" style="font-size:16px">folder_open</span> Import Local</button>' +
+              '<button onclick="_showRemoteScanModal()" style="background:rgba(255,255,255,0.04);color:var(--on-surface);padding:10px 20px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:1px solid rgba(255,255,255,0.10);cursor:pointer;display:inline-flex;align-items:center;gap:8px;transition:all 0.15s" onmouseover="this.style.borderColor=\'rgba(192,193,255,0.30)\';this.style.background=\'rgba(255,255,255,0.06)\'" onmouseout="this.style.borderColor=\'rgba(255,255,255,0.10)\';this.style.background=\'rgba(255,255,255,0.04)\'"><span class="material-symbols-outlined" style="font-size:16px">cloud_download</span> Import URL</button>' +
+              '<button onclick="rescanSkillStore()" style="background:rgba(255,255,255,0.04);color:var(--on-surface);padding:10px 20px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:1px solid rgba(255,255,255,0.10);cursor:pointer;display:inline-flex;align-items:center;gap:8px;transition:all 0.15s" onmouseover="this.style.borderColor=\'rgba(192,193,255,0.30)\';this.style.background=\'rgba(255,255,255,0.06)\'" onmouseout="this.style.borderColor=\'rgba(255,255,255,0.10)\';this.style.background=\'rgba(255,255,255,0.04)\'"><span class="material-symbols-outlined" style="font-size:16px">refresh</span> Rescan</button>' +
+            '</div>' +
+          '</div>' +
+        '</section>' +
+        // ── Compact filter row: search + source ──
+        '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">' +
+          '<input id="store-q" placeholder="Search name / description / tag…" style="flex:1;min-width:280px;padding:10px 14px;background:var(--surface-container-low);border:1px solid var(--outline-variant);border-radius:var(--r-md);color:var(--on-surface);font-size:13px;outline:none" oninput="_skillStoreState.q=this.value;_debouncedLoadStore()">' +
+          '<select id="store-source" onchange="_skillStoreState.source=this.value;loadSkillStore()" style="padding:10px 14px;background:var(--surface-container-low);border:1px solid var(--outline-variant);border-radius:var(--r-md);color:var(--on-surface);font-size:13px;font-family:var(--font-mono);cursor:pointer">' +
+            '<option value="">All sources</option>' +
+            '<option value="official">Official</option>' +
+            '<option value="maintainer">Maintainer</option>' +
+            '<option value="community">Community</option>' +
+            '<option value="agent">Agent-Authored</option>' +
+            '<option value="local">Local</option>' +
+          '</select>' +
         '</div>' +
-        '<h1 class="tc-h2" style="margin-top:6px">Skill Store</h1>' +
-        '<div class="tc-text-dim" style="font-size:12px;margin-top:6px;line-height:1.55">Anthropic Agent Skills (SKILL.md) + TudouClaw manifest.yaml. Browse by trust tier, install, grant to agents.</div>' +
-      '</div>'
-    : '    <div><h2 style="margin:0">技能商店 / Skill Store</h2>' +
+        // Hidden category-filter / tag-filter slots — kept for handler
+        // compatibility (they reference these IDs) but never visible
+        // since structured/tag filtering is applied programmatically.
+        '<div id="store-cat-filters" style="display:none"></div>' +
+        '<div id="store-tag-filters" style="display:flex;flex-wrap:wrap;gap:6px"></div>' +
+        '<div id="store-stats" class="tc-mono-label" style="color:var(--outline);font-size:10px;letter-spacing:0.05em"></div>' +
+        '<div id="store-list" class="tc-text-dim">LOADING…</div>' +
+      '</div>';
+  } else {
+    var ssHeader = '    <div><h2 style="margin:0">技能商店 / Skill Store</h2>' +
       '      <div style="font-size:12px;color:var(--text3);margin-top:4px">兼容 Anthropic Agent Skills 规范 (SKILL.md) 与 TudouClaw manifest.yaml。按信任分级浏览、安装、授权给 agent。</div>' +
       '    </div>';
-  c.innerHTML = ''
-    + '<div style="padding:18px">'
-    + '  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;gap:12px">'
-    + ssHeader
-    + '    <div style="display:flex;gap:8px">'
-    + '    <button class="btn btn-sm" onclick="_showLocalImportModal()"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">folder_open</span> 从本地导入</button>'
-    + '    <button class="btn btn-sm" onclick="_showRemoteScanModal()"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">cloud_download</span> 从 URL 导入</button>'
-    + '    <button class="btn btn-sm" onclick="rescanSkillStore()"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">refresh</span> 重新扫描</button>'
-    + '    </div>'
-    + '  </div>'
-    + '  <div style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap">'
-    + '    <input id="store-q" placeholder="搜索名称/描述/标签…" style="flex:1;min-width:260px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" oninput="_skillStoreState.q=this.value;_debouncedLoadStore()">'
-    + '    <select id="store-source" onchange="_skillStoreState.source=this.value;loadSkillStore()" style="padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">'
-    + '      <option value="">所有来源</option>'
-    + '      <option value="official">official 官方</option>'
-    + '      <option value="maintainer">maintainer 维护</option>'
-    + '      <option value="community">community 社区</option>'
-    + '      <option value="agent">agent Agent创建</option>'
-    + '      <option value="local">local 本地</option>'
-    + '    </select>'
-    + '  </div>'
-    + '  <div id="store-cat-filters" style="margin-bottom:10px"></div>'
-    + '  <div id="store-tag-filters" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px"></div>'
-    + '  <div id="store-stats" style="font-size:11px;color:var(--text3);margin-bottom:10px"></div>'
-    + '  <div id="store-list" style="color:var(--text3)">加载中…</div>'
-    + '</div>';
+    c.innerHTML = ''
+      + '<div style="padding:18px">'
+      + '  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;gap:12px">'
+      + ssHeader
+      + '    <div style="display:flex;gap:8px">'
+      + '    <button class="btn btn-sm" onclick="_showLocalImportModal()"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">folder_open</span> 从本地导入</button>'
+      + '    <button class="btn btn-sm" onclick="_showRemoteScanModal()"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">cloud_download</span> 从 URL 导入</button>'
+      + '    <button class="btn btn-sm" onclick="rescanSkillStore()"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">refresh</span> 重新扫描</button>'
+      + '    </div>'
+      + '  </div>'
+      + '  <div style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap">'
+      + '    <input id="store-q" placeholder="搜索名称/描述/标签…" style="flex:1;min-width:260px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" oninput="_skillStoreState.q=this.value;_debouncedLoadStore()">'
+      + '    <select id="store-source" onchange="_skillStoreState.source=this.value;loadSkillStore()" style="padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">'
+      + '      <option value="">所有来源</option>'
+      + '      <option value="official">official 官方</option>'
+      + '      <option value="maintainer">maintainer 维护</option>'
+      + '      <option value="community">community 社区</option>'
+      + '      <option value="agent">agent Agent创建</option>'
+      + '      <option value="local">local 本地</option>'
+      + '    </select>'
+      + '  </div>'
+      + '  <div id="store-cat-filters" style="margin-bottom:10px"></div>'
+      + '  <div id="store-tag-filters" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px"></div>'
+      + '  <div id="store-stats" style="font-size:11px;color:var(--text3);margin-bottom:10px"></div>'
+      + '  <div id="store-list" style="color:var(--text3)">加载中…</div>'
+      + '</div>';
+  }
   loadSkillStore();
 }
 
@@ -27583,6 +27629,12 @@ window._skillStoreFilterByCategory = function(dim, catId) {
 function _renderCategoryFilterBars() {
   var bar = document.getElementById('store-cat-filters');
   if (!bar) return;
+  // Tech mode: structured filtering happens via the hero search +
+  // source select. Skip rendering the category chip rows (they're
+  // hidden via display:none anyway, but no point computing).
+  try {
+    if (localStorage.getItem('tudou_theme') === 'tech') { bar.innerHTML = ''; return; }
+  } catch (e) {}
   var cats = _skillStoreState.categoriesPayload || { scenarios: [], agent_types: [] };
   if ((cats.scenarios || []).length === 0 && (cats.agent_types || []).length === 0) {
     bar.innerHTML = ''; return;
