@@ -28574,30 +28574,68 @@ function _copyPptxSnippet(themeId) {
 
 // ── Local Path Import Modal ──
 function _showLocalImportModal() {
+  var _techLi = false;
+  try { _techLi = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
   var modal = document.createElement('div');
   modal.id = 'local-import-modal';
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center';
-  modal.innerHTML = '<div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:20px;max-width:600px;width:94%;max-height:85vh;overflow:auto">'
-    + '<h3 style="margin:0 0 6px">从本地路径导入技能</h3>'
-    + '<div style="font-size:11px;color:var(--text3);margin-bottom:12px">'
-    + '输入包含 SKILL.md 或 manifest.yaml 的本地目录绝对路径。系统会将技能包复制到 skill catalog 并自动安装。'
-    + '</div>'
-    + '<div style="margin-bottom:10px">'
-    + '<input id="local-import-path" placeholder="/path/to/skill-folder  (包含 SKILL.md 的目录)" '
-    + 'style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:13px;box-sizing:border-box">'
-    + '</div>'
-    + '<div style="margin-bottom:12px">'
-    + '<label style="font-size:12px;color:var(--text2);margin-right:8px">来源分级:</label>'
-    + '<select id="local-import-tier" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:12px">'
-    + '<option value="community">community 社区</option>'
-    + '<option value="local">local 本地</option>'
-    + '</select>'
-    + '</div>'
-    + '<div id="local-import-status" style="font-size:12px;margin-bottom:8px;display:none"></div>'
-    + '<div style="display:flex;justify-content:flex-end;gap:8px">'
-    + '<button class="btn btn-sm" onclick="document.getElementById(\'local-import-modal\').remove()">取消</button>'
-    + '<button class="btn btn-primary btn-sm" id="local-import-btn" onclick="_doLocalImport()">导入</button>'
-    + '</div></div>';
+  if (_techLi) {
+    modal.innerHTML = '' +
+      '<div style="background:var(--surface);border:1px solid var(--outline-variant);border-radius:12px;padding:28px;max-width:600px;width:94%;max-height:85vh;overflow:auto;display:flex;flex-direction:column;gap:16px">' +
+        '<div>' +
+          '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
+            '<span>LOCAL FILESYSTEM</span>' +
+            '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
+          '</div>' +
+          '<h2 style="font-family:var(--font-display);font-size:22px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:0">Import Skill from Path</h2>' +
+          '<p class="tc-text-dim" style="font-size:12px;line-height:1.6;margin:8px 0 0">Absolute path to a directory containing SKILL.md or manifest.yaml. The bundle is copied into the skill catalog and auto-installed.</p>' +
+        '</div>' +
+        // Path input
+        '<div style="display:flex;flex-direction:column;gap:6px">' +
+          '<label class="tc-mono-label" style="color:var(--on-surface-variant);font-size:10px">DIRECTORY PATH</label>' +
+          '<input id="local-import-path" placeholder="/path/to/skill-folder" ' +
+          'style="width:100%;padding:12px 14px;background:var(--surface-container-lowest);border:1px solid var(--outline-variant);border-radius:var(--r-md);color:var(--on-surface);font-size:13px;font-family:var(--font-mono);outline:none;box-sizing:border-box">' +
+        '</div>' +
+        // Tier select
+        '<div style="display:flex;flex-direction:column;gap:6px">' +
+          '<label class="tc-mono-label" style="color:var(--on-surface-variant);font-size:10px">TRUST TIER</label>' +
+          '<select id="local-import-tier" style="padding:12px 14px;background:var(--surface-container-lowest);border:1px solid var(--outline-variant);border-radius:var(--r-md);color:var(--on-surface);font-size:13px;font-family:var(--font-mono);cursor:pointer">' +
+            '<option value="community">Community</option>' +
+            '<option value="local">Local</option>' +
+          '</select>' +
+        '</div>' +
+        '<div id="local-import-status" style="font-size:12px;font-family:var(--font-mono);letter-spacing:0.03em;display:none"></div>' +
+        // Footer actions
+        '<div style="display:flex;justify-content:flex-end;gap:10px;padding-top:14px;border-top:1px solid var(--outline-variant)">' +
+          '<button onclick="document.getElementById(\'local-import-modal\').remove()" style="background:rgba(255,255,255,0.04);color:var(--on-surface);padding:10px 18px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:1px solid var(--outline-variant);cursor:pointer">CANCEL</button>' +
+          '<button id="local-import-btn" onclick="_doLocalImport()" style="background:var(--primary-fixed);color:var(--on-primary-fixed);padding:10px 22px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:8px;box-shadow:0 4px 14px rgba(192,193,255,0.20)">' +
+            '<span class="material-symbols-outlined" style="font-size:16px">download</span> IMPORT' +
+          '</button>' +
+        '</div>' +
+      '</div>';
+  } else {
+    modal.innerHTML = '<div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:20px;max-width:600px;width:94%;max-height:85vh;overflow:auto">'
+      + '<h3 style="margin:0 0 6px">从本地路径导入技能</h3>'
+      + '<div style="font-size:11px;color:var(--text3);margin-bottom:12px">'
+      + '输入包含 SKILL.md 或 manifest.yaml 的本地目录绝对路径。系统会将技能包复制到 skill catalog 并自动安装。'
+      + '</div>'
+      + '<div style="margin-bottom:10px">'
+      + '<input id="local-import-path" placeholder="/path/to/skill-folder  (包含 SKILL.md 的目录)" '
+      + 'style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:13px;box-sizing:border-box">'
+      + '</div>'
+      + '<div style="margin-bottom:12px">'
+      + '<label style="font-size:12px;color:var(--text2);margin-right:8px">来源分级:</label>'
+      + '<select id="local-import-tier" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:12px">'
+      + '<option value="community">community 社区</option>'
+      + '<option value="local">local 本地</option>'
+      + '</select>'
+      + '</div>'
+      + '<div id="local-import-status" style="font-size:12px;margin-bottom:8px;display:none"></div>'
+      + '<div style="display:flex;justify-content:flex-end;gap:8px">'
+      + '<button class="btn btn-sm" onclick="document.getElementById(\'local-import-modal\').remove()">取消</button>'
+      + '<button class="btn btn-primary btn-sm" id="local-import-btn" onclick="_doLocalImport()">导入</button>'
+      + '</div></div>';
+  }
   document.body.appendChild(modal);
   setTimeout(function(){ var inp = document.getElementById('local-import-path'); if (inp) inp.focus(); }, 0);
 }
@@ -28644,26 +28682,59 @@ async function _doLocalImport() {
 var _remoteScanState = { temp_dir: '', skills: [] };
 
 function _showRemoteScanModal() {
+  var _techRs = false;
+  try { _techRs = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
   var modal = document.createElement('div');
   modal.id = 'remote-scan-modal';
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center';
-  modal.innerHTML = '<div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:20px;max-width:680px;width:94%;max-height:85vh;overflow:auto">'
-    + '<h3 style="margin:0 0 6px">从 URL 导入技能</h3>'
-    + '<div style="font-size:11px;color:var(--text3);margin-bottom:12px">'
-    + '支持 GitHub 仓库地址、.zip、.tar.gz 文件链接。系统会扫描其中的 SKILL.md / manifest.yaml 技能包。'
-    + '</div>'
-    + '<div style="display:flex;gap:8px;margin-bottom:12px">'
-    + '<input id="remote-scan-url" placeholder="https://github.com/user/repo  或  https://example.com/skill.zip" '
-    + 'style="flex:1;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:13px">'
-    + '<button id="remote-scan-btn" class="btn btn-primary btn-sm" onclick="_doRemoteScan()" style="white-space:nowrap">'
-    + '<span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">search</span> 扫描</button>'
-    + '</div>'
-    + '<div id="remote-scan-status" style="font-size:12px;color:var(--text3);margin-bottom:8px;display:none"></div>'
-    + '<div id="remote-scan-results"></div>'
-    + '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px">'
-    + '<button class="btn btn-sm" onclick="_closeRemoteScan()">关闭</button>'
-    + '</div>'
-    + '</div>';
+  if (_techRs) {
+    modal.innerHTML = '' +
+      '<div style="background:var(--surface);border:1px solid var(--outline-variant);border-radius:12px;padding:28px;max-width:680px;width:94%;max-height:85vh;overflow:auto;display:flex;flex-direction:column;gap:16px">' +
+        // Header with mono kicker + h2
+        '<div>' +
+          '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
+            '<span>REMOTE SOURCE</span>' +
+            '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
+          '</div>' +
+          '<h2 style="font-family:var(--font-display);font-size:22px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:0">Import Skill from URL</h2>' +
+          '<p class="tc-text-dim" style="font-size:12px;line-height:1.6;margin:8px 0 0">GitHub repo URL, .zip, .tar.gz — the scanner will discover SKILL.md / manifest.yaml bundles inside.</p>' +
+        '</div>' +
+        // URL input + Scan button
+        '<div style="display:flex;gap:10px">' +
+          '<input id="remote-scan-url" placeholder="https://github.com/user/repo  or  https://…/skill.zip" ' +
+          'style="flex:1;padding:12px 14px;background:var(--surface-container-lowest);border:1px solid var(--outline-variant);border-radius:var(--r-md);color:var(--on-surface);font-size:13px;font-family:var(--font-mono);outline:none">' +
+          '<button id="remote-scan-btn" onclick="_doRemoteScan()" style="white-space:nowrap;background:var(--primary-fixed);color:var(--on-primary-fixed);padding:12px 22px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:8px;box-shadow:0 4px 14px rgba(192,193,255,0.20)">' +
+            '<span class="material-symbols-outlined" style="font-size:16px">search</span> SCAN' +
+          '</button>' +
+        '</div>' +
+        '<div id="remote-scan-status" style="font-size:12px;color:var(--on-surface-variant);font-family:var(--font-mono);letter-spacing:0.03em;display:none"></div>' +
+        '<div id="remote-scan-results"></div>' +
+        // Footer close
+        '<div style="display:flex;justify-content:flex-end;gap:10px;margin-top:6px;padding-top:14px;border-top:1px solid var(--outline-variant)">' +
+          '<button onclick="_closeRemoteScan()" style="background:rgba(255,255,255,0.04);color:var(--on-surface);padding:10px 18px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:1px solid var(--outline-variant);cursor:pointer">' +
+            'CLOSE' +
+          '</button>' +
+        '</div>' +
+      '</div>';
+  } else {
+    modal.innerHTML = '<div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:20px;max-width:680px;width:94%;max-height:85vh;overflow:auto">'
+      + '<h3 style="margin:0 0 6px">从 URL 导入技能</h3>'
+      + '<div style="font-size:11px;color:var(--text3);margin-bottom:12px">'
+      + '支持 GitHub 仓库地址、.zip、.tar.gz 文件链接。系统会扫描其中的 SKILL.md / manifest.yaml 技能包。'
+      + '</div>'
+      + '<div style="display:flex;gap:8px;margin-bottom:12px">'
+      + '<input id="remote-scan-url" placeholder="https://github.com/user/repo  或  https://example.com/skill.zip" '
+      + 'style="flex:1;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:13px">'
+      + '<button id="remote-scan-btn" class="btn btn-primary btn-sm" onclick="_doRemoteScan()" style="white-space:nowrap">'
+      + '<span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">search</span> 扫描</button>'
+      + '</div>'
+      + '<div id="remote-scan-status" style="font-size:12px;color:var(--text3);margin-bottom:8px;display:none"></div>'
+      + '<div id="remote-scan-results"></div>'
+      + '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px">'
+      + '<button class="btn btn-sm" onclick="_closeRemoteScan()">关闭</button>'
+      + '</div>'
+      + '</div>';
+  }
   document.body.appendChild(modal);
   setTimeout(function(){ var inp = document.getElementById('remote-scan-url'); if (inp) inp.focus(); }, 0);
 }
