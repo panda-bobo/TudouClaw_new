@@ -12210,6 +12210,36 @@ async function renderMCPConfig(container) {
   var nodeCaps = Object.entries(catalog).filter(([_,c]) => c.scope !== 'global');
 
   function _renderCapCards(caps) {
+    if (_techMcp) {
+      // Stitch_17 bento: 6-col grid (auto-fill 200px), each card has
+      // rounded 64px icon circle + tier mono-label + name h3 +
+      // description + Configure button.
+      var typeColor = {filesystem:'#89ceff',database:'#89ceff',api:'#c0c1ff',search:'#ffb783',communication:'#adff2f',custom:'#c0c1ff'};
+      var tierLabel = {filesystem:'STORAGE',database:'STORAGE',api:'PROTOCOL',search:'COGNITION',communication:'CHANNEL',custom:'EXTENSION'};
+      var typeIcon = {filesystem:'folder',database:'database',api:'api',search:'travel_explore',communication:'forum',custom:'extension'};
+      var h = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:var(--s-md)">';
+      caps.forEach(function(pair) {
+        var id = pair[0], cap = pair[1];
+        var color = typeColor[cap.server_type] || 'var(--primary)';
+        var icon = typeIcon[cap.server_type] || 'extension';
+        var label = tierLabel[cap.server_type] || (cap.server_type || 'PROTOCOL').toUpperCase();
+        h += '<div class="tc-card-glass" style="padding:var(--s-lg);display:flex;flex-direction:column;align-items:center;text-align:center;gap:8px;cursor:pointer;border-top:1px solid rgba(255,255,255,0.10);transition:all 0.2s" ' +
+             'onmouseover="this.style.borderColor=\'rgba(192,193,255,0.30)\'" onmouseout="this.style.borderColor=\'\'" ' +
+             'onclick="showCatalogDetail(\''+esc(id)+'\')">' +
+          '<div style="width:64px;height:64px;border-radius:50%;background:var(--surface-container-high);display:flex;align-items:center;justify-content:center;transition:transform 0.2s" onmouseover="this.style.transform=\'scale(1.1)\'" onmouseout="this.style.transform=\'\'">' +
+            '<span class="material-symbols-outlined" style="font-size:30px;color:'+color+'">'+icon+'</span>' +
+          '</div>' +
+          '<span class="tc-mono-label" style="color:'+color+';font-size:9px;letter-spacing:0.1em;margin-top:4px">'+label+'</span>' +
+          '<h4 style="font-family:var(--font-display);font-size:16px;font-weight:700;color:var(--on-surface);margin:0">'+esc(cap.name)+'</h4>' +
+          '<p class="tc-text-dim" style="font-size:12px;line-height:1.5;margin:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">'+esc((cap.description||'').substring(0,80))+'</p>' +
+          '<button style="margin-top:auto;width:100%;padding:8px;background:rgba(255,255,255,0.04);border:1px solid var(--outline-variant);border-radius:var(--r-md);color:var(--on-surface);font-family:var(--font-mono);font-size:10px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;cursor:pointer;transition:all 0.15s" ' +
+                 'onmouseover="this.style.background=\'rgba(255,255,255,0.08)\';event.stopPropagation()" onmouseout="this.style.background=\'rgba(255,255,255,0.04)\'" ' +
+                 'onclick="event.stopPropagation();showCatalogDetail(\''+esc(id)+'\')">Configure</button>' +
+        '</div>';
+      });
+      h += '</div>';
+      return h;
+    }
     var h = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px">';
     caps.forEach(([id, cap]) => {
       var typeIcon = {filesystem:'folder',database:'storage',api:'api',search:'search',communication:'chat',custom:'extension'}[cap.server_type]||'extension';
