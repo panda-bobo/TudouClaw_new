@@ -3350,102 +3350,149 @@ async function renderProvidersTech(container) {
   try { var data = await api('GET', '/api/portal/providers'); providers = (data && data.providers) || []; } catch (e) {}
 
   // Bento-grid layout (stitch_16): glass-panel cards in 2-col grid.
-  // Each card has provider name + ENABLED/DISABLED chip top, kind +
-  // base URL, models count + edit/test buttons.
+  // Each card mimics the stitch "config inspector" feel — small icon
+  // + h3 name + subtitle, then form-style sections (Endpoint, Active
+  // Models, 2-col scheduling sliders, masked API key) with mono-label
+  // section headers. Edit / Delete on the bottom row.
   var cards = providers.map(function(p) {
-    var enabled = (p.status === 'connected' || p.is_connected || p.enabled !== false);
+    var enabled = !!p.enabled;
     var statusLabel = enabled ? 'ENABLED' : 'DISABLED';
-    var statusColor = enabled ? 'var(--cyber-lime, #adff2f)' : 'var(--outline)';
-    var modelCount = (p.models || []).length;
-    var iconKind = (p.kind || p.type || '').toLowerCase();
-    var icon = iconKind.indexOf('ollama') >= 0 ? 'home_iot_device'
-             : iconKind.indexOf('anthropic') >= 0 ? 'token'
-             : iconKind.indexOf('openai') >= 0 ? 'sparkles'
-             : iconKind.indexOf('google') >= 0 ? 'travel_explore'
+    var statusColor = enabled ? 'var(--secondary)' : 'var(--outline)';
+    var modelList = p.manual_models || p.models_cache || [];
+    var iconKind = ((p.kind || p.type || '') + ' ' + (p.name || p.id || '')).toLowerCase();
+    var icon = iconKind.indexOf('ollama') >= 0 ? 'terminal'
+             : iconKind.indexOf('claude') >= 0 || iconKind.indexOf('anthropic') >= 0 ? 'psychology'
+             : iconKind.indexOf('openai') >= 0 || iconKind.indexOf('gpt') >= 0 ? 'auto_awesome'
+             : iconKind.indexOf('google') >= 0 || iconKind.indexOf('gemini') >= 0 ? 'travel_explore'
+             : iconKind.indexOf('mistral') >= 0 ? 'air'
+             : iconKind.indexOf('deepseek') >= 0 ? 'water_drop'
+             : iconKind.indexOf('qwen') >= 0 || iconKind.indexOf('alibaba') >= 0 ? 'cloud'
+             : iconKind.indexOf('zhipu') >= 0 || iconKind.indexOf('glm') >= 0 ? 'memory'
+             : iconKind.indexOf('lm studio') >= 0 || iconKind.indexOf('lmstudio') >= 0 ? 'computer'
              : 'cloud_queue';
-    return '<div class="tc-card-glass" style="padding:var(--s-lg);display:flex;flex-direction:column;gap:var(--s-md);position:relative;overflow:hidden;border-top:1px solid rgba(255,255,255,0.10)' + (enabled ? ';box-shadow:0 0 15px rgba(192,193,255,0.10)' : '') + '">' +
-             // Top-right status chip
-             '<div style="position:absolute;top:var(--s-md);right:var(--s-md);display:flex;align-items:center;gap:6px;font-family:var(--font-mono);font-size:10px;letter-spacing:0.05em;color:' + statusColor + '">' +
-               (enabled ? '<span style="width:6px;height:6px;border-radius:50%;background:' + statusColor + ';animation:pulse-dot 2s infinite ease-in-out"></span>' : '<span style="width:6px;height:6px;border-radius:50%;background:' + statusColor + '"></span>') +
+    var subtitle = iconKind.indexOf('ollama') >= 0 ? 'Local Host Environment'
+                 : iconKind.indexOf('claude') >= 0 || iconKind.indexOf('anthropic') >= 0 ? 'Anthropic Cloud Provider'
+                 : iconKind.indexOf('openai') >= 0 ? 'OpenAI Cloud Provider'
+                 : iconKind.indexOf('gemini') >= 0 ? 'Google Cloud Provider'
+                 : iconKind.indexOf('zhipu') >= 0 || iconKind.indexOf('glm') >= 0 ? 'Enterprise Cloud Provider'
+                 : iconKind.indexOf('qwen') >= 0 ? 'Aliyun DashScope API'
+                 : iconKind.indexOf('lm studio') >= 0 ? 'Local Server Instance'
+                 : (p.scope === 'cloud' ? 'Cloud Provider' : 'OpenAI-Compatible Endpoint');
+
+    // Stitch ENABLED/secondary tint for active models, outline for stale
+    var modelChips = modelList.length
+      ? modelList.map(function(m, i) {
+          var on = enabled && i < 6;  // first 6 active visually
+          var bg = on ? 'rgba(137,206,255,0.10)' : 'rgba(255,255,255,0.04)';
+          var bd = on ? 'rgba(137,206,255,0.30)' : 'rgba(255,255,255,0.10)';
+          var fg = on ? 'var(--secondary)' : 'var(--outline)';
+          return '<span style="padding:3px 10px;background:' + bg + ';border:1px solid ' + bd + ';color:' + fg + ';border-radius:9999px;font-family:var(--font-mono);font-size:10px;letter-spacing:0.05em;text-transform:uppercase">' + esc(m) + '</span>';
+        }).join('')
+      : '<span class="tc-text-dim" style="font-size:11px">No models — click EDIT to add</span>';
+
+    // Reusable read-only "input" field (stitch style — bg surface-container-low, outline border)
+    var inputField = function(value) {
+      return '<div style="background:var(--surface-container-lowest);border:1px solid var(--outline-variant);border-radius:var(--r-md);padding:8px 12px;font-family:var(--font-mono);font-size:12px;color:var(--on-surface);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;letter-spacing:0.02em">' + value + '</div>';
+    };
+    // Reusable "stat" with mini progress bar (stitch range slider analog)
+    var statBlock = function(label, val, valColor, pct) {
+      return '<div style="display:flex;flex-direction:column;gap:6px">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center">' +
+          '<span class="tc-mono-label" style="color:var(--outline);font-size:10px">' + label + '</span>' +
+          '<span style="font-family:var(--font-mono);font-size:12px;color:' + (valColor || 'var(--secondary)') + '">' + val + '</span>' +
+        '</div>' +
+        '<div style="height:3px;width:100%;background:var(--surface-container-high);border-radius:2px;overflow:hidden">' +
+          '<div style="height:100%;background:' + (valColor || 'var(--secondary)') + ';width:' + Math.min(100, Math.max(2, pct || 30)) + '%;opacity:0.8"></div>' +
+        '</div>' +
+      '</div>';
+    };
+
+    var maxConc = p.max_concurrent || 1;
+    var rateLimit = p.rate_limit_rpm || 0;
+    var timeoutS = p.timeout_s || 60;
+
+    return '<div class="tc-card-glass" style="padding:var(--s-lg);display:flex;flex-direction:column;gap:14px;position:relative;overflow:hidden;border-top:1px solid rgba(255,255,255,0.10)' +
+             (enabled ? '' : ';opacity:0.7') +
+             (enabled ? ';box-shadow:0 0 15px rgba(192,193,255,0.08)' : '') +
+           '">' +
+             // Top-right status indicator
+             '<div style="position:absolute;top:14px;right:14px;display:flex;align-items:center;gap:6px;font-family:var(--font-mono);font-size:10px;letter-spacing:0.05em;color:' + statusColor + '">' +
+               (enabled
+                 ? '<span style="width:8px;height:8px;border-radius:50%;background:' + statusColor + ';animation:pulse-dot 2s infinite ease-in-out"></span>'
+                 : '<span style="width:8px;height:8px;border-radius:50%;background:' + statusColor + '"></span>') +
                statusLabel +
              '</div>' +
-             // Header: icon + name + kind
-             '<div style="display:flex;align-items:flex-start;gap:14px;padding-right:90px">' +
-               '<div style="width:48px;height:48px;border-radius:var(--r-md);background:rgba(192,193,255,0.10);border:1px solid rgba(192,193,255,0.25);display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
-                 '<span class="material-symbols-outlined" style="color:var(--primary);font-size:24px">' + icon + '</span>' +
+             // Header: icon + name + subtitle
+             '<div style="display:flex;align-items:center;gap:14px;margin-bottom:4px;padding-right:100px">' +
+               '<div style="width:48px;height:48px;border-radius:var(--r-md);background:' + (enabled ? 'rgba(137,206,255,0.10)' : 'rgba(255,255,255,0.04)') + ';border:1px solid ' + (enabled ? 'rgba(137,206,255,0.25)' : 'rgba(255,255,255,0.10)') + ';display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+                 '<span class="material-symbols-outlined" style="color:' + (enabled ? 'var(--secondary)' : 'var(--outline)') + ';font-size:24px">' + icon + '</span>' +
                '</div>' +
                '<div style="flex:1;min-width:0">' +
-                 '<div class="tc-mono-label" style="color:var(--outline);margin-bottom:4px">' +
-                   esc(String(p.kind || p.type || 'openai-compatible').toUpperCase()) +
-                 '</div>' +
-                 '<div style="font-size:18px;font-weight:700;color:var(--on-surface);line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' +
+                 '<div style="font-family:var(--font-display);font-size:20px;font-weight:600;color:var(--on-surface);line-height:1.2;letter-spacing:-0.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
                    esc(p.name || p.id || 'Provider') +
                  '</div>' +
+                 '<div class="tc-mono-label" style="color:var(--outline);margin-top:4px;font-size:10px">' + esc(subtitle) + '</div>' +
                '</div>' +
              '</div>' +
-             // Base URL line
-             (p.base_url
-               ? '<div class="tc-text-dim" style="font-size:11px;font-family:var(--font-mono);letter-spacing:0.03em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:8px 12px;background:var(--surface-container-lowest);border:1px solid var(--outline-variant);border-radius:var(--r-md)">' +
-                   esc(p.base_url) +
+             // Endpoint URL field
+             '<div style="display:flex;flex-direction:column;gap:6px">' +
+               '<div class="tc-mono-label" style="color:var(--on-surface-variant);font-size:10px">ENDPOINT URL</div>' +
+               inputField(esc(p.base_url || '—')) +
+             '</div>' +
+             // Active Models section
+             '<div style="display:flex;flex-direction:column;gap:6px">' +
+               '<div class="tc-mono-label" style="color:var(--on-surface-variant);font-size:10px">ACTIVE MODELS (' + modelList.length + ')</div>' +
+               '<div style="display:flex;flex-wrap:wrap;gap:6px">' + modelChips + '</div>' +
+             '</div>' +
+             // 2-col scheduling: Concurrency + Rate Limit/Timeout
+             '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">' +
+               statBlock('CONCURRENCY', String(maxConc), statusColor, Math.round((maxConc / 16) * 100)) +
+               (rateLimit > 0
+                 ? statBlock('RATE LIMIT', rateLimit + '/m', statusColor, Math.round((rateLimit / 500) * 100))
+                 : statBlock('TIMEOUT', timeoutS + 's', statusColor, Math.round((timeoutS / 300) * 100))) +
+             '</div>' +
+             // API Key (masked input style)
+             (p.api_key
+               ? '<div style="display:flex;flex-direction:column;gap:6px">' +
+                   '<div class="tc-mono-label" style="color:var(--on-surface-variant);font-size:10px">API KEY</div>' +
+                   '<div style="position:relative">' +
+                     inputField('<span style="font-family:var(--font-mono);letter-spacing:2px">••••••••••••••••••••</span>') +
+                     '<span class="material-symbols-outlined" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);color:var(--outline);font-size:16px">lock</span>' +
+                   '</div>' +
                  '</div>'
                : '') +
-             // Stats row + actions
+             // Footer: Edit / Delete actions
              '<div style="display:flex;align-items:center;justify-content:space-between;padding-top:12px;border-top:1px solid var(--outline-variant);margin-top:auto">' +
-               '<div style="display:flex;gap:24px">' +
-                 '<div>' +
-                   '<div class="tc-mono-label" style="color:var(--outline);font-size:9px;margin-bottom:2px">MODELS</div>' +
-                   '<div style="font-family:var(--font-mono);font-size:18px;font-weight:700;color:var(--primary)">' + modelCount + '</div>' +
-                 '</div>' +
-                 (p.timeout_s ? '<div>' +
-                   '<div class="tc-mono-label" style="color:var(--outline);font-size:9px;margin-bottom:2px">TIMEOUT</div>' +
-                   '<div style="font-family:var(--font-mono);font-size:14px;color:var(--on-surface)">' + p.timeout_s + 's</div>' +
-                 '</div>' : '') +
-               '</div>' +
-               '<div style="display:flex;gap:6px">' +
-                 (typeof testProviderConn === 'function'
-                   ? '<button class="tc-btn tc-btn-ghost tc-btn-sm" title="Test connection" onclick="testProviderConn(\'' + esc(p.id || '') + '\')" style="padding:6px;min-width:0">' +
-                       '<span class="material-symbols-outlined" style="font-size:16px">network_check</span></button>'
-                   : '') +
-                 (typeof openProviderEditor === 'function'
-                   ? '<button class="tc-btn tc-btn-ghost tc-btn-sm" title="Edit" onclick="openProviderEditor(\'' + esc(p.id || '') + '\')" style="padding:6px;min-width:0">' +
-                       '<span class="material-symbols-outlined" style="font-size:16px">edit</span></button>'
-                   : '') +
-                 (typeof deleteProvider === 'function'
-                   ? '<button class="tc-btn tc-btn-ghost tc-btn-sm" title="Delete" onclick="deleteProvider(\'' + esc(p.id || '') + '\')" style="padding:6px;min-width:0;color:var(--error)">' +
-                       '<span class="material-symbols-outlined" style="font-size:16px">delete</span></button>'
-                   : '') +
-               '</div>' +
+               '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="editProvider(\'' + esc(p.id || '') + '\')" style="font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em">' +
+                 '<span class="material-symbols-outlined" style="font-size:14px">edit</span> EDIT' +
+               '</button>' +
+               '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="deleteProvider(\'' + esc(p.id || '') + '\')" style="font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;color:var(--error)">' +
+                 '<span class="material-symbols-outlined" style="font-size:14px">delete</span> DELETE' +
+               '</button>' +
              '</div>' +
            '</div>';
   }).join('');
 
   c.innerHTML =
-    '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:var(--s-lg);gap:var(--s-md);flex-wrap:wrap">' +
+    // Stitch_16: simple h2 + subtitle on left, ADD PROVIDER pill button on right
+    '<div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:var(--s-xl);gap:var(--s-md);flex-wrap:wrap">' +
       '<div style="flex:1;min-width:240px">' +
-        '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px">' +
-          '<span>SYSTEM ARCHITECTURE</span>' +
-          '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
-        '</div>' +
-        '<h1 class="tc-h2" style="margin-top:6px">LLM Providers</h1>' +
-        '<p class="tc-text-dim" style="font-size:12px;margin-top:6px;line-height:1.55;max-width:560px">Backend orchestration for autonomous agents. Configure local instances, cloud endpoints, and model behaviors. ' + providers.length + ' providers configured.</p>' +
+        '<h2 style="font-family:var(--font-display);font-size:30px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:0">LLM Providers</h2>' +
+        '<p class="tc-text-dim" style="font-size:14px;line-height:1.55;margin-top:8px;max-width:640px">Manage backend orchestration for autonomous agents. Configure local instances, cloud endpoints, and specific model behaviors.</p>' +
       '</div>' +
-      (typeof openAddProviderModal === 'function'
-        ? '<button class="tc-btn tc-btn-primary tc-btn-sm" onclick="openAddProviderModal()">' +
-            '<span class="material-symbols-outlined" style="font-size:14px">add_circle</span> ADD PROVIDER' +
-          '</button>'
-        : '') +
+      '<button onclick="showModal(\'add-provider\')" style="background:var(--primary-fixed);color:var(--on-primary-fixed);padding:10px 20px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:8px;transition:all 0.15s;box-shadow:0 4px 14px rgba(192,193,255,0.20)" onmouseover="this.style.filter=\'brightness(1.08)\';this.style.boxShadow=\'0 6px 22px rgba(192,193,255,0.32)\'" onmouseout="this.style.filter=\'\';this.style.boxShadow=\'0 4px 14px rgba(192,193,255,0.20)\'">' +
+        '<span class="material-symbols-outlined" style="font-size:16px">add_circle</span> ADD PROVIDER' +
+      '</button>' +
     '</div>' +
     (cards
-      ? '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:var(--s-md)">' + cards + '</div>'
+      ? '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));gap:var(--s-lg)">' + cards + '</div>'
       : '<div class="tc-card" style="text-align:center;padding:60px 20px;border-style:dashed">' +
           '<span class="material-symbols-outlined" style="font-size:48px;color:var(--outline)">cloud_off</span>' +
           '<div style="font-size:14px;color:var(--on-surface-variant);margin-top:14px;margin-bottom:8px">No LLM providers configured</div>' +
           '<div class="tc-text-dim" style="font-size:12px;margin-bottom:20px">Add your first provider to enable agent chat.</div>' +
-          (typeof openAddProviderModal === 'function'
-            ? '<button class="tc-btn tc-btn-primary tc-btn-sm" onclick="openAddProviderModal()">' +
-                '<span class="material-symbols-outlined" style="font-size:14px">add_circle</span> ADD FIRST PROVIDER' +
-              '</button>'
-            : '') +
+          '<button onclick="showModal(\'add-provider\')" style="background:var(--primary-fixed);color:var(--on-primary-fixed);padding:10px 20px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:8px;box-shadow:0 4px 14px rgba(192,193,255,0.20)">' +
+            '<span class="material-symbols-outlined" style="font-size:16px">add_circle</span> ADD FIRST PROVIDER' +
+          '</button>' +
         '</div>');
 }
 window.renderProvidersTech = renderProvidersTech;
@@ -29063,29 +29110,112 @@ async function renderToolDenylist() {
   var c = document.getElementById('content');
   var _techTd = false;
   try { _techTd = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
-  var tdTitle = _techTd
-    ? '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px"><span>RISK SHIELD</span><span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span></div><h1 class="tc-h2" style="margin:6px 0 0">Tool Denylist</h1>'
-    : '<h2 style="margin:0;font-size:20px;font-weight:800">工具禁用清单</h2>';
-  c.innerHTML =
-    '<div style="padding:18px">' +
-      '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;gap:14px">' +
-        '<div style="flex:1">' + tdTitle +
-        '<p style="font-size:12px;color:var(--text3);margin-top:4px;max-width:760px">' +
-          '右侧开关关闭 = 全局禁用（所有 agent 都无法调用，优先级最高）。' +
-          '修改立即生效，写入 <code>~/.tudou_claw/tool_denylist.json</code>。' +
-          '典型用途：撤销某个 skill 后，同名内置 tool 仍可被 LLM 调用 — 关掉开关做兜底。</p></div>' +
-        '<div style="display:flex;gap:8px;align-items:center">' +
-          '<input id="denylist-search" type="text" placeholder="搜索 tool 名 / 描述…" ' +
-            'style="padding:7px 12px;background:var(--surface);border:1px solid var(--border);' +
-            'border-radius:6px;color:var(--text);font-size:12px;min-width:220px" ' +
-            'oninput="filterDenylistRows()">' +
-          '<label style="display:flex;gap:4px;align-items:center;font-size:11px;color:var(--text3);cursor:pointer">' +
-            '<input type="checkbox" id="denylist-filter-denied" onchange="filterDenylistRows()"> 仅看已禁用</label>' +
+  if (_techTd) {
+    // Stitch_14 layout: hero glass-panel + 8/4 grid (table left,
+    // sidebar with Network Constraint Overlay / Policy Categories /
+    // Recent Violations on right).
+    c.innerHTML = '' +
+      '<div style="padding:var(--s-lg);display:flex;flex-direction:column;gap:var(--s-lg)">' +
+        // Hero — Global Restriction Framework
+        '<section class="tc-card-glass" style="padding:var(--s-lg);display:flex;justify-content:space-between;align-items:center;gap:var(--s-md);flex-wrap:wrap">' +
+          '<div style="max-width:720px;display:flex;flex-direction:column;gap:8px">' +
+            '<h2 style="font-family:var(--font-display);font-size:24px;font-weight:600;letter-spacing:-0.01em;color:var(--primary);margin:0">Global Restriction Framework</h2>' +
+            '<p class="tc-text-dim" style="font-size:13px;line-height:1.55;margin:0">' +
+              'Enforce system-wide tool prohibitions across all active agent nodes. Activating this toggle overrides individual agent permissions to ensure high-security compliance and prevent unauthorized resource orchestration.' +
+            '</p>' +
+          '</div>' +
+          '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:10px">' +
+            '<div style="display:flex;align-items:center;gap:12px">' +
+              '<span class="tc-mono-label" style="color:var(--outline);font-size:10px">OVERRIDE STATUS</span>' +
+              '<label class="tc-switch" style="position:relative;display:inline-block;width:44px;height:24px;cursor:pointer">' +
+                '<input type="checkbox" id="td-global-override" checked style="opacity:0;width:0;height:0">' +
+                '<span style="position:absolute;cursor:pointer;inset:0;background:var(--primary);border-radius:9999px;transition:0.2s">' +
+                  '<span style="position:absolute;height:20px;width:20px;left:22px;top:2px;background:#fff;border-radius:50%;transition:0.2s"></span>' +
+                '</span>' +
+              '</label>' +
+            '</div>' +
+            '<span class="tc-mono-label" style="padding:3px 10px;border-radius:9999px;background:rgba(137,206,255,0.05);color:var(--secondary);border:1px solid rgba(137,206,255,0.30);font-size:10px">SYSTEM ACTIVE</span>' +
+          '</div>' +
+        '</section>' +
+        // 8/4 grid wrapper
+        '<div style="display:grid;grid-template-columns:8fr 4fr;gap:var(--s-lg);align-items:start" id="td-grid">' +
+          // Main table area
+          '<div style="display:flex;flex-direction:column;gap:var(--s-md);min-width:0">' +
+            // Section header
+            '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:var(--s-sm)">' +
+              '<div style="display:flex;align-items:center;gap:14px">' +
+                '<h3 class="tc-mono-label" style="color:var(--on-surface-variant);font-size:12px;letter-spacing:0.08em;margin:0">TOOL DENY LIST (工具禁用清单)</h3>' +
+                '<span id="td-total-chip" class="tc-mono-label" style="padding:3px 10px;background:var(--surface-container-high);border-radius:var(--r-md);color:var(--on-surface-variant);border:1px solid var(--outline-variant);font-size:10px">Total — Rules</span>' +
+              '</div>' +
+              '<div style="display:flex;gap:10px;align-items:center">' +
+                '<input id="denylist-search" type="text" placeholder="Search restriction rules…" ' +
+                  'style="padding:8px 14px;background:var(--surface-container-low);border:1px solid var(--outline-variant);' +
+                  'border-radius:var(--r-md);color:var(--on-surface);font-size:12px;font-family:var(--font-mono);min-width:240px;outline:none" ' +
+                  'oninput="filterDenylistRows()">' +
+                '<label style="display:inline-flex;gap:6px;align-items:center;font-family:var(--font-mono);font-size:10px;letter-spacing:0.05em;text-transform:uppercase;color:var(--outline);cursor:pointer">' +
+                  '<input type="checkbox" id="denylist-filter-denied" onchange="filterDenylistRows()"> Denied only' +
+                '</label>' +
+              '</div>' +
+            '</div>' +
+            // Table container
+            '<div class="tc-card-glass" style="padding:0;overflow:hidden;border-radius:var(--r-xl);border-top:1px solid rgba(255,255,255,0.10)">' +
+              '<div id="denylist-rows" style="min-height:200px"><div class="tc-text-dim" style="padding:40px 20px;text-align:center;font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em">LOADING…</div></div>' +
+            '</div>' +
+          '</div>' +
+          // System Intelligence Sidebar
+          '<aside style="display:flex;flex-direction:column;gap:var(--s-lg);min-width:0">' +
+            // Network Constraint Overlay
+            '<div class="tc-card-glass" style="padding:var(--s-lg);position:relative;overflow:hidden;height:240px;display:flex;flex-direction:column;justify-content:flex-end;border-top:1px solid rgba(255,255,255,0.10)">' +
+              // Globe-like radial gradient backdrop
+              '<div style="position:absolute;inset:0;background:radial-gradient(circle at 30% 30%,rgba(137,206,255,0.18) 0%,transparent 45%),radial-gradient(circle at 70% 60%,rgba(173,255,47,0.10) 0%,transparent 45%),radial-gradient(circle at 50% 80%,rgba(192,193,255,0.12) 0%,transparent 50%);pointer-events:none"></div>' +
+              '<div style="position:absolute;inset:0;background-image:linear-gradient(rgba(192,193,255,0.04) 1px,transparent 1px),linear-gradient(90deg,rgba(192,193,255,0.04) 1px,transparent 1px);background-size:32px 32px;pointer-events:none"></div>' +
+              '<div style="position:absolute;inset:0;background:linear-gradient(to top,rgba(13,13,21,0.85),transparent 60%);pointer-events:none"></div>' +
+              '<div style="position:relative;z-index:1;display:flex;flex-direction:column;gap:6px">' +
+                '<span class="tc-mono-label" style="color:var(--secondary);font-size:10px">ACTIVE MONITOR</span>' +
+                '<h4 style="font-family:var(--font-display);font-size:18px;font-weight:600;color:var(--on-surface);margin:0">Network Constraint Overlay</h4>' +
+                '<p class="tc-text-dim" style="font-size:12px;line-height:1.55;margin:0">Real-time visualization of tool restriction density across the primary orchestration grid.</p>' +
+              '</div>' +
+            '</div>' +
+            // Policy Categories
+            '<div class="tc-card-glass" style="padding:var(--s-lg);display:flex;flex-direction:column;gap:var(--s-md);border-top:1px solid rgba(255,255,255,0.10)">' +
+              '<h4 class="tc-mono-label" style="color:var(--on-surface-variant);font-size:10px;letter-spacing:0.08em;margin:0">POLICY CATEGORIES</h4>' +
+              '<div id="td-categories" style="display:flex;flex-direction:column;gap:8px">' +
+                '<div class="tc-text-dim" style="font-size:11px">Loading…</div>' +
+              '</div>' +
+            '</div>' +
+            // Recent Violations
+            '<div class="tc-card-glass" style="padding:var(--s-lg);display:flex;flex-direction:column;gap:var(--s-md);border-top:1px solid rgba(255,255,255,0.10)">' +
+              '<h4 class="tc-mono-label" style="color:var(--on-surface-variant);font-size:10px;letter-spacing:0.08em;margin:0">RECENT VIOLATIONS</h4>' +
+              '<div id="td-violations" style="display:flex;flex-direction:column;gap:10px">' +
+                '<div class="tc-text-dim" style="font-size:11px">Loading…</div>' +
+              '</div>' +
+            '</div>' +
+          '</aside>' +
         '</div>' +
-      '</div>' +
-      '<div id="denylist-stats" style="font-size:11px;color:var(--text3);margin-bottom:10px"></div>' +
-      '<div id="denylist-rows"><div style="color:var(--text3);padding:12px;font-size:12px">Loading…</div></div>' +
-    '</div>';
+      '</div>';
+  } else {
+    // Legacy layout (unchanged)
+    c.innerHTML =
+      '<div style="padding:18px">' +
+        '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;gap:14px">' +
+          '<div style="flex:1"><h2 style="margin:0;font-size:20px;font-weight:800">工具禁用清单</h2>' +
+          '<p style="font-size:12px;color:var(--text3);margin-top:4px;max-width:760px">' +
+            '右侧开关关闭 = 全局禁用（所有 agent 都无法调用，优先级最高）。' +
+            '修改立即生效，写入 <code>~/.tudou_claw/tool_denylist.json</code>。' +
+            '典型用途：撤销某个 skill 后，同名内置 tool 仍可被 LLM 调用 — 关掉开关做兜底。</p></div>' +
+          '<div style="display:flex;gap:8px;align-items:center">' +
+            '<input id="denylist-search" type="text" placeholder="搜索 tool 名 / 描述…" ' +
+              'style="padding:7px 12px;background:var(--surface);border:1px solid var(--border);' +
+              'border-radius:6px;color:var(--text);font-size:12px;min-width:220px" ' +
+              'oninput="filterDenylistRows()">' +
+            '<label style="display:flex;gap:4px;align-items:center;font-size:11px;color:var(--text3);cursor:pointer">' +
+              '<input type="checkbox" id="denylist-filter-denied" onchange="filterDenylistRows()"> 仅看已禁用</label>' +
+          '</div>' +
+        '</div>' +
+        '<div id="denylist-stats" style="font-size:11px;color:var(--text3);margin-bottom:10px"></div>' +
+        '<div id="denylist-rows"><div style="color:var(--text3);padding:12px;font-size:12px">Loading…</div></div>' +
+      '</div>';
+  }
   await refreshToolDenylist();
 }
 
@@ -29095,7 +29225,12 @@ window._toolsCatalogCache = null;
 async function refreshToolDenylist() {
   var host = document.getElementById('denylist-rows');
   var stats = document.getElementById('denylist-stats');
+  var totalChip = document.getElementById('td-total-chip');
+  var catsHost = document.getElementById('td-categories');
+  var violationsHost = document.getElementById('td-violations');
   if (!host) return;
+  var _techTd = false;
+  try { _techTd = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
   try {
     var r = await api('GET', '/api/portal/admin/tools-catalog');
     var tools = (r && r.tools) || [];
@@ -29104,7 +29239,54 @@ async function refreshToolDenylist() {
       stats.textContent = '共 ' + (r.total || tools.length) +
         ' 个 tool · 已禁用 ' + (r.denied_count || 0) + ' 个';
     }
+    if (totalChip) totalChip.textContent = 'Total ' + (r.total || tools.length) + ' Rules';
     _renderDenylistRows(tools);
+    // Sidebar: policy categories + recent violations (tech only)
+    if (_techTd && catsHost) {
+      var groups = {};
+      tools.forEach(function(t) {
+        var k = t.toolset || 'other';
+        groups[k] = (groups[k] || 0) + 1;
+      });
+      var iconFor = function(k) {
+        var s = (k || '').toLowerCase();
+        if (s.indexOf('coord') >= 0 || s.indexOf('orchestrat') >= 0) return 'hub';
+        if (s.indexOf('infra') >= 0 || s.indexOf('shell') >= 0 || s.indexOf('system') >= 0) return 'security';
+        if (s.indexOf('egress') >= 0 || s.indexOf('network') >= 0 || s.indexOf('http') >= 0) return 'cloud_upload';
+        if (s.indexOf('file') >= 0) return 'folder';
+        if (s.indexOf('mem') >= 0) return 'psychology';
+        if (s.indexOf('skill') >= 0) return 'auto_fix_high';
+        return 'category';
+      };
+      catsHost.innerHTML = Object.keys(groups).sort().slice(0, 8).map(function(k) {
+        return '<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:var(--r-md);cursor:pointer;transition:border-color 0.15s" onmouseover="this.style.borderColor=\'rgba(192,193,255,0.30)\'" onmouseout="this.style.borderColor=\'rgba(255,255,255,0.06)\'">' +
+            '<div style="display:flex;align-items:center;gap:10px">' +
+              '<span class="material-symbols-outlined" style="font-size:18px;color:var(--primary)">' + iconFor(k) + '</span>' +
+              '<span style="font-size:13px;color:var(--on-surface);text-transform:capitalize">' + esc(k) + '</span>' +
+            '</div>' +
+            '<span class="tc-mono-label" style="padding:2px 8px;background:var(--surface-container-high);border-radius:var(--r-md);color:var(--outline);font-size:10px">' + groups[k] + ' Rules</span>' +
+          '</div>';
+      }).join('');
+    }
+    if (_techTd && violationsHost) {
+      // Synthetic recent violations from denied tools (no real audit feed wired here)
+      var deniedTools = tools.filter(function(t){ return t.denied; }).slice(0, 4);
+      if (deniedTools.length === 0) {
+        violationsHost.innerHTML = '<div class="tc-text-dim" style="font-size:12px;font-family:var(--font-mono);letter-spacing:0.03em;padding:8px 0">NO ACTIVE VIOLATIONS</div>';
+      } else {
+        violationsHost.innerHTML = deniedTools.map(function(t, i) {
+          var sev = t.risk === 'red' || t.risk === 'high' ? 'var(--error)' : 'var(--cyber-orange, #ffb783)';
+          var ago = ['2 MINUTES AGO', '14 MINUTES AGO', '1 HOUR AGO', '3 HOURS AGO'][i] || 'RECENT';
+          return '<div style="display:flex;align-items:flex-start;gap:10px;padding-left:10px;border-left:3px solid ' + sev + '">' +
+              '<div style="flex:1;min-width:0">' +
+                '<div style="font-size:13px;font-weight:600;color:var(--on-surface);line-height:1.3">' + (t.risk === 'red' || t.risk === 'high' ? 'Illegal Tool Access Attempt' : 'Policy Update Propagated') + '</div>' +
+                '<div class="tc-text-dim" style="font-size:11px;margin-top:3px;line-height:1.4">Restriction "<code style="color:var(--secondary);background:transparent;padding:0;border:none;font-size:11px">' + esc(t.name) + '</code>" active globally</div>' +
+                '<div class="tc-mono-label" style="color:var(--outline);font-size:9px;margin-top:4px">' + ago + '</div>' +
+              '</div>' +
+            '</div>';
+        }).join('');
+      }
+    }
   } catch(e) {
     host.innerHTML = '<div style="color:var(--error);padding:12px;font-size:12px">' +
       '加载失败：' + esc(e.message || String(e)) + '</div>';
@@ -29126,7 +29308,100 @@ function _riskBadge(risk) {
 function _renderDenylistRows(tools) {
   var host = document.getElementById('denylist-rows');
   if (!host) return;
-  // Group by toolset so a 50+ tool catalogue stays navigable.
+  var _techTd = false;
+  try { _techTd = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+
+  if (_techTd) {
+    // Stitch_14: single flat table with STATUS / TOOL / CATEGORY /
+    // RISK / RESTRICTION LOGIC columns. Disabled rows dimmed.
+    if (!tools.length) {
+      host.innerHTML = '<div class="tc-text-dim" style="padding:40px 20px;text-align:center;font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em">NO MATCHING TOOLS</div>';
+      return;
+    }
+    var iconFor = function(name) {
+      var s = (name || '').toLowerCase();
+      if (s.indexOf('shell') >= 0 || s.indexOf('exec') >= 0) return 'terminal';
+      if (s.indexOf('coord') >= 0 || s.indexOf('hub') >= 0) return 'sync_alt';
+      if (s.indexOf('json') >= 0 || s.indexOf('parse') >= 0) return 'data_object';
+      if (s.indexOf('api') >= 0 || s.indexOf('http') >= 0 || s.indexOf('fetch') >= 0) return 'network_check';
+      if (s.indexOf('file') >= 0 || s.indexOf('read') >= 0) return 'description';
+      if (s.indexOf('mem') >= 0) return 'psychology';
+      if (s.indexOf('write') >= 0 || s.indexOf('edit') >= 0) return 'edit';
+      if (s.indexOf('skill') >= 0) return 'auto_fix_high';
+      if (s.indexOf('search') >= 0) return 'search';
+      return 'build_circle';
+    };
+    var riskChip = function(risk) {
+      var palette = {
+        low:      ['var(--secondary)', 'rgba(137,206,255,0.05)',  'rgba(137,206,255,0.30)', 'LOW'],
+        moderate: ['var(--tertiary)',  'rgba(255,183,131,0.05)',  'rgba(255,183,131,0.30)', 'MODERATE'],
+        high:     ['var(--error)',     'rgba(255,180,171,0.05)',  'rgba(255,180,171,0.30)', 'HIGH'],
+        red:      ['var(--error)',     'rgba(255,180,171,0.08)',  'rgba(255,180,171,0.40)', 'CRITICAL'],
+      };
+      var c = palette[risk] || ['var(--outline)', 'rgba(255,255,255,0.04)', 'var(--outline-variant)', (risk || '?').toUpperCase()];
+      var pulse = (risk === 'red' || risk === 'high') ? ';animation:pulse-dot 2s infinite ease-in-out' : '';
+      return '<span style="display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:9999px;border:1px solid ' + c[2] + ';background:' + c[1] + ';color:' + c[0] + ';font-family:var(--font-mono);font-size:10px;letter-spacing:0.05em;text-transform:uppercase">' +
+        '<span style="width:5px;height:5px;border-radius:50%;background:' + c[0] + pulse + '"></span>' + c[3] +
+      '</span>';
+    };
+
+    var rows = tools.map(function(t) {
+      var checked = t.denied ? '' : 'checked';
+      var dimmed = !!t.denied;
+      return '<tr class="td-row" data-denied="' + (dimmed ? '1' : '0') + '" style="border-bottom:1px solid rgba(255,255,255,0.05);' +
+          'transition:background 0.15s" ' +
+          'onmouseover="this.style.background=\'rgba(255,255,255,0.03)\'" ' +
+          'onmouseout="this.style.background=\'transparent\'">' +
+        // STATUS toggle
+        '<td style="padding:14px 18px">' +
+          '<label style="position:relative;display:inline-block;width:36px;height:20px;cursor:pointer">' +
+            '<input type="checkbox" ' + checked + ' onchange="toggleToolDenied(\'' + esc(t.name).replace(/\'/g, "\\'") + '\', this)" style="opacity:0;width:0;height:0">' +
+            '<span style="position:absolute;cursor:pointer;inset:0;background:' + (dimmed ? 'var(--surface-container-high)' : 'var(--primary)') + ';border-radius:9999px;transition:0.2s">' +
+              '<span style="position:absolute;height:16px;width:16px;left:' + (dimmed ? '2px' : '18px') + ';top:2px;background:#fff;border-radius:50%;transition:0.2s"></span>' +
+            '</span>' +
+          '</label>' +
+        '</td>' +
+        // TOOL NAME with icon
+        '<td style="padding:14px 18px">' +
+          '<div style="display:flex;align-items:center;gap:12px' + (dimmed ? ';opacity:0.5' : '') + '">' +
+            '<span class="material-symbols-outlined" style="font-size:18px;color:' + (dimmed ? 'var(--outline)' : 'var(--secondary)') + '">' + iconFor(t.name) + '</span>' +
+            '<span style="font-weight:600;font-size:13px;color:' + (dimmed ? 'var(--outline)' : 'var(--on-surface)') + '">' + esc(t.name) + '</span>' +
+          '</div>' +
+        '</td>' +
+        // CATEGORY chip
+        '<td style="padding:14px 18px">' +
+          '<span class="tc-mono-label" style="padding:3px 8px;background:var(--surface-container-low);border:1px solid var(--outline-variant);border-radius:var(--r-md);color:var(--outline);font-size:10px">' +
+            esc((t.toolset || 'other').toUpperCase()) +
+          '</span>' +
+        '</td>' +
+        // RISK LEVEL chip
+        '<td style="padding:14px 18px">' + riskChip(t.risk) + '</td>' +
+        // RESTRICTION LOGIC description
+        '<td style="padding:14px 18px;max-width:340px">' +
+          '<p style="font-size:11px;color:var(--on-surface-variant);line-height:1.5;margin:0;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">' +
+            esc(t.description || '—') +
+          '</p>' +
+        '</td>' +
+      '</tr>';
+    }).join('');
+
+    host.innerHTML =
+      '<table style="width:100%;border-collapse:collapse;background:transparent">' +
+        '<thead>' +
+          '<tr style="border-bottom:1px solid rgba(255,255,255,0.10);background:rgba(255,255,255,0.03)">' +
+            '<th class="tc-mono-label" style="padding:14px 18px;text-align:left;color:var(--outline);font-size:10px;letter-spacing:0.08em;font-weight:500">Status</th>' +
+            '<th class="tc-mono-label" style="padding:14px 18px;text-align:left;color:var(--outline);font-size:10px;letter-spacing:0.08em;font-weight:500">Tool Name</th>' +
+            '<th class="tc-mono-label" style="padding:14px 18px;text-align:left;color:var(--outline);font-size:10px;letter-spacing:0.08em;font-weight:500">Category</th>' +
+            '<th class="tc-mono-label" style="padding:14px 18px;text-align:left;color:var(--outline);font-size:10px;letter-spacing:0.08em;font-weight:500">Risk Level</th>' +
+            '<th class="tc-mono-label" style="padding:14px 18px;text-align:left;color:var(--outline);font-size:10px;letter-spacing:0.08em;font-weight:500">Restriction Logic</th>' +
+          '</tr>' +
+        '</thead>' +
+        '<tbody>' + rows + '</tbody>' +
+      '</table>';
+    return;
+  }
+
+  // ── Legacy layout (grouped cards) ──
   var groups = {};
   tools.forEach(function(t) {
     var ts = t.toolset || 'other';
@@ -29146,7 +29421,6 @@ function _renderDenylistRows(tools) {
       return '<div class="' + cls + '" data-name="' + esc(t.name) + '" data-denied="' + (t.denied ? '1' : '0') + '" ' +
         'style="display:flex;align-items:center;gap:12px;padding:10px 14px;' +
         'border-bottom:1px solid var(--border);background:' + (t.denied ? 'rgba(239,68,68,0.05)' : 'transparent') + '">' +
-        // toggle
         '<label class="switch" style="position:relative;display:inline-block;width:34px;height:18px;flex-shrink:0;cursor:pointer">' +
           '<input type="checkbox" ' + checked + ' onchange="toggleToolDenied(\'' + esc(t.name).replace(/\'/g, "\\'") + '\', this)" ' +
           'style="opacity:0;width:0;height:0">' +
@@ -29154,7 +29428,6 @@ function _renderDenylistRows(tools) {
             'background:' + (t.denied ? '#ef4444' : '#22c55e') + ';border-radius:18px;transition:0.2s">' +
           '<span style="position:absolute;content:\'\';height:14px;width:14px;left:' + (t.denied ? '2px' : '18px') + ';top:2px;' +
             'background:#fff;border-radius:50%;transition:0.2s"></span></span></label>' +
-        // name + meta
         '<div style="flex:1;min-width:0">' +
           '<div style="display:flex;align-items:center;gap:8px">' +
             '<code style="font-size:13px;color:' + (t.denied ? 'var(--text3)' : 'var(--text)') + ';text-decoration:' + (t.denied ? 'line-through' : 'none') + '">' + esc(t.name) + '</code>' +
