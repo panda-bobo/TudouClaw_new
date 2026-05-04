@@ -28,90 +28,21 @@ skills:
       - "safe-artifact-paths"   # After writing, verify outputs live in workspace
     sop_step: null
 
-  # ── Engineering workflow chain (superpowers pack) ─────────────────
-  brainstorming:
+  # ── Engineering workflow pack (merged 2026-05-04) ──────────────────
+  # 12 obra/superpowers sub-skills (brainstorming, writing-plans, TDD,
+  # systematic-debugging, etc.) collapsed into one consolidated pack
+  # to cut UI noise. The internal SOP chain still exists — see the
+  # SKILL.md body's "SOP Chain" section. Originals archived under
+  # builtin/superpowers/.legacy_split/ (hidden from scanner).
+  superpowers-engineering:
     not_for:
-      - "implementation"
-      - "writing code"
+      - "trivial typo fixes"
+      - "single-file documentation edits"
     next:
-      - "writing-plans"
-    sop_step: 0
+      - "safe-artifact-paths"   # After landing,verify outputs in workspace
+    sop_step: null
 
-  writing-plans:
-    not_for:
-      - "quick one-liners"
-      - "exploratory reading"
-    next:
-      - "using-git-worktrees"
-      - "test-driven-development"
-    sop_step: 1
-
-  using-git-worktrees:
-    not_for:
-      - "one-off edits on main"
-    next:
-      - "test-driven-development"
-    sop_step: 2
-
-  test-driven-development:
-    not_for:
-      - "pure documentation changes"
-      - "trivial refactors with existing coverage"
-    next:
-      - "verification-before-completion"
-    sop_step: 3
-
-  verification-before-completion:
-    not_for:
-      - "still in the middle of implementation"
-    next:
-      - "requesting-code-review"
-    sop_step: 4
-
-  requesting-code-review:
-    not_for:
-      - "FYI broadcasts (use send_message tool instead)"
-    next:
-      - "receiving-code-review"
-    sop_step: 5
-
-  receiving-code-review:
-    not_for:
-      - "giving review (use requesting-code-review from the author side)"
-    next:
-      - "finishing-a-development-branch"
-    sop_step: 6
-
-  finishing-a-development-branch:
-    not_for:
-      - "work still in progress"
-    next: []
-    sop_step: 7
-
-  systematic-debugging:
-    not_for:
-      - "known-cause simple fixes"
-      - "feature work (use test-driven-development)"
-    next:
-      - "test-driven-development"   # Write a regression test before merging fix
-
-  subagent-driven-development:
-    not_for:
-      - "tasks that need your full conversation context"
-      - "single-file edits"
-    next: []
-
-  dispatching-parallel-agents:
-    not_for:
-      - "sequentially-dependent tasks"
-    next: []
-
-  executing-plans:
-    not_for:
-      - "tasks without a written plan (use writing-plans first)"
-    next:
-      - "verification-before-completion"
-
+  # Catalog-only meta skills (kept separate, not merged).
   writing-skills:
     not_for:
       - "USING an existing skill (invoke it directly)"
@@ -163,3 +94,10 @@ skills:
     not_for:
       - "stitching existing image frames (use create_video tool)"
     next: []
+
+
+# Note: a `groups:` section was briefly added 2026-05-04 to bundle the
+# 12 superpowers sub-skills into 4 named groups (planning / implementation
+# / review-quality / shipping). It was superseded by physically merging
+# them into a single `superpowers-engineering` pack — see above. The
+# loader's SkillGroup support remains in case future packs want it.

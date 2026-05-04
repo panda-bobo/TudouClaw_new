@@ -1321,9 +1321,13 @@ TOOL_DEFINITIONS: list[dict] = [
             "name": "knowledge_lookup",
             "description": (
                 "Search KB (shared + agent's expert pool). "
-                "ONE-SHOT per turn: pack all keywords into a single query (second call rejected). "
-                "Modes: search (top-k content, default), count (exact aggregate by source_file), "
-                "list (metadata inventory, no content). "
+                "Same-mode ONE-SHOT per turn — different modes are allowed. "
+                "Modes: search (top-k content, default), count (chunk aggregates by source_file — "
+                "WARNING chunks ≠ user-meaningful units like cases/scenarios), "
+                "list (metadata inventory, no content), "
+                "outline (UNIQUE heading_paths per file — use for 'how many test cases / "
+                "scenarios / sections per document', this is the right tool for "
+                "'用例数 / 场景数 / 章节数' questions). "
                 "Cite hits as [source_file §heading_path]; reason only from retrieved content."
             ),
             "parameters": {
@@ -1331,7 +1335,7 @@ TOOL_DEFINITIONS: list[dict] = [
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Search keyword / substring. Required for mode=search; optional filter for mode=count and mode=list.",
+                        "description": "Search keyword / substring. Required for mode=search; optional filter for mode=count and mode=list. Ignored by mode=outline.",
                     },
                     "entry_id": {
                         "type": "string",
@@ -1339,8 +1343,24 @@ TOOL_DEFINITIONS: list[dict] = [
                     },
                     "mode": {
                         "type": "string",
-                        "enum": ["search", "count", "list"],
-                        "description": "Retrieval mode. search=top-k content chunks; count=exact aggregate by source_file (for how-many questions); list=per-chunk metadata inventory.",
+                        "enum": ["search", "count", "list", "outline"],
+                        "description": (
+                            "Retrieval mode. "
+                            "search=top-k content chunks; "
+                            "count=exact aggregate by source_file (CHUNK count, not user-units); "
+                            "list=per-chunk metadata inventory; "
+                            "outline=UNIQUE heading_paths per file (one leaf heading_path = one "
+                            "test case/scenario/section in a structured doc — pick this for "
+                            "'how many cases/scenarios/sections per service' questions)."
+                        ),
+                    },
+                    "source_file": {
+                        "type": "string",
+                        "description": "(mode=outline only) Substring filter on source_file path. Empty = all files.",
+                    },
+                    "heading_pattern": {
+                        "type": "string",
+                        "description": "(mode=outline only) Regex applied to heading_path; only headings matching this regex are counted. Empty = all headings.",
                     },
                 },
             },

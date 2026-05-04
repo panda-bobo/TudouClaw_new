@@ -8,7 +8,7 @@
 </head>
 <body>
   <!-- Small state: floating avatar -->
-  <div id="avatar" class="avatar idle empty" data-tauri-drag-region title="未连接到 TudouClaw">
+  <div id="avatar" class="avatar idle empty" data-tauri-drag-region title="尚未启用桌面 Agent — 请到 portal 智能体页打开『桌面悬浮』开关">
     <!-- Identity layers (priority: lottie > robot_avatar > initial > face) -->
     <div id="lottie-mount" class="lottie-mount"></div>
     <img id="avatar-robot" class="avatar-robot" alt="" hidden />
@@ -30,26 +30,87 @@
 
   <!-- Expanded state: card with name / persona / chat -->
   <div id="card" class="card hidden">
-    <div class="card-header" data-tauri-drag-region>
-      <div class="card-title">
-        <span id="agent-name">—</span>
-        <span class="card-status-pill" id="agent-status">idle</span>
+    <!-- Top utility bar (Doubao-style icon row) -->
+    <div class="card-topbar" data-tauri-drag-region>
+      <div class="topbar-left">
+        <button id="btn-pin" class="topbar-btn" title="切换置顶">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76V6h6v4.76l3 4.24H6l3-4.24z"/></svg>
+        </button>
+        <button id="btn-new-chat" class="topbar-btn" title="清空对话">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
       </div>
-      <div class="card-actions">
+      <div class="topbar-right">
         <select id="agent-picker" title="切换 Agent"></select>
-        <button id="close-card" title="收起">✕</button>
+        <button id="close-card" class="topbar-btn" title="收起">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></svg>
+        </button>
       </div>
     </div>
-    <div class="card-meta">
-      <span id="agent-role">—</span>
+
+    <!-- Hero block: large centered avatar + name + role -->
+    <div class="card-hero">
+      <div class="hero-avatar" id="hero-avatar">
+        <div id="hero-lottie" class="hero-lottie"></div>
+        <img id="hero-robot" class="hero-robot" alt="" hidden />
+        <div id="hero-initial" class="hero-initial" hidden></div>
+        <svg id="hero-face" class="hero-face" viewBox="0 0 64 64" aria-hidden="true">
+          <defs>
+            <radialGradient id="g-eye2" cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stop-color="#fff"/>
+              <stop offset="100%" stop-color="#a8b8ff"/>
+            </radialGradient>
+          </defs>
+          <ellipse cx="22" cy="30" rx="5" ry="6" fill="url(#g-eye2)"/>
+          <ellipse cx="42" cy="30" rx="5" ry="6" fill="url(#g-eye2)"/>
+          <path d="M16 42 Q32 50 48 42" stroke="rgba(255,255,255,0.65)" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+        </svg>
+        <div class="hero-status-dot" id="hero-status-dot"></div>
+      </div>
+      <div class="hero-name">
+        <span id="agent-name">—</span>
+        <span class="hero-status-pill" id="agent-status">idle</span>
+      </div>
+      <div class="hero-role" id="agent-role">—</div>
+      <div class="hero-persona" id="agent-persona"></div>
     </div>
-    <div class="card-persona" id="agent-persona"></div>
+
+    <!-- Chat log (scrolls when there's history) -->
     <div class="card-chat" id="chat-log"></div>
+
+    <!-- Input row -->
     <div class="card-input">
-      <input id="chat-input" type="text" placeholder="说点什么…" />
-      <button id="chat-send" title="发送">→</button>
+      <input id="chat-input" type="text" placeholder='发消息或输入"/"选择技能' />
+      <button id="chat-send" title="发送">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+      </button>
+    </div>
+
+    <!-- Quick action chip row (Doubao-style) -->
+    <div class="card-quickbar">
+      <button class="quickbar-chip" id="qb-attach" title="附件 (暂未启用)">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+      <button class="quickbar-chip" data-template="quick" title="一句话简答">
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+        快速
+      </button>
+      <button class="quickbar-chip" data-template="write" title="帮我写作">
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 113 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+        帮我写作
+      </button>
+      <button class="quickbar-chip" id="qb-more" title="更多模板">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg>
+        更多
+      </button>
+      <button class="quickbar-chip qb-mic" id="qb-mic" title="语音输入 (暂未接入)">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 11a7 7 0 0014 0M12 19v3"/></svg>
+      </button>
     </div>
   </div>
+
+  <!-- Floating template menu (popup from "更多" chip) -->
+  <div id="template-menu" class="template-menu hidden"></div>
 
   <script src="vendor/lottie.min.js"></script>
   <script src="widget.js"></script>

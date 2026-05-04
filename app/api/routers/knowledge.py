@@ -416,17 +416,42 @@ async def list_domain_knowledge_bases(
 # have to wait for us to add it here.
 CURATED_EMBEDDING_MODELS = [
     {"id": "", "label": "默认 (服务器配置)", "dim": None, "size_mb": None,
-     "note": "fallback to DEFAULT_EMBEDDING_MODEL"},
+     "note": (
+         "用服务器全局默认 (当前 = all-MiniLM-L6-v2)。\n"
+         "✓ 适合: 拿不准选哪个 / 英文为主 / 想立刻能用\n"
+         "✗ 不适合: 需要中文-英文跨语言检索"
+     )},
     {"id": "BAAI/bge-m3", "label": "BAAI/bge-m3", "dim": 1024, "size_mb": 2300,
-     "note": "多语言 + 中文最强 + 跨语言对齐, 当前最佳通用选项",
+     "note": (
+         "多语言通用,长文 + 跨语对齐强\n"
+         "✓ 适合: 跨语言检索(中文 query → 英文文档/反之) · "
+         "长文档 chunk(1000+ 字符) · 自然语言为主的内容(报告/文章/客服记录) · "
+         "多语言混合 KB\n"
+         "✗ 不适合: 高度结构化的技术文档(表格密集 / 模板重复 / "
+         "如 HCS 验收用例) · 全英文短文本 · 公司内部专有术语密集的小众域"
+     ),
      "recommended": True},
     {"id": "BAAI/bge-large-zh-v1.5", "label": "BAAI/bge-large-zh-v1.5", "dim": 1024, "size_mb": 1300,
-     "note": "纯中文 KB + 资源紧张时用 (体积比 bge-m3 小 70%)"},
+     "note": (
+         "纯中文 retrieval 专项,体积比 bge-m3 小 70%\n"
+         "✓ 适合: 纯中文文档库(法律 / 政策 / 中文新闻) · "
+         "中等长度自然语言 · 资源紧张但要好质量\n"
+         "✗ 不适合: 跨语言 · 英文为主的 KB"
+     )},
     {"id": "all-MiniLM-L6-v2", "label": "all-MiniLM-L6-v2", "dim": 384, "size_mb": 80,
-     "note": "英文为主, 体积小, 速度快 (旧默认)"},
+     "note": (
+         "ChromaDB 默认,sentence-pair retrieval 训练,体积最小\n"
+         "✓ 适合: 英文为主 · 表格密集 / 高度结构化技术文档 · "
+         "公司内部专有术语 · 短文本 · 速度/体积优先\n"
+         "✗ 不适合: 跨语言(中→英不行) · 中文为主 · 长 chunk(>700 字符会被截断)"
+     )},
     {"id": "paraphrase-multilingual-MiniLM-L12-v2",
      "label": "paraphrase-multilingual-MiniLM-L12-v2", "dim": 384, "size_mb": 470,
-     "note": "多语言 + 体积小"},
+     "note": (
+         "多语言句对相似度,体积小\n"
+         "✓ 适合: 多语言短句对 · FAQ 匹配 · 体积有限的多语场景\n"
+         "✗ 不适合: 长文档 · 复杂 retrieval"
+     )},
 ]
 
 
@@ -875,13 +900,42 @@ async def delete_domain_knowledge_base(
     hub=Depends(get_hub),
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Delete a domain knowledge base."""
+    """Delete a domain knowledge base.
+
+    Cascade: also strip the deleted ``kb_id`` from every agent's
+    ``profile.rag_collection_ids``. Without this, agents stay bound to
+    a now-orphan KB id, search silently returns nothing, and the
+    operator has no signal that the binding broke. Saves the agents
+    file once at the end (one disk write regardless of fan-out)."""
     try:
         from ...rag_provider import get_domain_kb_store
         store = get_domain_kb_store()
         kb_id = body.get("id", "")
+        if not kb_id:
+            raise HTTPException(400, "Missing id")
         ok = store.delete(kb_id)
-        return {"ok": ok}
+        # Cascade-clean dangling references on every local agent.
+        cleaned_agents: list[str] = []
+        try:
+            for agent in (hub.agents.values() if hasattr(hub, "agents") else []):
+                prof = getattr(agent, "profile", None)
+                if prof is None:
+                    continue
+                ids = getattr(prof, "rag_collection_ids", None)
+                if not isinstance(ids, list) or kb_id not in ids:
+                    continue
+                prof.rag_collection_ids = [x for x in ids if x != kb_id]
+                cleaned_agents.append(getattr(agent, "id", "") or "")
+            if cleaned_agents:
+                hub._save_agents()
+                logger.info(
+                    "domain-kb/delete cascaded: stripped %s from %d agent(s)",
+                    kb_id, len(cleaned_agents),
+                )
+        except Exception as casc_err:
+            logger.warning("cascade-clean of agent rag_collection_ids "
+                            "failed for kb %s: %s", kb_id, casc_err)
+        return {"ok": ok, "unbound_agents": cleaned_agents}
     except ImportError:
         raise HTTPException(501, "RAG provider module not available")
     except HTTPException:
@@ -968,40 +1022,61 @@ def _get_ocr_engine():
 
 def _docx_to_markdown(raw: bytes) -> tuple[str, str]:
     """Word doc → markdown. Word ``Heading N`` / ``Title`` styles
-    become ``#`` prefixes; tables flatten to pipe-joined rows."""
+    become ``#`` prefixes; tables flatten to pipe-joined rows.
+
+    Critical: walks ``doc.element.body`` in document order so tables stay
+    inline with their surrounding paragraphs. The naive python-docx
+    pattern (iterate ``doc.paragraphs`` then ``doc.tables`` separately
+    and concatenate) attaches every table to the END of the doc, which
+    silently dumps tables under whatever the last heading happened to
+    be — catastrophic for table-heavy formats like the HCS Acceptance
+    Test Guide where each test case is its own table.
+    """
     try:
         import docx  # type: ignore
+        from docx.text.paragraph import Paragraph  # type: ignore
+        from docx.table import Table  # type: ignore
         import io as _io
     except ImportError:
         return "", "ext_unsupported_docx"
     try:
         doc = docx.Document(_io.BytesIO(raw))
         parts: list[str] = []
-        for para in doc.paragraphs:
-            txt = para.text.strip()
-            if not txt:
-                continue
-            lvl = 0
-            try:
-                style_name = (para.style.name or "").strip()
-            except Exception:
-                style_name = ""
-            if style_name == "Title":
-                lvl = 1
-            elif style_name.startswith("Heading "):
+        # python-docx tags paragraph elements <w:p> and tables <w:tbl>.
+        # body.iterchildren() yields them in source-order so we can
+        # reconstruct the original layout.
+        for child in doc.element.body.iterchildren():
+            tag = child.tag
+            # Paragraph
+            if tag.endswith("}p"):
+                para = Paragraph(child, doc)
+                txt = para.text.strip()
+                if not txt:
+                    continue
+                lvl = 0
                 try:
-                    lvl = max(1, min(6, int(style_name.split()[-1])))
-                except (ValueError, IndexError):
-                    lvl = 0
-            if lvl > 0:
-                parts.append(f"\n{'#' * lvl} {txt}\n")
-            else:
-                parts.append(txt)
-        for table in doc.tables:
-            for row in table.rows:
-                cells = [c.text.strip() for c in row.cells if c.text.strip()]
-                if cells:
-                    parts.append(" | ".join(cells))
+                    style_name = (para.style.name or "").strip()
+                except Exception:
+                    style_name = ""
+                if style_name == "Title":
+                    lvl = 1
+                elif style_name.startswith("Heading "):
+                    try:
+                        lvl = max(1, min(6, int(style_name.split()[-1])))
+                    except (ValueError, IndexError):
+                        lvl = 0
+                if lvl > 0:
+                    parts.append(f"\n{'#' * lvl} {txt}\n")
+                else:
+                    parts.append(txt)
+            # Table
+            elif tag.endswith("}tbl"):
+                table = Table(child, doc)
+                for row in table.rows:
+                    cells = [c.text.strip() for c in row.cells if c.text.strip()]
+                    if cells:
+                        parts.append(" | ".join(cells))
+            # Other body elements (sectPr, sdt, etc.) — skip silently
         return "\n\n".join(parts), "python-docx-headings"
     except Exception as e:
         logger.debug("docx parse failed: %s", e)

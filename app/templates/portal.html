@@ -4,8 +4,23 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Tudou Claws Portal</title>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Inter:wght@300;400;500;600;700&family=Lora:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Inter:wght@300;400;500;600;700;800&family=Lora:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
+<!-- Tech (Aether) theme — phased rollout. The stylesheet loads on every
+     page so we don't FOUC when toggling; activation is gated by setting
+     `<html data-theme="tech">` BEFORE body paints (see boot script).
+     Source: app/server/static/css/theme-tech.css. -->
+<link href="/static/css/theme-tech.css" rel="stylesheet">
+<script>
+  /* Apply data-theme attribute as early as possible to avoid flash of
+   * old-theme styles when "tech" is enabled. Reads from localStorage. */
+  (function () {
+    try {
+      var t = localStorage.getItem('tudou_theme');
+      if (t === 'tech') document.documentElement.setAttribute('data-theme', 'tech');
+    } catch (e) {}
+  })();
+</script>
 <style>
 .material-symbols-outlined {
   font-variation-settings: 'FILL' 0, 'wght' 300, 'GRAD' 0, 'opsz' 24;

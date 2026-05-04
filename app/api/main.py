@@ -442,6 +442,7 @@ def create_app() -> FastAPI:
         canvas as canvas_router,
         branding as branding_router,
         system_settings as system_settings_router,
+        prompt_amplifier as prompt_amplifier_router,
     )
 
     # ── API routers ──────────────────────────────────────────────────
@@ -478,12 +479,22 @@ def create_app() -> FastAPI:
     app.include_router(canvas_router.router)
     app.include_router(branding_router.router)
     app.include_router(system_settings_router.router)
+    app.include_router(prompt_amplifier_router.router)
 
     # ── Static files (JS/CSS used by portal templates) ───────────────
     server_static = os.path.join(os.path.dirname(__file__), "..", "server", "static")
     app_static = os.path.join(os.path.dirname(__file__), "..", "static")
     if os.path.isdir(server_static):
         app.mount("/static/js", StaticFiles(directory=os.path.join(server_static, "js")), name="legacy-js")
+        # CSS lives under server/static/css (theme-tech.css and future
+        # theme stylesheets). Mount BEFORE the catch-all `/static` mount
+        # below so this more-specific path wins. Without this, /static/css/*
+        # would fall through to /static (= app/static/) and return a 404
+        # JSON blob, which Chrome rejects with "MIME type application/json
+        # is not a supported stylesheet MIME type".
+        css_dir = os.path.join(server_static, "css")
+        if os.path.isdir(css_dir):
+            app.mount("/static/css", StaticFiles(directory=css_dir), name="theme-css")
     if os.path.isdir(app_static):
         app.mount("/static", StaticFiles(directory=app_static), name="legacy-static")
 

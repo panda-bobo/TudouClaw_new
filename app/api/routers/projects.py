@@ -374,9 +374,25 @@ async def update_project_status(
     try:
         project = _get_project_or_404(hub, project_id)
         status = body.get("status", "")
-        if hasattr(project, "set_status"):
-            project.set_status(status)
-        return {"ok": True}
+        reason = body.get("reason", "") or ""
+        if not hasattr(project, "set_status"):
+            raise HTTPException(500, "project type missing set_status")
+        actor = str(getattr(user, "user_id", "") or "") or "user"
+        ok, msg = project.set_status(status, by=actor, reason=reason)
+        if not ok:
+            # set_status reports invalid-status / illegal-transition via
+            # (False, message). Surface that to the caller so the UI can
+            # show the real error instead of a misleading "ok".
+            raise HTTPException(400, msg)
+        # Persist — without this, the in-memory transition is lost on the
+        # next master restart and the status appears to revert to its
+        # last-saved value (typically "active").
+        try:
+            hub._save_projects()
+        except Exception as save_err:
+            logger.warning("save_projects after status update failed: %s",
+                           save_err)
+        return {"ok": True, "message": msg}
     except HTTPException:
         raise
     except Exception as e:

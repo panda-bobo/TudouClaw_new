@@ -29,6 +29,12 @@ class RoleDefaults:
     skill_names: list[str] = field(default_factory=list)
     # PromptPack names (match PromptPack.name from SKILL.md frontmatter)
     prompt_pack_names: list[str] = field(default_factory=list)
+    # PromptPack GROUP names — expanded at bind time via the routing
+    # MANIFEST.yaml `groups:` section. Lets a role say "I want the whole
+    # planning pack" instead of listing 3-4 individual skills.
+    # Group expansion is unioned with `prompt_pack_names`; duplicates
+    # are dropped (order-preserving).
+    prompt_pack_groups: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -72,62 +78,43 @@ ROLE_DEFAULTS: dict[str, RoleDefaults] = {
     ),
     "pm": RoleDefaults(
         skill_names=["send_email", "take_screenshot"],
-        # brainstorming: general ideation skill vendored from obra/superpowers
-        prompt_pack_names=["brainstorming"],
+        # Single merged pack covers brainstorming + writing-plans +
+        # dispatching-parallel-agents (the planning subset of superpowers).
+        prompt_pack_names=["superpowers-engineering"],
     ),
 
     # Engineering
-    # ── Superpowers auto-binding (vendored from obra/superpowers) ──
-    # 8 core engineering skills are bound to 'coder' by default; three roles
-    # (reviewer / architect / tester) receive targeted subsets; 'pm' gets the
-    # general ideation skill 'brainstorming'. Catalog-only (disabled by
-    # default): using-git-worktrees, using-superpowers, writing-skills,
-    # dispatching-parallel-agents, subagent-driven-development.
-    # See app/skills/builtin/superpowers/README.md for rationale.
+    # ── Superpowers binding (vendored from obra/superpowers) ──
+    # 2026-05-04: 12 sub-skills physically merged into a single
+    # `superpowers-engineering` pack — see app/skills/builtin/
+    # superpowers-engineering/SKILL.md. Originals archived under
+    # builtin/superpowers/.legacy_split/. All engineering roles now
+    # bind the same one merged pack.
+    # Catalog-only meta skills (using-superpowers / writing-skills) are
+    # NOT auto-bound — advanced users can grant them manually.
     "coder": RoleDefaults(
         skill_names=["take_screenshot"],
-        prompt_pack_names=[
-            "code-review-guide",
-            "test-driven-development",
-            "systematic-debugging",
-            "verification-before-completion",
-            "writing-plans",
-            "executing-plans",
-            "requesting-code-review",
-            "receiving-code-review",
-            "finishing-a-development-branch",
-        ],
+        prompt_pack_names=["code-review-guide", "superpowers-engineering"],
     ),
     "reviewer": RoleDefaults(
         skill_names=[],
-        prompt_pack_names=[
-            "code-review-guide",
-            "receiving-code-review",
-            "requesting-code-review",
-            "verification-before-completion",
-        ],
+        prompt_pack_names=["code-review-guide", "superpowers-engineering"],
     ),
     "architect": RoleDefaults(
         skill_names=["take_screenshot"],
-        prompt_pack_names=[
-            "code-review-guide",
-            "writing-plans",
-            "executing-plans",
-            "systematic-debugging",
-        ],
+        prompt_pack_names=["code-review-guide", "superpowers-engineering"],
     ),
     "tester": RoleDefaults(
         skill_names=["take_screenshot"],
         prompt_pack_names=[
-            "test-driven-development",
-            "verification-before-completion",
+            "superpowers-engineering",
             # web-automator: end-to-end browser testing via `npx agent-browser`
             "web-automator",
         ],
     ),
     "devops": RoleDefaults(
         skill_names=["take_screenshot", "send_email"],
-        prompt_pack_names=[],
+        prompt_pack_names=["superpowers-engineering"],
     ),
 
     # Creative / research
@@ -149,33 +136,71 @@ ROLE_DEFAULTS: dict[str, RoleDefaults] = {
 }
 
 
+def _expand_groups_to_packs(group_names: list[str]) -> list[str]:
+    """Expand `prompt_pack_groups` into concrete pack names via
+    MANIFEST.yaml. Returns an empty list if the manifest is missing /
+    malformed / lists no groups — that's a soft failure (the role just
+    doesn't get the group's packs, rather than crashing agent creation).
+    """
+    if not group_names:
+        return []
+    try:
+        from ..skills.manifest_loader import load_manifest
+        m = load_manifest()
+        return m.expand_groups(group_names, include_catalog_only=False)
+    except Exception:
+        return []
+
+
 def get_role_defaults(role: str) -> RoleDefaults:
     """Return defaults for a role (merged with 'general' baseline).
 
     Unknown roles fall back to the 'general' baseline.
+    Groups (``prompt_pack_groups``) get expanded into pack names via the
+    MANIFEST.yaml `groups:` section, then unioned with any explicitly
+    listed ``prompt_pack_names``.
     """
     base = ROLE_DEFAULTS.get("general", RoleDefaults())
-    if not role or role == "general":
-        return RoleDefaults(
-            skill_names=list(base.skill_names),
-            prompt_pack_names=list(base.prompt_pack_names),
-        )
-    role_spec = ROLE_DEFAULTS.get(role)
-    if not role_spec:
-        return RoleDefaults(
-            skill_names=list(base.skill_names),
-            prompt_pack_names=list(base.prompt_pack_names),
-        )
-    # Union (preserve base order, then append role-specific extras)
+    role_spec = ROLE_DEFAULTS.get(role) if role and role != "general" else None
+
+    # Skills (still by name, no group concept here)
     skills = list(base.skill_names)
-    for s in role_spec.skill_names:
-        if s not in skills:
-            skills.append(s)
-    packs = list(base.prompt_pack_names)
-    for p in role_spec.prompt_pack_names:
-        if p not in packs:
-            packs.append(p)
-    return RoleDefaults(skill_names=skills, prompt_pack_names=packs)
+    if role_spec is not None:
+        for s in role_spec.skill_names:
+            if s not in skills:
+                skills.append(s)
+
+    # Prompt packs: explicit names + group expansions, unioned, base first
+    packs: list[str] = []
+    seen: set[str] = set()
+    def _add(name: str):
+        if name and name not in seen:
+            seen.add(name)
+            packs.append(name)
+    for n in base.prompt_pack_names:
+        _add(n)
+    for n in _expand_groups_to_packs(list(base.prompt_pack_groups)):
+        _add(n)
+    if role_spec is not None:
+        for n in role_spec.prompt_pack_names:
+            _add(n)
+        for n in _expand_groups_to_packs(list(role_spec.prompt_pack_groups)):
+            _add(n)
+
+    # Carry the (already-merged) group names back so callers that want
+    # to inspect "what groups does this role have" can see them without
+    # re-deriving from the pack list.
+    groups = list(base.prompt_pack_groups)
+    if role_spec is not None:
+        for g in role_spec.prompt_pack_groups:
+            if g not in groups:
+                groups.append(g)
+
+    return RoleDefaults(
+        skill_names=skills,
+        prompt_pack_names=packs,
+        prompt_pack_groups=groups,
+    )
 
 
 def resolve_role_default_ids(

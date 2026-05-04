@@ -1,0 +1,840 @@
+/* TudouClaw — Tech (Aether) Theme · Single-theme target
+ * --------------------------------------------------------------
+ * Replaces Linear-dark + Claude-light themes (2026-05-04 refactor).
+ * Source of truth: stitch-generated mockups (32 designs, all share
+ * the same token set — verified across stitch_agent_0/5/10/20/25/31).
+ *
+ * Naming: `tc-` prefix for our local component classes
+ *         (`tc-card`, `tc-btn`, `tc-chip`, ...). No external utility
+ *         frameworks (Tailwind etc) — every class lives here.
+ */
+
+/* Tokens defined under [data-theme="tech"] so they only activate when
+ * the bootstrap script in portal.html sets that attribute. Existing
+ * pages keep their tokens until they migrate. The .tc-* component
+ * classes below are always available — they just have undefined values
+ * when not in tech mode (and we don't render them in legacy mode). */
+[data-theme="tech"] {
+  /* === Colors: Surface stack (deep indigo / charcoal) === */
+  --surface:                       #13131b;
+  --surface-dim:                   #13131b;
+  --surface-bright:                #393841;
+  --surface-container-lowest:      #0d0d15;
+  --surface-container-low:         #1b1b23;
+  --surface-container:             #1f1f27;
+  --surface-container-high:        #292932;
+  --surface-container-highest:     #34343d;
+  --surface-variant:               #34343d;
+
+  /* === Colors: Foreground === */
+  --on-surface:                    #e4e1ed;
+  --on-surface-variant:            #c7c4d7;
+  --inverse-surface:               #e4e1ed;
+  --inverse-on-surface:            #303038;
+
+  /* === Colors: Primary (indigo) === */
+  --primary:                       #c0c1ff;
+  --on-primary:                    #1000a9;
+  --primary-container:             #8083ff;
+  --on-primary-container:          #0d0096;
+  --inverse-primary:               #494bd6;
+  --primary-fixed:                 #e1e0ff;
+  --primary-fixed-dim:             #c0c1ff;
+  --on-primary-fixed:              #07006c;
+  --on-primary-fixed-variant:      #2f2ebe;
+  --surface-tint:                  #c0c1ff;
+
+  /* === Colors: Secondary (electric blue) === */
+  --secondary:                     #89ceff;
+  --on-secondary:                  #00344d;
+  --secondary-container:           #00a2e6;
+  --on-secondary-container:        #00344e;
+  --secondary-fixed:               #c9e6ff;
+  --secondary-fixed-dim:           #89ceff;
+  --on-secondary-fixed:            #001e2f;
+  --on-secondary-fixed-variant:    #004c6e;
+
+  /* === Colors: Tertiary (safety orange) === */
+  --tertiary:                      #ffb783;
+  --on-tertiary:                   #4f2500;
+  --tertiary-container:            #d97721;
+  --on-tertiary-container:         #452000;
+  --tertiary-fixed:                #ffdcc5;
+  --tertiary-fixed-dim:            #ffb783;
+  --on-tertiary-fixed:             #301400;
+  --on-tertiary-fixed-variant:     #703700;
+
+  /* === Colors: Error / Status === */
+  --error:                         #ffb4ab;
+  --on-error:                      #690005;
+  --error-container:               #93000a;
+  --on-error-container:            #ffdad6;
+
+  /* === Colors: Cyber accents (status indicators only) === */
+  --cyber-lime:                    #adff2f;  /* Active agents / success */
+  --cyber-blue:                    #2e90ff;  /* Info / processing      */
+  --cyber-orange:                  #ff6b00;  /* Non-critical warning   */
+
+  /* === Colors: Borders / outlines === */
+  --outline:                       #908fa0;
+  --outline-variant:               #464554;
+  --background:                    #13131b;
+  --on-background:                 #e4e1ed;
+
+  /* === Typography === */
+  --font-display: 'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC',
+                  'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --font-mono:    'Space Grotesk', 'JetBrains Mono', 'SF Mono', Menlo, monospace;
+
+  --type-h1-size:        48px;
+  --type-h1-weight:      700;
+  --type-h1-line:        1.1;
+  --type-h1-tracking:    -0.02em;
+  --type-h2-size:        30px;
+  --type-h2-weight:      600;
+  --type-h2-line:        1.2;
+  --type-h2-tracking:    -0.01em;
+  --type-h3-size:        24px;
+  --type-h3-weight:      600;
+  --type-h3-line:        1.3;
+  --type-body-lg-size:   18px;
+  --type-body-md-size:   16px;
+  --type-body-sm-size:   14px;
+  --type-mono-label-size: 12px;
+  --type-mono-label-weight: 500;
+  --type-mono-label-tracking: 0.05em;
+
+  /* === Shape === */
+  --r-sm:   0.125rem;       /* 2px  */
+  --r-md:   0.25rem;        /* 4px  - small components */
+  --r-lg:   0.5rem;         /* 8px  - cards / panels   */
+  --r-xl:   0.75rem;        /* 12px - modals           */
+  --r-full: 9999px;
+
+  /* === Spacing (4px base) === */
+  --s-unit:       4px;
+  --s-xs:         4px;
+  --s-sm:         8px;
+  --s-md:         16px;
+  --s-lg:         24px;
+  --s-xl:         32px;
+  --s-xxl:        48px;
+  --s-container:  32px;
+  --s-gutter:     20px;
+
+  /* === Layout === */
+  --nav-rail-w:   64px;
+  --header-h:     56px;
+
+  /* === Effects === */
+  --glass-blur:        20px;
+  --glass-bg:          rgba(31, 31, 39, 0.78);
+  --glass-border:      rgba(255, 255, 255, 0.08);
+  --shadow-ambient:    0 16px 40px rgba(7, 0, 108, 0.18);
+  --shadow-elevated:   0 24px 60px rgba(0, 0, 0, 0.55);
+  --glow-primary:      0 0 8px rgba(192, 193, 255, 0.20);
+  --glow-cyber-lime:   0 0 8px rgba(173, 255, 47, 0.30);
+
+  /* === Z stack === */
+  --z-content: 1;
+  --z-overlay: 100;
+  --z-modal:   1000;
+  --z-toast:   2000;
+}
+
+/* ──────────────────────────────────────────────────────────────
+ * Body styles + global resets — gated by [data-theme="tech"] so the
+ * existing pages' colors aren't disturbed during the phased rollout.
+ * ────────────────────────────────────────────────────────────── */
+[data-theme="tech"] body {
+  background: var(--background);
+  color: var(--on-surface);
+  font-family: var(--font-display);
+  font-size: var(--type-body-md-size);
+  line-height: 1.5;
+  min-height: 100vh;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+[data-theme="tech"] *::-webkit-scrollbar       { width: 6px; height: 6px; }
+[data-theme="tech"] *::-webkit-scrollbar-track { background: transparent; }
+[data-theme="tech"] *::-webkit-scrollbar-thumb { background: var(--outline-variant); border-radius: var(--r-full); }
+[data-theme="tech"] *::-webkit-scrollbar-thumb:hover { background: var(--outline); }
+
+[data-theme="tech"] a       { color: var(--primary); text-decoration: none; }
+[data-theme="tech"] a:hover { text-decoration: underline; }
+
+/* ──────────────────────────────────────────────────────────────
+ * Typography helpers
+ * ────────────────────────────────────────────────────────────── */
+.tc-h1 { font-size: var(--type-h1-size); font-weight: var(--type-h1-weight);
+         line-height: var(--type-h1-line); letter-spacing: var(--type-h1-tracking); }
+.tc-h2 { font-size: var(--type-h2-size); font-weight: var(--type-h2-weight);
+         line-height: var(--type-h2-line); letter-spacing: var(--type-h2-tracking); }
+.tc-h3 { font-size: var(--type-h3-size); font-weight: var(--type-h3-weight);
+         line-height: var(--type-h3-line); }
+
+.tc-body-lg { font-size: var(--type-body-lg-size); }
+.tc-body-md { font-size: var(--type-body-md-size); }
+.tc-body-sm { font-size: var(--type-body-sm-size); }
+
+.tc-mono-label {
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-label-size);
+  font-weight: var(--type-mono-label-weight);
+  letter-spacing: var(--type-mono-label-tracking);
+  text-transform: uppercase;
+  color: var(--on-surface-variant);
+}
+
+.tc-text-dim     { color: var(--on-surface-variant); }
+.tc-text-primary { color: var(--primary); }
+.tc-text-success { color: var(--cyber-lime); }
+.tc-text-warn    { color: var(--cyber-orange); }
+.tc-text-error   { color: var(--error); }
+
+/* ──────────────────────────────────────────────────────────────
+ * Layout primitives — 64px left rail + main content
+ * ────────────────────────────────────────────────────────────── */
+.tc-app {
+  display: grid;
+  grid-template-columns: var(--nav-rail-w) 1fr;
+  min-height: 100vh;
+}
+
+.tc-nav-rail {
+  background: var(--surface-container-low);
+  border-right: 1px solid var(--outline-variant);
+  padding: var(--s-md) var(--s-sm);
+  display: flex; flex-direction: column;
+  gap: var(--s-xs);
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+}
+.tc-nav-rail .tc-nav-item {
+  width: 48px; height: 48px;
+  border-radius: var(--r-md);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--on-surface-variant);
+  border: 1px solid transparent;
+  transition: all 0.15s;
+  cursor: pointer;
+}
+.tc-nav-rail .tc-nav-item:hover {
+  background: var(--surface-container);
+  color: var(--on-surface);
+}
+.tc-nav-rail .tc-nav-item.active {
+  background: var(--surface-container);
+  color: var(--primary);
+  border-color: var(--outline-variant);
+  box-shadow: var(--glow-primary);
+}
+
+.tc-main {
+  padding: var(--s-container);
+  overflow: hidden;
+  display: flex; flex-direction: column;
+}
+
+.tc-page-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: var(--s-lg);
+  padding-bottom: var(--s-md);
+  border-bottom: 1px solid var(--outline-variant);
+  gap: var(--s-md);
+  flex-wrap: wrap;
+}
+.tc-page-header h1 { font-size: var(--type-h2-size); font-weight: 600; }
+.tc-page-header .tc-mono-label { margin-bottom: 4px; }
+
+/* ──────────────────────────────────────────────────────────────
+ * Cards / panels
+ * ────────────────────────────────────────────────────────────── */
+.tc-card {
+  background: var(--surface-container);
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--r-lg);
+  padding: var(--s-lg);
+}
+.tc-card-glass {
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  border-radius: var(--r-lg);
+  padding: var(--s-lg);
+}
+.tc-card-active {
+  border-color: var(--primary);
+  box-shadow: var(--glow-primary);
+}
+.tc-card-clickable {
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.tc-card-clickable:hover {
+  border-color: var(--outline);
+  box-shadow: var(--shadow-ambient);
+}
+
+.tc-panel {
+  background: var(--surface-container-low);
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+}
+.tc-panel-header {
+  padding: var(--s-md) var(--s-lg);
+  border-bottom: 1px solid var(--outline-variant);
+  background: var(--surface-container);
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--s-md);
+}
+.tc-panel-body { padding: var(--s-lg); }
+
+/* ──────────────────────────────────────────────────────────────
+ * Buttons
+ * ────────────────────────────────────────────────────────────── */
+.tc-btn {
+  display: inline-flex; align-items: center; gap: var(--s-xs);
+  padding: 8px 16px;
+  border-radius: var(--r-md);
+  border: 1px solid transparent;
+  font-weight: 500;
+  font-size: var(--type-body-sm-size);
+  background: transparent;
+  color: var(--on-surface);
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.tc-btn:hover { background: var(--surface-container-high); }
+
+.tc-btn-primary {
+  background: var(--primary-container);
+  color: var(--on-primary-container);
+  border-color: var(--primary-container);
+  font-weight: 600;
+}
+.tc-btn-primary:hover {
+  background: var(--primary);
+  color: var(--on-primary);
+  box-shadow: var(--glow-primary);
+}
+
+.tc-btn-secondary {
+  background: var(--secondary-container);
+  color: #fff;
+  border-color: var(--secondary-container);
+}
+
+.tc-btn-ghost {
+  background: transparent;
+  color: var(--on-surface-variant);
+  border-color: var(--outline-variant);
+}
+.tc-btn-ghost:hover {
+  background: var(--surface-container-high);
+  color: var(--on-surface);
+  border-color: var(--outline);
+}
+
+.tc-btn-danger {
+  background: var(--error-container);
+  color: var(--on-error-container);
+  border-color: var(--error-container);
+}
+
+.tc-btn-icon {
+  width: 36px; height: 36px;
+  padding: 0;
+  border-radius: var(--r-md);
+  justify-content: center;
+}
+
+.tc-btn-sm { padding: 4px 10px; font-size: 12px; border-radius: var(--r-sm); }
+.tc-btn-lg { padding: 12px 24px; font-size: var(--type-body-md-size); }
+
+.tc-btn:disabled, .tc-btn[disabled] { opacity: 0.4; cursor: not-allowed; }
+.tc-btn:active { transform: scale(0.97); }
+
+/* ──────────────────────────────────────────────────────────────
+ * Form
+ * ────────────────────────────────────────────────────────────── */
+.tc-input,
+.tc-textarea,
+.tc-select {
+  background: var(--surface-container-low);
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--r-md);
+  padding: 10px 12px;
+  color: var(--on-surface);
+  font-size: var(--type-body-sm-size);
+  width: 100%;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+}
+.tc-input::placeholder,
+.tc-textarea::placeholder { color: var(--on-surface-variant); opacity: 0.5; }
+.tc-input:focus,
+.tc-textarea:focus,
+.tc-select:focus {
+  border-color: var(--primary);
+  background: var(--surface-container);
+  box-shadow: 0 0 0 3px rgba(192, 193, 255, 0.12);
+}
+.tc-textarea { resize: vertical; min-height: 80px; line-height: 1.5; }
+
+.tc-form-group { margin-bottom: var(--s-md); }
+.tc-form-group label {
+  display: block;
+  font-size: 12px;
+  color: var(--on-surface-variant);
+  margin-bottom: 6px;
+  font-weight: 500;
+}
+.tc-form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--s-md);
+}
+
+.tc-checkbox,
+.tc-radio {
+  width: 16px; height: 16px;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+/* ──────────────────────────────────────────────────────────────
+ * Chips / Status badges
+ * ────────────────────────────────────────────────────────────── */
+.tc-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 10px;
+  border-radius: var(--r-full);
+  font-size: 11px;
+  font-weight: 500;
+  background: var(--surface-container-high);
+  color: var(--on-surface-variant);
+  border: 1px solid var(--outline-variant);
+  white-space: nowrap;
+}
+.tc-chip-success { background: rgba(173, 255,  47, 0.12); color: var(--cyber-lime);   border-color: rgba(173, 255,  47, 0.25); }
+.tc-chip-info    { background: rgba( 46, 144, 255, 0.12); color: var(--cyber-blue);   border-color: rgba( 46, 144, 255, 0.25); }
+.tc-chip-warn    { background: rgba(255, 107,   0, 0.12); color: var(--cyber-orange); border-color: rgba(255, 107,   0, 0.25); }
+.tc-chip-error   { background: rgba(255, 180, 171, 0.12); color: var(--error);        border-color: rgba(255, 180, 171, 0.25); }
+.tc-chip-primary { background: rgba(192, 193, 255, 0.14); color: var(--primary);      border-color: rgba(192, 193, 255, 0.30); }
+
+.tc-status-dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: var(--r-full);
+  background: var(--on-surface-variant);
+  flex-shrink: 0;
+}
+.tc-status-dot.online { background: var(--cyber-lime); box-shadow: 0 0 6px rgba(173, 255, 47, 0.5); }
+.tc-status-dot.busy   { background: var(--cyber-orange); }
+.tc-status-dot.error  { background: var(--error); }
+
+/* ──────────────────────────────────────────────────────────────
+ * Tables
+ * ────────────────────────────────────────────────────────────── */
+.tc-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--type-body-sm-size);
+}
+.tc-table th {
+  text-align: left;
+  padding: var(--s-sm) var(--s-md);
+  color: var(--on-surface-variant);
+  border-bottom: 1px solid var(--outline-variant);
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  background: var(--surface-container-low);
+  font-family: var(--font-mono);
+}
+.tc-table td {
+  padding: var(--s-md);
+  border-bottom: 1px solid var(--outline-variant);
+}
+.tc-table tr:hover td { background: var(--surface-container-low); }
+.tc-table tr:last-child td { border-bottom: none; }
+
+/* ──────────────────────────────────────────────────────────────
+ * Modal
+ * ────────────────────────────────────────────────────────────── */
+.tc-modal-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  display: flex; align-items: center; justify-content: center;
+  z-index: var(--z-modal);
+  animation: tc-fade-in 0.15s ease-out;
+}
+.tc-modal {
+  background: var(--surface-container);
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--r-xl);
+  padding: var(--s-xl);
+  max-width: 520px;
+  width: 90%;
+  max-height: 85vh;
+  overflow-y: auto;
+  box-shadow: var(--shadow-elevated);
+  animation: tc-slide-up 0.2s ease-out;
+}
+.tc-modal-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: var(--s-lg);
+}
+.tc-modal-title { font-size: var(--type-h3-size); font-weight: 600; }
+.tc-modal-actions {
+  display: flex; gap: var(--s-sm); justify-content: flex-end;
+  margin-top: var(--s-lg);
+  padding-top: var(--s-md);
+  border-top: 1px solid var(--outline-variant);
+}
+
+@keyframes tc-fade-in  { from { opacity: 0; }                    to { opacity: 1; } }
+@keyframes tc-slide-up { from { transform: translateY(8px); opacity: 0; }
+                         to   { transform: translateY(0);  opacity: 1; } }
+
+/* ──────────────────────────────────────────────────────────────
+ * Grid / flex utilities
+ * ────────────────────────────────────────────────────────────── */
+.tc-grid       { display: grid; gap: var(--s-md); }
+.tc-grid-2     { grid-template-columns: repeat(2, 1fr); }
+.tc-grid-3     { grid-template-columns: repeat(3, 1fr); }
+.tc-grid-4     { grid-template-columns: repeat(4, 1fr); }
+.tc-grid-auto  { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+.tc-stack      { display: flex; flex-direction: column; gap: var(--s-md); }
+.tc-stack-sm   { display: flex; flex-direction: column; gap: var(--s-sm); }
+.tc-stack-lg   { display: flex; flex-direction: column; gap: var(--s-lg); }
+.tc-row        { display: flex; align-items: center;     gap: var(--s-md); }
+.tc-row-sm     { display: flex; align-items: center;     gap: var(--s-sm); }
+.tc-row-spread { display: flex; align-items: center; justify-content: space-between; gap: var(--s-md); }
+.tc-spacer     { flex: 1; }
+
+@media (max-width: 1024px) {
+  .tc-grid-4 { grid-template-columns: repeat(2, 1fr); }
+  .tc-grid-3 { grid-template-columns: 1fr; }
+}
+@media (max-width: 768px) {
+  .tc-grid-2,
+  .tc-grid-4 { grid-template-columns: 1fr; }
+}
+
+/* ──────────────────────────────────────────────────────────────
+ * KPI / metric blocks (Dashboard pattern)
+ * ────────────────────────────────────────────────────────────── */
+.tc-metric {
+  display: flex; flex-direction: column; gap: 4px;
+}
+.tc-metric-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--on-surface-variant);
+}
+.tc-metric-value {
+  font-size: 32px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--on-surface);
+  font-feature-settings: 'tnum';
+}
+.tc-metric-delta-up   { color: var(--cyber-lime);   font-size: 12px; }
+.tc-metric-delta-down { color: var(--error);        font-size: 12px; }
+.tc-metric-trail      { color: var(--on-surface-variant); font-size: 12px; }
+
+/* ──────────────────────────────────────────────────────────────
+ * Toast (non-intrusive notifications)
+ * ────────────────────────────────────────────────────────────── */
+.tc-toast {
+  position: fixed;
+  bottom: var(--s-lg);
+  right: var(--s-lg);
+  background: var(--surface-container-high);
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--r-md);
+  padding: var(--s-md) var(--s-lg);
+  color: var(--on-surface);
+  box-shadow: var(--shadow-ambient);
+  z-index: var(--z-toast);
+  animation: tc-slide-up 0.2s ease-out;
+  max-width: 420px;
+}
+.tc-toast.success { border-left: 3px solid var(--cyber-lime); }
+.tc-toast.error   { border-left: 3px solid var(--error); }
+.tc-toast.warning { border-left: 3px solid var(--cyber-orange); }
+.tc-toast.info    { border-left: 3px solid var(--cyber-blue); }
+
+/* ──────────────────────────────────────────────────────────────
+ * Avatar
+ * ────────────────────────────────────────────────────────────── */
+.tc-avatar {
+  width: 40px; height: 40px;
+  border-radius: var(--r-full);
+  background: var(--surface-container-high);
+  border: 1px solid var(--outline-variant);
+  display: inline-flex; align-items: center; justify-content: center;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.tc-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.tc-avatar-sm  { width: 28px; height: 28px; }
+.tc-avatar-lg  { width: 72px; height: 72px; }
+.tc-avatar-xl  { width: 96px; height: 96px; }
+
+/* ──────────────────────────────────────────────────────────────
+ * Material symbols sizing helper (used everywhere with icon font)
+ * ────────────────────────────────────────────────────────────── */
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+  vertical-align: middle;
+}
+
+/* ──────────────────────────────────────────────────────────────
+ * Existing portal shell overrides (slim 64px rail + tech topbar)
+ * --------------------------------------------------------------
+ * The portal.html ships with `.sidebar` (~280px wide) + `.topbar`.
+ * These rules transform that DOM into the stitch-style layout
+ * WITHOUT touching the HTML — only when `[data-theme="tech"]`
+ * is active. Nav items become icon-only (label hidden, tooltip on
+ * hover); the sidebar collapses to 64px; topbar restyles to match
+ * stitch's minimal "Command Center" header.
+ * ────────────────────────────────────────────────────────────── */
+
+[data-theme="tech"] .sidebar {
+  width: var(--nav-rail-w) !important;
+  min-width: var(--nav-rail-w) !important;
+  background: var(--surface-container-low) !important;
+  border-right: 1px solid var(--outline-variant) !important;
+  padding: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+[data-theme="tech"] .sidebar-toggle { display: none !important; }
+[data-theme="tech"] .sidebar-header {
+  height: 60px;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  padding: var(--s-sm) !important;
+  border-bottom: 1px solid var(--outline-variant);
+}
+[data-theme="tech"] .sidebar-header h1 {
+  margin: 0 !important;
+  cursor: pointer;
+}
+[data-theme="tech"] .sidebar-header h1 #brand-site-name,
+[data-theme="tech"] .sidebar-header .subtitle {
+  display: none !important;
+}
+[data-theme="tech"] #brand-logo-wrap {
+  width: 36px !important;
+  height: 36px !important;
+  border-radius: var(--r-md) !important;
+  background: linear-gradient(135deg, var(--primary), var(--primary-container)) !important;
+}
+
+[data-theme="tech"] .sidebar .nav {
+  padding: var(--s-md) var(--s-sm) !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: var(--s-xs) !important;
+  flex: 1 1 auto !important;
+}
+[data-theme="tech"] .sidebar .nav-section {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: var(--s-xs) !important;
+}
+[data-theme="tech"] .sidebar .nav-item {
+  width: 48px !important;
+  height: 48px !important;
+  padding: 0 !important;
+  border-radius: var(--r-md) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  color: var(--on-surface-variant) !important;
+  background: transparent !important;
+  border: 1px solid transparent !important;
+  margin: 0 auto !important;
+  position: relative !important;
+  transition: all 0.15s !important;
+}
+[data-theme="tech"] .sidebar .nav-item:hover {
+  background: var(--surface-container) !important;
+  color: var(--on-surface) !important;
+}
+[data-theme="tech"] .sidebar .nav-item.active {
+  background: var(--surface-container) !important;
+  color: var(--primary) !important;
+  border-color: var(--outline-variant) !important;
+  box-shadow: var(--glow-primary) !important;
+}
+/* Hide all label text inside nav-item, keep only the icon span */
+[data-theme="tech"] .sidebar .nav-item > span:not(.icon):not(.badge) {
+  display: none !important;
+}
+[data-theme="tech"] .sidebar .nav-item .icon {
+  font-size: 22px !important;
+  margin: 0 !important;
+}
+/* Badges become tiny corner dots */
+[data-theme="tech"] .sidebar .nav-item .badge {
+  position: absolute !important;
+  top: 4px !important;
+  right: 4px !important;
+  min-width: 16px !important;
+  height: 16px !important;
+  border-radius: var(--r-full) !important;
+  background: var(--primary) !important;
+  color: var(--on-primary) !important;
+  font-size: 9px !important;
+  padding: 0 4px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  font-weight: 700 !important;
+  line-height: 1 !important;
+}
+[data-theme="tech"] .sidebar .nav-item .badge.notification {
+  background: var(--cyber-orange) !important;
+  color: #fff !important;
+}
+[data-theme="tech"] .sidebar .nav-item .badge.hidden { display: none !important; }
+
+/* Footer: collapse to icon-only avatar + logout icon. The full
+ * username + role + change-pw text would never fit in 64px so we
+ * compact it to a single avatar with hover tooltip. */
+[data-theme="tech"] .sidebar-footer {
+  padding: var(--s-sm) !important;
+  border-top: 1px solid var(--outline-variant);
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  gap: var(--s-xs) !important;
+}
+[data-theme="tech"] .sidebar-footer #sidebar-footer {
+  flex-direction: column !important;
+  gap: 4px !important;
+  align-items: center !important;
+  width: 100%;
+}
+[data-theme="tech"] .sidebar-footer #footer-username,
+[data-theme="tech"] .sidebar-footer #footer-role {
+  display: none !important;
+}
+[data-theme="tech"] .sidebar-footer-user {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 4px !important;
+  align-items: center !important;
+}
+[data-theme="tech"] .sidebar-footer-user a {
+  color: var(--on-surface-variant) !important;
+  font-size: 0 !important;          /* Hide the text */
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-md);
+  text-decoration: none !important;
+}
+[data-theme="tech"] .sidebar-footer-user a:hover {
+  background: var(--surface-container);
+  color: var(--on-surface) !important;
+}
+/* Show a tiny logout icon via ::before since the original uses text */
+[data-theme="tech"] .sidebar-footer-user a[onclick*="logout"]::before {
+  content: 'logout';
+  font-family: 'Material Symbols Outlined';
+  font-size: 18px;
+  font-variation-settings: 'FILL' 0, 'wght' 400;
+}
+[data-theme="tech"] .sidebar-footer-user a[onclick*="ChangePassword"]::before {
+  content: 'key';
+  font-family: 'Material Symbols Outlined';
+  font-size: 18px;
+  font-variation-settings: 'FILL' 0, 'wght' 400;
+}
+
+/* ── Main + topbar adjustments ───────────────────────────────── */
+[data-theme="tech"] .main {
+  background: var(--background) !important;
+}
+[data-theme="tech"] .topbar {
+  background: var(--surface-container-low) !important;
+  border-bottom: 1px solid var(--outline-variant) !important;
+  padding: var(--s-sm) var(--s-lg) !important;
+  height: 56px !important;
+  display: flex !important;
+  align-items: center !important;
+  gap: var(--s-md) !important;
+}
+[data-theme="tech"] .topbar #view-title {
+  font-size: var(--type-body-md-size) !important;
+  font-weight: 600 !important;
+  color: var(--on-surface) !important;
+  font-family: var(--font-mono);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+[data-theme="tech"] .topbar .topbar-actions { display: flex; gap: 6px; }
+[data-theme="tech"] .topbar .btn {
+  background: transparent !important;
+  border: 1px solid var(--outline-variant) !important;
+  color: var(--on-surface-variant) !important;
+  padding: 6px 12px !important;
+  font-size: 11px !important;
+  font-family: var(--font-mono);
+  border-radius: var(--r-md) !important;
+}
+[data-theme="tech"] .topbar .btn:hover {
+  background: var(--surface-container) !important;
+  color: var(--on-surface) !important;
+  border-color: var(--outline) !important;
+}
+
+/* ── Content padding inside .main ────────────────────────────── */
+[data-theme="tech"] .main #content {
+  padding: var(--s-container) !important;
+  background: var(--background);
+}
+
+/* ── Hide UI bits that the new theme replaces or doesn't want ──
+ * The "深色主题/浅色主题" toggle becomes meaningless under single
+ * theme; hide it. (Keep DOM so legacy JS doesn't NPE.)
+ * The brand subtitle below the sidebar logo also goes — slim rail
+ * has no room for tagline text.
+ */
+[data-theme="tech"] #global-theme-btn { display: none !important; }
+[data-theme="tech"] .sidebar-header .subtitle,
+[data-theme="tech"] #node-info { display: none !important; }
+
+/* ──────────────────────────────────────────────────────────────
+ * Misc utility
+ * ────────────────────────────────────────────────────────────── */
+.tc-divider     { height: 1px; background: var(--outline-variant); margin: var(--s-md) 0; }
+.tc-divider-v   { width: 1px; background: var(--outline-variant); align-self: stretch; }
+.tc-clickable   { cursor: pointer; user-select: none; }
+.tc-no-select   { user-select: none; -webkit-user-select: none; }
+.tc-hide        { display: none !important; }
+.tc-visually-hidden {
+  position: absolute; width: 1px; height: 1px;
+  padding: 0; margin: -1px; overflow: hidden;
+  clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}

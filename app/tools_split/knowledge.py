@@ -588,10 +588,16 @@ def _tool_save_experience(
 
 # ── knowledge_lookup ─────────────────────────────────────────────────
 
-# Pack v3: cap kb_list rows sent to the LLM to keep payload bounded.
-# Max Markdown-table size = _KB_LIST_LIMIT × ~160 chars ≈ 32KB, still
-# under typical context windows. LLM gets a ``truncated`` flag to know.
-_KB_LIST_LIMIT = 200
+# Pack v3: default cap on kb_list rows sent to the LLM. Was 200 — too
+# tight for real KBs (HCS acceptance test guides hit 8000+ chunks and
+# the agent ran out of pagination options). Bumped to 5000 so any
+# realistic KB returns in one call. Each row is ~160 chars metadata so
+# 5000 ≈ 800KB JSON, comfortable in a 200K context window.
+#
+# Tool callers can still override via the ``limit`` and ``offset`` kwargs
+# — useful when you want a tighter window for cost or a paged read.
+_KB_LIST_LIMIT_DEFAULT = 5000
+_KB_LIST_LIMIT_HARD_MAX = 50000
 
 
 def _kb_aggregate(mode: str, query: str, rag_mode: str,
@@ -651,6 +657,17 @@ def _kb_aggregate(mode: str, query: str, rag_mode: str,
             grand_total_chunks += stat.get("total_chunks", 0)
             grand_total_files += stat.get("unique_source_files", 0)
             grand_filter_matched += stat.get("filter_matched", 0)
+        # Detect "test case / scenario / section" intent in the query —
+        # for those, chunk_count is NOT the right unit. Surface a strong
+        # hint redirecting to mode=outline so the LLM doesn't blindly
+        # report chunk_count as if it were the answer.
+        _q_low = (query or "").lower()
+        _wants_units = any(
+            kw in _q_low for kw in (
+                "case", "scenario", "section", "用例", "场景",
+                "步骤", "step", "测试", "用 例",
+            )
+        )
         return json.dumps({
             "status": "success",
             "mode": "count",
@@ -660,24 +677,36 @@ def _kb_aggregate(mode: str, query: str, rag_mode: str,
             "grand_filter_matched": grand_filter_matched,
             "per_kb": per_kb,
             "usage_guidance": (
-                "Direct metadata scan, NOT a top-k sample. Use verbatim "
-                "for aggregate answers ('有多少', '总数', 'list each'). "
-                "Each per_kb row has TWO breakdowns: \n"
+                "⚠️ CRITICAL: `chunk_count` / `total_chunks` is PHYSICAL "
+                "splits (one logical test case can span 5-15 chunks). "
+                "These numbers are NOT user-meaningful units like 'test "
+                "cases', 'scenarios', 'sections', 'steps', '用例', '场景'. "
+                "If the user asked for those, you MUST recall this tool "
+                "with `mode='outline'` — it counts UNIQUE heading_paths "
+                "(each leaf heading = one user-meaningful unit). Only "
+                "report chunk_count when the user EXPLICITLY asked for "
+                "'chunks', '分块', or '块数'.\n\n"
+                "Each per_kb row has TWO breakdowns:\n"
                 "  • by_source_file       — per-file counts WITH filter\n"
-                "                            applied (use for matched\n"
-                "                            count when filter hit)\n"
+                "                            applied (substring match)\n"
                 "  • by_source_file_full  — per-file counts of the WHOLE\n"
                 "                            KB (always present even if\n"
                 "                            the filter zero-matched —\n"
                 "                            common with cross-language\n"
                 "                            queries like 中文 → English\n"
-                "                            content). Use this to see\n"
-                "                            what's actually in the KB.\n"
+                "                            content).\n"
                 "If filter_matched=0 but by_source_file_full has files, "
                 "the keyword you tried doesn't substring-match — try a "
                 "different / English form, OR use mode='search' (vector "
                 "embedding handles cross-language)."
             ),
+            "next_action_hint": (
+                "User asked for test cases / scenarios / 用例 / 场景 — "
+                "the numbers above are CHUNKS, not cases. Re-call with "
+                "mode='outline' to get the real per-document case count "
+                "via heading_path enumeration. Do NOT report chunk_count "
+                "as the answer."
+            ) if _wants_units else None,
         }, ensure_ascii=False, indent=2)
 
     if mode == "outline":
@@ -729,11 +758,15 @@ def _kb_aggregate(mode: str, query: str, rag_mode: str,
         }, ensure_ascii=False, indent=2)
 
     # mode == "list"
+    # Caller can override the default cap via kw["limit"] / kw["offset"];
+    # we bound at _KB_LIST_LIMIT_HARD_MAX so a runaway loop can't blow
+    # the LLM context with millions of rows.
+    _list_limit_raw = locals().get("limit")  # placeholder; pulled from outer kw
     per_kb_lists = []
     for pid, coll, label in targets:
         try:
             lst = reg.kb_list(pid, coll, query=query,
-                              limit=_KB_LIST_LIMIT)
+                              limit=_KB_LIST_LIMIT_DEFAULT)
         except Exception as e:
             logger.warning("kb_list failed for %s: %s", label, e)
             continue

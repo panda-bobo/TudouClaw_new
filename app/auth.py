@@ -115,12 +115,36 @@ DEFAULT_TOOL_RISK: dict[str, str] = {
     "send_message":     "low",      # Inter-agent messaging
     "get_skill_guide":  "low",      # Read SKILL.md from disk
     "knowledge_lookup": "low",      # Query knowledge base (read-only)
+    "memory_recall":    "low",      # Agent's own L3 memory query (read-only)
     "learn_from_peers": "low",      # Read other agents' experiences
     "save_experience":  "low",      # Agent's own journal, private
     "create_goal":      "low",      # Track own goals
     "update_goal_progress": "low",
     "create_milestone": "low",
     "update_milestone_status": "low",
+    # ── Inbox / messaging / coordination — routine ops, no approval ──
+    # All previously absent from this table, so the default "high"
+    # gate fired every turn (operator confirmed these are routine).
+    "ack_message":      "low",      # Mark inbox message as seen
+    "check_inbox":      "low",      # Read own inbox
+    "reply_message":    "low",      # Send a reply (already messaging-internal)
+    "handoff_request":  "low",      # Ask another agent to take over
+    "emit_handoff":     "low",      # Signal handoff event
+    "emit_ui_block":    "low",      # Render UI block in chat (presentational)
+    "propose_decomposition": "low", # Suggest sub-task breakdown
+    "update_milestone_responsibility": "low",  # Reassign milestone owner
+    # ── Shared-context (SC) protocol — coordination only, no execution ──
+    "sc_query":         "low",      # Read shared context
+    "sc_get_artifact":  "low",      # Read an artifact
+    "sc_handoff":       "low",      # Coordination signal
+    "sc_record_decision": "low",    # Append to decision log
+    "sc_register_artifact": "low",  # Register artifact metadata
+    # ── Misc routine ops ──
+    "desktop_screenshot": "low",    # Capture own desktop (read-only)
+    "request_web_login":  "low",    # Trigger UI login flow (gated by user)
+    "run_tests":          "low",    # Test runs (operator considers low-risk)
+    "wiki_ingest":        "low",    # Write to wiki layer (sandbox content)
+    "create_video":       "low",    # Generate video (no system access)
 
     # ── Create / Modify (中风险) ──
     "write_file":       "moderate",

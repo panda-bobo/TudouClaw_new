@@ -226,8 +226,8 @@ body {
 
 <div class="login-container">
   <div class="login-header">
-    <h1>🥔 Tudou Claws</h1>
-    <p data-i18n="login.tagline">Multi-Agent AI Coordination Hub</p>
+    <h1 id="login-brand-h1">🥔 Tudou Claws</h1>
+    <p id="login-brand-tagline" data-i18n="login.tagline">Multi-Agent AI Coordination Hub</p>
   </div>
   <div id="error-msg" class="error hidden"></div>
 
@@ -369,6 +369,43 @@ document.documentElement.setAttribute('data-lang', window._currentLang);
 _loginApplyI18n();
 _loginApplyThemeLabel();
 _loginApplyLangLabel();
+
+// Pull admin-managed branding (site name / subtitle / logo) so the
+// login screen reflects whatever the operator set in branding.json.
+// This endpoint is intentionally unauthenticated. Failing fetch leaves
+// the hardcoded "🥔 Tudou Claws" defaults in place — login still works.
+(function _loginApplyBranding() {
+  fetch('/api/portal/branding', {credentials: 'same-origin'})
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(b) {
+      if (!b) return;
+      var name = (b.site_name || '').trim();
+      var sub = (b.site_subtitle || '').trim();
+      var logo = (b.logo_url || '').trim();
+      var h1 = document.getElementById('login-brand-h1');
+      var tagline = document.getElementById('login-brand-tagline');
+      if (h1 && name) {
+        if (logo) {
+          h1.innerHTML = '<img src="' + logo + '" alt="" style="height:32px;vertical-align:middle;margin-right:10px"> ' +
+                         name.replace(/[<>&"']/g, function(c){
+                           return {'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c];
+                         });
+        } else {
+          h1.textContent = '🥔 ' + name;
+        }
+      }
+      if (tagline && sub) {
+        // Drop the i18n key so language toggle won't overwrite the
+        // operator's custom subtitle on next _loginApplyI18n call.
+        tagline.removeAttribute('data-i18n');
+        tagline.textContent = sub;
+      }
+      if (name) {
+        document.title = name + ' - Login';
+      }
+    })
+    .catch(function() {/* offline / 503 — keep defaults */});
+})();
 </script>
 <script src="/static/js/portal_login.js"></script>
 

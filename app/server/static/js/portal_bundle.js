@@ -845,6 +845,13 @@ function _renderUnifiedChatInput(opts) {
             '<span class="material-symbols-outlined" style="font-size:16px">mic</span>' +
           '</button>'
         ) : '') +
+        (o.showAmplify ? (
+          '<button type="button" id="amplify-toggle-' + id + '" title="✨ 优化提示词 (开/关)" onclick="_amplifyToggleClick(\'' + id + '\')" ' +
+            'style="background:transparent;border:1px solid var(--overlay-10);border-radius:8px;padding:5px 8px;cursor:pointer;display:flex;align-items:center;gap:4px;color:var(--text3);transition:all .15s">' +
+            '<span class="material-symbols-outlined" style="font-size:16px">auto_awesome</span>' +
+            '<span style="font-size:11px">优化</span>' +
+          '</button>'
+        ) : '') +
         // Middle: provider + model selectors (agent only)
         (o.showModelSel ? (
           '<div style="display:flex;gap:4px;align-items:center;margin-left:6px">' +
@@ -878,6 +885,281 @@ function _renderUnifiedChatInput(opts) {
   return html;
 }
 window._renderUnifiedChatInput = _renderUnifiedChatInput;
+
+
+// ============ Prompt amplifier (✨ 优化提示词) =========================
+// Toggle-gated rewriter. When the per-agent toggle is ON, sendAgentMsg
+// pauses and runs the user's input through /api/portal/amplify-prompt
+// before posting to the agent. The amplified prompt is rendered in an
+// editable preview block above the input — user can tweak it, accept,
+// or fall back to the original.
+//
+// All state is per-agent in localStorage. If the toggle is OFF,
+// nothing in this section runs (sendAgentMsg short-circuits past it).
+// ────────────────────────────────────────────────────────────────────
+
+function _amplifyStorageKey(agentId) {
+  return 'tudou_amplify_on_' + (agentId || 'global');
+}
+function _amplifyEnabled(agentId) {
+  try {
+    return localStorage.getItem(_amplifyStorageKey(agentId)) === '1';
+  } catch (e) { return false; }
+}
+window._amplifyEnabled = _amplifyEnabled;
+
+function _amplifySyncToggleVisual(agentId) {
+  var btn = document.getElementById('amplify-toggle-' + agentId);
+  if (!btn) return;
+  var on = _amplifyEnabled(agentId);
+  if (on) {
+    btn.style.borderColor = 'var(--primary)';
+    btn.style.color = 'var(--primary)';
+    btn.style.background = 'color-mix(in srgb, var(--primary) 12%, transparent)';
+    btn.title = '✨ 优化提示词 (开,点击关闭)';
+  } else {
+    btn.style.borderColor = 'var(--overlay-10)';
+    btn.style.color = 'var(--text3)';
+    btn.style.background = 'transparent';
+    btn.title = '✨ 优化提示词 (关,点击开启)';
+  }
+}
+
+function _amplifyToggleClick(agentId) {
+  var on = _amplifyEnabled(agentId);
+  try {
+    localStorage.setItem(_amplifyStorageKey(agentId), on ? '0' : '1');
+  } catch (e) {}
+  _amplifySyncToggleVisual(agentId);
+  if (typeof window._toast === 'function') {
+    window._toast(on ? '提示词优化已关闭' : '✨ 提示词优化已开启 — 下次发送前会先改写',
+                  on ? 'info' : 'success');
+  }
+}
+window._amplifyToggleClick = _amplifyToggleClick;
+
+// MutationObserver-driven sync: whenever an `amplify-toggle-*` button
+// gets inserted into the DOM (chat panel re-renders), run the visual
+// sync so the on/off color matches localStorage. Cheap — only fires
+// on subtree changes inside the chat area.
+(function _wireAmplifyVisualSync() {
+  if (window._amplifyVisualSyncWired) return;
+  window._amplifyVisualSyncWired = true;
+  var sync = function() {
+    document.querySelectorAll('[id^="amplify-toggle-"]').forEach(function(btn) {
+      var aid = btn.id.replace('amplify-toggle-', '');
+      _amplifySyncToggleVisual(aid);
+    });
+  };
+  // Initial sweep + on every animation frame after DOM mutations
+  // settle. Debounced via rAF so we don't thrash on rapid re-renders.
+  var pending = false;
+  var schedule = function() {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(function() { pending = false; sync(); });
+  };
+  if (document.body) {
+    new MutationObserver(schedule).observe(document.body, {
+      childList: true, subtree: true,
+    });
+    sync();
+  } else {
+    document.addEventListener('DOMContentLoaded', function() {
+      new MutationObserver(schedule).observe(document.body, {
+        childList: true, subtree: true,
+      });
+      sync();
+    });
+  }
+})();
+
+async function _amplifyRunAndPreview(agentId, rawText) {
+  var inputEl = document.getElementById('chat-input-' + agentId);
+  var sendBtn = inputEl ? inputEl.closest('.uci-shell').querySelector('button[title="发送"]') : null;
+  // Lock the input + send btn while we wait — prevents double-send.
+  if (inputEl) inputEl.disabled = true;
+  if (sendBtn) sendBtn.disabled = true;
+
+  // Show a transient "优化中..." chip in the preview slot so the user
+  // sees the round-trip is in flight (LLM call can take 1-3s).
+  _renderAmplifyLoading(agentId);
+
+  var res;
+  try {
+    res = await api('POST', '/api/portal/amplify-prompt', {
+      raw_prompt: rawText,
+      agent_id: agentId,
+    });
+  } catch (e) {
+    _amplifyDismiss(agentId);
+    if (inputEl) inputEl.disabled = false;
+    if (sendBtn) sendBtn.disabled = false;
+    if (window._toast) window._toast('优化失败: ' + (e && e.message || e), 'error');
+    try { console.error('[amplify] error', e); } catch(_){}
+    return;
+  }
+  if (inputEl) inputEl.disabled = false;
+  if (sendBtn) sendBtn.disabled = false;
+
+  if (!res || !res.ok) {
+    _amplifyDismiss(agentId);
+    if (window._toast) window._toast('优化失败: ' + ((res && res.error) || '未知'), 'error');
+    return;
+  }
+  // Backend short-circuit: input was already specific. Dismiss the
+  // loading chip and just send the original — no preview needed.
+  if (res.skipped) {
+    _amplifyDismiss(agentId);
+    if (window._toast) {
+      window._toast('💡 ' + (res.rationale || '原输入已具体,直接发送'), 'info');
+    }
+    window._skipAmplifyOnce[agentId] = true;
+    sendAgentMsg(agentId);
+    return;
+  }
+
+  _renderAmplifyPreview(agentId, rawText, res.amplified || rawText, res.rationale || '');
+}
+
+function _amplifyPreviewSlotEl(agentId) {
+  // The preview block lives just above the input shell, inside the
+  // same wrapper. We append/replace it dynamically.
+  var inputEl = document.getElementById('chat-input-' + agentId);
+  if (!inputEl) return null;
+  var shell = inputEl.closest('.uci-shell');
+  if (!shell || !shell.parentNode) return null;
+  var slotId = 'amplify-slot-' + agentId;
+  var slot = document.getElementById(slotId);
+  if (!slot) {
+    slot = document.createElement('div');
+    slot.id = slotId;
+    shell.parentNode.insertBefore(slot, shell);
+  }
+  return slot;
+}
+
+function _renderAmplifyLoading(agentId) {
+  var slot = _amplifyPreviewSlotEl(agentId);
+  if (!slot) return;
+  slot.innerHTML =
+    '<div style="background:var(--surface3);border:1px solid var(--overlay-10);' +
+      'border-radius:12px;padding:12px 14px;margin-bottom:8px;display:flex;' +
+      'align-items:center;gap:10px;font-size:13px;color:var(--text2)">' +
+      '<span class="material-symbols-outlined" style="font-size:18px;color:var(--primary);' +
+        'animation:amplify-spin 1.4s linear infinite">auto_awesome</span>' +
+      '<span>正在优化提示词...</span>' +
+    '</div>' +
+    '<style>@keyframes amplify-spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}</style>';
+}
+
+function _renderAmplifyPreview(agentId, original, amplified, rationale) {
+  var slot = _amplifyPreviewSlotEl(agentId);
+  if (!slot) return;
+  // Encode the original safely — it gets stashed on a data attribute so
+  // "用原文" can recover it without us re-reading inputEl (which the
+  // user might have already edited).
+  var origAttr = encodeURIComponent(original || '');
+  slot.innerHTML =
+    '<div style="background:var(--surface3);border:1px solid var(--primary);' +
+      'border-radius:12px;padding:12px 14px;margin-bottom:8px;' +
+      'display:flex;flex-direction:column;gap:10px"' +
+      ' data-amplify-original="' + origAttr + '">' +
+      // Header: ✨ + rationale
+      '<div style="display:flex;align-items:flex-start;gap:8px;font-size:12px;' +
+        'color:var(--text2);line-height:1.5">' +
+        '<span class="material-symbols-outlined" style="font-size:16px;color:var(--primary);' +
+          'flex-shrink:0;margin-top:1px">auto_awesome</span>' +
+        '<div><b style="color:var(--text)">优化预览</b>' +
+          (rationale ? ' · ' + esc(rationale) : '') +
+        '</div>' +
+      '</div>' +
+      // Editable textarea
+      '<textarea id="amplify-text-' + agentId + '" rows="5"' +
+        ' style="background:var(--bg);border:1px solid var(--overlay-10);' +
+          'border-radius:8px;padding:10px 12px;color:var(--text);font-size:13px;' +
+          'line-height:1.5;font-family:inherit;resize:vertical;min-height:80px;' +
+          'max-height:280px;outline:none;width:100%"' +
+        '>' + esc(amplified) + '</textarea>' +
+      // Action row
+      '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+        '<button type="button" onclick="_amplifyConfirmSend(\'' + agentId + '\')" ' +
+          'style="background:var(--primary);border:none;border-radius:8px;' +
+          'padding:7px 14px;color:#0f0e2e;font-weight:600;font-size:12px;cursor:pointer;' +
+          'display:flex;align-items:center;gap:4px">' +
+          '<span class="material-symbols-outlined" style="font-size:14px">check</span>' +
+          '用这个发送' +
+        '</button>' +
+        '<button type="button" onclick="_amplifyUseOriginal(\'' + agentId + '\')" ' +
+          'style="background:transparent;border:1px solid var(--overlay-10);' +
+          'border-radius:8px;padding:7px 12px;color:var(--text2);font-size:12px;' +
+          'cursor:pointer;display:flex;align-items:center;gap:4px">' +
+          '<span class="material-symbols-outlined" style="font-size:14px">undo</span>' +
+          '用原文' +
+        '</button>' +
+        '<button type="button" onclick="_amplifyDismiss(\'' + agentId + '\')" ' +
+          'style="background:transparent;border:1px solid var(--overlay-10);' +
+          'border-radius:8px;padding:7px 12px;color:var(--text3);font-size:12px;' +
+          'cursor:pointer;display:flex;align-items:center;gap:4px">' +
+          '<span class="material-symbols-outlined" style="font-size:14px">close</span>' +
+          '取消' +
+        '</button>' +
+      '</div>' +
+    '</div>';
+  // Focus the textarea so the user can immediately start editing.
+  setTimeout(function() {
+    var ta = document.getElementById('amplify-text-' + agentId);
+    if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+  }, 50);
+}
+
+function _amplifyDismiss(agentId) {
+  var slot = document.getElementById('amplify-slot-' + agentId);
+  if (slot && slot.parentNode) slot.parentNode.removeChild(slot);
+}
+window._amplifyDismiss = _amplifyDismiss;
+
+function _amplifyConfirmSend(agentId) {
+  var ta = document.getElementById('amplify-text-' + agentId);
+  var inputEl = document.getElementById('chat-input-' + agentId);
+  if (!ta || !inputEl) return;
+  var text = (ta.value || '').trim();
+  if (!text) {
+    if (window._toast) window._toast('优化文本不能为空', 'warning');
+    return;
+  }
+  inputEl.value = text;
+  try { _autoGrowChatInput(inputEl); } catch(_){}
+  _amplifyDismiss(agentId);
+  // Mark this turn as already amplified so sendAgentMsg's intercept
+  // doesn't loop us back into the rewriter.
+  window._skipAmplifyOnce = window._skipAmplifyOnce || {};
+  window._skipAmplifyOnce[agentId] = true;
+  sendAgentMsg(agentId);
+}
+window._amplifyConfirmSend = _amplifyConfirmSend;
+
+function _amplifyUseOriginal(agentId) {
+  var slot = document.getElementById('amplify-slot-' + agentId);
+  var inputEl = document.getElementById('chat-input-' + agentId);
+  if (!inputEl) return;
+  var orig = '';
+  if (slot) {
+    var inner = slot.querySelector('[data-amplify-original]');
+    if (inner) {
+      try { orig = decodeURIComponent(inner.getAttribute('data-amplify-original') || ''); } catch(e) { orig = ''; }
+    }
+  }
+  if (orig) {
+    inputEl.value = orig;
+    try { _autoGrowChatInput(inputEl); } catch(_){}
+  }
+  _amplifyDismiss(agentId);
+  window._skipAmplifyOnce = window._skipAmplifyOnce || {};
+  window._skipAmplifyOnce[agentId] = true;
+  sendAgentMsg(agentId);
+}
+window._amplifyUseOriginal = _amplifyUseOriginal;
 
 
 // ============ Unified artifact preview panel (right side) =============
@@ -2809,6 +3091,14 @@ window._ltShowLearningDetail = function(agentId, learningId) {
 };
 
 function renderDashboard() {
+  // Phased rollout: when localStorage.tudou_theme === 'tech', dispatch
+  // to the new theme-tech implementation. Once Phase 4 lands, the
+  // legacy block below gets deleted and this dispatcher with it.
+  try {
+    if (localStorage.getItem('tudou_theme') === 'tech') {
+      return renderDashboardTech();
+    }
+  } catch (e) {}
   var c = document.getElementById('content');
   var epoch = _renderEpoch;
   var idle = agents.filter(function(a){return a.status==='idle'}).length;
@@ -3181,6 +3471,249 @@ function renderDashboard() {
   });
 }
 
+// ============ Tech (Aether) theme — Dashboard pilot ============
+// Replaces renderDashboard() when localStorage.tudou_theme === 'tech'.
+// Layout follows stitch_agent_0 (System Vitality / Multi-Agent Command
+// Center): top header → 4 KPI cards → Agents panel + Activity feed.
+//
+// Data sources reuse existing globals (`agents`, `approvals`) — same as
+// the legacy version — so the only real change is HTML + classnames.
+//
+// Sections that the stitch design includes but we don't have data for
+// (System Vitality time-series, Node Topology, Resource Allocation)
+// are deferred — the pilot is about proving the visual + data wiring
+// path, not feature parity with the mockup.
+
+function renderDashboardTech() {
+  var c = document.getElementById('content');
+  if (!c) return;
+
+  var idle   = agents.filter(function(a){ return a.status === 'idle'; }).length;
+  var busy   = agents.filter(function(a){ return a.status === 'busy'; }).length;
+  var errorA = agents.filter(function(a){ return a.status === 'error'; }).length;
+  var safeApprovals = Array.isArray(approvals) ? approvals : [].concat((approvals || {}).pending || []);
+  var pending = safeApprovals.filter(function(a){ return a.status === 'pending'; }).length;
+
+  var tokensIn = 0, tokensOut = 0;
+  agents.forEach(function(a) {
+    var tu = a.cost_summary || {};
+    tokensIn  += (tu.input_tokens  || 0);
+    tokensOut += (tu.output_tokens || 0);
+  });
+  var tokensTotal = tokensIn + tokensOut;
+
+  var fmtTokens = (typeof _dashFmtTokens === 'function') ? _dashFmtTokens : function(n) {
+    if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+    return String(n);
+  };
+
+  var robotSrc = function(a) {
+    var rid = a.robot_avatar || ('robot_' + (a.role || 'general'));
+    return _robotIconUrl(rid);
+  };
+  var statusClass = function(s) {
+    if (s === 'busy')  return 'busy';
+    if (s === 'error') return 'error';
+    return 'online';
+  };
+  var statusLabel = function(s, a) {
+    if (s === 'busy')  return 'Working';
+    if (a && a.self_improvement && a.self_improvement.is_learning) return 'Learning';
+    if (s === 'error') return 'Error';
+    return 'Online';
+  };
+
+  // --- KPI cards row ---
+  var kpiHtml =
+    '<div class="tc-grid tc-grid-4" style="margin-bottom:var(--s-lg)">' +
+      // Active Agents
+      '<div class="tc-card tc-card-clickable"' +
+           ' onclick="_settingsSubTab=\'nodes\';showView(\'settings\',null)">' +
+        '<div class="tc-mono-label">Active Agents</div>' +
+        '<div class="tc-metric-value" style="color:var(--primary);margin-top:8px">' + agents.length + '</div>' +
+        '<div class="tc-row-sm" style="margin-top:10px;font-size:11px">' +
+          '<span class="tc-row-sm" style="gap:4px"><span class="tc-status-dot online"></span>' + idle + ' online</span>' +
+          '<span class="tc-row-sm" style="gap:4px"><span class="tc-status-dot busy"></span>' + busy + ' busy</span>' +
+          (errorA > 0
+            ? '<span class="tc-row-sm" style="gap:4px"><span class="tc-status-dot error"></span>' + errorA + ' error</span>'
+            : '') +
+        '</div>' +
+      '</div>' +
+      // Projects
+      '<div class="tc-card tc-card-clickable" onclick="showView(\'projects\',null)">' +
+        '<div class="tc-mono-label">Projects</div>' +
+        '<div class="tc-metric-value" style="color:var(--cyber-lime);margin-top:8px" id="dash-tech-project-count">-</div>' +
+        '<div class="tc-metric-trail" style="margin-top:10px">active</div>' +
+      '</div>' +
+      // Tokens
+      '<div class="tc-card tc-card-clickable"' +
+           ' onclick="_settingsSubTab=\'providers\';showView(\'settings\',null)">' +
+        '<div class="tc-mono-label">Tokens</div>' +
+        '<div class="tc-metric-value" style="margin-top:8px">' + fmtTokens(tokensTotal) + '</div>' +
+        '<div class="tc-row-sm" style="margin-top:10px;font-size:11px;font-family:var(--font-mono)">' +
+          '<span class="tc-text-primary">↓ ' + fmtTokens(tokensIn) + ' <span class="tc-text-dim">in</span></span>' +
+          '<span class="tc-text-success">↑ ' + fmtTokens(tokensOut) + ' <span class="tc-text-dim">out</span></span>' +
+        '</div>' +
+      '</div>' +
+      // Approvals
+      '<div class="tc-card tc-card-clickable" onclick="showView(\'approvals\',null)"' +
+           (pending > 0 ? ' style="border-color:var(--cyber-orange);box-shadow:0 0 8px rgba(255,107,0,0.18)"' : '') + '>' +
+        '<div class="tc-mono-label">Approvals</div>' +
+        '<div class="tc-metric-value" style="margin-top:8px;color:' + (pending > 0 ? 'var(--cyber-orange)' : 'var(--on-surface)') + '">' + pending + '</div>' +
+        '<div class="tc-metric-trail" style="margin-top:10px">pending</div>' +
+      '</div>' +
+    '</div>';
+
+  // --- Agent grid (filter chips + cards) ---
+  var roles = Array.from(new Set(agents.map(function(a){ return a.role || 'general'; }))).sort();
+  var filterChips = [{ key: 'all', label: 'All', count: agents.length }].concat(
+    roles.map(function(r){
+      return { key: r, label: r, count: agents.filter(function(a){ return (a.role || 'general') === r; }).length };
+    })
+  );
+  var chipsHtml = filterChips.map(function(ch){
+    var active = (_dashFilterRole === ch.key);
+    return '<button class="tc-chip' + (active ? ' tc-chip-primary' : '') + '"' +
+           ' style="cursor:pointer;font-size:11px;padding:4px 12px"' +
+           ' onclick="_setDashFilter(\'' + ch.key + '\')">' +
+           esc(ch.label) + ' · ' + ch.count +
+           '</button>';
+  }).join('');
+
+  var visible = (_dashFilterRole === 'all')
+    ? agents
+    : agents.filter(function(a){ return (a.role || 'general') === _dashFilterRole; });
+  var agentCardsHtml = visible.length === 0
+    ? '<div class="tc-text-dim" style="padding:24px;grid-column:1/-1;font-size:13px">No agents match this filter.</div>'
+    : visible.map(function(a){
+        var prof = a.profile || {};
+        var expertise = (prof.expertise || []).slice(0, 3).join(' · ');
+        var desc = expertise || a.role_title || ('Role: ' + (a.role || 'general'));
+        var ev = a.event_count || 0;
+        var tu = a.cost_summary || {};
+        var aTokens = (tu.input_tokens || 0) + (tu.output_tokens || 0);
+        var ts = a.tasks_summary || { todo: 0, in_progress: 0, done: 0 };
+        var totalTasks = (ts.todo || 0) + (ts.in_progress || 0) + (ts.done || 0);
+        return '<div class="tc-card tc-card-clickable tc-stack-sm"' +
+               ' onclick="showAgentView(\'' + a.id + '\',null)" style="padding:14px">' +
+                 // top: avatar + name/role + status
+                 '<div class="tc-row" style="gap:10px">' +
+                   '<img class="tc-avatar tc-avatar-sm" src="' + robotSrc(a) + '"' +
+                        ' onerror="this.style.display=\'none\'" alt="">' +
+                   '<div style="flex:1;min-width:0">' +
+                     '<div style="font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(a.name) + '</div>' +
+                     '<div class="tc-mono-label" style="margin-top:2px">' + esc(a.role || 'general') + '</div>' +
+                   '</div>' +
+                   '<span class="tc-row-sm" style="gap:4px">' +
+                     '<span class="tc-status-dot ' + statusClass(a.status) + '"></span>' +
+                     '<span class="tc-mono-label" style="text-transform:none">' + statusLabel(a.status, a) + '</span>' +
+                   '</span>' +
+                 '</div>' +
+                 // description
+                 '<div class="tc-text-dim" style="font-size:11px;line-height:1.45;min-height:32px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">' + esc(desc) + '</div>' +
+                 // metrics row
+                 '<div class="tc-row-spread" style="border-top:1px solid var(--outline-variant);padding-top:8px">' +
+                   '<div style="text-align:center;flex:1">' +
+                     '<div style="font-weight:700;font-size:13px">' + ev + '</div>' +
+                     '<div class="tc-mono-label" style="font-size:9px">events</div>' +
+                   '</div>' +
+                   '<div class="tc-divider-v"></div>' +
+                   '<div style="text-align:center;flex:1">' +
+                     '<div style="font-weight:700;font-size:13px;font-family:var(--font-mono)">' + fmtTokens(aTokens) + '</div>' +
+                     '<div class="tc-mono-label" style="font-size:9px">tokens</div>' +
+                   '</div>' +
+                   '<div class="tc-divider-v"></div>' +
+                   '<div style="text-align:center;flex:1">' +
+                     '<div style="font-weight:700;font-size:13px">' + (ts.done || 0) + '/' + totalTasks + '</div>' +
+                     '<div class="tc-mono-label" style="font-size:9px">tasks</div>' +
+                   '</div>' +
+                 '</div>' +
+               '</div>';
+      }).join('');
+
+  // --- Compose page ---
+  c.innerHTML =
+    // Header
+    '<div class="tc-page-header">' +
+      '<div>' +
+        '<div class="tc-mono-label">Command Center</div>' +
+        '<h1 class="tc-h2" style="margin-top:4px">System Vitality</h1>' +
+      '</div>' +
+      '<div class="tc-row-sm">' +
+        '<span class="tc-chip tc-chip-success">' +
+          '<span class="tc-status-dot online"></span> System Active' +
+        '</span>' +
+        '<span class="tc-mono-label">v0.1.0</span>' +
+      '</div>' +
+    '</div>' +
+
+    // KPIs
+    kpiHtml +
+
+    // Agents section
+    '<div class="tc-panel" style="margin-bottom:var(--s-lg)">' +
+      '<div class="tc-panel-header">' +
+        '<div class="tc-row-sm">' +
+          '<span class="tc-mono-label">Active Agents</span>' +
+          '<span class="tc-chip">' + agents.length + ' total</span>' +
+        '</div>' +
+        '<a class="tc-text-primary" style="font-size:11px;cursor:pointer"' +
+           ' onclick="_settingsSubTab=\'nodes\';showView(\'settings\',null)">View All →</a>' +
+      '</div>' +
+      '<div class="tc-panel-body">' +
+        '<div class="tc-row-sm" style="flex-wrap:wrap;margin-bottom:var(--s-md)">' + chipsHtml + '</div>' +
+        '<div class="tc-grid tc-grid-auto" id="dash-tech-agents">' + agentCardsHtml + '</div>' +
+      '</div>' +
+    '</div>' +
+
+    // Activity feed (compact two-column: feed + tasks)
+    '<div class="tc-grid tc-grid-2">' +
+      '<div class="tc-panel">' +
+        '<div class="tc-panel-header">' +
+          '<span class="tc-mono-label">Activity Feed</span>' +
+          '<span class="tc-text-dim" style="font-size:10px">recent completions</span>' +
+        '</div>' +
+        '<div class="tc-panel-body" id="dash-tech-activity-feed" style="max-height:340px;overflow-y:auto">' +
+          '<div class="tc-text-dim" style="font-size:12px">Loading…</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="tc-panel">' +
+        '<div class="tc-panel-header">' +
+          '<span class="tc-mono-label">Task Queue</span>' +
+          '<span class="tc-text-dim" style="font-size:10px">in progress</span>' +
+        '</div>' +
+        '<div class="tc-panel-body" id="dash-tech-task-queue" style="max-height:340px;overflow-y:auto">' +
+          '<div class="tc-text-dim" style="font-size:12px">Loading…</div>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+
+  // Hook into existing data loaders if present (these populate the
+  // legacy DOM ids; we mirror them under "dash-tech-" so the same
+  // loaders can target both).
+  try {
+    if (typeof _loadDashProjectCount === 'function') {
+      // Mirror legacy id so existing fetcher works without modification.
+      var pcEl = document.getElementById('dash-tech-project-count');
+      if (pcEl) pcEl.id = 'dash-project-count';
+      _loadDashProjectCount();
+    }
+    if (typeof _loadDashActivityFeed === 'function') {
+      var afEl = document.getElementById('dash-tech-activity-feed');
+      if (afEl) afEl.id = 'dash-activity-feed';
+      _loadDashActivityFeed();
+    }
+    if (typeof _loadDashTaskQueue === 'function') {
+      var tqEl = document.getElementById('dash-tech-task-queue');
+      if (tqEl) tqEl.id = 'dash-task-queue';
+      _loadDashTaskQueue();
+    }
+  } catch (e) { console.warn('[dashboard-tech] data loader hooks failed:', e); }
+}
+window.renderDashboardTech = renderDashboardTech;
+
+
 // ============ Agent Chat ============
 // ── Bottom-panel tab helpers (2026-04-30 redesign) ──
 // The chat-page bottom region is a tabbed strip with 4 panes
@@ -3318,6 +3851,7 @@ function renderAgentChat(agentId) {
           showSTT: true,
           showAbort: true,
           showModelSel: true,
+          showAmplify: true,
         }) +
       '</div>' +
     '</div>' +  // close chat column wrapper
@@ -5951,6 +6485,22 @@ async function sendAgentMsg(agentId) {
   var rawText = inputEl.value.trim();
   var attachments = _agentAttachList(agentId).slice();
   if(!rawText && !attachments.length) return;
+
+  // ── Prompt amplifier intercept ──
+  // If the toggle is on AND the user typed real text (not a slash
+  // command, not just attachments), pause here and run the rewriter.
+  // The preview block re-enters this fn after the user confirms.
+  // _skipAmplifyOnce is set by the preview block right before re-entry
+  // so we don't loop forever.
+  window._skipAmplifyOnce = window._skipAmplifyOnce || {};
+  if (window._amplifyEnabled && window._amplifyEnabled(agentId)
+      && rawText
+      && !rawText.startsWith('/')
+      && !window._skipAmplifyOnce[agentId]) {
+    _amplifyRunAndPreview(agentId, rawText);
+    return;
+  }
+  delete window._skipAmplifyOnce[agentId];
 
   // Slash-command preprocessing — happens BEFORE busy-check so we can
   // tell if this is a command (commands refuse to queue).
@@ -21556,7 +22106,7 @@ function _kmShowCreateDomainKb() {
     // — Local sub-section (shown by default)
     +   '<div id="km-dkb-embed-local-section">'
     +     '<select id="km-dkb-embed-model"><option value="">加载中…</option></select>'
-    +     '<div id="km-dkb-embed-note" style="font-size:11px;color:var(--text3);margin-top:4px;line-height:1.4"></div>'
+    +     '<div id="km-dkb-embed-note" style="font-size:11px;color:var(--text3);margin-top:6px;line-height:1.55;white-space:pre-line;background:var(--surface3);border:1px solid var(--overlay-5);border-radius:8px;padding:8px 10px"></div>'
     +   '</div>'
     // — LLM provider sub-section (shown when "远程" is picked)
     +   '<div id="km-dkb-llm-embed-section" style="display:none">'

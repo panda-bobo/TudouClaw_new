@@ -65,6 +65,136 @@ picker.addEventListener('change', () => {
   if (a) { currentAgent = a; renderAgent(); clearChat(); }
 });
 
+// ── Top-bar wiring ──────────────────────────────────
+$('#btn-pin').addEventListener('click', _togglePin);
+$('#btn-new-chat').addEventListener('click', () => {
+  clearChat();
+  appendChat('sys', '已清空对话');
+});
+
+// ── Quick-action chips (preset templates) ───────────
+// Templates plug straight into the input box — user can edit before
+// sending. Keep these short and obviously editable so the user is
+// nudged to fill blanks rather than blindly send the boilerplate.
+const TEMPLATES = {
+  quick: {
+    title: '一句话简答',
+    text: '请用一句话回答：',
+  },
+  write: {
+    title: '帮我写作',
+    text: '帮我写一段文字：\n- 主题：\n- 长度：约 100 字\n- 风格：\n- 受众：',
+  },
+  bug: {
+    title: '解释这个错误',
+    text: '帮我看下这个报错是什么原因、怎么修：\n```\n（贴日志）\n```',
+  },
+  summary: {
+    title: '总结要点',
+    text: '帮我总结以下内容的要点（3-5 条 bullet）：\n\n',
+  },
+  translate: {
+    title: '翻译',
+    text: '把下面这段翻译成中文（保留专有名词不译）：\n\n',
+  },
+  outline: {
+    title: '列大纲',
+    text: '帮我列一份关于「__」的大纲（H1 + H2,3-5 个一级章节）',
+  },
+};
+
+document.querySelectorAll('.quickbar-chip[data-template]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const key = btn.dataset.template;
+    const t = TEMPLATES[key];
+    if (!t) return;
+    _applyTemplate(t.text);
+  });
+});
+
+$('#qb-more').addEventListener('click', _toggleTemplateMenu);
+$('#qb-attach').addEventListener('click', () => {
+  appendChat('sys', '附件功能尚未启用');
+});
+$('#qb-mic').addEventListener('click', () => {
+  appendChat('sys', '语音输入尚未启用');
+});
+
+// Click outside to close the template menu.
+document.addEventListener('click', (e) => {
+  const menu = $('#template-menu');
+  if (!menu || menu.classList.contains('hidden')) return;
+  if (e.target.closest('#template-menu') || e.target.closest('#qb-more')) return;
+  menu.classList.add('hidden');
+});
+
+function _applyTemplate(text) {
+  const inp = $('#chat-input');
+  if (!inp) return;
+  inp.value = text;
+  inp.focus();
+  // Move cursor to end so user can keep typing.
+  try { inp.setSelectionRange(inp.value.length, inp.value.length); } catch (_) {}
+  // Hide menu if visible.
+  const menu = $('#template-menu');
+  if (menu) menu.classList.add('hidden');
+}
+
+function _toggleTemplateMenu() {
+  const menu = $('#template-menu');
+  if (!menu) return;
+  if (menu.classList.contains('hidden')) {
+    // Render entries on every open so we can extend later (per-role
+    // templates, MRU sorting, etc.) without rebuilding HTML.
+    menu.innerHTML = Object.entries(TEMPLATES)
+      .map(([key, t]) => (
+        `<div class="menu-item" data-tk="${key}">
+           <div class="menu-title">${_esc(t.title)}</div>
+           <div class="menu-hint">${_esc(t.text.slice(0, 60).replace(/\n/g, ' / '))}…</div>
+         </div>`
+      )).join('');
+    menu.querySelectorAll('.menu-item').forEach((row) => {
+      row.addEventListener('click', () => {
+        const k = row.dataset.tk;
+        if (TEMPLATES[k]) _applyTemplate(TEMPLATES[k].text);
+      });
+    });
+    menu.classList.remove('hidden');
+  } else {
+    menu.classList.add('hidden');
+  }
+}
+
+function _esc(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// ── Pin (always-on-top) toggle ──────────────────────
+let _pinOn = true;  // Tauri config defaults alwaysOnTop=true
+
+async function _togglePin() {
+  try {
+    const T = window.__TAURI__;
+    if (!T || !T.window) return;
+    const w = T.window.getCurrentWindow ? T.window.getCurrentWindow() : T.window.appWindow;
+    if (!w || typeof w.setAlwaysOnTop !== 'function') return;
+    _pinOn = !_pinOn;
+    await w.setAlwaysOnTop(_pinOn);
+    const btn = $('#btn-pin');
+    if (btn) {
+      btn.classList.toggle('active', _pinOn);
+      btn.title = _pinOn ? '已置顶 · 点击关闭' : '未置顶 · 点击置顶';
+    }
+  } catch (e) {
+    console.warn('[floater] pin toggle failed:', e);
+  }
+}
+
 // ── Agent fetch loop ──────────────────────────────
 async function loadAgents() {
   try {
@@ -188,7 +318,11 @@ function _ensureLottie(url, onFail) {
 function renderAgent() {
   if (!currentAgent) {
     avatar.classList.add('empty');
-    avatar.title = '未连接到 TudouClaw';
+    // Misleading "未连接到 TudouClaw" implied a network/IPC failure.
+    // Real state: TudouClaw IS reachable, we just got an empty
+    // /agents/desktop list — meaning no agent has the desktop toggle
+    // flipped on. Surface a CTA-style hint instead.
+    avatar.title = '尚未启用桌面 Agent — 请到 portal 智能体页打开『桌面悬浮』开关';
     return;
   }
   avatar.classList.remove('empty');
@@ -200,8 +334,12 @@ function renderAgent() {
     ? persona.slice(0, PERSONA_MAX_CHARS) + '…'
     : (persona || '（未填写性格设定）');
 
-  // Per-agent hue
-  avatar.style.setProperty('--avatar-hue', String(avatarHue(currentAgent)));
+  // Per-agent hue — set on BOTH the small floating avatar (closed
+  // state) and the big hero avatar (card-open state).
+  const hue = String(avatarHue(currentAgent));
+  avatar.style.setProperty('--avatar-hue', hue);
+  const heroAv = $('#hero-avatar');
+  if (heroAv) heroAv.style.setProperty('--avatar-hue', hue);
 
   // Identity layer (priority): lottie > robot_avatar > initial > face.
   // Each layer hides the others; on async failure we fall back one
@@ -214,7 +352,6 @@ function renderAgent() {
 
   const lottieUrl = _resolveLottieUrl(currentAgent.desktop_lottie_url);
   const lottieOk = _ensureLottie(lottieUrl, () => {
-    // async fail: re-show fallback layer
     if (currentAgent.robot_avatar) { robotImg.hidden = false; }
     else { initialEl.hidden = false; }
   });
@@ -235,12 +372,51 @@ function renderAgent() {
     initialEl.hidden = false;
   }
 
+  // Mirror the identity layer onto the hero (card-open state). The
+  // hero block uses parallel ids prefixed with "hero-" so we don't
+  // double-handle lottie animation (single instance is enough; we
+  // just clone the visible static layer). Robot image / initial / face
+  // are re-set; lottie shows in the small avatar OR the hero, but not
+  // both simultaneously to avoid lottie's single-instance limitation.
+  const heroRobot = $('#hero-robot');
+  const heroInitial = $('#hero-initial');
+  const heroFace = $('#hero-face');
+  if (heroRobot && heroInitial && heroFace) {
+    heroFace.style.display = 'none';
+    heroInitial.textContent = avatarInitial(currentAgent);
+    if (currentAgent.robot_avatar) {
+      heroRobot.src = `${STATIC_BASE}/robots/${currentAgent.robot_avatar}.svg`;
+      heroRobot.hidden = false;
+      heroInitial.hidden = true;
+      heroRobot.onerror = () => {
+        heroRobot.hidden = true;
+        heroInitial.hidden = false;
+      };
+    } else if (lottieOk) {
+      // No robot image — keep just the lottie visible on the small
+      // avatar; the hero shows the initial as a fallback.
+      heroRobot.hidden = true;
+      heroInitial.hidden = false;
+    } else {
+      heroRobot.hidden = true;
+      heroInitial.hidden = false;
+    }
+  }
+
   // Status (drives animation + status dot — color stays per-agent)
   const status = (currentAgent.status || 'idle').toLowerCase();
   statusPill.textContent = status;
   statusPill.dataset.status = status;
   avatar.classList.remove('idle', 'busy', 'error');
   avatar.classList.add(['idle', 'busy', 'error'].includes(status) ? status : 'idle');
+
+  // Hero status dot color (mirrors avatar status)
+  const heroDot = $('#hero-status-dot');
+  if (heroDot) {
+    if (status === 'busy') heroDot.style.background = '#fbbf24';
+    else if (status === 'error') heroDot.style.background = '#ef4444';
+    else heroDot.style.background = '#4ade80';
+  }
 
   // Hover tooltip (system tooltip, ~500ms delay built-in)
   avatar.title = `${currentAgent.name || 'Agent'}` +
@@ -249,10 +425,49 @@ function renderAgent() {
 }
 
 // ── Card open/close ───────────────────────────────
+//
+// The Tauri window is sized for the floating avatar (140×140). When
+// the user opens the card we need a much bigger surface — header +
+// persona + chat log + input row don't fit in 128 usable pixels.
+//
+// Strategy: resize the window via the Tauri JS API on every toggle.
+// `withGlobalTauri:true` in tauri.conf.json exposes `window.__TAURI__`,
+// so we don't need to import an ES module. If the API is unavailable
+// (older builds, browser preview, etc.) we silently fall back to the
+// CSS-only toggle — the card still opens, just constrained.
+
+const CARD_W = 360;
+const CARD_H = 600;
+const AVATAR_W = 140;
+const AVATAR_H = 140;
+
+async function _resizeFloaterWindow(width, height) {
+  try {
+    var T = (typeof window !== 'undefined') ? window.__TAURI__ : null;
+    if (!T || !T.window) return;
+    var win = T.window.getCurrentWindow
+      ? T.window.getCurrentWindow()
+      : (T.window.appWindow || null);
+    if (!win || typeof win.setSize !== 'function') return;
+    var Logical = T.window.LogicalSize;
+    if (!Logical) return;
+    await win.setSize(new Logical(width, height));
+  } catch (e) {
+    console.warn('[floater] resize failed:', e);
+  }
+}
+
 function toggleCard() {
-  const isHidden = card.classList.contains('hidden');
+  const wasHidden = card.classList.contains('hidden');
   card.classList.toggle('hidden');
-  avatar.style.display = isHidden ? 'none' : '';
+  avatar.style.display = wasHidden ? 'none' : '';
+  // Fire-and-forget; don't await — keeps the UI snappy. The window
+  // resize lands on the next frame.
+  if (wasHidden) {
+    _resizeFloaterWindow(CARD_W, CARD_H);
+  } else {
+    _resizeFloaterWindow(AVATAR_W, AVATAR_H);
+  }
 }
 
 // ── Chat (write side — read side is Phase 3) ──────

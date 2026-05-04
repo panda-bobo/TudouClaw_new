@@ -915,6 +915,22 @@
       "created_at": 1775316628.2001216,
       "created_by": "system",
       "enabled": true
+    },
+    {
+      "id": "8d98f44aa1",
+      "name": "Research Fellow Assistant（博士科研助理）",
+      "filename": "research_fellow_assistant_博士科研助理_.md",
+      "description": "你的专属学术研究副手，专注于博士课题全流程支撑：文献梳理、逻辑建模、实验设计、结果分析、论文结构与学术写作，保持严谨、克制、可复现、不编造结论。",
+      "roles": [
+        "Research Fellow Assistant"
+      ],
+      "tags": [
+        "research"
+      ],
+      "category": "General",
+      "created_at": 1777793201.0560992,
+      "created_by": "1152a898ce25",
+      "enabled": true
     }
   ]
 }
