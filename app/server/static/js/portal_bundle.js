@@ -27478,14 +27478,28 @@ window._canvasStartRun = async function() {
 
 async function renderSkillCategoriesAdmin() {
   var c = document.getElementById('content');
-  c.innerHTML = ''
-    + '<div style="padding:18px">'
-    + '  <div style="margin-bottom:14px"><h2 style="margin:0">Skill 分类管理</h2>'
-    + '    <div style="font-size:12px;color:var(--text3);margin-top:4px">'
-    + '      Admin 管理 skill 商店的两个分类维度。改完后立刻生效,不需要重启服务。'
-    + '      已被 skill 引用但被删除的分类会自动失效,无需迁移。</div></div>'
-    + '  <div id="cat-admin-content" style="color:var(--text3)">加载中…</div>'
-    + '</div>';
+  var _techScA = false;
+  try { _techScA = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+  if (_techScA) {
+    c.innerHTML = '' +
+      '<div style="padding:var(--s-lg)">' +
+        '<div style="margin-bottom:var(--s-lg)">' +
+          '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px"><span>TAXONOMY ADMIN</span><span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span></div>' +
+          '<h2 style="font-family:var(--font-display);font-size:24px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:8px 0 6px">Skill Category Management</h2>' +
+          '<p class="tc-text-dim" style="font-size:13px;line-height:1.55;max-width:680px">Admin-curated taxonomy for the skill marketplace — Business Scenarios + Agent Types. Edits apply instantly. Deleted categories silently expire on referencing skills; no migration required.</p>' +
+        '</div>' +
+        '<div id="cat-admin-content" class="tc-text-dim">Loading…</div>' +
+      '</div>';
+  } else {
+    c.innerHTML = ''
+      + '<div style="padding:18px">'
+      + '  <div style="margin-bottom:14px"><h2 style="margin:0">Skill 分类管理</h2>'
+      + '    <div style="font-size:12px;color:var(--text3);margin-top:4px">'
+      + '      Admin 管理 skill 商店的两个分类维度。改完后立刻生效,不需要重启服务。'
+      + '      已被 skill 引用但被删除的分类会自动失效,无需迁移。</div></div>'
+      + '  <div id="cat-admin-content" style="color:var(--text3)">加载中…</div>'
+      + '</div>';
+  }
   await loadSkillCategoriesAdmin();
 }
 
@@ -30763,13 +30777,25 @@ async function renderRolePresetsV2(container) {
     var data = await api('GET', '/api/role_presets_v2');
     var presets = data.presets || [];
 
-    var html = '<div style="margin-bottom:16px">' +
-      '<h3 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:20px;font-weight:700;margin-bottom:4px">高级角色（7 维度 · Playbook）</h3>' +
-      '<p style="color:var(--text2);font-size:13px">声明式角色：Knowledge / Tooling / Methodology / Quality / LLM Tier / Collaboration / Evolution</p>' +
-      '<div style="margin-top:12px;display:flex;gap:8px">' +
-        '<button class="btn btn-primary btn-sm" onclick="_rpv2Reload()"><span class="material-symbols-outlined" style="font-size:16px">refresh</span> 重载 YAML</button>' +
-      '</div>' +
-    '</div>';
+    var _techRpv2 = false;
+    try { _techRpv2 = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+    var html;
+    if (_techRpv2) {
+      html = '<div style="margin-bottom:var(--s-lg)">' +
+        '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px"><span>ROLE LATTICE V2</span><span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span></div>' +
+        '<h2 style="font-family:var(--font-display);font-size:24px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:8px 0 6px">Advanced Role Playbooks</h2>' +
+        '<p class="tc-text-dim" style="font-size:13px;line-height:1.55;max-width:680px">Declarative roles spanning seven dimensions: Knowledge / Tooling / Methodology / Quality / LLM Tier / Collaboration / Evolution.</p>' +
+        '<div style="margin-top:14px"><button onclick="_rpv2Reload()" style="background:rgba(255,255,255,0.04);color:var(--on-surface);padding:9px 16px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:1px solid var(--outline-variant);cursor:pointer;display:inline-flex;align-items:center;gap:6px"><span class="material-symbols-outlined" style="font-size:14px">refresh</span> RELOAD YAML</button></div>' +
+      '</div>';
+    } else {
+      html = '<div style="margin-bottom:16px">' +
+        '<h3 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:20px;font-weight:700;margin-bottom:4px">高级角色（7 维度 · Playbook）</h3>' +
+        '<p style="color:var(--text2);font-size:13px">声明式角色：Knowledge / Tooling / Methodology / Quality / LLM Tier / Collaboration / Evolution</p>' +
+        '<div style="margin-top:12px;display:flex;gap:8px">' +
+          '<button class="btn btn-primary btn-sm" onclick="_rpv2Reload()"><span class="material-symbols-outlined" style="font-size:16px">refresh</span> 重载 YAML</button>' +
+        '</div>' +
+      '</div>';
+    }
 
     if (presets.length === 0) {
       html += '<div style="padding:40px;text-align:center;color:var(--text3);background:var(--surface);border-radius:12px">暂无 V2 角色。请在 <code>data/roles/*.yaml</code> 或 <code>~/.tudou_claw/roles/*.yaml</code> 添加角色定义。</div>';
