@@ -1141,3 +1141,370 @@
   padding: 0;
 }
 
+/* ──────────────────────────────────────────────────────────────
+ * Global "Stitch-ify" overrides for un-ported legacy pages
+ * ──────────────────────────────────────────────────────────────
+ * The handoff strategy is: a page only ports its renderer when its
+ * layout demands custom Aether visuals. For everything else, this
+ * block re-skins every common legacy primitive (.btn, .card, .tag,
+ * .modal, table, input, h1/h2/h3, .form-group, .token-item, ...) so
+ * the page looks Aether without touching its JS.
+ *
+ * Scope is tightly gated: only triggers under [data-theme="tech"] so
+ * the legacy themes are unaffected.
+ */
+
+/* Headings inside the content area — pull h1/h2/h3 to tech sizes when
+ * a renderer hasn't chosen its own. We don't override `.tc-h2` users. */
+[data-theme="tech"] .main #content h1:not(.tc-h2):not(.tc-h1):not(.tc-h3) {
+  font-family: var(--font-display);
+  font-size: var(--type-h1-size);
+  font-weight: var(--type-h1-weight);
+  letter-spacing: var(--type-h1-tracking);
+  color: var(--on-surface);
+}
+[data-theme="tech"] .main #content h2:not(.tc-h2):not(.tc-h1):not(.tc-h3) {
+  font-family: var(--font-display);
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--on-surface);
+}
+[data-theme="tech"] .main #content h3:not(.tc-h2):not(.tc-h1):not(.tc-h3) {
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  color: var(--on-surface);
+}
+
+/* ── Buttons — re-skin .btn / .btn-sm / .btn-primary / .btn-ghost / .btn-danger */
+[data-theme="tech"] .btn {
+  background: var(--surface-container);
+  border: 1px solid var(--outline-variant);
+  color: var(--on-surface);
+  border-radius: var(--r-md);
+  padding: 6px 14px;
+  font-size: 12px;
+  font-family: var(--font-display);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s, box-shadow 0.15s;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+[data-theme="tech"] .btn:hover {
+  background: var(--surface-container-high);
+  border-color: var(--primary);
+  color: var(--on-surface);
+}
+[data-theme="tech"] .btn-sm {
+  padding: 5px 10px;
+  font-size: 11px;
+  border-radius: var(--r-md);
+}
+[data-theme="tech"] .btn-primary {
+  background: var(--primary) !important;
+  color: var(--on-primary) !important;
+  border: 1px solid var(--primary) !important;
+  box-shadow: 0 0 8px rgba(192, 193, 255, 0.20);
+}
+[data-theme="tech"] .btn-primary:hover {
+  filter: brightness(1.08);
+  box-shadow: 0 0 14px rgba(192, 193, 255, 0.32);
+}
+[data-theme="tech"] .btn-ghost {
+  background: transparent !important;
+  border: 1px solid transparent !important;
+  color: var(--on-surface-variant) !important;
+}
+[data-theme="tech"] .btn-ghost:hover {
+  background: rgba(255, 255, 255, 0.04) !important;
+  border-color: var(--outline-variant) !important;
+  color: var(--on-surface) !important;
+}
+[data-theme="tech"] .btn-danger {
+  background: rgba(255, 180, 171, 0.10) !important;
+  color: var(--error) !important;
+  border: 1px solid rgba(255, 180, 171, 0.30) !important;
+}
+[data-theme="tech"] .btn-danger:hover {
+  background: rgba(255, 180, 171, 0.18) !important;
+  border-color: var(--error) !important;
+}
+
+/* ── Form inputs / selects / textareas ────────────────────────── */
+[data-theme="tech"] input[type="text"],
+[data-theme="tech"] input[type="password"],
+[data-theme="tech"] input[type="email"],
+[data-theme="tech"] input[type="search"],
+[data-theme="tech"] input[type="number"],
+[data-theme="tech"] input[type="url"],
+[data-theme="tech"] input:not([type]),
+[data-theme="tech"] select,
+[data-theme="tech"] textarea {
+  background: var(--surface-container-low) !important;
+  border: 1px solid var(--outline-variant) !important;
+  color: var(--on-surface) !important;
+  border-radius: var(--r-md) !important;
+  font-family: var(--font-display);
+  transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+}
+[data-theme="tech"] input:focus,
+[data-theme="tech"] select:focus,
+[data-theme="tech"] textarea:focus {
+  border-color: var(--secondary) !important;
+  box-shadow: 0 0 0 2px rgba(137, 206, 255, 0.20) !important;
+  outline: none !important;
+  background: var(--surface-container) !important;
+}
+[data-theme="tech"] input::placeholder,
+[data-theme="tech"] textarea::placeholder {
+  color: var(--outline);
+}
+[data-theme="tech"] .form-group label {
+  font-family: var(--font-mono, 'Space Grotesk', monospace);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--on-surface-variant);
+  font-weight: 500;
+  display: block;
+  margin-bottom: 6px;
+}
+
+/* ── Tags / chips ──────────────────────────────────────────────── */
+[data-theme="tech"] .tag {
+  font-family: var(--font-mono, 'Space Grotesk', monospace);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: var(--r-md);
+  background: var(--surface-container);
+  color: var(--on-surface-variant);
+  border: 1px solid var(--outline-variant);
+}
+[data-theme="tech"] .tag-green,
+[data-theme="tech"] .tag.tag-green {
+  background: rgba(173, 255, 47, 0.10) !important;
+  color: var(--cyber-lime) !important;
+  border-color: rgba(173, 255, 47, 0.25) !important;
+}
+[data-theme="tech"] .tag-blue,
+[data-theme="tech"] .tag.tag-blue {
+  background: rgba(137, 206, 255, 0.10) !important;
+  color: var(--secondary) !important;
+  border-color: rgba(137, 206, 255, 0.25) !important;
+}
+[data-theme="tech"] .tag-red,
+[data-theme="tech"] .tag.tag-red {
+  background: rgba(255, 180, 171, 0.10) !important;
+  color: var(--error) !important;
+  border-color: rgba(255, 180, 171, 0.25) !important;
+}
+[data-theme="tech"] .tag-orange,
+[data-theme="tech"] .tag.tag-orange {
+  background: rgba(255, 183, 131, 0.10) !important;
+  color: var(--tertiary) !important;
+  border-color: rgba(255, 183, 131, 0.25) !important;
+}
+
+/* ── Tables ────────────────────────────────────────────────────── */
+[data-theme="tech"] table {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: 100%;
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  background: var(--surface-container);
+  border: 1px solid var(--outline-variant);
+}
+[data-theme="tech"] table th {
+  background: var(--surface-container-high);
+  font-family: var(--font-mono, 'Space Grotesk', monospace);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--outline);
+  font-weight: 500;
+  padding: 10px 14px;
+  text-align: left;
+  border-bottom: 1px solid var(--outline-variant);
+}
+[data-theme="tech"] table td {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--outline-variant);
+  color: var(--on-surface);
+  font-size: 13px;
+}
+[data-theme="tech"] table tr:last-child td { border-bottom: none; }
+[data-theme="tech"] table tr:hover td { background: rgba(255, 255, 255, 0.03); }
+
+/* ── Modals ────────────────────────────────────────────────────── */
+[data-theme="tech"] .modal-overlay {
+  background: rgba(7, 0, 50, 0.65) !important;
+  backdrop-filter: blur(8px);
+}
+[data-theme="tech"] .modal {
+  background: rgba(31, 31, 39, 0.85) !important;
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 24px 60px rgba(0, 0, 0, 0.55),
+    0 0 60px rgba(99, 102, 241, 0.10) !important;
+  border-radius: var(--r-xl) !important;
+  color: var(--on-surface) !important;
+}
+[data-theme="tech"] .modal h3,
+[data-theme="tech"] .modal h2,
+[data-theme="tech"] .modal h1 {
+  font-family: var(--font-display);
+  letter-spacing: -0.01em;
+  color: var(--on-surface);
+}
+
+/* ── Token list / audit table specifics ──────────────────────────── */
+[data-theme="tech"] .token-item {
+  background: var(--surface-container) !important;
+  border: 1px solid var(--outline-variant) !important;
+  border-radius: var(--r-lg) !important;
+  margin-bottom: 10px !important;
+  padding: 14px 16px !important;
+}
+[data-theme="tech"] .token-id {
+  font-family: var(--font-mono, 'Space Grotesk', monospace) !important;
+  color: var(--outline) !important;
+  font-size: 11px !important;
+  letter-spacing: 0.03em;
+}
+[data-theme="tech"] .audit-table {
+  border-radius: var(--r-lg);
+  overflow: hidden;
+}
+[data-theme="tech"] .audit-table th {
+  background: var(--surface-container-high) !important;
+}
+
+/* ── Tab strips (legacy hub tabs use inline backgrounds; restyle them)
+ * Targets only `_renderHubTabs` strip which has class .hub-tabs-bar
+ * (and also the inline div pattern used in legacy hubs) */
+[data-theme="tech"] [id^="hub-"][id$="-content"] {
+  /* leave content alone but the parent tab bar gets a glass treatment */
+}
+[data-theme="tech"] [id$="-tabs"] {
+  background: var(--surface-container-low) !important;
+  border: 1px solid var(--outline-variant) !important;
+  border-radius: var(--r-lg) !important;
+  padding: 6px !important;
+}
+[data-theme="tech"] [id$="-tabs"] button {
+  font-family: var(--font-mono, 'Space Grotesk', monospace);
+  font-size: 11px !important;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* ── Misc legacy helpers ──────────────────────────────────────────── */
+[data-theme="tech"] code {
+  background: var(--surface-container-low);
+  border: 1px solid var(--outline-variant);
+  color: var(--secondary);
+  padding: 1px 6px;
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono, 'Space Grotesk', monospace);
+  font-size: 0.9em;
+}
+[data-theme="tech"] pre {
+  background: var(--surface-container-lowest);
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--r-md);
+  padding: 12px 14px;
+  color: var(--on-surface);
+  font-family: var(--font-mono, 'Space Grotesk', monospace);
+}
+[data-theme="tech"] hr {
+  border: none;
+  height: 1px;
+  background: var(--outline-variant);
+  margin: var(--s-md) 0;
+}
+[data-theme="tech"] a:not([class*="tc-"]):not([class*="btn"]) {
+  color: var(--primary);
+}
+
+/* ── Scrollbar — match the dark surfaces ──────────────────────── */
+[data-theme="tech"] ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+[data-theme="tech"] ::-webkit-scrollbar-track {
+  background: var(--surface-container-lowest);
+}
+[data-theme="tech"] ::-webkit-scrollbar-thumb {
+  background: var(--outline-variant);
+  border-radius: var(--r-md);
+  border: 2px solid var(--surface-container-lowest);
+}
+[data-theme="tech"] ::-webkit-scrollbar-thumb:hover {
+  background: var(--outline);
+}
+
+/* ── Topbar adjustments ──────────────────────────────────────── */
+[data-theme="tech"] .topbar {
+  background: rgba(13, 13, 21, 0.60) !important;
+  backdrop-filter: blur(20px);
+  border-bottom: 1px solid var(--outline-variant) !important;
+}
+[data-theme="tech"] #view-title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--on-surface);
+}
+
+/* ── Project Detail page specifics — bridge improvements ──────── */
+[data-theme="tech"] [id^="proj-tab-"] {
+  background: var(--surface) !important;
+}
+
+/* ── Chat input box re-skin (legacy renders) ──────────────────── */
+[data-theme="tech"] .chat-input-wrap {
+  background: rgba(31, 31, 39, 0.6) !important;
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  border-radius: var(--r-xl) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+/* ── Text2/3 colors that legacy uses for muted hint text ──────── */
+[data-theme="tech"] [style*="color:var(--text2)"],
+[data-theme="tech"] [style*="color: var(--text2)"] {
+  /* var(--text2) → tech --on-surface-variant via bridge already, no-op
+     but keep the rule slot in case future tweaks */
+}
+
+/* ── Legacy "tag" non-color version + tag.tag-* ─────────────── */
+[data-theme="tech"] .tag-grey,
+[data-theme="tech"] .tag.tag-grey {
+  background: var(--surface-container-high) !important;
+  color: var(--outline) !important;
+  border-color: var(--outline-variant) !important;
+}
+
+/* Legacy `.badge` and `.notification` (counter pills on buttons) */
+[data-theme="tech"] .badge {
+  background: var(--surface-container-high);
+  color: var(--on-surface-variant);
+  border: 1px solid var(--outline-variant);
+  font-family: var(--font-mono, 'Space Grotesk', monospace);
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 9999px;
+}
+[data-theme="tech"] .badge.notification {
+  background: var(--primary);
+  color: var(--on-primary);
+  border-color: var(--primary);
+}

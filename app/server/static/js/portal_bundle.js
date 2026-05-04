@@ -3068,6 +3068,10 @@ function renderRolesSkillsHubTech() {
   if (typeof _isAdmin === 'function' && _isAdmin()) {
     tabs.push({ id: 'skill-categories', label: 'Categories', icon: 'category' });
   }
+  if (typeof window.isV2Mode === 'function' && window.isV2Mode()) {
+    tabs.push({ id: 'v2-templates', label: 'FSM Templates', icon: 'rocket_launch' });
+    tabs.push({ id: 'v2-tiers',     label: 'LLM Tier Binding', icon: 'tune' });
+  }
   var r = _techHubPage({ label: 'Configuration', title: 'Roles & Skills' }, tabs, 'roles');
   c.innerHTML = r.html;
   var sc = document.getElementById(r.bodyId);
@@ -16728,13 +16732,15 @@ async function renderProjectDetail(projId) {
       var active = (_activeTab === key);
       return '<button onclick="switchProjectTab(\''+projId+'\',\''+key+'\')" class="btn btn-ghost btn-sm" style="border-radius:0;border-bottom:2px solid '+(active?'var(--primary)':'transparent')+';color:'+(active?'var(--primary)':'var(--text2)')+';font-weight:'+(active?'700':'500')+';padding:10px 16px"><span class="material-symbols-outlined" style="font-size:16px;margin-right:4px">'+icon+'</span>'+label+'</button>';
     };
+    var _isTechPd = false;
+    try { _isTechPd = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
     var tabBar = '<div style="display:flex;gap:2px;border-bottom:1px solid var(--overlay-5);background:var(--bg);flex-shrink:0">' +
-      _tabBtn('overview','Overview','dashboard') +
-      _tabBtn('goals','目标','flag') +
-      _tabBtn('milestones','里程碑','timeline') +
-      _tabBtn('deliverables','交付件','description') +
-      _tabBtn('issues','问题','bug_report') +
-      _tabBtn('chat','团队协作','forum') +
+      _tabBtn('overview',     _isTechPd ? 'Overview'     : 'Overview',     'dashboard') +
+      _tabBtn('goals',        _isTechPd ? 'Goals'        : '目标',         'flag') +
+      _tabBtn('milestones',   _isTechPd ? 'Milestones'   : '里程碑',       'timeline') +
+      _tabBtn('deliverables', _isTechPd ? 'Deliverables' : '交付件',       'description') +
+      _tabBtn('issues',       _isTechPd ? 'Issues'       : '问题',         'bug_report') +
+      _tabBtn('chat',         _isTechPd ? 'Team Chat'    : '团队协作',     'forum') +
     '</div>';
     // Panes: one pane per tab; only the chat pane keeps the legacy grid+sidebar.
     var paneVis = function(key){ return _activeTab === key ? '' : 'display:none;'; };
@@ -20180,7 +20186,14 @@ function _renderProjectsHubLegacy() {
   if (actionsEl) actionsEl.innerHTML = '';
   // 状态机任务已合并进任务中心内部（作为 3 个 sub-tab 的第 3 个），不再
   // 在此处单独占一个顶级 tab。
-  var tabs = [
+  var _isTechProj = false;
+  try { _isTechProj = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+  var tabs = _isTechProj ? [
+    { id: 'projects',      label: 'Projects',           icon: 'folder_special' },
+    { id: 'meetings',      label: 'Meetings',           icon: 'groups' },
+    { id: 'task_center',   label: 'Task Center',        icon: 'checklist' },
+    { id: 'workflows',     label: 'Workflow Templates', icon: 'account_tree' },
+  ] : [
     { id: 'projects',      label: t('tab.projectList',    '项目列表'),    icon: 'folder_special' },
     { id: 'meetings',      label: t('tab.meetings',       '群聊会议'),    icon: 'groups' },
     { id: 'task_center',   label: t('tab.taskCenter',     '任务中心'),    icon: 'checklist' },
