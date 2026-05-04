@@ -12186,22 +12186,28 @@ async function renderMCPConfig(container) {
 
   let html = '';
 
-  // Page header (Add MCP button lives in topbar — single source of truth)
+  // Page header. Add MCP button is also rendered inline here so it
+  // shows up when MCP Configuration is opened via a hub (Settings or
+  // Tools & Approvals) — those code paths don't populate the topbar
+  // actions slot, which is what the legacy showView('mcpconfig') case
+  // relied on. Inline button = hub-friendly.
   var _techMcp = false;
   try { _techMcp = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
   if (_techMcp) {
-    html += '<div style="margin-bottom:var(--s-lg)">' +
-      '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px">' +
-        '<span>PROTOCOL FABRIC</span>' +
-        '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
+    html += '<div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:var(--s-lg);gap:var(--s-md);flex-wrap:wrap">' +
+      '<div style="flex:1;min-width:240px">' +
+        '<h2 style="font-family:var(--font-display);font-size:30px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:0">MCP Configuration</h2>' +
+        '<p class="tc-text-dim" style="font-size:14px;line-height:1.55;margin-top:8px;max-width:640px">Manage Multi-Agent Orchestration Protocols and context bindings.</p>' +
       '</div>' +
-      '<h1 class="tc-h2" style="margin-top:6px">MCP Configuration</h1>' +
-      '<p class="tc-text-dim" style="font-size:12px;margin-top:6px;line-height:1.55">Model Context Protocol server bindings and catalog.</p>' +
+      '<button onclick="showAddMCP()" style="background:var(--primary-fixed);color:var(--on-primary-fixed);padding:10px 20px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:8px;box-shadow:0 4px 14px rgba(192,193,255,0.20)" onmouseover="this.style.filter=\'brightness(1.08)\'" onmouseout="this.style.filter=\'\'">' +
+        '<span class="material-symbols-outlined" style="font-size:16px">add_circle</span> ADD MCP' +
+      '</button>' +
     '</div>';
   } else {
-    html += '<div style="margin-bottom:28px">';
-    html += '<h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:28px;font-weight:800;letter-spacing:-0.5px">MCP Configuration</h2>';
-    html += '<p style="color:var(--text2);font-size:14px;margin-top:4px">Manage Model Context Protocol server bindings and catalog.</p>';
+    html += '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:28px;gap:14px">';
+    html += '<div><h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:28px;font-weight:800;letter-spacing:-0.5px">MCP Configuration</h2>';
+    html += '<p style="color:var(--text2);font-size:14px;margin-top:4px">Manage Model Context Protocol server bindings and catalog.</p></div>';
+    html += '<button class="btn btn-primary btn-sm" onclick="showAddMCP()"><span class="material-symbols-outlined" style="font-size:16px">add</span> Add MCP</button>';
     html += '</div>';
   }
 
