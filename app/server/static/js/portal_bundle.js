@@ -16490,53 +16490,167 @@ function renderChannels(container) {
   const c = container || document.getElementById('content');
   if (!container) c.style.padding = '24px';
   const epoch = _renderEpoch;
+  let _techCh = false;
+  try { _techCh = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
   api('GET', '/api/portal/channels').then(data => {
     if (!data || epoch !== _renderEpoch) return;
     channelList = data.channels || [];
     var chCountEl = document.getElementById('channel-count');
     if (chCountEl) chCountEl.textContent = channelList.length;
-    c.innerHTML = `
-      <div style="display:flex;gap:24px">
-        <div style="flex:1;max-width:700px">
-          <h3 style="font-size:14px;margin-bottom:12px;color:var(--text2)">Configured Channels</h3>
-          ${channelList.length===0?'<div style="color:var(--text3);padding:20px">No channels configured. Click "+ Add Channel" to connect a messaging platform.</div>':''}
-          <div style="display:grid;gap:12px">
-            ${channelList.map(ch => `
-              <div class="card">
-                <div style="display:flex;justify-content:space-between;align-items:flex-start">
-                  <div>
-                    <div style="font-weight:600;font-size:15px">
-                      ${channelTypeIcons[ch.channel_type]||'🔗'} ${esc(ch.name)}
-                      <span class="tag ${ch.enabled?'tag-green':'tag-red'}" style="font-size:10px;margin-left:6px">${ch.enabled?'active':'disabled'}</span>
-                      <span class="tag tag-blue" style="font-size:10px;margin-left:4px">${channelTypeLabels[ch.channel_type]||ch.channel_type}</span>
-                      <span class="tag" style="font-size:10px;margin-left:4px;background:${ch.mode==='polling'?'rgba(251,191,36,0.15);color:#f59e0b':'rgba(96,165,250,0.15);color:#60a5fa'}">${ch.mode==='polling'?'Polling':'Webhook'}</span>
+
+    if (_techCh) {
+      // Stitch_18-style: hero header + 8/4 grid (channels list + event log sidebar)
+      // Each channel = glass-card with platform icon, name, status chip,
+      // type chip, mode chip, agent binding, action buttons.
+      var modeChip = function(mode) {
+        var palette = mode === 'polling'
+          ? { bg: 'rgba(255,183,131,0.10)', bd: 'rgba(255,183,131,0.30)', fg: 'var(--tertiary)' }
+          : { bg: 'rgba(137,206,255,0.10)', bd: 'rgba(137,206,255,0.30)', fg: 'var(--secondary)' };
+        return '<span class="tc-mono-label" style="padding:3px 8px;border-radius:9999px;background:'+palette.bg+';color:'+palette.fg+';border:1px solid '+palette.bd+';font-size:10px">'+(mode||'webhook').toUpperCase()+'</span>';
+      };
+      var statusChip = function(enabled) {
+        return enabled
+          ? '<span class="tc-mono-label" style="padding:3px 8px;border-radius:9999px;background:rgba(173,255,47,0.10);color:var(--cyber-lime, #adff2f);border:1px solid rgba(173,255,47,0.30);font-size:10px;display:inline-flex;align-items:center;gap:4px"><span style="width:5px;height:5px;border-radius:50%;background:var(--cyber-lime, #adff2f);animation:pulse-dot 2s infinite ease-in-out"></span>ACTIVE</span>'
+          : '<span class="tc-mono-label" style="padding:3px 8px;border-radius:9999px;background:rgba(255,255,255,0.04);color:var(--outline);border:1px solid var(--outline-variant);font-size:10px;display:inline-flex;align-items:center;gap:4px"><span style="width:5px;height:5px;border-radius:50%;background:var(--outline)"></span>DISABLED</span>';
+      };
+      var platformIcon = function(t) {
+        var s = (t || '').toLowerCase();
+        if (s.indexOf('slack') >= 0) return 'forum';
+        if (s.indexOf('discord') >= 0) return 'sports_esports';
+        if (s.indexOf('feishu') >= 0 || s.indexOf('lark') >= 0) return 'flutter_dash';
+        if (s.indexOf('wechat') >= 0 || s.indexOf('weixin') >= 0) return 'chat';
+        if (s.indexOf('email') >= 0 || s.indexOf('smtp') >= 0) return 'mail';
+        if (s.indexOf('webhook') >= 0 || s.indexOf('http') >= 0) return 'webhook';
+        return 'connect_without_contact';
+      };
+
+      var channelCards = channelList.map(function(ch) {
+        var agentName = ch.agent_id ? ((agents.find(function(a){return a.id===ch.agent_id;})||{}).name || ch.agent_id) : null;
+        return '<div class="tc-card-glass" style="padding:18px;display:flex;flex-direction:column;gap:14px;border-top:1px solid rgba(255,255,255,0.10)' + (ch.enabled ? ';box-shadow:0 0 12px rgba(192,193,255,0.08)' : '') + '">' +
+          // Header row
+          '<div style="display:flex;align-items:flex-start;gap:14px">' +
+            '<div style="width:44px;height:44px;border-radius:var(--r-md);background:rgba(192,193,255,0.10);border:1px solid rgba(192,193,255,0.25);display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+              '<span class="material-symbols-outlined" style="color:var(--primary);font-size:22px">'+platformIcon(ch.channel_type)+'</span>' +
+            '</div>' +
+            '<div style="flex:1;min-width:0">' +
+              '<div class="tc-mono-label" style="color:var(--outline);font-size:9px;margin-bottom:4px">'+esc((channelTypeLabels[ch.channel_type]||ch.channel_type||'').toUpperCase())+'</div>' +
+              '<div style="font-size:16px;font-weight:600;color:var(--on-surface);line-height:1.25">'+esc(ch.name)+'</div>' +
+            '</div>' +
+            '<div style="flex-shrink:0">' + statusChip(ch.enabled) + '</div>' +
+          '</div>' +
+          // Chips row
+          '<div style="display:flex;flex-wrap:wrap;gap:6px">' +
+            modeChip(ch.mode) +
+            (agentName
+              ? '<span class="tc-mono-label" style="padding:3px 8px;border-radius:9999px;background:rgba(192,193,255,0.05);color:var(--primary);border:1px solid rgba(192,193,255,0.20);font-size:10px;display:inline-flex;align-items:center;gap:4px"><span class="material-symbols-outlined" style="font-size:11px">smart_toy</span>'+esc(agentName)+'</span>'
+              : '<span class="tc-mono-label" style="padding:3px 8px;border-radius:9999px;background:rgba(255,255,255,0.04);color:var(--outline);border:1px solid var(--outline-variant);font-size:10px">UNBOUND</span>') +
+          '</div>' +
+          // Webhook URL or outbound URL
+          (ch.mode === 'webhook'
+            ? '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--surface-container-lowest);border:1px solid var(--outline-variant);border-radius:var(--r-md)">' +
+                '<span class="material-symbols-outlined" style="font-size:14px;color:var(--outline)">webhook</span>' +
+                '<code style="font-family:var(--font-mono);font-size:11px;color:var(--secondary);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">/api/portal/channels/'+esc(ch.id)+'/webhook</code>' +
+              '</div>'
+            : '') +
+          (ch.webhook_url
+            ? '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--surface-container-lowest);border:1px solid var(--outline-variant);border-radius:var(--r-md)">' +
+                '<span class="material-symbols-outlined" style="font-size:14px;color:var(--outline)">north_east</span>' +
+                '<code style="font-family:var(--font-mono);font-size:11px;color:var(--on-surface);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(ch.webhook_url)+'</code>' +
+              '</div>'
+            : '') +
+          // Action footer
+          '<div style="display:flex;gap:6px;flex-wrap:wrap;padding-top:10px;border-top:1px solid var(--outline-variant);margin-top:auto">' +
+            '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="editChannel(\''+esc(ch.id)+'\')" style="font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em">' +
+              '<span class="material-symbols-outlined" style="font-size:14px">edit</span> EDIT</button>' +
+            (ch.enabled
+              ? '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="testChannel(\''+esc(ch.id)+'\')" style="font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em">' +
+                  '<span class="material-symbols-outlined" style="font-size:14px">network_check</span> TEST</button>' +
+                '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="toggleChannelEnabled(\''+esc(ch.id)+'\',false)" style="font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;color:var(--tertiary)">' +
+                  '<span class="material-symbols-outlined" style="font-size:14px">pause</span> DISABLE</button>'
+              : '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="toggleChannelEnabled(\''+esc(ch.id)+'\',true)" style="font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;color:var(--cyber-lime, #adff2f)">' +
+                  '<span class="material-symbols-outlined" style="font-size:14px">play_arrow</span> ENABLE</button>') +
+            '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="deleteChannel(\''+esc(ch.id)+'\')" style="font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;color:var(--error);margin-left:auto">' +
+              '<span class="material-symbols-outlined" style="font-size:14px">delete</span> DELETE</button>' +
+          '</div>' +
+        '</div>';
+      }).join('');
+
+      c.innerHTML =
+        '<div style="display:flex;flex-direction:column;gap:var(--s-lg)">' +
+          // Hero
+          '<div style="display:flex;justify-content:space-between;align-items:flex-end;gap:var(--s-md);flex-wrap:wrap">' +
+            '<div style="flex:1;min-width:240px">' +
+              '<h2 style="font-family:var(--font-display);font-size:30px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:0">Channel Integrations</h2>' +
+              '<p class="tc-text-dim" style="font-size:14px;line-height:1.55;margin-top:8px;max-width:640px">External messaging platforms bound to agents. Inbound webhooks deliver messages to agents; outbound channels broadcast agent updates.</p>' +
+            '</div>' +
+            '<button onclick="showModal(\'add-channel\')" style="background:var(--primary-fixed);color:var(--on-primary-fixed);padding:10px 20px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:8px;box-shadow:0 4px 14px rgba(192,193,255,0.20)" onmouseover="this.style.filter=\'brightness(1.08)\'" onmouseout="this.style.filter=\'\'">' +
+              '<span class="material-symbols-outlined" style="font-size:16px">add_circle</span> ADD CHANNEL' +
+            '</button>' +
+          '</div>' +
+          // 8/4 grid
+          '<div style="display:grid;grid-template-columns:8fr 4fr;gap:var(--s-lg);align-items:start">' +
+            // Channels grid
+            '<div style="display:flex;flex-direction:column;gap:var(--s-md);min-width:0">' +
+              '<h3 class="tc-mono-label" style="color:var(--on-surface-variant);font-size:12px;letter-spacing:0.08em;margin:0">CONFIGURED CHANNELS '+ '<span style="color:var(--outline);margin-left:6px">(' + channelList.length + ')</span></h3>' +
+              (channelList.length === 0
+                ? '<div class="tc-card" style="text-align:center;padding:60px 20px;border-style:dashed">' +
+                    '<span class="material-symbols-outlined" style="font-size:48px;color:var(--outline)">connect_without_contact</span>' +
+                    '<div style="font-size:14px;color:var(--on-surface-variant);margin-top:14px;margin-bottom:8px">No channels configured</div>' +
+                    '<div class="tc-text-dim" style="font-size:12px;margin-bottom:20px">Connect Slack, Discord, Feishu, or webhooks to bridge agents with messaging platforms.</div>' +
+                  '</div>'
+                : '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:var(--s-md)">' + channelCards + '</div>') +
+            '</div>' +
+            // Event log sidebar
+            '<aside class="tc-card-glass" style="padding:var(--s-lg);display:flex;flex-direction:column;gap:var(--s-md);border-top:1px solid rgba(255,255,255,0.10);min-width:0;align-self:start">' +
+              '<h4 class="tc-mono-label" style="color:var(--on-surface-variant);font-size:10px;letter-spacing:0.08em;margin:0">EVENT TRAIL</h4>' +
+              '<div id="channel-event-log" style="font-size:12px;max-height:60vh;overflow-y:auto;font-family:var(--font-mono)"></div>' +
+            '</aside>' +
+          '</div>' +
+        '</div>';
+    } else {
+      c.innerHTML = `
+        <div style="display:flex;gap:24px">
+          <div style="flex:1;max-width:700px">
+            <h3 style="font-size:14px;margin-bottom:12px;color:var(--text2)">Configured Channels</h3>
+            ${channelList.length===0?'<div style="color:var(--text3);padding:20px">No channels configured. Click "+ Add Channel" to connect a messaging platform.</div>':''}
+            <div style="display:grid;gap:12px">
+              ${channelList.map(ch => `
+                <div class="card">
+                  <div style="display:flex;justify-content:space-between;align-items:flex-start">
+                    <div>
+                      <div style="font-weight:600;font-size:15px">
+                        ${channelTypeIcons[ch.channel_type]||'🔗'} ${esc(ch.name)}
+                        <span class="tag ${ch.enabled?'tag-green':'tag-red'}" style="font-size:10px;margin-left:6px">${ch.enabled?'active':'disabled'}</span>
+                        <span class="tag tag-blue" style="font-size:10px;margin-left:4px">${channelTypeLabels[ch.channel_type]||ch.channel_type}</span>
+                        <span class="tag" style="font-size:10px;margin-left:4px;background:${ch.mode==='polling'?'rgba(251,191,36,0.15);color:#f59e0b':'rgba(96,165,250,0.15);color:#60a5fa'}">${ch.mode==='polling'?'Polling':'Webhook'}</span>
+                      </div>
+                      <div style="font-size:12px;color:var(--text3);margin-top:4px">
+                        Agent: <strong>${esc(ch.agent_id ? (agents.find(a=>a.id===ch.agent_id)||{}).name || ch.agent_id : '(unbound)')}</strong>
+                      </div>
+                      ${ch.mode==='webhook' ? '<div style="font-size:12px;color:var(--text3);margin-top:2px">Webhook URL: <code style="font-size:11px;background:var(--surface2);padding:2px 6px;border-radius:4px">/api/portal/channels/'+ch.id+'/webhook</code></div>' : ''}
+                      ${ch.webhook_url ? '<div style="font-size:12px;color:var(--text3);margin-top:2px">Outbound: '+esc(ch.webhook_url)+'</div>' : ''}
                     </div>
-                    <div style="font-size:12px;color:var(--text3);margin-top:4px">
-                      Agent: <strong>${esc(ch.agent_id ? (agents.find(a=>a.id===ch.agent_id)||{}).name || ch.agent_id : '(unbound)')}</strong>
-                    </div>
-                    ${ch.mode==='webhook' ? '<div style="font-size:12px;color:var(--text3);margin-top:2px">Webhook URL: <code style="font-size:11px;background:var(--surface2);padding:2px 6px;border-radius:4px">/api/portal/channels/'+ch.id+'/webhook</code></div>' : ''}
-                    ${ch.webhook_url ? '<div style="font-size:12px;color:var(--text3);margin-top:2px">Outbound: '+esc(ch.webhook_url)+'</div>' : ''}
+                  </div>
+                  <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
+                    <button class="btn btn-sm btn-ghost" onclick="editChannel('${esc(ch.id)}')">Edit</button>
+                    ${ch.enabled
+                      ? `<button class="btn btn-sm btn-ghost" onclick="testChannel('${esc(ch.id)}')">Test</button>
+                         <button class="btn btn-sm btn-ghost" style="color:#f59e0b" onclick="toggleChannelEnabled('${esc(ch.id)}',false)">⏸ Disable</button>`
+                      : `<button class="btn btn-sm btn-ghost" disabled title="Channel disabled — enable first" style="opacity:0.5;cursor:not-allowed">Test</button>
+                         <button class="btn btn-sm btn-ghost" style="color:#10b981" onclick="toggleChannelEnabled('${esc(ch.id)}',true)">▶ Enable</button>`}
+                    <button class="btn btn-sm btn-danger" onclick="deleteChannel('${esc(ch.id)}')">Delete</button>
                   </div>
                 </div>
-                <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
-                  <button class="btn btn-sm btn-ghost" onclick="editChannel('${esc(ch.id)}')">Edit</button>
-                  ${ch.enabled
-                    ? `<button class="btn btn-sm btn-ghost" onclick="testChannel('${esc(ch.id)}')">Test</button>
-                       <button class="btn btn-sm btn-ghost" style="color:#f59e0b" onclick="toggleChannelEnabled('${esc(ch.id)}',false)">⏸ Disable</button>`
-                    : `<button class="btn btn-sm btn-ghost" disabled title="Channel disabled — enable first" style="opacity:0.5;cursor:not-allowed">Test</button>
-                       <button class="btn btn-sm btn-ghost" style="color:#10b981" onclick="toggleChannelEnabled('${esc(ch.id)}',true)">▶ Enable</button>`}
-                  <button class="btn btn-sm btn-danger" onclick="deleteChannel('${esc(ch.id)}')">Delete</button>
-                </div>
-              </div>
-            `).join('')}
+              `).join('')}
+            </div>
+          </div>
+          <div style="width:320px">
+            <h3 style="font-size:14px;margin-bottom:12px;color:var(--text2)">Event Log</h3>
+            <div id="channel-event-log" style="font-size:12px"></div>
           </div>
         </div>
-        <div style="width:320px">
-          <h3 style="font-size:14px;margin-bottom:12px;color:var(--text2)">Event Log</h3>
-          <div id="channel-event-log" style="font-size:12px"></div>
-        </div>
-      </div>
-    `;
+      `;
+    }
     loadChannelEvents();
   });
 }
