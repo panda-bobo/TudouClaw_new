@@ -51,59 +51,306 @@
 }
 [data-theme="tech"] {
   /* Tech (Aether) — single deep-indigo target. Mirrors theme-tech.css. */
-  --bg: #0d0d15;
-  --bg2: #1b1b23;
-  --surface: #1f1f27;
-  --surface2: #292932;
-  --surface3: #34343d;
-  --border: #464554;
-  --text: #e4e1ed;
-  --text2: #c7c4d7;
-  --text3: #908fa0;
-  --primary: #c0c1ff;
-  --primary-container: #8083ff;
-  --primary-text: #1000a9;
-  --secondary: #89ceff;
-  --error: #ffb4ab;
-  --success: #adff2f;
+  --bg:                 #13131b;
+  --bg2:                #1b1b23;
+  --surface:            #1f1f27;
+  --surface-low:        #1b1b23;
+  --surface-lowest:     #0d0d15;
+  --surface2:           #292932;
+  --surface3:           #34343d;
+  --surface-high:       #292932;
+  --border:             #464554;
+  --outline-variant:    #464554;
+  --outline:            #908fa0;
+  --text:               #e4e1ed;
+  --text2:              #c7c4d7;
+  --text3:              #908fa0;
+  --primary:            #c0c1ff;
+  --primary-container:  #8083ff;
+  --primary-text:       #1000a9;
+  --secondary:          #89ceff;
+  --tertiary:           #ffb783;
+  --error:              #ffb4ab;
+  --success:            #adff2f;
   --font-display: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono:    'Space Grotesk', monospace;
 }
+/* ── Stitch_23 layout: neural-background dots + atmospheric blur orbs ── */
 [data-theme="tech"] body {
   background:
-    radial-gradient(ellipse at 20% 0%, rgba(192,193,255,0.10), transparent 50%),
-    radial-gradient(ellipse at 80% 100%, rgba(137,206,255,0.06), transparent 50%),
+    radial-gradient(circle at 2px 2px, rgba(192, 193, 255, 0.05) 1px, transparent 0) 0 0 / 32px 32px,
     var(--bg);
+  position: relative;
+  overflow-x: hidden;
 }
+[data-theme="tech"] body::before {
+  content: '';
+  position: fixed;
+  top: -10%;
+  left: -10%;
+  width: 40%;
+  height: 40%;
+  background: rgba(192, 193, 255, 0.05);
+  filter: blur(120px);
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 0;
+}
+[data-theme="tech"] body::after {
+  content: '';
+  position: fixed;
+  bottom: -10%;
+  right: -10%;
+  width: 50%;
+  height: 50%;
+  background: rgba(137, 206, 255, 0.05);
+  filter: blur(120px);
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 0;
+}
+/* Top + bottom thin gradient lines (stitch decoration) */
+[data-theme="tech"] {
+  --line-top: linear-gradient(to right, transparent, rgba(137, 206, 255, 0.20), transparent);
+  --line-bot: linear-gradient(to right, transparent, rgba(192, 193, 255, 0.20), transparent);
+}
+[data-theme="tech"]::before {
+  content: '';
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 1px;
+  background: var(--line-top);
+  z-index: 1;
+  pointer-events: none;
+}
+[data-theme="tech"]::after {
+  content: '';
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  height: 1px;
+  background: var(--line-bot);
+  z-index: 1;
+  pointer-events: none;
+}
+
+/* Brand header: hub icon in glass square + Aether name */
+[data-theme="tech"] .login-header {
+  margin-bottom: 32px;
+  position: relative;
+  z-index: 2;
+}
+[data-theme="tech"] .login-header h1 {
+  font-family: var(--font-display);
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+}
+/* Replace the 🥔 emoji with a hub icon block */
+[data-theme="tech"] .login-header h1::before {
+  content: '';
+  display: block;
+  width: 64px;
+  height: 64px;
+  margin: 0 auto 16px;
+  border-radius: var(--r-md, 8px);
+  background:
+    radial-gradient(circle, rgba(192, 193, 255, 0.25) 0%, rgba(192, 193, 255, 0.08) 100%),
+    var(--surface-high);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  box-shadow: 0 0 20px rgba(192, 193, 255, 0.15);
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 24 24' fill='%23c0c1ff'%3E%3Cpath d='M12 2c-2.21 0-4 1.79-4 4 0 1.86 1.27 3.43 3 3.87V11h-3c-1.1 0-2 .9-2 2v.13c-1.73.43-3 2-3 3.87 0 2.21 1.79 4 4 4s4-1.79 4-4c0-1.86-1.27-3.43-3-3.87V13h6v.13c-1.73.43-3 2-3 3.87 0 2.21 1.79 4 4 4s4-1.79 4-4c0-1.86-1.27-3.43-3-3.87V13c0-1.1-.9-2-2-2h-3V9.87c1.73-.43 3-2 3-3.87 0-2.21-1.79-4-4-4z'/%3E%3C/svg%3E");
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 32px;
+}
+/* Hide the actual emoji text */
+[data-theme="tech"] #login-brand-h1 {
+  font-size: 0;
+  color: transparent;
+}
+[data-theme="tech"] #login-brand-h1::after {
+  content: 'Aether Orchestrator';
+  font-size: 30px;
+  color: var(--text);
+}
+[data-theme="tech"] .login-header p {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--outline);
+  margin-top: 12px;
+}
+
+/* Login container — glass-panel rounded-xl */
 [data-theme="tech"] .login-container {
-  background: rgba(31, 31, 39, 0.60);
+  background: rgba(19, 19, 27, 0.6);
   backdrop-filter: blur(20px);
   border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px !important;
+  padding: 32px !important;
+  max-width: 440px !important;
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.05),
     0 24px 60px rgba(0, 0, 0, 0.55),
     0 0 60px rgba(99, 102, 241, 0.10);
+  position: relative;
+  z-index: 2;
 }
-[data-theme="tech"] .login-header h1 {
-  font-family: 'Inter', sans-serif;
-  letter-spacing: -0.02em;
+
+/* Tab switcher — pill segmented control */
+[data-theme="tech"] #tab-admin,
+[data-theme="tech"] #tab-token {
+  font-family: var(--font-mono) !important;
+  font-size: 11px !important;
+  font-weight: 500 !important;
+  letter-spacing: 0.05em !important;
+  text-transform: uppercase !important;
+  border: 1px solid transparent !important;
+  border-radius: 8px !important;
+  padding: 10px !important;
+  transition: all 0.2s !important;
 }
+[data-theme="tech"] [style*="border-bottom:1px solid var(--border)"] {
+  border-bottom: none !important;
+}
+[data-theme="tech"] #tab-admin[style*="color:var(--primary)"],
+[data-theme="tech"] #tab-token[style*="color:var(--primary)"] {
+  background: rgba(192, 193, 255, 0.10) !important;
+  color: var(--primary) !important;
+  border-color: rgba(192, 193, 255, 0.20) !important;
+  border-bottom-color: rgba(192, 193, 255, 0.20) !important;
+}
+
+/* Form labels — mono uppercase */
 [data-theme="tech"] .form-group label {
-  font-family: 'Space Grotesk', monospace;
+  font-family: var(--font-mono);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   font-size: 11px;
+  color: var(--outline);
+  font-weight: 500;
+  margin-bottom: 8px;
 }
+
+/* Inputs — dark filled with focus glow */
+[data-theme="tech"] .form-group input {
+  background: var(--surface-lowest) !important;
+  border: 1px solid rgba(255, 255, 255, 0.10) !important;
+  border-radius: 8px !important;
+  color: var(--text) !important;
+  font-size: 14px !important;
+  height: 48px !important;
+  transition: all 0.2s !important;
+}
+[data-theme="tech"] .form-group input:focus {
+  border-color: var(--primary) !important;
+  box-shadow: 0 0 0 2px rgba(192, 193, 255, 0.20) !important;
+  background: var(--surface-lowest) !important;
+}
+[data-theme="tech"] .form-group input::placeholder {
+  color: rgba(144, 143, 160, 0.50);
+}
+
+/* Submit button — primary with glow + uppercase mono */
 [data-theme="tech"] .btn-primary {
-  background: var(--primary);
-  color: var(--primary-text);
-  font-family: 'Space Grotesk', monospace;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  box-shadow: 0 0 8px rgba(192, 193, 255, 0.20);
+  background: var(--primary) !important;
+  color: var(--primary-text) !important;
+  font-family: var(--font-mono) !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.05em !important;
+  font-size: 12px !important;
+  font-weight: 700 !important;
+  height: 48px !important;
+  border-radius: 8px !important;
+  box-shadow: 0 0 20px rgba(192, 193, 255, 0.15) !important;
+  transition: all 0.2s !important;
 }
 [data-theme="tech"] .btn-primary:hover {
   filter: brightness(1.08);
-  box-shadow: 0 0 18px rgba(192, 193, 255, 0.30);
+  box-shadow: 0 0 28px rgba(192, 193, 255, 0.30) !important;
+  transform: translateY(0) !important;
+}
+[data-theme="tech"] .btn-primary:active {
+  transform: scale(0.98) !important;
+}
+
+/* Footer notice */
+[data-theme="tech"] .login-container > div[style*="font-size:11px"]:last-child {
+  font-family: var(--font-mono) !important;
+  font-size: 10px !important;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--outline) !important;
+  margin-top: 24px !important;
+}
+
+/* Top-right toggles */
+[data-theme="tech"] .login-top-toggles button {
+  background: rgba(31, 31, 39, 0.6) !important;
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  color: var(--outline) !important;
+  font-family: var(--font-mono) !important;
+  font-size: 10px !important;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border-radius: 8px !important;
+}
+[data-theme="tech"] .login-top-toggles button:hover {
+  background: rgba(255, 255, 255, 0.04) !important;
+  color: var(--text) !important;
+  border-color: rgba(192, 193, 255, 0.30) !important;
+}
+
+/* Error block */
+[data-theme="tech"] .error {
+  background: rgba(255, 180, 171, 0.05) !important;
+  border: 1px solid rgba(255, 180, 171, 0.30) !important;
+  color: var(--error) !important;
+  font-family: var(--font-mono) !important;
+  font-size: 11px !important;
+  letter-spacing: 0.03em;
+  border-radius: 8px !important;
+}
+
+/* Forgot token link */
+[data-theme="tech"] .login-container button[onclick="showTokenHelp()"] {
+  font-family: var(--font-mono) !important;
+  font-size: 10px !important;
+  letter-spacing: 0.05em !important;
+  text-transform: uppercase !important;
+  color: var(--primary) !important;
+  opacity: 0.7;
+  text-decoration: none !important;
+}
+[data-theme="tech"] .login-container button[onclick="showTokenHelp()"]:hover {
+  opacity: 1;
+}
+
+/* Token help modal */
+[data-theme="tech"] #token-help > div {
+  background: rgba(19, 19, 27, 0.85) !important;
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  border-radius: 12px !important;
+}
+[data-theme="tech"] #token-help h3 {
+  font-family: var(--font-display) !important;
+  color: var(--text);
+}
+[data-theme="tech"] #token-help code {
+  background: var(--surface-lowest) !important;
+  border: 1px solid var(--outline-variant) !important;
+  color: var(--secondary) !important;
 }
 * { margin:0; padding:0; box-sizing:border-box; }
 body {
