@@ -30502,10 +30502,16 @@ async function renderSystemSettings(container) {
   var delegateDefault = (defaults.delegate && defaults.delegate.max_parallel_children) || 6;
   var anyDiverged = (canvasMax !== canvasDefault) || (delegateMax !== delegateDefault);
 
+  var _techSs2 = false;
+  try { _techSs2 = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
   c.innerHTML = ''
-    + '<div style="padding:24px;max-width:680px">'
-    +   '<h2 style="margin:0 0 6px;font-size:18px">系统配置</h2>'
-    +   '<div style="font-size:12px;color:var(--text3);margin-bottom:24px">影响整个部署的运行时参数。改完保存后，下次画布运行 / agent 调用立即生效。</div>'
+    + '<div style="padding:' + (_techSs2 ? 'var(--s-lg)' : '24px') + ';max-width:680px">'
+    + (_techSs2
+        ? '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px"><span>RUNTIME PARAMETERS</span><span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span></div>' +
+          '<h2 style="font-family:var(--font-display);font-size:24px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:8px 0 6px">System Configuration</h2>' +
+          '<div class="tc-text-dim" style="font-size:13px;line-height:1.55;margin-bottom:24px">Deployment-wide runtime knobs. Saved values take effect on the next canvas run / agent call.</div>'
+        : '<h2 style="margin:0 0 6px;font-size:18px">系统配置</h2>' +
+          '<div style="font-size:12px;color:var(--text3);margin-bottom:24px">影响整个部署的运行时参数。改完保存后，下次画布运行 / agent 调用立即生效。</div>')
 
     +   '<div style="background:var(--surface);border:1px solid var(--border-light);border-radius:10px;padding:18px;margin-bottom:14px">'
     +     '<div style="font-size:13px;font-weight:700;margin-bottom:4px">画布编排 (Canvas)</div>'
@@ -30572,14 +30578,32 @@ async function renderLLMTiers(container) {
       return nm ? nm : pid;
     }
 
-    var html = '<div style="margin-bottom:16px">' +
-      '<h3 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:20px;font-weight:700;margin-bottom:4px">LLM 档位 Tier Routing</h3>' +
-      '<p style="color:var(--text2);font-size:13px">把角色的「LLM 档位」映射到真实 provider/model。新角色（会议助理/PM/产品架构师）会按档位自动路由；未配置则回退全局默认。</p>' +
-      '<div style="margin-top:12px;display:flex;gap:8px">' +
-        '<button class="btn btn-primary btn-sm" onclick="_llmTiersAutofill(false)"><span class="material-symbols-outlined" style="font-size:16px">auto_fix_high</span> 智能预填（仅补空白）</button>' +
-        '<button class="btn btn-ghost btn-sm" onclick="_llmTiersAutofill(true)">强制覆盖预填</button>' +
-      '</div>' +
-    '</div>';
+    var _techLt = false;
+    try { _techLt = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+    var html = '';
+    if (_techLt) {
+      html += '<div style="margin-bottom:var(--s-lg)">' +
+        '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px">' +
+          '<span>TIER ROUTING</span>' +
+          '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
+        '</div>' +
+        '<h2 style="font-family:var(--font-display);font-size:24px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:8px 0 6px">LLM Tier Routing</h2>' +
+        '<p class="tc-text-dim" style="font-size:13px;line-height:1.55;max-width:680px">Map abstract role tiers to real provider / model bindings. New roles auto-route by tier; unbound tiers fall back to the global default.</p>' +
+        '<div style="margin-top:14px;display:flex;gap:8px">' +
+          '<button onclick="_llmTiersAutofill(false)" style="background:var(--primary-fixed);color:var(--on-primary-fixed);padding:9px 16px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:6px;box-shadow:0 4px 14px rgba(192,193,255,0.20)"><span class="material-symbols-outlined" style="font-size:14px">auto_fix_high</span> AUTO-FILL EMPTY</button>' +
+          '<button onclick="_llmTiersAutofill(true)" style="background:rgba(255,255,255,0.04);color:var(--on-surface);padding:9px 16px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:1px solid var(--outline-variant);cursor:pointer">FORCE OVERWRITE</button>' +
+        '</div>' +
+      '</div>';
+    } else {
+      html += '<div style="margin-bottom:16px">' +
+        '<h3 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:20px;font-weight:700;margin-bottom:4px">LLM 档位 Tier Routing</h3>' +
+        '<p style="color:var(--text2);font-size:13px">把角色的「LLM 档位」映射到真实 provider/model。新角色（会议助理/PM/产品架构师）会按档位自动路由；未配置则回退全局默认。</p>' +
+        '<div style="margin-top:12px;display:flex;gap:8px">' +
+          '<button class="btn btn-primary btn-sm" onclick="_llmTiersAutofill(false)"><span class="material-symbols-outlined" style="font-size:16px">auto_fix_high</span> 智能预填（仅补空白）</button>' +
+          '<button class="btn btn-ghost btn-sm" onclick="_llmTiersAutofill(true)">强制覆盖预填</button>' +
+        '</div>' +
+      '</div>';
+    }
 
     html += '<table class="table" style="width:100%;border-collapse:collapse"><thead><tr>' +
       '<th style="text-align:left;padding:10px;border-bottom:1px solid var(--border-light)">档位</th>' +
