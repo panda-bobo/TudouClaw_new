@@ -206,31 +206,70 @@
   z-index: 2;
 }
 
-/* Tab switcher — pill segmented control */
+/* Tab switcher — pill segmented control. Parent div gets converted from
+ * a flat border-bottom layout into a proper rounded pill container. */
+[data-theme="tech"] [style*="border-bottom:1px solid var(--border)"] {
+  background: var(--surface-lowest) !important;
+  border: 1px solid rgba(255, 255, 255, 0.05) !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05) !important;
+  border-radius: 10px !important;
+  padding: 6px !important;
+  gap: 4px !important;
+}
 [data-theme="tech"] #tab-admin,
 [data-theme="tech"] #tab-token {
   font-family: var(--font-mono) !important;
   font-size: 11px !important;
   font-weight: 500 !important;
-  letter-spacing: 0.05em !important;
-  text-transform: uppercase !important;
+  letter-spacing: 0.03em !important;
   border: 1px solid transparent !important;
-  border-radius: 8px !important;
+  border-bottom: 1px solid transparent !important;
+  border-radius: 6px !important;
   padding: 10px !important;
   transition: all 0.2s !important;
+  text-transform: none !important;
 }
-[data-theme="tech"] [style*="border-bottom:1px solid var(--border)"] {
-  border-bottom: none !important;
+/* Hide the original Chinese text and replace with stitch English */
+[data-theme="tech"] #tab-admin {
+  font-size: 0 !important;
 }
+[data-theme="tech"] #tab-admin::after {
+  content: 'Administrator Login';
+  font-size: 12px;
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+[data-theme="tech"] #tab-token {
+  font-size: 0 !important;
+}
+[data-theme="tech"] #tab-token::after {
+  content: 'Token Login';
+  font-size: 12px;
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+/* Active tab: glass background + primary border (matches stitch active tab look) */
 [data-theme="tech"] #tab-admin[style*="color:var(--primary)"],
 [data-theme="tech"] #tab-token[style*="color:var(--primary)"] {
   background: rgba(192, 193, 255, 0.10) !important;
   color: var(--primary) !important;
-  border-color: rgba(192, 193, 255, 0.20) !important;
-  border-bottom-color: rgba(192, 193, 255, 0.20) !important;
+  border-color: rgba(192, 193, 255, 0.30) !important;
+  border-bottom-color: rgba(192, 193, 255, 0.30) !important;
+  box-shadow: inset 0 1px 0 rgba(192, 193, 255, 0.10);
+}
+[data-theme="tech"] #tab-admin:not([style*="color:var(--primary)"])::after,
+[data-theme="tech"] #tab-token:not([style*="color:var(--primary)"])::after {
+  color: var(--outline);
+}
+[data-theme="tech"] #tab-admin:hover:not([style*="color:var(--primary)"]),
+[data-theme="tech"] #tab-token:hover:not([style*="color:var(--primary)"]) {
+  background: rgba(255, 255, 255, 0.04) !important;
+  color: var(--text) !important;
 }
 
-/* Form labels — mono uppercase */
+/* Form labels — mono uppercase. Replace 用户名/密码 with stitch labels. */
 [data-theme="tech"] .form-group label {
   font-family: var(--font-mono);
   text-transform: uppercase;
@@ -239,9 +278,77 @@
   color: var(--outline);
   font-weight: 500;
   margin-bottom: 8px;
+  position: relative;
+}
+[data-theme="tech"] .form-group [data-i18n="login.username"] {
+  font-size: 0 !important;
+  letter-spacing: 0 !important;
+}
+[data-theme="tech"] .form-group [data-i18n="login.username"]::after {
+  content: 'IDENTITY IDENTIFIER';
+  font-size: 11px;
+  letter-spacing: 0.05em;
+}
+[data-theme="tech"] .form-group [data-i18n="login.password"] {
+  font-size: 0 !important;
+  letter-spacing: 0 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+}
+[data-theme="tech"] .form-group [data-i18n="login.password"]::before {
+  content: 'ACCESS CIPHER';
+  font-size: 11px;
+  letter-spacing: 0.05em;
+}
+[data-theme="tech"] .form-group [data-i18n="login.password"]::after {
+  content: 'LOST CREDENTIAL?';
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  color: var(--primary);
+  opacity: 0.7;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: opacity 0.15s;
+}
+[data-theme="tech"] .form-group [data-i18n="login.password"]:hover::after {
+  opacity: 1;
 }
 
-/* Inputs — dark filled with focus glow */
+/* "Establish persistent session" checkbox row — added under password
+ * field. Visible only in tech mode; the existing form has no checkbox
+ * so we synthesize one via a sibling element injected by JS later. */
+[data-theme="tech"] .tech-persistent-session {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: -8px 0 16px;
+  padding: 4px 0;
+  cursor: pointer;
+  user-select: none;
+}
+[data-theme="tech"] .tech-persistent-session input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  border: 1px solid var(--outline-variant);
+  background: var(--surface-lowest);
+  cursor: pointer;
+  accent-color: var(--primary);
+  margin: 0;
+}
+[data-theme="tech"] .tech-persistent-session label {
+  font-family: var(--font-display);
+  font-size: 13px;
+  color: var(--text2);
+  font-weight: 400;
+  cursor: pointer;
+  margin: 0;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* Inputs — dark filled with focus glow + icon on the left (stitch_23) */
 [data-theme="tech"] .form-group input {
   background: var(--surface-lowest) !important;
   border: 1px solid rgba(255, 255, 255, 0.10) !important;
@@ -249,18 +356,32 @@
   color: var(--text) !important;
   font-size: 14px !important;
   height: 48px !important;
+  padding-left: 48px !important;
   transition: all 0.2s !important;
+  background-repeat: no-repeat !important;
+  background-position: 14px center !important;
+  background-size: 20px 20px !important;
+}
+[data-theme="tech"] #admin-username {
+  /* Person icon (Material Symbols person, outlined) */
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='%23908fa0' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2'/><circle cx='12' cy='7' r='4'/></svg>") !important;
+}
+[data-theme="tech"] #admin-password,
+[data-theme="tech"] #api-token {
+  /* Lock icon */
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='%23908fa0' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='11' width='18' height='11' rx='2' ry='2'/><path d='M7 11V7a5 5 0 0 1 10 0v4'/></svg>") !important;
 }
 [data-theme="tech"] .form-group input:focus {
   border-color: var(--primary) !important;
   box-shadow: 0 0 0 2px rgba(192, 193, 255, 0.20) !important;
-  background: var(--surface-lowest) !important;
+  background-color: var(--surface-lowest) !important;
 }
 [data-theme="tech"] .form-group input::placeholder {
   color: rgba(144, 143, 160, 0.50);
 }
 
-/* Submit button — primary with glow + uppercase mono */
+/* Submit button — primary with glow + uppercase mono. Replaces 登录
+ * with INITIALIZE CONNECTION + login arrow icon. */
 [data-theme="tech"] .btn-primary {
   background: var(--primary) !important;
   color: var(--primary-text) !important;
@@ -273,6 +394,25 @@
   border-radius: 8px !important;
   box-shadow: 0 0 20px rgba(192, 193, 255, 0.15) !important;
   transition: all 0.2s !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 10px !important;
+}
+[data-theme="tech"] .btn-primary[data-i18n="login.signIn"] {
+  font-size: 0 !important;
+  letter-spacing: 0 !important;
+}
+[data-theme="tech"] .btn-primary[data-i18n="login.signIn"]::before {
+  content: 'INITIALIZE CONNECTION';
+  font-size: 12px;
+  letter-spacing: 0.05em;
+}
+[data-theme="tech"] .btn-primary[data-i18n="login.signIn"]::after {
+  content: '→';
+  font-size: 18px;
+  font-weight: 400;
+  letter-spacing: 0;
 }
 [data-theme="tech"] .btn-primary:hover {
   filter: brightness(1.08);
@@ -283,14 +423,37 @@
   transform: scale(0.98) !important;
 }
 
-/* Footer notice */
+/* Footer notice — replace Chinese with English */
 [data-theme="tech"] .login-container > div[style*="font-size:11px"]:last-child {
   font-family: var(--font-mono) !important;
-  font-size: 10px !important;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--outline) !important;
+  font-size: 0 !important;
+  letter-spacing: 0 !important;
   margin-top: 24px !important;
+  padding: 12px 16px;
+  background: rgba(255, 183, 131, 0.05);
+  border: 1px solid rgba(255, 183, 131, 0.20);
+  border-radius: 8px;
+  text-align: left !important;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+[data-theme="tech"] .login-container > div[style*="font-size:11px"]:last-child::before {
+  content: '\e88e';   /* Material Symbols 'info' codepoint */
+  font-family: 'Material Symbols Outlined';
+  font-size: 18px;
+  color: var(--tertiary);
+  flex-shrink: 0;
+  font-feature-settings: 'liga';
+}
+[data-theme="tech"] .login-container > div[style*="font-size:11px"]:last-child::after {
+  content: 'Generated admin password is printed in the console on first startup. Check orchestration logs if access is denied.';
+  font-size: 12px;
+  letter-spacing: 0.01em;
+  line-height: 1.5;
+  color: var(--text2);
+  text-transform: none;
+  font-family: var(--font-display);
 }
 
 /* Top-right toggles */
