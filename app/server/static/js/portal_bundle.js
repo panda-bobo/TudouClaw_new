@@ -2194,6 +2194,12 @@ function renderCurrentView() {
   const c = document.getElementById('content');
   c.style.padding = '24px';
   actionsEl.innerHTML = '';
+  // Tech mode: ALL add/action buttons live in each page's hero, not
+  // in the topbar — keeps actions context-bound to the current page
+  // so they don't leak across hub sub-tabs (e.g. "Add Channel" was
+  // showing on Inbox tab because it lived in the topbar).
+  var _techRcv = false;
+  try { _techRcv = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
 
   try {
   switch(currentView) {
@@ -2252,7 +2258,7 @@ function renderCurrentView() {
     }
     case 'channels': {
       titleEl.textContent = t('page.channels', 'Channels');
-      actionsEl.innerHTML = '<button class="btn btn-primary btn-sm" onclick="showModal(\'add-channel\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> Add Channel</button>';
+      if (!_techRcv) actionsEl.innerHTML = '<button class="btn btn-primary btn-sm" onclick="showModal(\'add-channel\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> Add Channel</button>';
       renderChannels();
       break;
     }
@@ -2293,13 +2299,13 @@ function renderCurrentView() {
     }
     case 'scheduler': {
       titleEl.textContent = t('page.scheduled', 'Scheduled Tasks');
-      actionsEl.innerHTML = '<button class="btn btn-primary btn-sm" onclick="showCreateJob()"><span class="material-symbols-outlined" style="font-size:16px">add</span> New Job</button>';
+      if (!_techRcv) actionsEl.innerHTML = '<button class="btn btn-primary btn-sm" onclick="showCreateJob()"><span class="material-symbols-outlined" style="font-size:16px">add</span> New Job</button>';
       renderScheduler();
       break;
     }
     case 'mcpconfig': {
       titleEl.textContent = t('page.mcpConfig', 'MCP Configuration');
-      actionsEl.innerHTML = '<button class="btn btn-primary btn-sm" onclick="showAddMCP()"><span class="material-symbols-outlined" style="font-size:16px">add</span> Add MCP</button>';
+      if (!_techRcv) actionsEl.innerHTML = '<button class="btn btn-primary btn-sm" onclick="showAddMCP()"><span class="material-symbols-outlined" style="font-size:16px">add</span> Add MCP</button>';
       renderMCPConfig();
       break;
     }
@@ -2329,7 +2335,7 @@ function renderCurrentView() {
     }
     case 'workflows': {
       titleEl.textContent = t('page.workflows', 'Workflows');
-      actionsEl.innerHTML = '<button class="btn btn-primary btn-sm" onclick="showCreateWorkflowModal()"><span class="material-symbols-outlined" style="font-size:16px">add</span> New Workflow</button>';
+      if (!_techRcv) actionsEl.innerHTML = '<button class="btn btn-primary btn-sm" onclick="showCreateWorkflowModal()"><span class="material-symbols-outlined" style="font-size:16px">add</span> New Workflow</button>';
       renderWorkflows();
       break;
     }
@@ -2375,7 +2381,14 @@ function renderCurrentView() {
     }
     case 'integrations': {
       titleEl.textContent = t('nav.integrations', '集成与通知');
-      actionsEl.innerHTML = '<button class="btn btn-primary btn-sm" onclick="showModal(\'add-channel\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> Add Channel</button>';
+      // Add Channel is rendered inline by renderChannels and only on
+      // the Channels tab — this prevents the button from leaking into
+      // the Inbox tab when the user switches sub-tabs.
+      var _techIg = false;
+      try { _techIg = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+      actionsEl.innerHTML = _techIg
+        ? ''
+        : '<button class="btn btn-primary btn-sm" onclick="showModal(\'add-channel\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> Add Channel</button>';
       renderIntegrationsHub();
       break;
     }
@@ -16499,78 +16512,70 @@ function renderChannels(container) {
     if (chCountEl) chCountEl.textContent = channelList.length;
 
     if (_techCh) {
-      // Stitch_18-style: hero header + 8/4 grid (channels list + event log sidebar)
-      // Each channel = glass-card with platform icon, name, status chip,
-      // type chip, mode chip, agent binding, action buttons.
-      var modeChip = function(mode) {
-        var palette = mode === 'polling'
-          ? { bg: 'rgba(255,183,131,0.10)', bd: 'rgba(255,183,131,0.30)', fg: 'var(--tertiary)' }
-          : { bg: 'rgba(137,206,255,0.10)', bd: 'rgba(137,206,255,0.30)', fg: 'var(--secondary)' };
-        return '<span class="tc-mono-label" style="padding:3px 8px;border-radius:9999px;background:'+palette.bg+';color:'+palette.fg+';border:1px solid '+palette.bd+';font-size:10px">'+(mode||'webhook').toUpperCase()+'</span>';
-      };
-      var statusChip = function(enabled) {
-        return enabled
-          ? '<span class="tc-mono-label" style="padding:3px 8px;border-radius:9999px;background:rgba(173,255,47,0.10);color:var(--cyber-lime, #adff2f);border:1px solid rgba(173,255,47,0.30);font-size:10px;display:inline-flex;align-items:center;gap:4px"><span style="width:5px;height:5px;border-radius:50%;background:var(--cyber-lime, #adff2f);animation:pulse-dot 2s infinite ease-in-out"></span>ACTIVE</span>'
-          : '<span class="tc-mono-label" style="padding:3px 8px;border-radius:9999px;background:rgba(255,255,255,0.04);color:var(--outline);border:1px solid var(--outline-variant);font-size:10px;display:inline-flex;align-items:center;gap:4px"><span style="width:5px;height:5px;border-radius:50%;background:var(--outline)"></span>DISABLED</span>';
+      // Stitch_18 layout — horizontal channel rows + Connection Logs
+      // sidebar with traffic-light dots and stats footer.
+      var statusInfo = function(enabled, mode) {
+        if (!enabled) return { label: 'OFFLINE', color: 'var(--outline)', bg: 'rgba(255,255,255,0.04)', bd: 'var(--outline-variant)', pulse: false };
+        if (mode === 'polling') return { label: 'STANDBY', color: 'var(--secondary)', bg: 'rgba(137,206,255,0.10)', bd: 'rgba(137,206,255,0.30)', pulse: false };
+        return { label: 'ACTIVE', color: 'var(--cyber-lime, #adff2f)', bg: 'rgba(173,255,47,0.10)', bd: 'rgba(173,255,47,0.30)', pulse: true };
       };
       var platformIcon = function(t) {
         var s = (t || '').toLowerCase();
-        if (s.indexOf('slack') >= 0) return 'forum';
-        if (s.indexOf('discord') >= 0) return 'sports_esports';
-        if (s.indexOf('feishu') >= 0 || s.indexOf('lark') >= 0) return 'flutter_dash';
-        if (s.indexOf('wechat') >= 0 || s.indexOf('weixin') >= 0) return 'chat';
-        if (s.indexOf('email') >= 0 || s.indexOf('smtp') >= 0) return 'mail';
-        if (s.indexOf('webhook') >= 0 || s.indexOf('http') >= 0) return 'webhook';
-        return 'connect_without_contact';
+        if (s.indexOf('slack') >= 0) return { ic: 'forum', tint: '#4a154b22' };
+        if (s.indexOf('discord') >= 0) return { ic: 'sports_esports', tint: '#5865f222' };
+        if (s.indexOf('telegram') >= 0) return { ic: 'send', tint: '#0088cc22' };
+        if (s.indexOf('feishu') >= 0 || s.indexOf('lark') >= 0) return { ic: 'flutter_dash', tint: '#00d6b922' };
+        if (s.indexOf('wechat') >= 0 || s.indexOf('weixin') >= 0) return { ic: 'chat', tint: '#07c16022' };
+        if (s.indexOf('email') >= 0 || s.indexOf('smtp') >= 0) return { ic: 'mail', tint: '#ff6b0022' };
+        if (s.indexOf('webhook') >= 0 || s.indexOf('http') >= 0) return { ic: 'webhook', tint: '#c0c1ff22' };
+        return { ic: 'connect_without_contact', tint: '#c0c1ff22' };
       };
 
-      var channelCards = channelList.map(function(ch) {
+      var enabledCount = channelList.filter(function(ch){return ch.enabled;}).length;
+      var rowsHtml = channelList.map(function(ch) {
+        var st = statusInfo(ch.enabled, ch.mode);
+        var icon = platformIcon(ch.channel_type);
         var agentName = ch.agent_id ? ((agents.find(function(a){return a.id===ch.agent_id;})||{}).name || ch.agent_id) : null;
-        return '<div class="tc-card-glass" style="padding:18px;display:flex;flex-direction:column;gap:14px;border-top:1px solid rgba(255,255,255,0.10)' + (ch.enabled ? ';box-shadow:0 0 12px rgba(192,193,255,0.08)' : '') + '">' +
-          // Header row
-          '<div style="display:flex;align-items:flex-start;gap:14px">' +
-            '<div style="width:44px;height:44px;border-radius:var(--r-md);background:rgba(192,193,255,0.10);border:1px solid rgba(192,193,255,0.25);display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
-              '<span class="material-symbols-outlined" style="color:var(--primary);font-size:22px">'+platformIcon(ch.channel_type)+'</span>' +
-            '</div>' +
-            '<div style="flex:1;min-width:0">' +
-              '<div class="tc-mono-label" style="color:var(--outline);font-size:9px;margin-bottom:4px">'+esc((channelTypeLabels[ch.channel_type]||ch.channel_type||'').toUpperCase())+'</div>' +
-              '<div style="font-size:16px;font-weight:600;color:var(--on-surface);line-height:1.25">'+esc(ch.name)+'</div>' +
-            '</div>' +
-            '<div style="flex-shrink:0">' + statusChip(ch.enabled) + '</div>' +
+        var modeLabel = ch.mode === 'polling' ? 'Polling'
+                      : ch.mode === 'webhook' ? 'Webhook'
+                      : (channelTypeLabels[ch.channel_type] || ch.channel_type || 'Custom');
+        var attachLabel = agentName
+          ? '1 Agent Attached'
+          : 'Unbound';
+        // Disabled-row specific styling
+        var disabledStyle = ch.enabled ? '' : 'opacity:0.55;';
+        return '<div class="ach-row tc-card-glass" style="padding:18px 22px;display:flex;align-items:center;gap:18px;border-top:1px solid rgba(255,255,255,0.10);transition:border-color 0.15s;'+disabledStyle+'" ' +
+          'onmouseover="this.style.borderColor=\'rgba(192,193,255,0.30)\'" onmouseout="this.style.borderColor=\'\'">' +
+          // 40x40 platform icon block
+          '<div style="width:42px;height:42px;border-radius:var(--r-md);background:'+icon.tint+';border:1px solid rgba(255,255,255,0.06);display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+            '<span class="material-symbols-outlined" style="color:var(--primary);font-size:22px">'+icon.ic+'</span>' +
           '</div>' +
-          // Chips row
-          '<div style="display:flex;flex-wrap:wrap;gap:6px">' +
-            modeChip(ch.mode) +
-            (agentName
-              ? '<span class="tc-mono-label" style="padding:3px 8px;border-radius:9999px;background:rgba(192,193,255,0.05);color:var(--primary);border:1px solid rgba(192,193,255,0.20);font-size:10px;display:inline-flex;align-items:center;gap:4px"><span class="material-symbols-outlined" style="font-size:11px">smart_toy</span>'+esc(agentName)+'</span>'
-              : '<span class="tc-mono-label" style="padding:3px 8px;border-radius:9999px;background:rgba(255,255,255,0.04);color:var(--outline);border:1px solid var(--outline-variant);font-size:10px">UNBOUND</span>') +
+          // Body: name + status + meta
+          '<div style="flex:1;min-width:0">' +
+            '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px">' +
+              '<span style="font-size:16px;font-weight:600;color:'+(ch.enabled?'var(--on-surface)':'var(--outline)')+';line-height:1.2">'+esc(ch.name)+'</span>' +
+              '<span class="tc-mono-label" style="padding:3px 8px;border-radius:9999px;background:'+st.bg+';color:'+st.color+';border:1px solid '+st.bd+';font-size:10px;display:inline-flex;align-items:center;gap:4px">' +
+                '<span style="width:5px;height:5px;border-radius:50%;background:'+st.color+(st.pulse?';animation:pulse-dot 2s infinite ease-in-out':'')+'"></span>'+st.label +
+              '</span>' +
+            '</div>' +
+            '<div class="tc-mono-label" style="color:var(--outline);font-size:11px;letter-spacing:0.04em;display:flex;align-items:center;gap:10px;flex-wrap:wrap">' +
+              '<span style="display:inline-flex;align-items:center;gap:4px">' +
+                '<span class="material-symbols-outlined" style="font-size:12px">'+(ch.mode==='webhook'?'bolt':'sync')+'</span>'+esc(modeLabel) +
+              '</span>' +
+              '<span style="display:inline-flex;align-items:center;gap:4px">' +
+                '<span class="material-symbols-outlined" style="font-size:12px">smart_toy</span>'+(agentName?esc(agentName):attachLabel) +
+              '</span>' +
+            '</div>' +
+            (!ch.enabled ? '<div class="tc-text-dim" style="font-size:11px;margin-top:4px;font-family:var(--font-display);text-transform:none;letter-spacing:0">Disabled by administrator</div>' : '') +
           '</div>' +
-          // Webhook URL or outbound URL
-          (ch.mode === 'webhook'
-            ? '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--surface-container-lowest);border:1px solid var(--outline-variant);border-radius:var(--r-md)">' +
-                '<span class="material-symbols-outlined" style="font-size:14px;color:var(--outline)">webhook</span>' +
-                '<code style="font-family:var(--font-mono);font-size:11px;color:var(--secondary);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">/api/portal/channels/'+esc(ch.id)+'/webhook</code>' +
-              '</div>'
-            : '') +
-          (ch.webhook_url
-            ? '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--surface-container-lowest);border:1px solid var(--outline-variant);border-radius:var(--r-md)">' +
-                '<span class="material-symbols-outlined" style="font-size:14px;color:var(--outline)">north_east</span>' +
-                '<code style="font-family:var(--font-mono);font-size:11px;color:var(--on-surface);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(ch.webhook_url)+'</code>' +
-              '</div>'
-            : '') +
-          // Action footer
-          '<div style="display:flex;gap:6px;flex-wrap:wrap;padding-top:10px;border-top:1px solid var(--outline-variant);margin-top:auto">' +
-            '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="editChannel(\''+esc(ch.id)+'\')" style="font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em">' +
-              '<span class="material-symbols-outlined" style="font-size:14px">edit</span> EDIT</button>' +
+          // Action icons: enable-or-test + edit + delete
+          '<div style="display:flex;align-items:center;gap:4px;flex-shrink:0">' +
             (ch.enabled
-              ? '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="testChannel(\''+esc(ch.id)+'\')" style="font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em">' +
-                  '<span class="material-symbols-outlined" style="font-size:14px">network_check</span> TEST</button>' +
-                '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="toggleChannelEnabled(\''+esc(ch.id)+'\',false)" style="font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;color:var(--tertiary)">' +
-                  '<span class="material-symbols-outlined" style="font-size:14px">pause</span> DISABLE</button>'
-              : '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="toggleChannelEnabled(\''+esc(ch.id)+'\',true)" style="font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;color:var(--cyber-lime, #adff2f)">' +
-                  '<span class="material-symbols-outlined" style="font-size:14px">play_arrow</span> ENABLE</button>') +
-            '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="deleteChannel(\''+esc(ch.id)+'\')" style="font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;color:var(--error);margin-left:auto">' +
-              '<span class="material-symbols-outlined" style="font-size:14px">delete</span> DELETE</button>' +
+              ? '<button onclick="testChannel(\''+esc(ch.id)+'\')" title="Test" style="background:transparent;border:none;color:var(--outline);padding:8px;cursor:pointer;border-radius:var(--r-md);transition:all 0.15s;display:inline-flex;align-items:center;justify-content:center" onmouseover="this.style.background=\'rgba(255,255,255,0.04)\';this.style.color=\'var(--secondary)\'" onmouseout="this.style.background=\'\';this.style.color=\'var(--outline)\'"><span class="material-symbols-outlined" style="font-size:20px">send</span></button>' +
+                '<button onclick="editChannel(\''+esc(ch.id)+'\')" title="Edit" style="background:transparent;border:none;color:var(--outline);padding:8px;cursor:pointer;border-radius:var(--r-md);transition:all 0.15s;display:inline-flex;align-items:center;justify-content:center" onmouseover="this.style.background=\'rgba(255,255,255,0.04)\';this.style.color=\'var(--primary)\'" onmouseout="this.style.background=\'\';this.style.color=\'var(--outline)\'"><span class="material-symbols-outlined" style="font-size:20px">edit</span></button>' +
+                '<button onclick="deleteChannel(\''+esc(ch.id)+'\')" title="Delete" style="background:transparent;border:none;color:var(--outline);padding:8px;cursor:pointer;border-radius:var(--r-md);transition:all 0.15s;display:inline-flex;align-items:center;justify-content:center" onmouseover="this.style.background=\'rgba(255,180,171,0.10)\';this.style.color=\'var(--error)\'" onmouseout="this.style.background=\'\';this.style.color=\'var(--outline)\'"><span class="material-symbols-outlined" style="font-size:20px">delete</span></button>'
+              : '<button onclick="toggleChannelEnabled(\''+esc(ch.id)+'\',true)" style="background:rgba(255,255,255,0.04);border:1px solid var(--outline-variant);color:var(--outline);padding:8px 16px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;cursor:pointer">ENABLE</button>' +
+                '<button onclick="editChannel(\''+esc(ch.id)+'\')" title="Edit" style="background:transparent;border:none;color:var(--outline);padding:8px;cursor:pointer;border-radius:var(--r-md);display:inline-flex;align-items:center;justify-content:center"><span class="material-symbols-outlined" style="font-size:20px">edit</span></button>') +
           '</div>' +
         '</div>';
       }).join('');
@@ -16580,8 +16585,13 @@ function renderChannels(container) {
           // Hero
           '<div style="display:flex;justify-content:space-between;align-items:flex-end;gap:var(--s-md);flex-wrap:wrap">' +
             '<div style="flex:1;min-width:240px">' +
-              '<h2 style="font-family:var(--font-display);font-size:30px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:0">Channel Integrations</h2>' +
-              '<p class="tc-text-dim" style="font-size:14px;line-height:1.55;margin-top:8px;max-width:640px">External messaging platforms bound to agents. Inbound webhooks deliver messages to agents; outbound channels broadcast agent updates.</p>' +
+              '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px">' +
+                '<span>SYSTEM INFRASTRUCTURE</span>' +
+                '<span style="width:5px;height:5px;border-radius:50%;background:var(--outline)"></span>' +
+                '<span style="color:var(--outline)">V2.4.0 STABLE</span>' +
+              '</div>' +
+              '<h2 style="font-family:var(--font-display);font-size:30px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:8px 0 0">Channel Integrations</h2>' +
+              '<p class="tc-text-dim" style="font-size:14px;line-height:1.55;margin-top:8px;max-width:640px">Manage outbound webhooks and messaging channels for autonomous agent notifications and system-level alerts.</p>' +
             '</div>' +
             '<button onclick="showModal(\'add-channel\')" style="background:var(--primary-fixed);color:var(--on-primary-fixed);padding:10px 20px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:8px;box-shadow:0 4px 14px rgba(192,193,255,0.20)" onmouseover="this.style.filter=\'brightness(1.08)\'" onmouseout="this.style.filter=\'\'">' +
               '<span class="material-symbols-outlined" style="font-size:16px">add_circle</span> ADD CHANNEL' +
@@ -16589,21 +16599,44 @@ function renderChannels(container) {
           '</div>' +
           // 8/4 grid
           '<div style="display:grid;grid-template-columns:8fr 4fr;gap:var(--s-lg);align-items:start">' +
-            // Channels grid
+            // Channels list (vertical stack of horizontal rows)
             '<div style="display:flex;flex-direction:column;gap:var(--s-md);min-width:0">' +
-              '<h3 class="tc-mono-label" style="color:var(--on-surface-variant);font-size:12px;letter-spacing:0.08em;margin:0">CONFIGURED CHANNELS '+ '<span style="color:var(--outline);margin-left:6px">(' + channelList.length + ')</span></h3>' +
+              '<div style="display:flex;align-items:center;gap:10px">' +
+                '<h3 style="font-family:var(--font-display);font-size:18px;font-weight:600;color:var(--on-surface);margin:0">Configured Channels</h3>' +
+                '<span class="tc-mono-label" style="padding:4px 10px;border-radius:9999px;background:rgba(192,193,255,0.10);color:var(--primary);border:1px solid rgba(192,193,255,0.25);font-size:10px">' + (enabledCount<10?'0'+enabledCount:enabledCount) + ' ACTIVE</span>' +
+              '</div>' +
               (channelList.length === 0
                 ? '<div class="tc-card" style="text-align:center;padding:60px 20px;border-style:dashed">' +
                     '<span class="material-symbols-outlined" style="font-size:48px;color:var(--outline)">connect_without_contact</span>' +
                     '<div style="font-size:14px;color:var(--on-surface-variant);margin-top:14px;margin-bottom:8px">No channels configured</div>' +
-                    '<div class="tc-text-dim" style="font-size:12px;margin-bottom:20px">Connect Slack, Discord, Feishu, or webhooks to bridge agents with messaging platforms.</div>' +
+                    '<div class="tc-text-dim" style="font-size:12px;margin-bottom:20px">Connect Slack, Discord, Telegram, or webhooks to bridge agents with messaging platforms.</div>' +
                   '</div>'
-                : '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:var(--s-md)">' + channelCards + '</div>') +
+                : '<div style="display:flex;flex-direction:column;gap:14px">' + rowsHtml + '</div>') +
             '</div>' +
-            // Event log sidebar
-            '<aside class="tc-card-glass" style="padding:var(--s-lg);display:flex;flex-direction:column;gap:var(--s-md);border-top:1px solid rgba(255,255,255,0.10);min-width:0;align-self:start">' +
-              '<h4 class="tc-mono-label" style="color:var(--on-surface-variant);font-size:10px;letter-spacing:0.08em;margin:0">EVENT TRAIL</h4>' +
-              '<div id="channel-event-log" style="font-size:12px;max-height:60vh;overflow-y:auto;font-family:var(--font-mono)"></div>' +
+            // Real-time Status + Connection Logs sidebar
+            '<aside style="display:flex;flex-direction:column;gap:var(--s-md);min-width:0;align-self:start">' +
+              '<div style="display:flex;align-items:center;gap:8px">' +
+                '<h3 style="font-family:var(--font-display);font-size:16px;font-weight:600;color:var(--on-surface);margin:0">Real-time Status</h3>' +
+                '<span style="width:8px;height:8px;border-radius:50%;background:var(--cyber-lime, #adff2f);animation:pulse-dot 2s infinite ease-in-out;box-shadow:0 0 8px var(--cyber-lime, #adff2f)"></span>' +
+              '</div>' +
+              '<div class="tc-card-glass" style="padding:0;display:flex;flex-direction:column;border-top:1px solid rgba(255,255,255,0.10);overflow:hidden">' +
+                // Connection Logs header with traffic-light dots
+                '<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--outline-variant);background:rgba(0,0,0,0.20)">' +
+                  '<span class="tc-mono-label" style="color:var(--on-surface-variant);font-size:10px;letter-spacing:0.08em">CONNECTION LOGS</span>' +
+                  '<div style="display:flex;gap:6px">' +
+                    '<span style="width:9px;height:9px;border-radius:50%;background:#ff5f57;opacity:0.8"></span>' +
+                    '<span style="width:9px;height:9px;border-radius:50%;background:#ffbd2e;opacity:0.8"></span>' +
+                    '<span style="width:9px;height:9px;border-radius:50%;background:#28c840;opacity:0.8"></span>' +
+                  '</div>' +
+                '</div>' +
+                // Log entries area
+                '<div id="channel-event-log" style="font-family:var(--font-mono);font-size:11px;line-height:1.65;letter-spacing:0.02em;padding:14px 16px;max-height:54vh;overflow-y:auto;color:var(--on-surface-variant)"></div>' +
+                // Stats footer
+                '<div style="display:flex;justify-content:space-between;padding:10px 16px;border-top:1px solid var(--outline-variant);background:rgba(0,0,0,0.20);font-family:var(--font-mono);font-size:10px;letter-spacing:0.05em;color:var(--outline)">' +
+                  '<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:6px;height:6px;border-radius:50%;background:var(--cyber-lime, #adff2f)"></span>102 Requests / Hour</span>' +
+                  '<span style="display:inline-flex;align-items:center;gap:4px"><span class="material-symbols-outlined" style="font-size:12px">timer</span>142ms Avg Latency</span>' +
+                '</div>' +
+              '</div>' +
             '</aside>' +
           '</div>' +
         '</div>';
@@ -31738,10 +31771,16 @@ function _inboxFmtTs(ts) {
 
 async function renderInbox() {
   var c = document.getElementById('content');
-  // Build agent selector from loaded agents list.
+  var _techIb = false;
+  try { _techIb = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
   var visibleAgents = (agents || []).filter(function(a){ return !a.parent_id; });
   if (!visibleAgents.length) {
-    c.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text3)">' + window.t('inbox.noMessages', '暂无 agent，无法查看收件箱。') + '</div>';
+    c.innerHTML = _techIb
+      ? '<div class="tc-card" style="padding:60px 20px;text-align:center;border-style:dashed">' +
+          '<span class="material-symbols-outlined" style="font-size:48px;color:var(--outline)">inbox</span>' +
+          '<div style="font-size:14px;color:var(--on-surface-variant);margin-top:14px">No agents available — inbox is empty.</div>' +
+        '</div>'
+      : '<div style="padding:40px;text-align:center;color:var(--text3)">' + window.t('inbox.noMessages', '暂无 agent，无法查看收件箱。') + '</div>';
     return;
   }
   if (!_inboxSelectedAgent ||
@@ -31754,18 +31793,46 @@ async function renderInbox() {
     return '<option value="'+_inboxEsc(a.id)+'"'+sel+'>'+_inboxEsc(a.name)+' ('+_inboxEsc(a.id.slice(0,8))+')</option>';
   }).join('');
 
-  c.innerHTML =
-      '<div style="max-width:980px">' +
-        '<div style="display:flex;gap:12px;align-items:center;margin-bottom:16px;flex-wrap:wrap">' +
-          '<label style="font-size:12px;color:var(--text3)">当前查看：</label>' +
-          '<select id="inbox-agent-sel" onchange="_inboxOnAgentChange(this.value)" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">' +
-            opts + '</select>' +
-          '<label style="font-size:12px;color:var(--text3);margin-left:8px"><input type="checkbox" id="inbox-show-read" onchange="_inboxRefresh()" checked /> 显示已读</label>' +
-          '<label style="font-size:12px;color:var(--text3)"><input type="checkbox" id="inbox-show-acked" onchange="_inboxRefresh()" /> 显示已确认</label>' +
-          '<span id="inbox-summary" style="margin-left:auto;font-size:12px;color:var(--text3)"></span>' +
+  if (_techIb) {
+    // Stitch-style table layout: hero + filter row + table inside glass shell
+    c.innerHTML = '' +
+      '<div style="display:flex;flex-direction:column;gap:var(--s-lg)">' +
+        // Hero
+        '<div style="display:flex;justify-content:space-between;align-items:flex-end;gap:var(--s-md);flex-wrap:wrap">' +
+          '<div style="flex:1;min-width:240px">' +
+            '<h2 style="font-family:var(--font-display);font-size:30px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:0">Agent Inbox</h2>' +
+            '<p class="tc-text-dim" style="font-size:14px;line-height:1.55;margin-top:8px;max-width:640px">Cross-agent messages, system notifications, and replies awaiting review. Filter by agent and read state.</p>' +
+          '</div>' +
         '</div>' +
-        '<div id="inbox-list" style="min-height:120px">加载中…</div>' +
+        // Filter bar
+        '<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:14px 18px;background:var(--surface-container-low);border:1px solid var(--outline-variant);border-radius:var(--r-md)">' +
+          '<label class="tc-mono-label" style="color:var(--outline);font-size:10px">VIEWING AGENT</label>' +
+          '<select id="inbox-agent-sel" onchange="_inboxOnAgentChange(this.value)" style="padding:8px 12px;background:var(--surface-container-lowest);border:1px solid var(--outline-variant);border-radius:var(--r-md);color:var(--on-surface);font-size:12px;font-family:var(--font-mono);cursor:pointer">' + opts + '</select>' +
+          '<label style="font-family:var(--font-mono);font-size:10px;letter-spacing:0.05em;text-transform:uppercase;color:var(--outline);display:inline-flex;align-items:center;gap:6px;cursor:pointer">' +
+            '<input type="checkbox" id="inbox-show-read" onchange="_inboxRefresh()" checked style="accent-color:var(--primary)"> SHOW READ</label>' +
+          '<label style="font-family:var(--font-mono);font-size:10px;letter-spacing:0.05em;text-transform:uppercase;color:var(--outline);display:inline-flex;align-items:center;gap:6px;cursor:pointer">' +
+            '<input type="checkbox" id="inbox-show-acked" onchange="_inboxRefresh()" style="accent-color:var(--primary)"> SHOW ACKED</label>' +
+          '<span id="inbox-summary" class="tc-mono-label" style="margin-left:auto;color:var(--outline);font-size:10px"></span>' +
+        '</div>' +
+        // Table area inside glass shell
+        '<div class="tc-card-glass" style="padding:0;overflow:hidden;border-top:1px solid rgba(255,255,255,0.10)">' +
+          '<div id="inbox-list" style="min-height:120px"></div>' +
+        '</div>' +
       '</div>';
+  } else {
+    c.innerHTML =
+        '<div style="max-width:980px">' +
+          '<div style="display:flex;gap:12px;align-items:center;margin-bottom:16px;flex-wrap:wrap">' +
+            '<label style="font-size:12px;color:var(--text3)">当前查看：</label>' +
+            '<select id="inbox-agent-sel" onchange="_inboxOnAgentChange(this.value)" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">' +
+              opts + '</select>' +
+            '<label style="font-size:12px;color:var(--text3);margin-left:8px"><input type="checkbox" id="inbox-show-read" onchange="_inboxRefresh()" checked /> 显示已读</label>' +
+            '<label style="font-size:12px;color:var(--text3)"><input type="checkbox" id="inbox-show-acked" onchange="_inboxRefresh()" /> 显示已确认</label>' +
+            '<span id="inbox-summary" style="margin-left:auto;font-size:12px;color:var(--text3)"></span>' +
+          '</div>' +
+          '<div id="inbox-list" style="min-height:120px">加载中…</div>' +
+        '</div>';
+  }
 
   await _inboxRefresh();
 }
@@ -31781,6 +31848,8 @@ async function _inboxRefresh() {
   if (!listEl) return;
   var aid = _inboxSelectedAgent;
   if (!aid) { listEl.innerHTML = '<div style="color:var(--text3)">请选择 agent</div>'; return; }
+  var _techIb = false;
+  try { _techIb = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
   var showRead = !!(document.getElementById('inbox-show-read') || {}).checked;
   var showAcked = !!(document.getElementById('inbox-show-acked') || {}).checked;
   var qs = '?agent_id=' + encodeURIComponent(aid) +
@@ -31790,11 +31859,71 @@ async function _inboxRefresh() {
   try {
     var d = await api('GET', '/api/portal/inbox/list' + qs);
     var msgs = (d && d.messages) || [];
-    if (sumEl) sumEl.textContent = '共 ' + msgs.length + ' 条 (未读 ' + (d.unread_count||0) + ')';
+    if (sumEl) {
+      sumEl.textContent = _techIb
+        ? msgs.length + ' MESSAGES · ' + (d.unread_count||0) + ' UNREAD'
+        : '共 ' + msgs.length + ' 条 (未读 ' + (d.unread_count||0) + ')';
+    }
     if (!msgs.length) {
-      listEl.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text3);border:1px dashed var(--border);border-radius:8px">空</div>';
+      listEl.innerHTML = _techIb
+        ? '<div class="tc-text-dim" style="padding:60px 20px;text-align:center;font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em">NO MESSAGES</div>'
+        : '<div style="padding:40px;text-align:center;color:var(--text3);border:1px dashed var(--border);border-radius:8px">空</div>';
       return;
     }
+
+    if (_techIb) {
+      // Stitch-style table: STATE / PRIORITY / FROM / MESSAGE / TIME / ACTIONS
+      var stateChip = function(state) {
+        if (state === 'new') return '<span class="tc-mono-label" style="padding:3px 8px;border-radius:9999px;background:rgba(137,206,255,0.10);color:var(--secondary);border:1px solid rgba(137,206,255,0.30);font-size:10px;display:inline-flex;align-items:center;gap:4px"><span style="width:5px;height:5px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>NEW</span>';
+        if (state === 'read') return '<span class="tc-mono-label" style="padding:3px 8px;border-radius:9999px;background:rgba(255,255,255,0.04);color:var(--outline);border:1px solid var(--outline-variant);font-size:10px">READ</span>';
+        if (state === 'acked') return '<span class="tc-mono-label" style="padding:3px 8px;border-radius:9999px;background:rgba(173,255,47,0.10);color:var(--cyber-lime, #adff2f);border:1px solid rgba(173,255,47,0.30);font-size:10px;display:inline-flex;align-items:center;gap:4px"><span class="material-symbols-outlined" style="font-size:11px">check</span>ACKED</span>';
+        return '<span class="tc-mono-label" style="padding:3px 8px;border-radius:9999px;background:rgba(255,255,255,0.04);color:var(--outline);border:1px solid var(--outline-variant);font-size:10px">' + _inboxEsc((state||'').toUpperCase()) + '</span>';
+      };
+      var prioChip = function(p) {
+        if (p === 'urgent') return '<span class="tc-mono-label" style="color:var(--error);font-size:10px;display:inline-flex;align-items:center;gap:3px"><span class="material-symbols-outlined" style="font-size:12px">priority_high</span>URGENT</span>';
+        if (p === 'low') return '<span class="tc-mono-label" style="color:var(--outline);font-size:10px">LOW</span>';
+        return '<span class="tc-mono-label" style="color:var(--on-surface-variant);font-size:10px">NORMAL</span>';
+      };
+
+      var rows = msgs.map(function(m) {
+        var preview = _inboxEsc((m.content || '').slice(0, 100)) + ((m.content || '').length > 100 ? '…' : '');
+        var actions = '';
+        if (m.state !== 'acked') {
+          actions += '<button onclick="_inboxAck(\''+_inboxEsc(m.id)+'\')" title="Ack" style="background:transparent;border:none;color:var(--outline);padding:6px;cursor:pointer;border-radius:var(--r-md);display:inline-flex;align-items:center;justify-content:center" onmouseover="this.style.color=\'var(--cyber-lime, #adff2f)\';this.style.background=\'rgba(173,255,47,0.10)\'" onmouseout="this.style.color=\'var(--outline)\';this.style.background=\'\'"><span class="material-symbols-outlined" style="font-size:18px">check_circle</span></button>';
+        }
+        actions += '<button onclick="_inboxReply(\''+_inboxEsc(m.id)+'\',\''+_inboxEsc(m.from_agent)+'\')" title="Reply" style="background:transparent;border:none;color:var(--outline);padding:6px;cursor:pointer;border-radius:var(--r-md);display:inline-flex;align-items:center;justify-content:center" onmouseover="this.style.color=\'var(--primary)\';this.style.background=\'rgba(192,193,255,0.10)\'" onmouseout="this.style.color=\'var(--outline)\';this.style.background=\'\'"><span class="material-symbols-outlined" style="font-size:18px">reply</span></button>';
+        if (m.thread_id && m.thread_id !== m.id) {
+          actions += '<button onclick="_inboxShowThread(\''+_inboxEsc(m.thread_id)+'\')" title="Thread" style="background:transparent;border:none;color:var(--outline);padding:6px;cursor:pointer;border-radius:var(--r-md);display:inline-flex;align-items:center;justify-content:center" onmouseover="this.style.color=\'var(--secondary)\'" onmouseout="this.style.color=\'var(--outline)\'"><span class="material-symbols-outlined" style="font-size:18px">forum</span></button>';
+        }
+        return '<tr style="border-bottom:1px solid rgba(255,255,255,0.05);transition:background 0.15s" onmouseover="this.style.background=\'rgba(255,255,255,0.03)\'" onmouseout="this.style.background=\'transparent\'">' +
+          '<td style="padding:14px 18px">'+stateChip(m.state)+'</td>' +
+          '<td style="padding:14px 18px">'+prioChip(m.priority)+'</td>' +
+          '<td style="padding:14px 18px"><div style="display:flex;align-items:center;gap:8px"><span class="material-symbols-outlined" style="font-size:16px;color:var(--outline)">smart_toy</span><span style="font-size:13px;color:var(--on-surface);font-weight:500">'+_inboxEsc(m.from_agent)+'</span></div></td>' +
+          '<td style="padding:14px 18px;max-width:340px"><div style="font-size:13px;color:var(--on-surface);line-height:1.5;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">'+preview+'</div></td>' +
+          '<td style="padding:14px 18px;font-family:var(--font-mono);font-size:11px;letter-spacing:0.03em;color:var(--outline);white-space:nowrap">'+_inboxFmtTs(m.created_at)+'</td>' +
+          '<td style="padding:14px 18px;white-space:nowrap"><div style="display:flex;gap:2px;justify-content:flex-end">'+actions+'</div></td>' +
+        '</tr>';
+      }).join('');
+
+      listEl.innerHTML =
+        '<table style="width:100%;border-collapse:collapse;background:transparent">' +
+          '<thead>' +
+            '<tr style="border-bottom:1px solid rgba(255,255,255,0.10);background:rgba(255,255,255,0.03)">' +
+              '<th class="tc-mono-label" style="padding:14px 18px;text-align:left;color:var(--outline);font-size:10px;letter-spacing:0.08em;font-weight:500">State</th>' +
+              '<th class="tc-mono-label" style="padding:14px 18px;text-align:left;color:var(--outline);font-size:10px;letter-spacing:0.08em;font-weight:500">Priority</th>' +
+              '<th class="tc-mono-label" style="padding:14px 18px;text-align:left;color:var(--outline);font-size:10px;letter-spacing:0.08em;font-weight:500">From</th>' +
+              '<th class="tc-mono-label" style="padding:14px 18px;text-align:left;color:var(--outline);font-size:10px;letter-spacing:0.08em;font-weight:500">Message</th>' +
+              '<th class="tc-mono-label" style="padding:14px 18px;text-align:left;color:var(--outline);font-size:10px;letter-spacing:0.08em;font-weight:500">Time</th>' +
+              '<th class="tc-mono-label" style="padding:14px 18px;text-align:right;color:var(--outline);font-size:10px;letter-spacing:0.08em;font-weight:500">Actions</th>' +
+            '</tr>' +
+          '</thead>' +
+          '<tbody>' + rows + '</tbody>' +
+        '</table>';
+      _inboxFetchCount();
+      return;
+    }
+
+    // Legacy
     var html = '<div style="display:flex;flex-direction:column;gap:8px">';
     msgs.forEach(function(m){
       var badge = '', border = 'var(--border)';
