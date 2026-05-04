@@ -29784,10 +29784,12 @@ function renderIntegrationsHub() {
 function renderIntegrationsHubTech() {
   var c = document.getElementById('content');
   if (!c) return;
+  // Meetings tab removed per user request — meetings already live in
+  // the Projects hub's "Meetings" tab and don't belong here. Keeping
+  // Channels + Inbox.
   var tabs = [
     { id: 'channels', label: 'Channels', icon: 'forum' },
     { id: 'inbox',    label: 'Inbox',    icon: 'inbox'  },
-    { id: 'meetings', label: 'Meetings', icon: 'groups' },
   ];
   var r = _techHubPage({ label: 'System Feed', title: 'Integrations & Notifications' }, tabs, 'integrations');
   c.innerHTML = r.html;
@@ -29800,8 +29802,6 @@ function renderIntegrationsHubTech() {
       renderChannels(sc);
     } else if (r.current === 'inbox' && typeof renderInbox === 'function') {
       renderInbox();
-    } else if (r.current === 'meetings' && typeof renderMeetingsTab === 'function') {
-      renderMeetingsTab();
     } else {
       sc.innerHTML = '<div class="tc-card tc-text-dim" style="padding:var(--s-lg)">Tab not yet implemented.</div>';
     }
@@ -31471,24 +31471,103 @@ async function loadPendingSkills() {
 }
 
 function _renderDraftCard(d) {
+  var _techDc = false;
+  try { _techDc = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
   var statusColors = { draft: '#60a5fa', exported: '#a78bfa', approved: '#10b981', rejected: '#ef4444' };
   var statusLabels = { draft: '草稿', exported: '已导出', approved: '已批准', rejected: '已拒绝' };
+  var statusLabelsEN = { draft: 'DRAFT', exported: 'EXPORTED', approved: 'APPROVED', rejected: 'REJECTED' };
   var statusColor = statusColors[d.status] || '#94a3b8';
-  var statusLabel = statusLabels[d.status] || d.status;
+  var statusLabel = (_techDc ? statusLabelsEN[d.status] : statusLabels[d.status]) || d.status;
   var confPct = Math.round((d.confidence || 0) * 100);
   var confColor = confPct >= 80 ? '#10b981' : confPct >= 60 ? '#f59e0b' : '#ef4444';
   var codeCount = d.code_files ? Object.keys(d.code_files).length : 0;
   var dateStr = d.created_at ? _formatDate(d.created_at) : '';
   // Source inference
   var sourceLabel;
-  if (d.id && d.id.indexOf('-SUB-') > -1) sourceLabel = '🤖 Agent 提交';
-  else if (d.id && d.id.indexOf('-IMP-') > -1) sourceLabel = '📂 工作区导入';
-  else if (d.source_experiences && d.source_experiences.length) sourceLabel = '💡 ' + d.source_experiences.length + ' 经验';
-  else sourceLabel = '🔬 经验提炼';
+  if (_techDc) {
+    if (d.id && d.id.indexOf('-SUB-') > -1) sourceLabel = 'AGENT-AUTHORED';
+    else if (d.id && d.id.indexOf('-IMP-') > -1) sourceLabel = 'WORKSPACE-IMPORT';
+    else if (d.source_experiences && d.source_experiences.length) sourceLabel = d.source_experiences.length + ' XP';
+    else sourceLabel = 'XP-DISTILLED';
+  } else {
+    if (d.id && d.id.indexOf('-SUB-') > -1) sourceLabel = '🤖 Agent 提交';
+    else if (d.id && d.id.indexOf('-IMP-') > -1) sourceLabel = '📂 工作区导入';
+    else if (d.source_experiences && d.source_experiences.length) sourceLabel = '💡 ' + d.source_experiences.length + ' 经验';
+    else sourceLabel = '🔬 经验提炼';
+  }
 
-  // Emoji for skill — pick from name/runtime heuristically
-  var emoji;
+  // Material Symbols icon mapping (replaces emoji in tech mode)
   var nameL = (d.name || '').toLowerCase();
+  var matIcon;
+  if (d.runtime === 'python') matIcon = 'code';
+  else if (/ppt|slide|deck/.test(nameL)) matIcon = 'slideshow';
+  else if (/email|mail/.test(nameL)) matIcon = 'mail';
+  else if (/web|http|fetch/.test(nameL)) matIcon = 'language';
+  else if (/file|doc/.test(nameL)) matIcon = 'description';
+  else if (/data|analy|chart/.test(nameL)) matIcon = 'analytics';
+  else if (/screenshot|image/.test(nameL)) matIcon = 'image';
+  else if (/video|media/.test(nameL)) matIcon = 'videocam';
+  else if (/git|code|repo/.test(nameL)) matIcon = 'integration_instructions';
+  else if (/test|verify|check/.test(nameL)) matIcon = 'verified';
+  else matIcon = 'auto_fix_high';
+
+  if (_techDc) {
+    // Stitch_21 style: glass-card with icon block top-left, status chip
+    // top-right, name + role row, description, footer stat row + action
+    // bar
+    var actionsTech = '';
+    if (d.status === 'draft' || d.status === 'exported') {
+      actionsTech = '<button onclick="event.stopPropagation();approveDraft(\'' + esc(d.id) + '\',\'' + esc(d.name) + '\')" style="flex:1;background:var(--primary-fixed);color:var(--on-primary-fixed);padding:8px 14px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:none;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;box-shadow:0 4px 14px rgba(192,193,255,0.20)">' +
+        '<span class="material-symbols-outlined" style="font-size:14px">check_circle</span> APPROVE</button>' +
+        '<button onclick="event.stopPropagation();rejectDraft(\'' + esc(d.id) + '\',\'' + esc(d.name) + '\')" style="background:rgba(255,255,255,0.04);color:var(--error);padding:8px 12px;border:1px solid var(--outline-variant);border-radius:var(--r-md);cursor:pointer;display:inline-flex;align-items:center;font-family:var(--font-mono);font-size:11px" title="Reject">' +
+        '<span class="material-symbols-outlined" style="font-size:14px">close</span></button>';
+    } else {
+      actionsTech = '<button onclick="event.stopPropagation();showDraftDetail(\'' + esc(d.id) + '\')" style="flex:1;background:rgba(255,255,255,0.04);color:var(--on-surface);padding:8px 14px;border:1px solid var(--outline-variant);border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px">' +
+        '<span class="material-symbols-outlined" style="font-size:14px">visibility</span> VIEW DETAIL</button>';
+    }
+    var descT = esc(d.description || '').slice(0, 110);
+    if ((d.description || '').length > 110) descT += '…';
+    return '' +
+      '<div class="tc-card-glass" style="position:relative;padding:18px;display:flex;flex-direction:column;gap:12px;cursor:pointer;border-top:1px solid rgba(255,255,255,0.10);transition:all 0.18s" ' +
+        'onclick="showDraftDetail(\'' + esc(d.id) + '\')" ' +
+        'onmouseover="this.style.borderColor=\'rgba(192,193,255,0.30)\';this.style.transform=\'translateY(-2px)\'" ' +
+        'onmouseout="this.style.borderColor=\'\';this.style.transform=\'\'">' +
+        // Status chip top-right
+        '<span class="tc-mono-label" style="position:absolute;top:14px;right:14px;padding:3px 8px;border-radius:9999px;background:' + statusColor + '22;color:' + statusColor + ';border:1px solid ' + statusColor + '40;font-size:10px;letter-spacing:0.05em">' + esc(statusLabel) + '</span>' +
+        // Header: icon + name + role
+        '<div style="display:flex;align-items:flex-start;gap:14px;padding-right:80px">' +
+          '<div style="width:48px;height:48px;border-radius:var(--r-md);background:rgba(192,193,255,0.10);border:1px solid rgba(192,193,255,0.25);display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+            '<span class="material-symbols-outlined" style="color:var(--primary);font-size:24px">' + matIcon + '</span>' +
+          '</div>' +
+          '<div style="flex:1;min-width:0">' +
+            '<div class="tc-mono-label" style="color:var(--outline);font-size:9px;margin-bottom:4px">' + esc((d.role || 'general').toUpperCase()) + ' · ' + (d.runtime === 'python' ? 'PYTHON' : 'MARKDOWN') + '</div>' +
+            '<div style="font-size:16px;font-weight:600;color:var(--on-surface);line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(d.name) + '</div>' +
+          '</div>' +
+        '</div>' +
+        // Description
+        '<div class="tc-text-dim" style="font-size:12px;line-height:1.55;min-height:38px">' + descT + '</div>' +
+        // Footer stats
+        '<div style="display:flex;align-items:center;justify-content:space-between;font-family:var(--font-mono);font-size:10px;letter-spacing:0.03em;color:var(--outline);padding-top:10px;border-top:1px solid var(--outline-variant)">' +
+          '<span style="display:inline-flex;align-items:center;gap:4px"><span class="material-symbols-outlined" style="font-size:13px">target</span><span style="color:' + confColor + ';font-weight:700">' + confPct + '%</span></span>' +
+          '<span style="display:inline-flex;align-items:center;gap:4px"><span class="material-symbols-outlined" style="font-size:13px">flash_on</span>' + sourceLabel + '</span>' +
+          (codeCount ? '<span style="display:inline-flex;align-items:center;gap:4px"><span class="material-symbols-outlined" style="font-size:13px">description</span>' + codeCount + '</span>' : '') +
+          '<span>' + esc(dateStr) + '</span>' +
+        '</div>' +
+        // Action bar
+        '<div style="display:flex;gap:8px;margin-top:auto">' + actionsTech + '</div>' +
+      '</div>';
+  }
+
+  // Legacy
+  var actions = '';
+  if (d.status === 'draft' || d.status === 'exported') {
+    actions = '<button class="btn btn-primary btn-sm" style="flex:1" onclick="event.stopPropagation();approveDraft(\'' + esc(d.id) + '\',\'' + esc(d.name) + '\')"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">check_circle</span> 批准</button>'
+      + '<button class="btn btn-sm" style="color:var(--error)" title="拒绝" onclick="event.stopPropagation();rejectDraft(\'' + esc(d.id) + '\',\'' + esc(d.name) + '\')"><span class="material-symbols-outlined" style="font-size:14px">close</span></button>';
+  } else {
+    actions = '<button class="btn btn-sm" style="flex:1" onclick="event.stopPropagation();showDraftDetail(\'' + esc(d.id) + '\')"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">visibility</span> 详情</button>';
+  }
+
+  var emoji;
   if (d.runtime === 'python') emoji = '🐍';
   else if (/ppt|slide|deck/.test(nameL)) emoji = '📊';
   else if (/email|mail/.test(nameL)) emoji = '📧';
@@ -31500,14 +31579,6 @@ function _renderDraftCard(d) {
   else if (/git|code|repo/.test(nameL)) emoji = '💻';
   else if (/test|verify|check/.test(nameL)) emoji = '✅';
   else emoji = '⚡';
-
-  var actions = '';
-  if (d.status === 'draft' || d.status === 'exported') {
-    actions = '<button class="btn btn-primary btn-sm" style="flex:1" onclick="event.stopPropagation();approveDraft(\'' + esc(d.id) + '\',\'' + esc(d.name) + '\')"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">check_circle</span> 批准</button>'
-      + '<button class="btn btn-sm" style="color:var(--error)" title="拒绝" onclick="event.stopPropagation();rejectDraft(\'' + esc(d.id) + '\',\'' + esc(d.name) + '\')"><span class="material-symbols-outlined" style="font-size:14px">close</span></button>';
-  } else {
-    actions = '<button class="btn btn-sm" style="flex:1" onclick="event.stopPropagation();showDraftDetail(\'' + esc(d.id) + '\')"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">visibility</span> 详情</button>';
-  }
 
   var desc = esc(d.description || '').slice(0, 100);
   if ((d.description || '').length > 100) desc += '…';
