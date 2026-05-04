@@ -2582,6 +2582,589 @@ function _toggleAgentNode(cls, nodeId) {
   renderAgentsList();
 }
 
+
+// ============ Tech (Aether) theme — Agent Directory ============
+// Restructured per user request 2026-05-04:
+//   • The 3 agent_class buckets (advisor / enterprise / personal)
+//     no longer carry meaningful product distinction — all merged.
+//   • Top tabs are now NODE-driven: "All Nodes" + one tab per
+//     registered hub-worker node. Selecting a tab filters the
+//     agent grid to that node's agents.
+// Reuses _getNodeForAgent / _getNodeLabel / _getNodeStatus helpers
+// from the legacy renderer, plus _robotIconUrl for avatars.
+
+window._agentsTechSelectedNode = window._agentsTechSelectedNode || 'all';
+
+function _switchAgentNodeTab(nid) {
+  window._agentsTechSelectedNode = nid;
+  renderAgentsListTech();
+}
+window._switchAgentNodeTab = _switchAgentNodeTab;
+
+// Map agent role → category icon. The stitch design uses a single
+// large category glyph in the card's top-left (code/analytics/security
+// /hub/psychology/draft); we mirror that pattern using Material Symbols
+// chosen to match each role's actual job. Unknown roles fall back to
+// the generic robot.
+var _ROLE_CATEGORY_ICON = {
+  coder:             'code',
+  reviewer:          'fact_check',
+  architect:         'architecture',
+  devops:            'hub',
+  data:              'analytics',
+  researcher:        'psychology',
+  designer:          'palette',
+  pm:                'assignment',
+  tester:            'bug_report',
+  marketing:         'campaign',
+  media:             'mic',
+  meeting:           'voice_chat',
+  specialist:        'workspace_premium',
+  tech_expert:       'settings_input_component',
+  ceo:               'star',
+  cto:               'memory',
+  product_architect: 'inventory_2',
+  general:           'smart_toy',
+};
+
+// Status → cyber accent color (using existing CSS vars). Each status
+// gets its own glyph + tint pair.
+var _STATUS_META = {
+  idle:    { dotCls: 'online', tone: 'success', label: 'ACTIVE'  },
+  busy:    { dotCls: 'busy',   tone: 'warn',    label: 'WORKING' },
+  error:   { dotCls: 'error',  tone: 'error',   label: 'ERROR'   },
+  offline: { dotCls: '',       tone: 'neutral', label: 'OFFLINE' },
+};
+
+// Aether portrait gallery — realistic AI-rendered persona headshots
+// sourced from stitch_agent_32 (14 unique role portraits, sci-fi
+// aesthetic). Files at /static/robots/aether/aether_<role>.png.
+//
+// Direct hits (file exists for these roles):
+var _AETHER_PORTRAITS = new Set([
+  'ceo', 'cto', 'coder', 'reviewer', 'tester', 'pm', 'marketing',
+  'developer', 'support', 'data', 'security', 'designer',
+  'researcher', 'general',
+]);
+
+// Alias map for our roles that don't have a literal portrait file —
+// reuse the nearest archetype.
+var _AETHER_ALIASES = {
+  architect:         'cto',          // tech leadership
+  devops:            'security',     // ops + reliability vibe
+  product_architect: 'pm',           // PM-flavored
+  tech_expert:       'researcher',   // analytical
+  specialist:        'researcher',   // niche-domain expert
+  media:             'marketing',    // communicator class
+  meeting:           'support',      // friendly note-taker
+};
+
+function _aetherAvatarUrl(role) {
+  var r = String(role || '').toLowerCase();
+  if (_AETHER_PORTRAITS.has(r)) {
+    return '/static/robots/aether/aether_' + r + '.png';
+  }
+  var alias = _AETHER_ALIASES[r];
+  if (alias && _AETHER_PORTRAITS.has(alias)) {
+    return '/static/robots/aether/aether_' + alias + '.png';
+  }
+  // Last resort: the generic portrait. Anything we can't match still
+  // gets a sci-fi look instead of falling back to pixel art.
+  return '/static/robots/aether/aether_general.png';
+}
+
+function _renderAgentCardTech(a) {
+  var role = (a.role || 'general').toLowerCase();
+  var statusKey = (a.status || 'offline').toLowerCase();
+  var sm = _STATUS_META[statusKey] || _STATUS_META.offline;
+  var prof = a.profile || {};
+  // Prefer realistic aether portrait; fall back to pixel-art robot.
+  var aether = _aetherAvatarUrl(role);
+  var avatarUrl = aether || _robotIconUrl(a.robot_avatar || ('robot_' + (a.role || 'general')));
+  var isAether = !!aether;
+
+  // Persona archetype label (stitch_agent_10 uses STRATEGIST/ARCHITECT/
+  // EXECUTOR/AUDITOR — short uppercase mono labels above the title).
+  // Map our actual roles to similar persona archetypes.
+  var ARCHETYPE = {
+    ceo:                'STRATEGIST',
+    cto:                'ARCHITECT',
+    architect:          'ARCHITECT',
+    coder:              'EXECUTOR',
+    reviewer:           'AUDITOR',
+    tester:             'AUDITOR',
+    researcher:         'ANALYST',
+    data:               'ANALYST',
+    designer:           'CREATOR',
+    pm:                 'COORDINATOR',
+    devops:             'OPERATOR',
+    marketing:          'COMMUNICATOR',
+    media:              'COMMUNICATOR',
+    meeting:            'SCRIBE',
+    specialist:         'SPECIALIST',
+    tech_expert:        'SPECIALIST',
+    product_architect:  'COORDINATOR',
+    general:            'GENERALIST',
+  };
+  var archetype = ARCHETYPE[role] || role.toUpperCase();
+
+  // "The X" stylized title (stitch uses "The CEO" / "The Coder")
+  var subtitle = a.name;
+
+  // Description — prefer role_title or first line of soul_md
+  var description = a.role_title
+    || (a.soul_md ? (a.soul_md.split('\n').filter(function(l){return l.trim();})[0] || '') : '')
+    || (a.role ? ('Specialized ' + a.role + ' agent') : 'Generic AI agent');
+  // Strip leading markdown # heading if soul_md was used
+  description = description.replace(/^#+\s*/, '').replace(/^Role:\s*/i, '').trim();
+  if (description.length > 110) description = description.slice(0, 108) + '…';
+
+  // Capability hints (compact, mono, sit at bottom)
+  var ragKbs = Array.isArray(prof.rag_collection_ids) ? prof.rag_collection_ids.length : 0;
+  var skillCount = Array.isArray(a.granted_skills) ? a.granted_skills.length : 0;
+  var expertise = Array.isArray(prof.expertise) ? prof.expertise.slice(0, 3) : [];
+  var modelShort = (a.model || 'default').split('/').pop().split(':')[0];
+  if (modelShort.length > 18) modelShort = modelShort.slice(0, 16) + '..';
+
+  return '' +
+    '<div class="tc-card-glass tc-card-clickable" style="display:flex;flex-direction:column;' +
+                 'padding:0;overflow:hidden;cursor:pointer;position:relative;transition:all .18s"' +
+         ' onmouseover="this.style.borderColor=\'var(--primary)\';this.style.boxShadow=\'0 0 24px rgba(192,193,255,0.18)\'"' +
+         ' onmouseout="this.style.borderColor=\'\';this.style.boxShadow=\'\'"' +
+         ' onclick="showAgentView(\'' + a.id + '\')">' +
+
+      // ── Hero: portrait — 4:3 landscape (was 1:1, too tall) ──
+      '<div style="position:relative;width:100%;aspect-ratio:4/3;overflow:hidden;' +
+                   'background:radial-gradient(ellipse at top, rgba(192,193,255,0.08), transparent 60%), var(--surface-container-low);' +
+                   'border-bottom:1px solid var(--outline-variant)">' +
+        // top-right status badge floating over portrait
+        '<span class="tc-chip tc-chip-' + sm.tone + '" style="position:absolute;top:10px;right:10px;z-index:2;padding:3px 9px;font-size:10px">' +
+          '<span class="tc-status-dot ' + sm.dotCls + '" style="width:6px;height:6px"></span>' +
+          sm.label +
+        '</span>' +
+        // department mini-tag, top-left
+        (a.department
+          ? '<span style="position:absolute;top:10px;left:10px;z-index:2;padding:2px 8px;' +
+                          'font-family:var(--font-mono);font-size:10px;color:var(--cyber-orange);' +
+                          'background:rgba(255,107,0,0.12);border:1px solid rgba(255,107,0,0.30);' +
+                          'border-radius:var(--r-md);letter-spacing:0.05em">' + esc(a.department) + '</span>'
+          : '') +
+        // the avatar — aether portraits fill the hero (cover); pixel-art
+        // robots stay centered + smaller (contain) so they don't pixelate.
+        (isAether
+          ? '<img src="' + avatarUrl + '"' +
+                  ' style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;' +
+                          'object-position:center 22%;filter:saturate(1.05) contrast(1.05)"' +
+                  ' onerror="this.style.display=\'none\'"' +
+                  ' alt="">' +
+            // Subtle dark vignette so name text below stays readable.
+            '<div style="position:absolute;inset:0;background:linear-gradient(to bottom,transparent 55%,rgba(19,19,27,0.6))"></div>'
+          : '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center">' +
+              '<img src="' + avatarUrl + '"' +
+                    ' style="width:65%;height:65%;object-fit:contain;filter:drop-shadow(0 0 18px rgba(192,193,255,0.25))"' +
+                    ' onerror="this.outerHTML=\'<span class=&quot;material-symbols-outlined&quot; style=&quot;font-size:120px;color:var(--primary);opacity:0.4&quot;>smart_toy</span>\'"' +
+                    ' alt="">' +
+            '</div>' +
+            // subtle scan-line grid only for pixel-art mode (aether portraits already have rich texture)
+            '<div style="position:absolute;inset:0;background-image:linear-gradient(rgba(192,193,255,0.04) 1px,transparent 1px),linear-gradient(90deg,rgba(192,193,255,0.04) 1px,transparent 1px);background-size:24px 24px;pointer-events:none"></div>') +
+      '</div>' +
+
+      // ── Body: archetype + name + description ──
+      '<div style="padding:var(--s-md);display:flex;flex-direction:column;gap:6px;flex:1">' +
+        // ARCHETYPE label — mono uppercase indigo
+        '<div class="tc-mono-label" style="color:var(--primary);font-size:11px">' + esc(archetype) + '</div>' +
+        // The X
+        '<div style="font-size:18px;font-weight:600;color:var(--on-surface);line-height:1.25;' +
+                     'white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(subtitle) + '</div>' +
+        // Description (3-line clamp)
+        '<div class="tc-text-dim" style="font-size:12px;line-height:1.55;' +
+                     'overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;min-height:54px">' +
+          esc(description) +
+        '</div>' +
+      '</div>' +
+
+      // ── Footer: capability summary + action ──
+      '<div style="padding:10px var(--s-md);border-top:1px solid var(--outline-variant);' +
+                   'background:var(--surface-container-low);' +
+                   'display:flex;align-items:center;gap:var(--s-sm);font-family:var(--font-mono);font-size:10px;color:var(--on-surface-variant)">' +
+        // model
+        '<span title="' + esc(a.model || 'default') + '" style="color:var(--on-surface-variant);letter-spacing:0.04em">' + esc(modelShort) + '</span>' +
+        '<span class="tc-text-dim">·</span>' +
+        // RAG indicator
+        (ragKbs > 0
+          ? '<span style="color:var(--cyber-blue)" title="Bound to ' + ragKbs + ' KB">RAG ' + ragKbs + '</span>'
+          : '<span class="tc-text-dim">no rag</span>') +
+        // expertise (compact, max 2 here)
+        (expertise.length > 0
+          ? '<span class="tc-text-dim">·</span>' +
+            '<span style="color:var(--on-surface-variant);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0">' +
+              esc(expertise.slice(0, 2).join(' / ')) +
+              (expertise.length + (Array.isArray(prof.expertise) && prof.expertise.length > 3 ? prof.expertise.length - 3 : 0) > 2 ? ' +' : '') +
+            '</span>'
+          : '<span class="tc-spacer"></span>') +
+        // arrow
+        '<span class="material-symbols-outlined" style="font-size:14px;color:var(--primary);flex-shrink:0">arrow_forward</span>' +
+      '</div>' +
+
+    '</div>';
+}
+
+function renderAgentsListTech() {
+  var c = document.getElementById('content');
+  if (!c) return;
+  if (nodes.length === 0) {
+    c.innerHTML =
+      '<div class="tc-card" style="text-align:center;padding:60px 20px">' +
+        '<span class="material-symbols-outlined" style="font-size:48px;color:var(--on-surface-variant)">device_hub</span>' +
+        '<div class="tc-text-dim" style="margin-top:12px">No nodes found.</div>' +
+      '</div>';
+    return;
+  }
+
+  // Group agents by node (drops the legacy advisor/enterprise/personal split).
+  var byNode = {};
+  agents.forEach(function(a) {
+    var nid = _getNodeForAgent(a);
+    if (!byNode[nid]) byNode[nid] = [];
+    byNode[nid].push(a);
+  });
+
+  // Build tab list — order: self/local first, then by name
+  var tabNodes = nodes.slice().sort(function(x, y) {
+    if (x.is_self && !y.is_self) return -1;
+    if (!x.is_self && y.is_self) return 1;
+    return (x.name || x.node_id || '').localeCompare(y.name || y.node_id || '');
+  });
+
+  // Selected tab — default 'all'
+  var sel = window._agentsTechSelectedNode || 'all';
+  if (sel !== 'all') {
+    var found = tabNodes.find(function(n) { return n.node_id === sel; });
+    if (!found) sel = 'all';
+  }
+
+  // Visible agents
+  var visible = (sel === 'all')
+    ? agents
+    : (byNode[sel] || []);
+
+  // ── Build tabs HTML ──
+  var tabHtml = '';
+  // "All Nodes" tab
+  var allActive = (sel === 'all');
+  tabHtml += '<button class="tc-chip' + (allActive ? ' tc-chip-primary' : '') + '"' +
+             ' style="cursor:pointer;font-size:12px;padding:6px 14px"' +
+             ' onclick="_switchAgentNodeTab(\'all\')">' +
+             '<span class="material-symbols-outlined" style="font-size:14px;margin-right:4px">apps</span>' +
+             'All Nodes <span class="tc-text-dim" style="margin-left:4px">·</span> ' + agents.length +
+             '</button>';
+  tabNodes.forEach(function(n) {
+    var nid = n.node_id;
+    var nodeAgents = byNode[nid] || [];
+    var active = (sel === nid);
+    var statusCls = (n.status === 'online' || n.is_self) ? 'online'
+                  : n.status === 'error' ? 'error' : 'busy';
+    var label = (n.name && n.name !== 'undefined') ? n.name : nid;
+    if (n.is_self) label += ' (Local)';
+    tabHtml += '<button class="tc-chip' + (active ? ' tc-chip-primary' : '') + '"' +
+               ' style="cursor:pointer;font-size:12px;padding:6px 14px"' +
+               ' onclick="_switchAgentNodeTab(\'' + nid + '\')">' +
+               '<span class="tc-status-dot ' + statusCls + '" style="width:6px;height:6px;margin-right:6px"></span>' +
+               esc(label) + ' <span class="tc-text-dim" style="margin-left:4px">·</span> ' + nodeAgents.length +
+               '</button>';
+  });
+
+  // ── Build agent rows ──
+  var listHtml;
+  if (visible.length === 0) {
+    listHtml =
+      '<div class="tc-card" style="text-align:center;padding:40px 20px">' +
+        '<span class="material-symbols-outlined" style="font-size:36px;color:var(--on-surface-variant)">smart_toy</span>' +
+        '<div class="tc-text-dim" style="margin-top:8px;font-size:13px">No agents on this node yet.</div>' +
+        '<button class="tc-btn tc-btn-primary" style="margin-top:16px"' +
+                ' onclick="openCreateAgentForClass(\'enterprise\')">' +
+          '<span class="material-symbols-outlined" style="font-size:16px">add</span>' +
+          ' Deploy New Agent' +
+        '</button>' +
+      '</div>';
+  } else {
+    listHtml = '<div class="tc-grid" style="grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:var(--s-md)">' +
+               visible.map(function(a) { return _renderAgentCardTech(a); }).join('') +
+               '</div>';
+  }
+
+  // ── Compose page ──
+  var sectionLabel;
+  if (sel === 'all') {
+    sectionLabel = 'All Agents';
+  } else {
+    var n = nodes.find(function(x) { return x.node_id === sel; });
+    sectionLabel = (n ? (n.name || n.node_id) : sel);
+    if (n && n.is_self) sectionLabel += ' (Local)';
+  }
+
+  c.innerHTML =
+    // Header
+    '<div class="tc-page-header">' +
+      '<div>' +
+        '<div class="tc-mono-label">Admin Console</div>' +
+        '<h1 class="tc-h2" style="margin-top:4px">Agent Directory</h1>' +
+      '</div>' +
+      '<div class="tc-row-sm">' +
+        '<button class="tc-btn tc-btn-primary"' +
+                ' onclick="openCreateAgentForClass(\'enterprise\')">' +
+          '<span class="material-symbols-outlined" style="font-size:16px">add</span>' +
+          ' Deploy New Agent' +
+        '</button>' +
+      '</div>' +
+    '</div>' +
+
+    // Node tabs row
+    '<div class="tc-row-sm" style="flex-wrap:wrap;gap:var(--s-sm);margin-bottom:var(--s-lg)">' +
+      '<span class="tc-mono-label" style="margin-right:var(--s-sm)">Node:</span>' +
+      tabHtml +
+    '</div>' +
+
+    // Agents on selected node
+    '<div class="tc-panel">' +
+      '<div class="tc-panel-header">' +
+        '<div class="tc-row-sm">' +
+          '<span class="tc-mono-label">' + esc(sectionLabel) + '</span>' +
+          '<span class="tc-chip">' + visible.length + ' agents</span>' +
+        '</div>' +
+      '</div>' +
+      '<div class="tc-panel-body">' + listHtml + '</div>' +
+    '</div>';
+}
+window.renderAgentsListTech = renderAgentsListTech;
+
+
+// ──────────────────────────────────────────────────────────────
+// Shared helpers for Phase-2 tech-mode page renderers
+// --------------------------------------------------------------
+// Each ported page calls _techPageHeader() to render the consistent
+// stitch-style page header (mono label + h2 title + optional right
+// actions), then wraps body content in tc-panel / tc-card.
+//
+// For pages we haven't fully rewritten yet, the dispatcher uses
+// _techWrapLegacy() which keeps the legacy body but adds a tech-
+// styled header + container so the page at least matches the new
+// chrome. Phase 4 will collapse these as time allows.
+// ──────────────────────────────────────────────────────────────
+
+function _techPageHeader(opts) {
+  opts = opts || {};
+  var actions = opts.actions || '';
+  return '<div class="tc-page-header">' +
+           '<div>' +
+             (opts.label ? '<div class="tc-mono-label">' + esc(opts.label) + '</div>' : '') +
+             '<h1 class="tc-h2" style="margin-top:4px">' + esc(opts.title || '') + '</h1>' +
+           '</div>' +
+           (actions ? '<div class="tc-row-sm">' + actions + '</div>' : '') +
+         '</div>';
+}
+window._techPageHeader = _techPageHeader;
+
+// Wrap a legacy renderer's existing HTML inside a tech-themed page
+// shell. The legacy body keeps its inline classes (which lose color
+// coherence under tech theme but at least everything is functional).
+// Used as a stop-gap for pages we'll fully port in a later pass.
+function _techWrapLegacy(opts, legacyHtml) {
+  return _techPageHeader(opts) +
+         '<div class="tc-panel">' +
+           '<div class="tc-panel-body" style="padding:var(--s-md)">' +
+             legacyHtml +
+           '</div>' +
+         '</div>';
+}
+window._techWrapLegacy = _techWrapLegacy;
+
+
+// Render a tech-style hub page (header + chip-style tab strip + body
+// container). Used by Roles & Skills, Tools & Approvals, Knowledge &
+// Memory, Settings — they all share the "page-with-sub-tabs" pattern.
+//
+// Returns { html, current, bodyId } — caller uses `current` to pick
+// which sub-renderer to dispatch and writes into `bodyId`.
+function _techHubPage(opts, tabs, key) {
+  var current = (function() {
+    try {
+      var stored = localStorage.getItem('tudou_hub_' + key);
+      if (stored && tabs.find(function(t) { return t.id === stored; })) return stored;
+    } catch (e) {}
+    return tabs[0] && tabs[0].id;
+  })();
+
+  // Build tab chips
+  var tabHtml = tabs.map(function(t) {
+    var active = (t.id === current);
+    return '<button class="tc-chip' + (active ? ' tc-chip-primary' : '') + '"' +
+           ' style="cursor:pointer;font-size:12px;padding:6px 14px"' +
+           ' onclick="_techHubSwitch(\'' + esc(key) + '\',\'' + esc(t.id) + '\')">' +
+             (t.icon
+               ? '<span class="material-symbols-outlined" style="font-size:14px;margin-right:4px">' + esc(t.icon) + '</span>'
+               : '') +
+             esc(t.label) +
+           '</button>';
+  }).join('');
+
+  var bodyId = 'tech-hub-' + key + '-body';
+  return {
+    current: current,
+    bodyId: bodyId,
+    html: _techPageHeader(opts) +
+          '<div class="tc-row-sm" style="flex-wrap:wrap;gap:var(--s-sm);margin-bottom:var(--s-lg)">' +
+            tabHtml +
+          '</div>' +
+          '<div id="' + bodyId + '"></div>',
+  };
+}
+window._techHubPage = _techHubPage;
+
+function _techHubSwitch(key, tabId) {
+  try { localStorage.setItem('tudou_hub_' + key, tabId); } catch (e) {}
+  // Re-render whichever hub is currently active. Each hub has its
+  // own dispatcher so we just call renderCurrentView again.
+  if (typeof renderCurrentView === 'function') renderCurrentView();
+}
+window._techHubSwitch = _techHubSwitch;
+
+
+// ── renderRolesSkillsHub — tech port ──
+function renderRolesSkillsHubTech() {
+  var c = document.getElementById('content');
+  if (!c) return;
+  var tabs = [
+    { id: 'templates',        label: 'Roles / Domains',     icon: 'library_books' },
+    { id: 'skill-store',      label: 'Skill Marketplace',   icon: 'storefront'    },
+    { id: 'pending-skills',   label: 'SkillForge',          icon: 'auto_fix_high' },
+    { id: 'self-improvement', label: 'Learning Loop',       icon: 'psychology'    },
+  ];
+  if (typeof _isAdmin === 'function' && _isAdmin()) {
+    tabs.push({ id: 'skill-categories', label: 'Categories', icon: 'category' });
+  }
+  var r = _techHubPage({ label: 'Configuration', title: 'Roles & Skills' }, tabs, 'roles');
+  c.innerHTML = r.html;
+  var sc = document.getElementById(r.bodyId);
+  if (!sc) return;
+  // Reuse existing renderers — they write into #content. Swap ids
+  // so they target our hub body instead, then restore.
+  var _orig = document.getElementById('content');
+  sc.id = 'content'; if (_orig !== sc) _orig.id = 'content-outer';
+  try {
+    if      (r.current === 'templates')        renderTemplateLibrary();
+    else if (r.current === 'skill-store')      renderSkillStore();
+    else if (r.current === 'pending-skills')   renderPendingSkills();
+    else if (r.current === 'self-improvement') renderSelfImprovement();
+    else if (r.current === 'skill-categories' && typeof renderSkillCategoriesAdmin === 'function') {
+      renderSkillCategoriesAdmin();
+    }
+  } catch (e) {
+    sc.innerHTML = '<div class="tc-card" style="color:var(--error);padding:var(--s-lg)">' + esc(e.message) + '</div>';
+  } finally {
+    sc.id = r.bodyId;
+    if (_orig !== sc) _orig.id = 'content';
+  }
+}
+window.renderRolesSkillsHubTech = renderRolesSkillsHubTech;
+
+
+// ── renderToolsApprovalsHub — tech port ──
+function renderToolsApprovalsHubTech() {
+  var c = document.getElementById('content');
+  if (!c) return;
+  var tabs = [
+    { id: 'approvals', label: 'Pending Requests',  icon: 'verified_user' },
+    { id: 'policies',  label: 'Tool Risk & Policy', icon: 'shield' },
+    { id: 'audit',     label: 'Audit Trail',        icon: 'history' },
+  ];
+  var r = _techHubPage({ label: 'Governance Console', title: 'Tool Approvals & Policies' }, tabs, 'tools');
+  c.innerHTML = r.html;
+  var sc = document.getElementById(r.bodyId);
+  if (!sc) return;
+  var _orig = document.getElementById('content');
+  sc.id = 'content'; if (_orig !== sc) _orig.id = 'content-outer';
+  try {
+    if      (r.current === 'approvals') renderApprovals();
+    else if (r.current === 'policies' && typeof renderToolPolicy === 'function') renderToolPolicy();
+    else if (r.current === 'audit' && typeof renderAuditTrail === 'function') renderAuditTrail();
+    else sc.innerHTML = '<div class="tc-card tc-text-dim" style="padding:var(--s-lg)">Tab not yet implemented.</div>';
+  } catch (e) {
+    sc.innerHTML = '<div class="tc-card" style="color:var(--error);padding:var(--s-lg)">' + esc(e.message) + '</div>';
+  } finally {
+    sc.id = r.bodyId;
+    if (_orig !== sc) _orig.id = 'content';
+  }
+}
+window.renderToolsApprovalsHubTech = renderToolsApprovalsHubTech;
+
+
+// ── renderKnowledgeMemoryHub — tech port ──
+function renderKnowledgeMemoryHubTech() {
+  var c = document.getElementById('content');
+  if (!c) return;
+  var tabs = [
+    { id: 'kb-list',   label: 'Knowledge Bases', icon: 'database' },
+    { id: 'memory',    label: 'Agent Memory',    icon: 'memory' },
+    { id: 'wiki',      label: 'Wiki',            icon: 'menu_book' },
+    { id: 'rag-prov',  label: 'RAG Providers',   icon: 'cable' },
+  ];
+  var r = _techHubPage({ label: 'Neural Stack', title: 'Knowledge & Memory' }, tabs, 'km');
+  c.innerHTML = r.html;
+  var sc = document.getElementById(r.bodyId);
+  if (!sc) return;
+  var _orig = document.getElementById('content');
+  sc.id = 'content'; if (_orig !== sc) _orig.id = 'content-outer';
+  try {
+    if      (r.current === 'kb-list'  && typeof _renderKmPrivate === 'function') _renderKmPrivate();
+    else if (r.current === 'memory'   && typeof renderAgentMemoryHub === 'function') renderAgentMemoryHub();
+    else if (r.current === 'wiki'     && typeof renderWikiHub === 'function') renderWikiHub();
+    else if (r.current === 'rag-prov' && typeof renderRagProviders === 'function') renderRagProviders();
+    else sc.innerHTML = '<div class="tc-card tc-text-dim" style="padding:var(--s-lg)">Tab not yet implemented.</div>';
+  } catch (e) {
+    sc.innerHTML = '<div class="tc-card" style="color:var(--error);padding:var(--s-lg)">' + esc(e.message) + '</div>';
+  } finally {
+    sc.id = r.bodyId;
+    if (_orig !== sc) _orig.id = 'content';
+  }
+}
+window.renderKnowledgeMemoryHubTech = renderKnowledgeMemoryHubTech;
+
+
+// ── renderSettingsHub — tech port ──
+function renderSettingsHubTech() {
+  var c = document.getElementById('content');
+  if (!c) return;
+  var tabs = [
+    { id: 'providers', label: 'LLM Providers',    icon: 'cloud_queue' },
+    { id: 'mcp',       label: 'MCP Servers',      icon: 'extension' },
+    { id: 'nodes',     label: 'Worker Nodes',     icon: 'device_hub' },
+    { id: 'branding',  label: 'Branding',         icon: 'palette' },
+    { id: 'admin',     label: 'Permissions',      icon: 'admin_panel_settings' },
+  ];
+  var r = _techHubPage({ label: 'Command Center', title: 'System Settings' }, tabs, 'settings');
+  c.innerHTML = r.html;
+  var sc = document.getElementById(r.bodyId);
+  if (!sc) return;
+  var _orig = document.getElementById('content');
+  sc.id = 'content'; if (_orig !== sc) _orig.id = 'content-outer';
+  try {
+    if      (r.current === 'providers' && typeof renderProviders === 'function') renderProviders(sc);
+    else if (r.current === 'mcp'       && typeof renderMCP === 'function') renderMCP(sc);
+    else if (r.current === 'nodes'     && typeof renderNodes === 'function') renderNodes(sc);
+    else if (r.current === 'branding'  && typeof renderBranding === 'function') renderBranding();
+    else if (r.current === 'admin'     && typeof renderAdmin === 'function') renderAdmin();
+    else sc.innerHTML = '<div class="tc-card tc-text-dim" style="padding:var(--s-lg)">Tab not yet implemented.</div>';
+  } catch (e) {
+    sc.innerHTML = '<div class="tc-card" style="color:var(--error);padding:var(--s-lg)">' + esc(e.message) + '</div>';
+  } finally {
+    sc.id = r.bodyId;
+    if (_orig !== sc) _orig.id = 'content';
+  }
+}
+window.renderSettingsHubTech = renderSettingsHubTech;
+
+
 function _getNodeForAgent(a) {
   // Determine which node an agent belongs to
   if (a.node_id && a.node_id !== 'local') return a.node_id;
@@ -2610,6 +3193,13 @@ function _getNodeStatus(nodeId) {
 }
 
 function renderAgentsList() {
+  // Phased rollout: tech theme has its own renderer with the new
+  // node-tab structure (drops the meaningless 3-class buckets).
+  try {
+    if (localStorage.getItem('tudou_theme') === 'tech') {
+      return renderAgentsListTech();
+    }
+  } catch (e) {}
   var c = document.getElementById('content');
 
   if (nodes.length === 0) {
@@ -21691,6 +22281,7 @@ function _formatNum(n) {
 var _kmTab = 'shared';
 
 function renderKnowledgeMemoryHub() {
+  try { if (localStorage.getItem('tudou_theme') === 'tech') return renderKnowledgeMemoryHubTech(); } catch (e) {}
   var c = document.getElementById('content');
   var tabs = [
     { id: 'shared',  label: window.t('tab.km.shared',  '共享知识库'),     icon: 'public' },
@@ -23333,6 +23924,7 @@ async function compactAgentMemoryFromModal(aid) {
 }
 
 function renderRolesSkillsHub() {
+  try { if (localStorage.getItem('tudou_theme') === 'tech') return renderRolesSkillsHubTech(); } catch (e) {}
   var c = document.getElementById('content');
   var tabs = [
     { id: 'templates',        label: window.t('tab.rs.templates',       '角色 / 专业领域'),       icon: 'library_books' },
@@ -27132,6 +27724,7 @@ async function uninstallSkillPkg(sid) {
 }
 
 function renderToolsApprovalsHub() {
+  try { if (localStorage.getItem('tudou_theme') === 'tech') return renderToolsApprovalsHubTech(); } catch (e) {}
   var c = document.getElementById('content');
   var actionsEl = document.getElementById('topbar-actions');
   var tabs = [
@@ -27334,6 +27927,7 @@ function renderIntegrationsHub() {
 }
 
 function renderSettingsHub() {
+  try { if (localStorage.getItem('tudou_theme') === 'tech') return renderSettingsHubTech(); } catch (e) {}
   var c = document.getElementById('content');
   var tabs = [
     { id: 'branding',    label: window.t('tab.settings.branding',     '品牌'),         icon: 'workspaces' },

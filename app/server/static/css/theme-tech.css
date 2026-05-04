@@ -775,6 +775,10 @@
 /* ── Main + topbar adjustments ───────────────────────────────── */
 [data-theme="tech"] .main {
   background: var(--background) !important;
+  /* Keep `overflow: hidden` from the base rule — `#content` inside
+   * already does `flex:1 + overflow-y:auto` and is the real scroll
+   * container. Putting overflow-y:auto on .main here breaks
+   * .content's flex:1 height calculation so its inner scroll dies. */
 }
 [data-theme="tech"] .topbar {
   background: var(--surface-container-low) !important;
