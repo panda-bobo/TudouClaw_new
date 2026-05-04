@@ -11486,12 +11486,31 @@ function renderTemplateLibrary(container) {
       cats[cat].push(t);
     });
 
-    let html = '<div style="margin-bottom:20px">' +
-      '<h3 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:20px;font-weight:700;margin-bottom:4px">专业领域</h3>' +
-      '<p style="color:var(--text2);font-size:13px">Agent 执行任务时自动匹配对应专业领域，注入领域方法论和检查清单。共 ' + templates.length + ' 个领域。</p>' +
-      '<button class="btn btn-primary btn-sm" style="margin-top:10px" onclick="showCreateTemplate()">' +
-        '<span class="material-symbols-outlined" style="font-size:14px">add</span> 新建专业领域</button>' +
-    '</div>';
+    var _techTpl = false;
+    try { _techTpl = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+    let html = '';
+    if (_techTpl) {
+      html += '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:var(--s-lg);gap:var(--s-md);flex-wrap:wrap">' +
+        '<div style="flex:1;min-width:240px">' +
+          '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px">' +
+            '<span>DOMAIN LIBRARY</span>' +
+            '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
+          '</div>' +
+          '<h1 class="tc-h2" style="margin-top:6px">Role Templates</h1>' +
+          '<p class="tc-text-dim" style="font-size:12px;margin-top:6px;line-height:1.55">Agent runs auto-match a domain template; injects methodology + checklist. ' + templates.length + ' domains.</p>' +
+        '</div>' +
+        '<button class="tc-btn tc-btn-primary tc-btn-sm" onclick="showCreateTemplate()">' +
+          '<span class="material-symbols-outlined" style="font-size:14px">add</span> NEW DOMAIN' +
+        '</button>' +
+      '</div>';
+    } else {
+      html += '<div style="margin-bottom:20px">' +
+        '<h3 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:20px;font-weight:700;margin-bottom:4px">专业领域</h3>' +
+        '<p style="color:var(--text2);font-size:13px">Agent 执行任务时自动匹配对应专业领域，注入领域方法论和检查清单。共 ' + templates.length + ' 个领域。</p>' +
+        '<button class="btn btn-primary btn-sm" style="margin-top:10px" onclick="showCreateTemplate()">' +
+          '<span class="material-symbols-outlined" style="font-size:14px">add</span> 新建专业领域</button>' +
+      '</div>';
+    }
 
     Object.keys(cats).sort().forEach(cat => {
       html += '<div style="margin-bottom:24px">';
@@ -12013,10 +12032,23 @@ async function renderMCPConfig(container) {
   let html = '';
 
   // Page header (Add MCP button lives in topbar — single source of truth)
-  html += '<div style="margin-bottom:28px">';
-  html += '<h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:28px;font-weight:800;letter-spacing:-0.5px">MCP Configuration</h2>';
-  html += '<p style="color:var(--text2);font-size:14px;margin-top:4px">Manage Model Context Protocol server bindings and catalog.</p>';
-  html += '</div>';
+  var _techMcp = false;
+  try { _techMcp = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+  if (_techMcp) {
+    html += '<div style="margin-bottom:var(--s-lg)">' +
+      '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px">' +
+        '<span>PROTOCOL FABRIC</span>' +
+        '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
+      '</div>' +
+      '<h1 class="tc-h2" style="margin-top:6px">MCP Configuration</h1>' +
+      '<p class="tc-text-dim" style="font-size:12px;margin-top:6px;line-height:1.55">Model Context Protocol server bindings and catalog.</p>' +
+    '</div>';
+  } else {
+    html += '<div style="margin-bottom:28px">';
+    html += '<h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:28px;font-weight:800;letter-spacing:-0.5px">MCP Configuration</h2>';
+    html += '<p style="color:var(--text2);font-size:14px;margin-top:4px">Manage Model Context Protocol server bindings and catalog.</p>';
+    html += '</div>';
+  }
 
   // MCP Catalog — 分 Global / Node 两组
   var globalCaps = Object.entries(catalog).filter(([_,c]) => c.scope === 'global');
@@ -27192,12 +27224,24 @@ function _fmtSize(bytes) {
 
 async function renderSkillStore() {
   var c = document.getElementById('content');
+  var _techSs = false;
+  try { _techSs = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+  var ssHeader = _techSs
+    ? '    <div style="flex:1;min-width:240px">' +
+        '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px">' +
+          '<span>SKILL MARKETPLACE</span>' +
+          '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
+        '</div>' +
+        '<h1 class="tc-h2" style="margin-top:6px">Skill Store</h1>' +
+        '<div class="tc-text-dim" style="font-size:12px;margin-top:6px;line-height:1.55">Anthropic Agent Skills (SKILL.md) + TudouClaw manifest.yaml. Browse by trust tier, install, grant to agents.</div>' +
+      '</div>'
+    : '    <div><h2 style="margin:0">技能商店 / Skill Store</h2>' +
+      '      <div style="font-size:12px;color:var(--text3);margin-top:4px">兼容 Anthropic Agent Skills 规范 (SKILL.md) 与 TudouClaw manifest.yaml。按信任分级浏览、安装、授权给 agent。</div>' +
+      '    </div>';
   c.innerHTML = ''
     + '<div style="padding:18px">'
     + '  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;gap:12px">'
-    + '    <div><h2 style="margin:0">技能商店 / Skill Store</h2>'
-    + '      <div style="font-size:12px;color:var(--text3);margin-top:4px">兼容 Anthropic Agent Skills 规范 (SKILL.md) 与 TudouClaw manifest.yaml。按信任分级浏览、安装、授权给 agent。</div>'
-    + '    </div>'
+    + ssHeader
     + '    <div style="display:flex;gap:8px">'
     + '    <button class="btn btn-sm" onclick="_showLocalImportModal()"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">folder_open</span> 从本地导入</button>'
     + '    <button class="btn btn-sm" onclick="_showRemoteScanModal()"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">cloud_download</span> 从 URL 导入</button>'
@@ -30579,12 +30623,24 @@ var _pendingSkillsState = { status: '', drafts: [] };
 
 async function renderPendingSkills() {
   var c = document.getElementById('content');
+  var _techPs = false;
+  try { _techPs = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+  var headerHtml = _techPs
+    ? '    <div style="flex:1;min-width:240px">' +
+        '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px">' +
+          '<span>SKILL FOUNDRY</span>' +
+          '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
+        '</div>' +
+        '<h1 class="tc-h2" style="margin-top:6px">Pending Skill Drafts</h1>' +
+        '<div class="tc-text-dim" style="font-size:12px;margin-top:6px;line-height:1.55">Skills proposed by agents from experience — review and approve to add them to the marketplace.</div>' +
+      '</div>'
+    : '    <div><h2 style="margin:0">技能锻造 / SkillForge Drafts</h2>' +
+      '      <div style="font-size:12px;color:var(--text3);margin-top:4px">Agent 从经验库中提炼出的技能草稿，等待管理员审核后导入技能商店。</div>' +
+      '    </div>';
   c.innerHTML = ''
     + '<div style="padding:18px">'
     + '  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;gap:12px">'
-    + '    <div><h2 style="margin:0">技能锻造 / SkillForge Drafts</h2>'
-    + '      <div style="font-size:12px;color:var(--text3);margin-top:4px">Agent 从经验库中提炼出的技能草稿，等待管理员审核后导入技能商店。</div>'
-    + '    </div>'
+    + headerHtml
     + '    <div style="display:flex;gap:8px">'
     + '      <button class="btn btn-sm" onclick="importSkillFromWorkspace()"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">upload_file</span> 从 Agent 工作区导入</button>'
     + '      <button class="btn btn-sm" onclick="loadPendingSkills()"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">refresh</span> 刷新</button>'
