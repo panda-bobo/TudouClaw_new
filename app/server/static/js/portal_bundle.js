@@ -3148,9 +3148,9 @@ function renderKnowledgeMemoryHubTech() {
   sc.id = 'content'; if (_orig !== sc) _orig.id = 'content-outer';
   try {
     if      (r.current === 'kb-list'  && typeof _renderKmPrivate === 'function') _renderKmPrivate();
-    else if (r.current === 'memory'   && typeof renderAgentMemoryHub === 'function') renderAgentMemoryHub();
-    else if (r.current === 'wiki'     && typeof renderWikiHub === 'function') renderWikiHub();
-    else if (r.current === 'rag-prov' && typeof renderRagProviders === 'function') renderRagProviders();
+    else if (r.current === 'memory'   && typeof _renderKmMemory === 'function') _renderKmMemory();
+    else if (r.current === 'wiki'     && typeof _renderKmShared === 'function') _renderKmShared();
+    else if (r.current === 'rag-prov' && typeof _renderKmRagProviders === 'function') _renderKmRagProviders();
     else sc.innerHTML = '<div class="tc-card tc-text-dim" style="padding:var(--s-lg)">Tab not yet implemented.</div>';
   } catch (e) {
     sc.innerHTML = '<div class="tc-card" style="color:var(--error);padding:var(--s-lg)">' + esc(e.message) + '</div>';
@@ -4752,6 +4752,13 @@ window._applyInitialBottomTab = function(agentId) {
 };
 
 function renderAgentChat(agentId) {
+  // Phased rollout: dispatch to the tech-themed variant when the user
+  // has opted into the tech theme. Same DOM IDs so all loaders below
+  // (loadAgentChat / loadTasks / loadAgentEventLog / loadExecutionSteps)
+  // continue to find their targets unchanged.
+  try {
+    if (localStorage.getItem('tudou_theme') === 'tech') return renderAgentChatTech(agentId);
+  } catch (e) {}
   var c = document.getElementById('content');
   c.style.padding = '0';
   c.style.display = 'flex';
@@ -4936,6 +4943,237 @@ function renderAgentChat(agentId) {
   // Reconnect to active task stream if agent is busy
   _reconnectActiveStream(agentId);
 }
+
+// ============ Tech (Aether) theme — Agent Chat (stitch_agent_22) ============
+// Same DOM IDs as legacy renderAgentChat so loaders/pollers stay reusable.
+// Visual chrome: glass-panel header + mono-label sub-bar + pill bottom
+// tabs + workspace footer. Bubbles get re-skinned via theme-tech.css.
+function renderAgentChatTech(agentId) {
+  var c = document.getElementById('content');
+  c.style.padding = '0';
+  c.style.display = 'flex';
+  c.style.flexDirection = 'column';
+  c.style.height = '100%';
+  var ag = agents.find(function(a){ return a.id === agentId; }) || {};
+  var agRole = esc(ag.role || 'general');
+  var agName = esc(ag.name || 'Agent');
+  var agDisplayName = agRole + '-' + agName;
+  var avatarUrl = _aetherAvatarUrl(ag.role || 'general');
+  var modelShort = (ag.model || 'default').split('/').pop().split(':')[0];
+  if (modelShort.length > 24) modelShort = modelShort.slice(0, 22) + '..';
+
+  var _hasLLM = !!((ag.provider || '').trim() && (ag.model || '').trim());
+  var _llmBannerHtml = _hasLLM ? '' :
+    '<div id="llm-missing-banner-' + agentId + '" style="padding:10px 14px;margin:0 20px 8px;' +
+      'background:rgba(255,183,131,0.08);border:1px solid rgba(255,183,131,0.30);border-radius:8px;' +
+      'font-family:var(--font-mono);font-size:11px;letter-spacing:0.04em;color:var(--tertiary);' +
+      'display:flex;align-items:center;gap:10px;justify-content:space-between">' +
+      '<span><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">warning</span> ' +
+        'LLM NOT CONFIGURED — pick a provider/model to enable chat.</span>' +
+      '<button class="tc-btn tc-btn-sm tc-btn-primary" onclick="(document.getElementById(\'agent-quick-provider-' + agentId + '\')||{}).focus&&document.getElementById(\'agent-quick-provider-' + agentId + '\').focus()" ' +
+        'style="font-size:10px">SELECT LLM</button>' +
+    '</div>';
+  var _inputPlaceholder = _hasLLM ? 'Direct Agent Tasking...' : '🚫 Configure an LLM first';
+
+  // ── Pill bottom tab button (tech variant — class-based active state) ──
+  var _bottomTabBtnTech = function(paneId, icon, label) {
+    var active = _getActiveBottomTab(agentId) === paneId;
+    return '<button data-pane="' + paneId + '"' +
+      ' class="' + (active ? 'active' : '') + '"' +
+      ' onclick="_selectBottomTabTech(\'' + agentId + '\',\'' + paneId + '\')">' +
+      '<span class="material-symbols-outlined" style="font-size:13px;margin-right:4px">' + icon + '</span>' +
+      label +
+      '</button>';
+  };
+
+  c.innerHTML = '' +
+    // ── Chat header (glass) ──
+    '<div class="agent-chat-header-tech">' +
+      '<div style="display:flex;align-items:center;gap:12px;min-width:0">' +
+        '<div class="ach-avatar">' +
+          '<img src="' + avatarUrl + '" alt=""' +
+            ' onerror="this.outerHTML=\'<span class=&quot;material-symbols-outlined&quot; style=&quot;font-size:24px;color:var(--primary)&quot;>memory</span>\'">' +
+          '<span class="ach-status-dot"></span>' +
+        '</div>' +
+        '<div style="display:flex;flex-direction:column;gap:2px;min-width:0">' +
+          '<div class="ach-name">' + agDisplayName + '</div>' +
+          '<div style="display:flex;align-items:center;gap:8px">' +
+            '<span class="ach-online">Online</span>' +
+            '<span style="width:3px;height:3px;background:var(--outline);border-radius:50%"></span>' +
+            '<span style="font-family:var(--font-mono);font-size:10px;letter-spacing:0.05em;color:var(--outline);text-transform:uppercase;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:240px" title="' + esc(ag.model || 'default') + '">' + esc(modelShort) + '</span>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0">' +
+        // Preprocessor badge slot (kept hidden; populated elsewhere)
+        '<span id="prep-badge-' + agentId + '" style="display:none"></span>' +
+      '</div>' +
+    '</div>' +
+
+    // ── Action sub-bar (Soul / Think / TTS / Wake / RAG) ──
+    '<div class="agent-chat-actbar">' +
+      '<button class="ach-act" onclick="showSoulEditor(\'' + agentId + '\')" title="Edit SOUL.md">' +
+        '<span class="material-symbols-outlined">auto_awesome</span>Soul</button>' +
+      '<button class="ach-act" onclick="showThinkingPanel(\'' + agentId + '\')" title="Open thinking panel">' +
+        '<span class="material-symbols-outlined">psychology</span>Think</button>' +
+      '<button id="tts-btn-' + agentId + '" class="ach-act" onclick="_toggleTTS(\'' + agentId + '\')" title="Auto TTS">' +
+        '<span class="material-symbols-outlined">volume_up</span>TTS</button>' +
+      '<button class="ach-act" onclick="wakeAgent(\'' + agentId + '\')" title="Wake agent">' +
+        '<span class="material-symbols-outlined">notifications_active</span>Wake</button>' +
+      '<button id="rag-btn-' + agentId + '" class="ach-act" onclick="_toggleRagOnly(\'' + agentId + '\')" title="Toggle RAG-only mode">' +
+        '<span class="material-symbols-outlined" id="rag-icon-' + agentId + '">search</span>Rag</button>' +
+    '</div>' +
+
+    // ── Main section: chat (left) | right column [artifact (top) + tabs (bottom)] ──
+    '<section style="display:flex;flex:1;min-height:0;background:var(--surface);overflow:hidden;position:relative">' +
+      // ── Left: chat column (chat-msgs + banner + input) ──
+      '<div style="flex:1;display:flex;flex-direction:column;min-width:0">' +
+        '<div class="chat-messages" id="chat-msgs-' + agentId + '" style="flex:1;overflow-y:auto;padding:24px 24px 8px;display:flex;flex-direction:column;gap:14px"></div>' +
+        _llmBannerHtml +
+        '<div style="padding:14px 20px;background:var(--surface-container-low);border-top:1px solid var(--outline-variant)">' +
+          _renderUnifiedChatInput({
+            id: agentId,
+            scope: 'agent',
+            placeholder: _inputPlaceholder,
+            disabled: !_hasLLM,
+            sendFnName: 'sendAgentMsg',
+            attachFnName: 'handleAgentAttach',
+            acceptFiles: 'image/*,.pdf,.doc,.docx,.pptx,.xlsx,.xls,.txt,.csv,.json,.yaml,.yml,.md,.py,.js,.ts,.html,.css',
+            showSTT: true,
+            showAbort: true,
+            showModelSel: true,
+            showAmplify: true,
+          }) +
+        '</div>' +
+      '</div>' +
+
+      // ── Right column: artifact (top half) + tabs+pane (bottom half) ──
+      '<div class="agent-chat-right-col" style="width:380px;flex-shrink:0;display:flex;flex-direction:column;border-left:1px solid var(--outline-variant);overflow:hidden">' +
+        // Artifact panel — fills top 50%
+        '<div class="ach-right-artifact" style="flex:1 1 50%;min-height:0;display:flex;flex-direction:column;overflow:hidden">' +
+          _renderArtifactPanelShell('agent', agentId) +
+        '</div>' +
+        // Tabs + panes — fills bottom 50%
+        '<div class="ach-right-tabs" style="flex:1 1 50%;min-height:0;display:flex;flex-direction:column;overflow:hidden;border-top:1px solid var(--outline-variant);background:var(--surface-container-lowest)">' +
+          '<div class="lt-bottom-tabs" id="lt-bottom-tabs-' + agentId + '">' +
+            _bottomTabBtnTech('caps',  'build_circle', 'Caps') +
+            _bottomTabBtnTech('tasks', 'queue',        'Tasks') +
+            _bottomTabBtnTech('log',   'terminal',     'Log') +
+            _bottomTabBtnTech('todos', 'checklist',    'Todos') +
+          '</div>' +
+          '<div style="flex:1;overflow:hidden;position:relative">' +
+            // Capabilities (default)
+            '<div class="lt-bottom-pane" data-pane="caps" id="lt-pane-caps-' + agentId + '"' +
+              ' style="position:absolute;inset:0;overflow-y:auto;padding:16px 18px;cursor:pointer"' +
+              ' onclick="showSkillPanel(\'' + agentId + '\')">' +
+              (function(){
+                var skills = (ag.granted_skills && ag.granted_skills.length) || 0;
+                var mcps = (ag.mcp_servers && ag.mcp_servers.length) || 0;
+                var tools = (ag.tools && ag.tools.length) || 0;
+                var statRow = function(label, val) {
+                  return '<div style="display:flex;align-items:baseline;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--outline-variant)">' +
+                    '<span class="tc-mono-label" style="color:var(--outline)">' + label + '</span>' +
+                    '<span style="font-weight:700;font-size:22px;color:var(--primary);font-family:var(--font-mono);letter-spacing:-0.02em">' + val + '</span>' +
+                  '</div>';
+                };
+                return statRow('SKILLS', skills) + statRow('MCPS', mcps) + statRow('TOOLS', tools) +
+                  '<div class="tc-mono-label" style="margin-top:14px;color:var(--outline);font-size:10px">CLICK TO OPEN SKILL PANEL →</div>';
+              })() +
+              // Hidden spans for legacy pollers
+              '<span id="agent-token-stats-' + agentId + '" style="display:none"></span>' +
+              '<span id="agent-token-calls-' + agentId + '" style="display:none"></span>' +
+              '<span id="agent-memory-ratio-' + agentId + '" style="display:none"></span>' +
+              '<span id="agent-memory-bar-' + agentId + '" style="display:none"></span>' +
+              '<span id="agent-task-count-' + agentId + '" style="display:none">0</span>' +
+            '</div>' +
+            // Tasks
+            '<div class="lt-bottom-pane" data-pane="tasks" id="lt-pane-tasks-' + agentId + '"' +
+              ' style="display:none;position:absolute;inset:0;overflow-y:auto;padding:16px 18px">' +
+              '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--outline-variant)">' +
+                '<div class="tc-mono-label" style="color:var(--outline);font-size:10px">ACTIVE TASKS</div>' +
+                '<button class="tc-btn tc-btn-sm tc-btn-ghost" onclick="addTaskDialog(\'' + agentId + '\')" style="font-size:10px;padding:3px 8px"><span class="material-symbols-outlined" style="font-size:13px">add</span>NEW</button>' +
+              '</div>' +
+              '<div id="tasks-list-' + agentId + '" style="display:flex;flex-direction:column;gap:6px"></div>' +
+            '</div>' +
+            // Execution Log
+            '<div class="lt-bottom-pane" data-pane="log" id="lt-pane-log-' + agentId + '"' +
+              ' style="display:none;position:absolute;inset:0;overflow-y:auto;padding:14px 18px;background:var(--surface-container-lowest)">' +
+              '<div id="agent-event-log-' + agentId + '" style="font-family:var(--font-mono);font-size:10px;line-height:1.7;color:var(--on-surface-variant);letter-spacing:0.03em"></div>' +
+            '</div>' +
+            // TODOs
+            '<div class="lt-bottom-pane" data-pane="todos" id="lt-pane-todos-' + agentId + '"' +
+              ' style="display:none;position:absolute;inset:0;overflow-y:auto;padding:14px 18px">' +
+              '<div id="execution-steps-' + agentId + '" style="display:flex;flex-direction:column;gap:6px">' +
+                '<div class="tc-mono-label" style="color:var(--outline);padding:6px 0;font-size:10px">WAITING FOR AGENT…</div>' +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+    '</section>' +
+
+    // ── Workspace footer ──
+    '<div class="agent-chat-footer-tech">' +
+      'PRIVATE WORKSPACE: <code>~/.tudou_claw/workspaces/' + esc(agentId) + '</code>' +
+    '</div>';
+
+  // Pane visibility — apply persisted active tab.
+  try { _applyInitialBottomTabTech(agentId); } catch(_){}
+
+  loadAgentChat(agentId).then(function() {
+    try { attachHistoricalFileCards(agentId); } catch(e) {}
+  });
+  try { _initRagToggle(agentId); } catch(e) {}
+  loadTasks(agentId);
+  loadAgentEventLog(agentId);
+  loadExecutionSteps(agentId);
+  loadInterAgentMessages(agentId);
+  try {
+    if (typeof window.isV2Mode === 'function' && window.isV2Mode() &&
+        typeof window.loadConversationTasksIntoQueue === 'function') {
+      window.loadConversationTasksIntoQueue(agentId);
+    }
+  } catch (_e) {}
+  populateQuickModelSwitch(agentId);
+  loadAgentRuntimeStats(agentId);
+  if (window._agentRuntimeStatsTimer) clearInterval(window._agentRuntimeStatsTimer);
+  window._agentRuntimeStatsTimer = setInterval(function(){
+    loadAgentRuntimeStats(agentId);
+  }, 8000);
+  _reconnectActiveStream(agentId);
+}
+window.renderAgentChatTech = renderAgentChatTech;
+
+// Pill-style bottom-tab selector (class-based active state, no inline
+// style mutations). Used only by the tech variant so the legacy
+// _selectBottomTab keeps its inline-style flow.
+window._selectBottomTabTech = function(agentId, paneId) {
+  try { localStorage.setItem(_bottomTabKey(agentId), paneId); } catch(_) {}
+  var panes = document.querySelectorAll(
+    '#lt-pane-caps-' + CSS.escape(agentId) + ', '
+    + '#lt-pane-tasks-' + CSS.escape(agentId) + ', '
+    + '#lt-pane-log-' + CSS.escape(agentId) + ', '
+    + '#lt-pane-todos-' + CSS.escape(agentId));
+  panes.forEach(function(p) {
+    p.style.display = (p.getAttribute('data-pane') === paneId) ? 'block' : 'none';
+  });
+  var tabs = document.querySelectorAll(
+    '#lt-bottom-tabs-' + CSS.escape(agentId) + ' button');
+  tabs.forEach(function(b) {
+    if (b.getAttribute('data-pane') === paneId) {
+      b.classList.add('active');
+    } else {
+      b.classList.remove('active');
+    }
+  });
+};
+
+window._applyInitialBottomTabTech = function(agentId) {
+  var sel = _getActiveBottomTab(agentId);
+  if (sel !== 'caps') {
+    window._selectBottomTabTech(agentId, sel);
+  }
+};
 
 // Load event log for agent bottom panel
 // Per-kind color for the event log chip.
@@ -7892,6 +8130,13 @@ function _getAgentRobotSrc(agentId) {
   // Find agent in cached state to get robot avatar
   var agents = window._cachedAgents || [];
   var a = agents.find(function(x){ return x.id === agentId; });
+  // Tech mode: prefer the aether portrait keyed off role. Falls back to
+  // _robotIconUrl flow for any role _aetherAvatarUrl can't resolve.
+  try {
+    if (localStorage.getItem('tudou_theme') === 'tech' && typeof _aetherAvatarUrl === 'function') {
+      return _aetherAvatarUrl((a && a.role) || 'general');
+    }
+  } catch (e) {}
   if (a && a.robot_avatar) return _robotIconUrl(a.robot_avatar);
   if (a) return _robotIconUrl('robot_' + (a.role || 'general'));
   return _robotIconUrl('robot_general');
@@ -18163,18 +18408,35 @@ function _siFormatTokens(n) {
 function renderSelfImprovement() {
   var c = document.getElementById('content');
   if (!c) { console.error('renderSelfImprovement: content element not found'); return; }
-  c.style.padding = '24px';
+  var _techMode = false;
+  try { _techMode = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+  c.style.padding = _techMode ? 'var(--s-lg)' : '24px';
 
   var siCount = agents.filter(function(a){ return a.self_improvement && a.self_improvement.enabled; }).length;
 
   var html = '<div style="width:100%;padding:0">';
 
   // Header
-  html += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:20px">';
-  html += '<span class="material-symbols-outlined" style="font-size:28px;color:var(--primary)">psychology</span>';
-  html += '<div><h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:22px;font-weight:800;margin:0;line-height:1.2">Agent Self-Improvement</h2>';
-  html += '<div style="color:var(--text3);font-size:12px;margin-top:2px">复盘固化 + 主动学习 → 经验库 → 检索调用 → 迭代进化</div>';
-  html += '</div></div>';
+  if (_techMode) {
+    html += '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:var(--s-lg);gap:var(--s-md);flex-wrap:wrap">' +
+      '<div style="flex:1;min-width:240px">' +
+        '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px">' +
+          '<span>RECURSIVE LEARNING</span>' +
+          '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
+        '</div>' +
+        '<h1 class="tc-h2" style="margin-top:6px">Agent Self-Improvement</h1>' +
+        '<div class="tc-text-dim" style="font-size:12px;margin-top:6px;line-height:1.55">' +
+          'Retrospect + active learn → experience library → retrieve on demand → iterate.' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  } else {
+    html += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:20px">';
+    html += '<span class="material-symbols-outlined" style="font-size:28px;color:var(--primary)">psychology</span>';
+    html += '<div><h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:22px;font-weight:800;margin:0;line-height:1.2">Agent Self-Improvement</h2>';
+    html += '<div style="color:var(--text3);font-size:12px;margin-top:2px">复盘固化 + 主动学习 → 经验库 → 检索调用 → 迭代进化</div>';
+    html += '</div></div>';
+  }
 
   // ── Row 1: closed-loop KPI cards ──
   // Goal → Plan → Completion → Conversion
@@ -22712,6 +22974,14 @@ function renderKnowledgeMemoryHub() {
 // ── Tab 1: Shared Knowledge ──
 async function _renderKmShared() {
   var sc = document.getElementById('km-content');
+  // Tech hub doesn't create #km-content — its body is #tech-hub-km-body
+  // (or temporarily renamed to #content during the initial render). The
+  // bridge in theme-tech.css handles the visual skin; we just need the
+  // right container.
+  if (!sc) {
+    sc = document.getElementById('tech-hub-km-body') || document.getElementById('content');
+  }
+  if (!sc) return;
   sc.innerHTML = '<div style="color:var(--text3);padding:20px;text-align:center">加载中...</div>';
   try {
     var data = await api('GET', '/api/portal/knowledge');
@@ -23016,6 +23286,12 @@ async function _kmDoImport(collection, providerId) {
 
 // ── Tab 2: Domain Knowledge Bases (standalone, decoupled from agents) ──
 async function _renderKmPrivate() {
+  // Tech (Aether) variant — different visual chrome, reuses the same
+  // /api/portal/domain-kb/list endpoint and the existing edit/delete/
+  // import/search handlers + create modal.
+  try {
+    if (localStorage.getItem('tudou_theme') === 'tech') return _renderKmPrivateTech();
+  } catch (e) {}
   var sc = document.getElementById('km-content');
   sc.innerHTML = '<div style="color:var(--text3);padding:20px;text-align:center">加载中...</div>';
   try {
@@ -23076,6 +23352,157 @@ async function _renderKmPrivate() {
     sc.innerHTML = '<div style="color:var(--error);padding:20px">加载失败: '+e+'</div>';
   }
 }
+
+// ============ Tech (Aether) — Private/Domain KB list (stitch_30) ============
+// Same /api/portal/domain-kb/list payload as legacy. Visual chrome only.
+// Container resolution: tech hub renames its body div to 'content' during
+// the initial sub-render call, then restores it to 'tech-hub-km-body'.
+// We try both so post-action refreshes (e.g., after create modal saves)
+// also find the right target.
+async function _renderKmPrivateTech() {
+  var sc = document.getElementById('tech-hub-km-body')
+        || document.getElementById('content');
+  if (!sc) return;
+  sc.innerHTML = '<div class="tc-text-dim" style="padding:40px 20px;text-align:center;font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em">LOADING…</div>';
+  try {
+    var data = await api('POST', '/api/portal/domain-kb/list');
+    var kbs = (data && data.knowledge_bases) || [];
+
+    // Map of which agents bind each KB
+    var agentsByKb = {};
+    (agents || []).forEach(function(a) {
+      var colIds = (a.profile && a.profile.rag_collection_ids) || [];
+      colIds.forEach(function(cid) {
+        if (!agentsByKb[cid]) agentsByKb[cid] = [];
+        agentsByKb[cid].push(a);
+      });
+    });
+
+    var cardsHtml = kbs.map(function(kb) {
+      var boundAgents = agentsByKb[kb.id] || [];
+      var isRemote = !!kb.provider_id;
+      var idShort = (kb.id || '').slice(0, 12);
+      var statusChip = isRemote
+        ? '<span class="tc-mono-label" style="padding:3px 8px;border-radius:var(--r-md);background:var(--surface-container-highest);color:var(--outline);border:1px solid var(--outline-variant);font-size:10px">REMOTE</span>'
+        : '<span class="tc-mono-label" style="padding:3px 8px;border-radius:var(--r-md);background:rgba(192,193,255,0.10);color:var(--primary);border:1px solid rgba(192,193,255,0.20);font-size:10px">LOCAL</span>';
+
+      var firstAgent = boundAgents[0];
+      var avatarRow;
+      if (firstAgent) {
+        var aurl = _aetherAvatarUrl(firstAgent.role || 'general');
+        var moreCount = boundAgents.length - 1;
+        avatarRow =
+          '<div style="display:flex;align-items:center;gap:10px">' +
+            '<div style="width:32px;height:32px;border-radius:9999px;border:1px solid var(--outline-variant);overflow:hidden;background:var(--surface-container-high);flex-shrink:0">' +
+              '<img src="' + aurl + '" style="width:100%;height:100%;object-fit:cover" alt="" onerror="this.style.display=\'none\'">' +
+            '</div>' +
+            '<div style="display:flex;flex-direction:column">' +
+              '<span class="tc-mono-label" style="color:var(--outline);font-size:9px">EXPERT LEAD</span>' +
+              '<span style="font-size:13px;font-weight:500;color:var(--on-surface)">' + esc(firstAgent.name) + (moreCount > 0 ? ' <span class="tc-text-dim" style="font-size:11px">+' + moreCount + '</span>' : '') + '</span>' +
+            '</div>' +
+          '</div>';
+      } else {
+        avatarRow =
+          '<div style="display:flex;align-items:center;gap:10px">' +
+            '<div style="width:32px;height:32px;border-radius:var(--r-md);border:1px solid var(--outline-variant);background:var(--surface-container-highest);display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+              '<span class="material-symbols-outlined" style="color:var(--outline);font-size:18px">person_off</span>' +
+            '</div>' +
+            '<div style="display:flex;flex-direction:column">' +
+              '<span class="tc-mono-label" style="color:var(--outline);font-size:9px">EXPERT LEAD</span>' +
+              '<span class="tc-text-dim" style="font-size:13px">Unassigned</span>' +
+            '</div>' +
+          '</div>';
+      }
+
+      var tagPills = (kb.tags || []).slice(0, 3).map(function(t) {
+        return '<span class="tc-mono-label" style="padding:2px 8px;border-radius:var(--r-md);background:rgba(255,183,131,0.10);color:var(--tertiary);border:1px solid rgba(255,183,131,0.25);font-size:10px">' + esc(t) + '</span>';
+      }).join(' ');
+      if ((kb.tags || []).length > 3) tagPills += ' <span class="tc-text-dim" style="font-size:10px">+' + ((kb.tags || []).length - 3) + '</span>';
+
+      return '' +
+        '<div class="tc-card-glass" style="padding:18px;display:flex;flex-direction:column;gap:14px;position:relative;border-top:1px solid rgba(255,255,255,0.10);' + (boundAgents.length > 0 ? 'box-shadow:0 0 15px rgba(99,102,241,0.10);' : '') + '">' +
+          // Top: ID + name | status chip
+          '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">' +
+            '<div style="flex:1;min-width:0">' +
+              '<div class="tc-mono-label" style="color:var(--primary);font-size:10px;margin-bottom:4px">ID: ' + esc(idShort).toUpperCase() + '</div>' +
+              '<div style="font-size:18px;font-weight:700;color:var(--on-surface);line-height:1.3">' + esc(kb.name) + '</div>' +
+              (kb.description
+                ? '<div class="tc-text-dim" style="font-size:12px;margin-top:6px;line-height:1.5">' + esc(kb.description) + '</div>'
+                : '') +
+            '</div>' +
+            statusChip +
+          '</div>' +
+          // 2-col grid: docs / utilization
+          '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">' +
+            '<div style="display:flex;flex-direction:column;gap:4px">' +
+              '<span class="tc-mono-label" style="color:var(--outline);font-size:9px">VOLUME</span>' +
+              '<div style="display:flex;align-items:baseline;gap:4px">' +
+                '<span style="font-size:18px;font-weight:700;color:var(--on-surface);font-family:var(--font-mono)">' + (kb.doc_count || 0) + '</span>' +
+                '<span class="tc-text-dim" style="font-size:10px">docs</span>' +
+              '</div>' +
+            '</div>' +
+            '<div style="display:flex;flex-direction:column;gap:4px">' +
+              '<span class="tc-mono-label" style="color:var(--outline);font-size:9px">UTILIZATION</span>' +
+              '<div style="display:flex;align-items:center;gap:6px">' +
+                '<div style="width:6px;height:6px;border-radius:50%;background:' + (boundAgents.length > 0 ? 'var(--cyber-blue, var(--secondary))' : 'var(--outline)') + '"></div>' +
+                '<span style="font-size:14px;font-weight:600;color:var(--on-surface)">' + boundAgents.length + ' Agent' + (boundAgents.length === 1 ? '' : 's') + '</span>' +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+          // Tags row (if any)
+          (tagPills ? '<div style="display:flex;gap:6px;flex-wrap:wrap">' + tagPills + '</div>' : '') +
+          // Footer: avatar | actions
+          '<div style="display:flex;align-items:center;justify-content:space-between;padding-top:12px;border-top:1px solid var(--outline-variant)">' +
+            avatarRow +
+            '<div style="display:flex;gap:4px">' +
+              '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="_kmShowDomainImport(\'' + esc(kb.id) + '\',\'' + esc(kb.name) + '\')" title="Import" style="padding:6px;min-width:0">' +
+                '<span class="material-symbols-outlined" style="font-size:16px">upload_file</span></button>' +
+              '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="_kmSearchDomainKb(\'' + esc(kb.id) + '\',\'' + esc(kb.name) + '\')" title="Search test" style="padding:6px;min-width:0">' +
+                '<span class="material-symbols-outlined" style="font-size:16px">search</span></button>' +
+              '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="_kmEditDomainKb(\'' + esc(kb.id) + '\')" title="Edit" style="padding:6px;min-width:0">' +
+                '<span class="material-symbols-outlined" style="font-size:16px">edit</span></button>' +
+              '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="_kmDeleteDomainKb(\'' + esc(kb.id) + '\',\'' + esc(kb.name) + '\')" title="Delete" style="padding:6px;min-width:0;color:var(--error)">' +
+                '<span class="material-symbols-outlined" style="font-size:16px">delete</span></button>' +
+            '</div>' +
+          '</div>' +
+        '</div>';
+    }).join('');
+
+    var headerHtml =
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-lg);gap:var(--s-md);flex-wrap:wrap">' +
+        '<div style="flex:1;min-width:240px">' +
+          '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px">' +
+            '<span>REPOSITORY STATUS</span>' +
+            '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
+          '</div>' +
+          '<div class="tc-text-dim" style="font-size:12px;margin-top:6px">' +
+            'Domain knowledge bases — independent of agents. Bind to multiple advisors; deleting an agent does not affect the KB.' +
+          '</div>' +
+        '</div>' +
+        '<button class="tc-btn tc-btn-primary tc-btn-sm" onclick="_kmShowCreateDomainKb()">' +
+          '<span class="material-symbols-outlined" style="font-size:14px">add</span> NEW KB' +
+        '</button>' +
+      '</div>';
+
+    var bodyHtml = (kbs.length === 0)
+      ? '<div class="tc-card" style="text-align:center;padding:60px 20px;border-style:dashed">' +
+          '<span class="material-symbols-outlined" style="font-size:48px;color:var(--outline)">menu_book</span>' +
+          '<div style="font-size:14px;color:var(--on-surface-variant);margin-top:14px;margin-bottom:8px">No domain knowledge bases yet</div>' +
+          '<div class="tc-text-dim" style="font-size:12px;margin-bottom:20px;line-height:1.55">' +
+            'Create a KB, import PDFs / docs, then bind it when configuring an advisor agent.' +
+          '</div>' +
+          '<button class="tc-btn tc-btn-primary tc-btn-sm" onclick="_kmShowCreateDomainKb()">' +
+            '<span class="material-symbols-outlined" style="font-size:14px">add</span> CREATE FIRST KB' +
+          '</button>' +
+        '</div>'
+      : '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:var(--s-md)">' + cardsHtml + '</div>';
+
+    sc.innerHTML = headerHtml + bodyHtml;
+  } catch (e) {
+    sc.innerHTML = '<div class="tc-card" style="color:var(--error);padding:var(--s-lg)">' + esc(String(e)) + '</div>';
+  }
+}
+window._renderKmPrivateTech = _renderKmPrivateTech;
 
 function _kmShowCreateDomainKb() {
   var html = '<div class="modal-overlay" id="km-dkb-modal" onclick="if(event.target===this)this.remove()">'
@@ -23748,6 +24175,9 @@ async function _kmSearchDomainKb(kbId, kbName) {
 
 // ── Tab 3: RAG Providers ──
 async function _renderKmRagProviders() {
+  try {
+    if (localStorage.getItem('tudou_theme') === 'tech') return _renderKmRagProvidersTech();
+  } catch (e) {}
   var sc = document.getElementById('km-content');
   sc.innerHTML = '<div style="color:var(--text3);padding:20px;text-align:center">加载中...</div>';
   try {
@@ -23825,6 +24255,79 @@ async function _kmDeleteProvider(id) {
     _renderKmRagProviders();
   } catch(e) { alert('删除失败: '+e); }
 }
+
+// ============ Tech (Aether) — RAG Providers (stitch_26) ============
+async function _renderKmRagProvidersTech() {
+  var sc = document.getElementById('tech-hub-km-body')
+        || document.getElementById('content');
+  if (!sc) return;
+  sc.innerHTML = '<div class="tc-text-dim" style="padding:40px 20px;text-align:center;font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em">LOADING…</div>';
+  try {
+    var data = await api('GET', '/api/portal/rag/providers');
+    var providers = (data && data.providers) || [];
+
+    var builtinCard =
+      '<div class="tc-card-glass" style="padding:18px;display:flex;align-items:center;gap:14px;border-top:1px solid rgba(255,255,255,0.10);box-shadow:0 0 12px rgba(173,255,47,0.08)">' +
+        '<div style="width:42px;height:42px;border-radius:var(--r-md);background:rgba(173,255,47,0.10);border:1px solid rgba(173,255,47,0.25);display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+          '<span class="material-symbols-outlined" style="font-size:22px;color:var(--cyber-lime, #adff2f)">storage</span>' +
+        '</div>' +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="display:flex;align-items:center;gap:8px;margin-bottom:2px">' +
+            '<span style="font-size:14px;font-weight:600;color:var(--on-surface)">Local ChromaDB</span>' +
+            '<span class="tc-mono-label" style="padding:2px 7px;border-radius:var(--r-md);background:rgba(173,255,47,0.10);color:var(--cyber-lime, #adff2f);border:1px solid rgba(173,255,47,0.25);font-size:9px">BUILT-IN</span>' +
+          '</div>' +
+          '<div class="tc-text-dim" style="font-size:11px;font-family:var(--font-mono);letter-spacing:0.03em">~/.tudou_claw/chromadb · zero-config vector store</div>' +
+        '</div>' +
+      '</div>';
+
+    var providerCards = providers.map(function(p) {
+      var enabled = !!p.enabled;
+      var statusChip = enabled
+        ? '<span class="tc-mono-label" style="padding:2px 7px;border-radius:var(--r-md);background:rgba(192,193,255,0.10);color:var(--primary);border:1px solid rgba(192,193,255,0.25);font-size:9px">ACTIVE</span>'
+        : '<span class="tc-mono-label" style="padding:2px 7px;border-radius:var(--r-md);background:rgba(255,180,171,0.10);color:var(--error);border:1px solid rgba(255,180,171,0.25);font-size:9px">DISABLED</span>';
+      return '' +
+        '<div class="tc-card-glass" style="padding:18px;display:flex;align-items:center;gap:14px;border-top:1px solid rgba(255,255,255,0.10)">' +
+          '<div style="width:42px;height:42px;border-radius:var(--r-md);background:rgba(192,193,255,0.10);border:1px solid rgba(192,193,255,0.25);display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+            '<span class="material-symbols-outlined" style="font-size:22px;color:var(--primary)">cloud</span>' +
+          '</div>' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;flex-wrap:wrap">' +
+              '<span style="font-size:14px;font-weight:600;color:var(--on-surface)">' + esc(p.name) + '</span>' +
+              statusChip +
+            '</div>' +
+            '<div class="tc-text-dim" style="font-size:11px;font-family:var(--font-mono);letter-spacing:0.03em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
+              esc(p.kind || 'remote').toUpperCase() + ' · ' + esc(p.base_url || 'N/A') +
+            '</div>' +
+          '</div>' +
+          '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="_kmDeleteProvider(\'' + esc(p.id) + '\')" title="Remove" style="padding:6px;color:var(--error)">' +
+            '<span class="material-symbols-outlined" style="font-size:16px">delete</span></button>' +
+        '</div>';
+    }).join('');
+
+    sc.innerHTML = '' +
+      '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:var(--s-lg);gap:var(--s-md);flex-wrap:wrap">' +
+        '<div style="flex:1;min-width:240px">' +
+          '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px">' +
+            '<span>VECTOR BACKEND</span>' +
+            '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
+          '</div>' +
+          '<div class="tc-text-dim" style="font-size:12px;margin-top:6px;line-height:1.55">' +
+            'RAG provider registry — local ChromaDB ships built-in. Add remote nodes for cross-instance KB sharing.' +
+          '</div>' +
+        '</div>' +
+        '<button class="tc-btn tc-btn-primary tc-btn-sm" onclick="_kmShowAddProvider()">' +
+          '<span class="material-symbols-outlined" style="font-size:14px">add</span> ADD PROVIDER' +
+        '</button>' +
+      '</div>' +
+      '<div style="display:flex;flex-direction:column;gap:10px">' +
+        builtinCard +
+        providerCards +
+      '</div>';
+  } catch (e) {
+    sc.innerHTML = '<div class="tc-card" style="color:var(--error);padding:var(--s-lg)">' + esc(String(e)) + '</div>';
+  }
+}
+window._renderKmRagProvidersTech = _renderKmRagProvidersTech;
 
 // ── Tab 4: Agent Private Memory ──
 var _agentMemStats = {};  // {agent_id: {l1, l2, l3}}
@@ -23940,6 +24443,14 @@ function _l3RefreshModal() {
 }
 
 function _renderKmMemory() {
+  // Tech (Aether) variant — dispatch when the user is in tech mode.
+  // Reuses /api/portal/agents/memory-stats and the existing dream
+  // handlers. Container resolution mirrors _renderKmPrivate's: tech
+  // hub renames its body div to 'content' during the initial sync
+  // call, then restores it after.
+  try {
+    if (localStorage.getItem('tudou_theme') === 'tech') return _renderKmMemoryTech();
+  } catch (e) {}
   var sc = document.getElementById('km-content');
   var visibleAgents = (agents||[]).filter(function(a){return !a.parent_id;});
   if (!visibleAgents.length) {
@@ -24040,6 +24551,11 @@ function _drmStat(label, val, color) {
 }
 
 function _renderKmAgentCards(visibleAgents) {
+  try {
+    if (localStorage.getItem('tudou_theme') === 'tech' && typeof _renderKmAgentCardsTech === 'function') {
+      return _renderKmAgentCardsTech(visibleAgents);
+    }
+  } catch (e) {}
   var grid = document.getElementById('km-agent-grid');
   if (!grid) return;
   grid.innerHTML = visibleAgents.map(function(a) {
@@ -24078,6 +24594,121 @@ function _memBadge(label, count, color) {
   return '<div style="font-size:10px;padding:2px 6px;border-radius:4px;background:'+bg+';color:'+fg+';border:1px solid '+(count>0?color+'40':'var(--border-light)')+'">'
     + label + ' <b>' + count + '</b></div>';
 }
+
+// ============ Tech (Aether) — Agent Memory hub (stitch_9) ============
+// Per-agent L1/L2/L3 memory layer view. Reuses /api/portal/agents/
+// memory-stats and the existing _kmTriggerDream / _kmShowLastDream
+// handlers + showAgentMemoryView modal.
+function _renderKmMemoryTech() {
+  var sc = document.getElementById('tech-hub-km-body')
+        || document.getElementById('content');
+  if (!sc) return;
+  var visibleAgents = (agents || []).filter(function(a){ return !a.parent_id; });
+  if (!visibleAgents.length) {
+    sc.innerHTML = '<div class="tc-card" style="text-align:center;padding:60px 20px;border-style:dashed">' +
+      '<span class="material-symbols-outlined" style="font-size:48px;color:var(--outline)">memory</span>' +
+      '<div class="tc-text-dim" style="margin-top:14px;font-size:13px">No agents yet — create one first.</div>' +
+    '</div>';
+    return;
+  }
+  sc.innerHTML = '' +
+    // Header — mono-label kicker + h2 title + dream actions
+    '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:var(--s-lg);gap:var(--s-md);flex-wrap:wrap">' +
+      '<div style="flex:1;min-width:240px">' +
+        '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px">' +
+          '<span>NEURAL PATHWAYS</span>' +
+          '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
+        '</div>' +
+        '<div class="tc-text-dim" style="font-size:12px;margin-top:6px;line-height:1.55">' +
+          'Per-agent multi-tier memory · L1 hot cache · L2 working summaries · L3 long-term semantic. ' +
+          'Click any agent to inspect, run a Dream pass to consolidate.' +
+        '</div>' +
+      '</div>' +
+      '<div style="display:flex;gap:8px;align-items:center;flex-shrink:0">' +
+        '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="_kmShowLastDream()" title="View last Dream report">' +
+          '<span class="material-symbols-outlined" style="font-size:14px">history</span> LAST DREAM' +
+        '</button>' +
+        '<button class="tc-btn tc-btn-primary tc-btn-sm" id="km-dream-btn" onclick="_kmTriggerDream()" title="Trigger full memory consolidation pass">' +
+          '<span class="material-symbols-outlined" style="font-size:14px">auto_awesome</span> TRIGGER DREAM' +
+        '</button>' +
+      '</div>' +
+    '</div>' +
+    // Inline dream report container (filled by _kmRenderDreamReport)
+    '<div id="km-dream-report" style="margin-bottom:var(--s-md)"></div>' +
+    // Agent grid
+    '<div id="km-agent-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:var(--s-md)"></div>';
+  _renderKmAgentCards(visibleAgents);
+  api('GET', '/api/portal/agents/memory-stats').then(function(data) {
+    if (data) { _agentMemStats = data; _renderKmAgentCards(visibleAgents); }
+  }).catch(function(){});
+}
+window._renderKmMemoryTech = _renderKmMemoryTech;
+
+function _renderKmAgentCardsTech(visibleAgents) {
+  var grid = document.getElementById('km-agent-grid');
+  if (!grid) return;
+  var L1_COLOR = 'var(--secondary, #89ceff)';   // L1 hot cache — electric blue
+  var L2_COLOR = '#a78bfa';                      // L2 working — purple
+  var L3_COLOR = 'var(--cyber-lime, #adff2f)';  // L3 long-term — lime
+  var bar = function(count, color) {
+    if (!count) return '';
+    return '<div style="flex:' + count + ';background:' + color + '"></div>';
+  };
+  var pill = function(label, count, color) {
+    var on = count > 0;
+    return '<div class="tc-mono-label" style="padding:3px 8px;border-radius:var(--r-md);font-size:9px;letter-spacing:0.05em;' +
+      (on ? 'background:' + color + '20;color:' + color + ';border:1px solid ' + color + '40'
+          : 'background:transparent;color:var(--outline);border:1px solid var(--outline-variant)') +
+      '">' + label + ' <span style="font-weight:700">' + count + '</span></div>';
+  };
+  grid.innerHTML = visibleAgents.map(function(a) {
+    var cls = a.agent_class || (a.profile && a.profile.agent_class) || 'enterprise';
+    var clsMeta = _AGENT_CLASSES[cls] || _AGENT_CLASSES.enterprise;
+    var memMode = a.memory_mode || (a.profile && a.profile.memory_mode) || 'full';
+    var memLabel = memMode === 'full' ? 'FULL MEMORY' : memMode === 'light' ? 'LIGHT' : 'NO MEMORY';
+    var st = _agentMemStats[a.id] || {};
+    var l1 = st.l1 || 0, l2 = st.l2 || 0, l3 = st.l3 || 0;
+    var total = l1 + l2 + l3;
+    var aurl = _aetherAvatarUrl(a.role || 'general');
+    var hasMem = total > 0;
+
+    return '' +
+      '<div class="tc-card-glass tc-card-clickable" onclick="showAgentMemoryView(\'' + a.id + '\')"' +
+           ' style="padding:var(--s-md);display:flex;flex-direction:column;gap:12px;border-top:1px solid rgba(255,255,255,0.10);' +
+           (hasMem ? 'box-shadow:0 0 15px rgba(192,193,255,0.10);' : '') + '"' +
+           ' onmouseover="this.style.borderColor=\'var(--primary)\'" onmouseout="this.style.borderColor=\'\'">' +
+        // Top row: avatar + name + memory mode chip
+        '<div style="display:flex;align-items:center;gap:10px">' +
+          '<div style="width:36px;height:36px;border-radius:9999px;border:1px solid var(--outline-variant);overflow:hidden;background:var(--surface-container-high);flex-shrink:0">' +
+            '<img src="' + aurl + '" style="width:100%;height:100%;object-fit:cover" alt="" onerror="this.style.display=\'none\'">' +
+          '</div>' +
+          '<div style="flex:1;min-width:0">' +
+            '<div class="tc-mono-label" style="color:' + clsMeta.color + ';font-size:9px">' + esc(cls).toUpperCase() + '</div>' +
+            '<div style="font-size:14px;font-weight:600;color:var(--on-surface);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(a.name) + '</div>' +
+          '</div>' +
+          '<span class="tc-mono-label" style="padding:2px 7px;border-radius:var(--r-md);background:var(--surface-container-high);color:var(--outline);border:1px solid var(--outline-variant);font-size:9px">' + memLabel + '</span>' +
+        '</div>' +
+        // L1/L2/L3 pills
+        '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
+          pill('L1', l1, L1_COLOR) +
+          pill('L2', l2, L2_COLOR) +
+          pill('L3', l3, L3_COLOR) +
+        '</div>' +
+        // Memory bar
+        '<div style="display:flex;gap:1px;height:4px;border-radius:var(--r-sm);overflow:hidden;background:var(--surface-container-lowest)">' +
+          (total > 0
+            ? (bar(l1, L1_COLOR) + bar(l2, L2_COLOR) + bar(l3, L3_COLOR))
+            : '<div style="flex:1;background:var(--outline-variant)"></div>') +
+        '</div>' +
+        // Footer: total + arrow
+        '<div style="display:flex;align-items:center;justify-content:space-between;font-family:var(--font-mono);font-size:10px;color:var(--outline);letter-spacing:0.05em">' +
+          '<span>' + total + ' MEMORIES</span>' +
+          '<span class="material-symbols-outlined" style="font-size:14px;color:var(--primary)">arrow_forward</span>' +
+        '</div>' +
+      '</div>';
+  }).join('');
+}
+window._renderKmAgentCardsTech = _renderKmAgentCardsTech;
 
 function showAgentMemoryView(aid) {
   var ag = null;
