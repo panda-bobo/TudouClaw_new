@@ -17065,18 +17065,27 @@ function _renderProjectOverview(projId, d) {
       (sub?'<div style="font-size:10px;color:var(--text3);margin-top:2px">'+sub+'</div>':'') +
     '</div>';
   };
+  var _techOv = false;
+  try { _techOv = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+  var L = _techOv
+    ? { goalsDone:'GOALS DONE', delPending:'DELIVERABLES PENDING', issuesOpen:'OPEN ISSUES', tasksRun:'TASKS IN PROGRESS',
+        avg:'AVG ', total:'TOTAL ',
+        secGoals:'GOAL OVERVIEW (TOP 5)', secDeliv:'PENDING DELIVERABLE REVIEW', secIssues:'UNRESOLVED ISSUES' }
+    : { goalsDone:'目标完成', delPending:'交付件等待审阅', issuesOpen:'未解决问题', tasksRun:'进行中任务',
+        avg:'均值 ', total:'总 ',
+        secGoals:'目标概览 (Top 5)', secDeliv:'待审阅交付件', secIssues:'未解决问题' };
   return '<div style="max-width:1100px">' +
     '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px">' +
-      statCard('目标完成', (gs.done||0)+'/'+(gs.total||0), '均值 '+(gs.avg_progress||0)+'%') +
-      statCard('交付件等待审阅', (ds.submitted||0)+'', '总 '+(ds.total||0)+' · ✅'+(ds.approved||0)) +
-      statCard('未解决问题', (is.open||0)+'', '总 '+(is.total||0)) +
-      statCard('进行中任务', (ts.in_progress||0)+'', 'TODO '+(ts.todo||0)+' · DONE '+(ts.done||0)) +
+      statCard(L.goalsDone, (gs.done||0)+'/'+(gs.total||0), L.avg+(gs.avg_progress||0)+'%') +
+      statCard(L.delPending, (ds.submitted||0)+'', L.total+(ds.total||0)+' · ✅'+(ds.approved||0)) +
+      statCard(L.issuesOpen, (is.open||0)+'', L.total+(is.total||0)) +
+      statCard(L.tasksRun, (ts.in_progress||0)+'', 'TODO '+(ts.todo||0)+' · DONE '+(ts.done||0)) +
     '</div>' +
     '<div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">' +
-      '<div><div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--text3);margin-bottom:10px">目标概览 (Top 5)</div>'+recentGoals+'</div>' +
-      '<div><div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--text3);margin-bottom:10px">待审阅交付件</div>'+pendingHtml+'</div>' +
+      '<div><div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--text3);margin-bottom:10px">'+L.secGoals+'</div>'+recentGoals+'</div>' +
+      '<div><div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--text3);margin-bottom:10px">'+L.secDeliv+'</div>'+pendingHtml+'</div>' +
     '</div>' +
-    '<div style="margin-top:20px"><div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--text3);margin-bottom:10px">未解决问题</div>'+issuesHtml+'</div>' +
+    '<div style="margin-top:20px"><div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--text3);margin-bottom:10px">'+L.secIssues+'</div>'+issuesHtml+'</div>' +
   '</div>';
 }
 
@@ -17102,11 +17111,17 @@ function _renderProjectGoals(projId, goals) {
       '</div>' +
       '<div style="margin-top:10px">'+_pctBar(pct)+'</div>' +
     '</div>';
-  }).join('') || '<div style="color:var(--text3);font-size:13px;padding:20px;text-align:center">暂无目标。点击"新建目标"来为本项目设立可度量目标。</div>';
+  });
+  var _techGoals = false;
+  try { _techGoals = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+  var emptyMsg = _techGoals
+    ? '<div class="tc-text-dim" style="font-size:13px;padding:20px;text-align:center">No goals yet. Click NEW GOAL to set a measurable target for this project.</div>'
+    : '<div style="color:var(--text3);font-size:13px;padding:20px;text-align:center">暂无目标。点击"新建目标"来为本项目设立可度量目标。</div>';
+  rows = rows.join('') || emptyMsg;
   return '<div style="max-width:900px">' +
     '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">' +
-      '<div style="font-size:16px;font-weight:700">项目目标</div>' +
-      '<button class="btn btn-primary btn-sm" onclick="showAddGoalModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> 新建目标</button>' +
+      '<div style="font-size:16px;font-weight:700">' + (_techGoals ? 'Project Goals' : '项目目标') + '</div>' +
+      '<button class="btn btn-primary btn-sm" onclick="showAddGoalModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> ' + (_techGoals ? 'NEW GOAL' : '新建目标') + '</button>' +
     '</div>' + rows +
   '</div>';
 }
@@ -17127,11 +17142,17 @@ function _renderProjectMilestonesTab(projId, milestones) {
       (m.rejected_reason?'<div style="color:var(--error);font-size:11px;margin-top:4px">驳回原因: '+esc(m.rejected_reason)+'</div>':'') +
       actions +
     '</div>';
-  }).join('') || '<div style="color:var(--text3);font-size:13px;padding:20px;text-align:center">暂无里程碑</div>';
+  });
+  var _techMs = false;
+  try { _techMs = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+  var emptyMs = _techMs
+    ? '<div class="tc-text-dim" style="font-size:13px;padding:20px;text-align:center">No milestones yet</div>'
+    : '<div style="color:var(--text3);font-size:13px;padding:20px;text-align:center">暂无里程碑</div>';
+  rows = rows.join('') || emptyMs;
   return '<div style="max-width:900px">' +
     '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">' +
-      '<div style="font-size:16px;font-weight:700">里程碑</div>' +
-      '<button class="btn btn-primary btn-sm" onclick="showProjectMilestoneModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> 新建里程碑</button>' +
+      '<div style="font-size:16px;font-weight:700">' + (_techMs ? 'Milestones' : '里程碑') + '</div>' +
+      '<button class="btn btn-primary btn-sm" onclick="showProjectMilestoneModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> ' + (_techMs ? 'NEW MILESTONE' : '新建里程碑') + '</button>' +
     '</div>' + rows +
   '</div>';
 }
@@ -17294,13 +17315,18 @@ function _renderProjectDeliverables(projId, data) {
       groupHtml +
     '</div>';
   }
+  var _techDel = false;
+  try { _techDel = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+  var emptyDel = _techDel
+    ? '<div class="tc-text-dim" style="font-size:13px;padding:20px;text-align:center">No deliverables yet</div>'
+    : '<div style="color:var(--text3);font-size:13px;padding:20px;text-align:center">暂无交付件</div>';
   var body = (sharedSection || agentSections || unassignedSection)
     ? (sharedSection + agentSections + unassignedSection)
-    : '<div style="color:var(--text3);font-size:13px;padding:20px;text-align:center">暂无交付件</div>';
+    : emptyDel;
   return '<div style="max-width:900px">' +
     '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">' +
-      '<div style="font-size:16px;font-weight:700">交付件</div>' +
-      '<button class="btn btn-primary btn-sm" onclick="showAddDeliverableModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> 新建交付件</button>' +
+      '<div style="font-size:16px;font-weight:700">' + (_techDel ? 'Deliverables' : '交付件') + '</div>' +
+      '<button class="btn btn-primary btn-sm" onclick="showAddDeliverableModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> ' + (_techDel ? 'NEW DELIVERABLE' : '新建交付件') + '</button>' +
     '</div>' + body +
   '</div>';
 }
@@ -17325,11 +17351,17 @@ function _renderProjectIssues(projId, items) {
         '</div>' +
       '</div>' +
     '</div>';
-  }).join('') || '<div style="color:var(--text3);font-size:13px;padding:20px;text-align:center">暂无问题记录</div>';
+  });
+  var _techIss = false;
+  try { _techIss = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+  var emptyIss = _techIss
+    ? '<div class="tc-text-dim" style="font-size:13px;padding:20px;text-align:center">No issues recorded</div>'
+    : '<div style="color:var(--text3);font-size:13px;padding:20px;text-align:center">暂无问题记录</div>';
+  rows = rows.join('') || emptyIss;
   return '<div style="max-width:900px">' +
     '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">' +
-      '<div style="font-size:16px;font-weight:700">问题 / 风险</div>' +
-      '<button class="btn btn-primary btn-sm" onclick="showAddIssueModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> 新建问题</button>' +
+      '<div style="font-size:16px;font-weight:700">' + (_techIss ? 'Issues / Risks' : '问题 / 风险') + '</div>' +
+      '<button class="btn btn-primary btn-sm" onclick="showAddIssueModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> ' + (_techIss ? 'NEW ISSUE' : '新建问题') + '</button>' +
     '</div>' + rows +
   '</div>';
 }
