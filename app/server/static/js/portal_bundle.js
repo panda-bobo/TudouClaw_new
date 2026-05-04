@@ -31126,10 +31126,24 @@ async function renderPolicyConfig(container) {
       else toolsByRisk['moderate'].push(t);
     });
 
-    var html = '<div style="margin-bottom:20px">' +
-      '<h3 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:20px;font-weight:700;margin-bottom:4px">审批策略 Tool Policy</h3>' +
-      '<p style="color:var(--text2);font-size:13px">管理员可以调整每个工具的风险级别，定义不同角色的审批权限。</p>' +
-    '</div>';
+    var _techPc = false;
+    try { _techPc = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+    var html = '';
+    if (_techPc) {
+      html += '<div style="margin-bottom:var(--s-lg)">' +
+        '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px">' +
+          '<span>RISK GOVERNANCE</span>' +
+          '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
+        '</div>' +
+        '<h2 style="font-family:var(--font-display);font-size:30px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:8px 0 0">Tool Policy</h2>' +
+        '<p class="tc-text-dim" style="font-size:14px;line-height:1.55;margin-top:8px;max-width:640px">Adjust risk tier per tool, define approval authority per role tier, and configure delegation rules across the agent fork lattice.</p>' +
+      '</div>';
+    } else {
+      html += '<div style="margin-bottom:20px">' +
+        '<h3 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:20px;font-weight:700;margin-bottom:4px">审批策略 Tool Policy</h3>' +
+        '<p style="color:var(--text2);font-size:13px">管理员可以调整每个工具的风险级别，定义不同角色的审批权限。</p>' +
+      '</div>';
+    }
 
     // ── Risk level legend ──
     html += '<div style="display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap">';
