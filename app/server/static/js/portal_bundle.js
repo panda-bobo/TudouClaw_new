@@ -31794,29 +31794,36 @@ async function renderInbox() {
   }).join('');
 
   if (_techIb) {
-    // Stitch-style table layout: hero + filter row + table inside glass shell
+    // Stitch_24 layout: SYSTEM FEED kicker + h2 + search + 8/4 grid
+    // (message cards left, DETAIL VIEW panel right).
     c.innerHTML = '' +
       '<div style="display:flex;flex-direction:column;gap:var(--s-lg)">' +
         // Hero
-        '<div style="display:flex;justify-content:space-between;align-items:flex-end;gap:var(--s-md);flex-wrap:wrap">' +
-          '<div style="flex:1;min-width:240px">' +
-            '<h2 style="font-family:var(--font-display);font-size:30px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:0">Agent Inbox</h2>' +
-            '<p class="tc-text-dim" style="font-size:14px;line-height:1.55;margin-top:8px;max-width:640px">Cross-agent messages, system notifications, and replies awaiting review. Filter by agent and read state.</p>' +
+        '<div>' +
+          '<div class="tc-mono-label" style="color:var(--primary)">SYSTEM FEED</div>' +
+          '<h2 style="font-family:var(--font-display);font-size:30px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:8px 0 0">Inbox</h2>' +
+        '</div>' +
+        // Search + agent selector + filters row
+        '<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">' +
+          '<div style="flex:1;min-width:280px;position:relative">' +
+            '<span class="material-symbols-outlined" style="position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--outline);font-size:18px;pointer-events:none">search</span>' +
+            '<input id="inbox-search" placeholder="Search logs & messages…" oninput="_inboxFilter(this.value)" ' +
+              'style="width:100%;padding:11px 14px 11px 44px;background:var(--surface-container-lowest);border:1px solid var(--outline-variant);border-radius:var(--r-md);color:var(--on-surface);font-size:13px;outline:none;box-sizing:border-box">' +
           '</div>' +
-        '</div>' +
-        // Filter bar
-        '<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:14px 18px;background:var(--surface-container-low);border:1px solid var(--outline-variant);border-radius:var(--r-md)">' +
-          '<label class="tc-mono-label" style="color:var(--outline);font-size:10px">VIEWING AGENT</label>' +
-          '<select id="inbox-agent-sel" onchange="_inboxOnAgentChange(this.value)" style="padding:8px 12px;background:var(--surface-container-lowest);border:1px solid var(--outline-variant);border-radius:var(--r-md);color:var(--on-surface);font-size:12px;font-family:var(--font-mono);cursor:pointer">' + opts + '</select>' +
+          '<select id="inbox-agent-sel" onchange="_inboxOnAgentChange(this.value)" style="padding:11px 14px;background:var(--surface-container-lowest);border:1px solid var(--outline-variant);border-radius:var(--r-md);color:var(--on-surface);font-size:12px;font-family:var(--font-mono);cursor:pointer">' + opts + '</select>' +
           '<label style="font-family:var(--font-mono);font-size:10px;letter-spacing:0.05em;text-transform:uppercase;color:var(--outline);display:inline-flex;align-items:center;gap:6px;cursor:pointer">' +
-            '<input type="checkbox" id="inbox-show-read" onchange="_inboxRefresh()" checked style="accent-color:var(--primary)"> SHOW READ</label>' +
+            '<input type="checkbox" id="inbox-show-read" onchange="_inboxRefresh()" checked style="accent-color:var(--primary)"> READ</label>' +
           '<label style="font-family:var(--font-mono);font-size:10px;letter-spacing:0.05em;text-transform:uppercase;color:var(--outline);display:inline-flex;align-items:center;gap:6px;cursor:pointer">' +
-            '<input type="checkbox" id="inbox-show-acked" onchange="_inboxRefresh()" style="accent-color:var(--primary)"> SHOW ACKED</label>' +
-          '<span id="inbox-summary" class="tc-mono-label" style="margin-left:auto;color:var(--outline);font-size:10px"></span>' +
+            '<input type="checkbox" id="inbox-show-acked" onchange="_inboxRefresh()" style="accent-color:var(--primary)"> ACKED</label>' +
+          '<span id="inbox-summary" class="tc-mono-label" style="color:var(--outline);font-size:10px"></span>' +
         '</div>' +
-        // Table area inside glass shell
-        '<div class="tc-card-glass" style="padding:0;overflow:hidden;border-top:1px solid rgba(255,255,255,0.10)">' +
-          '<div id="inbox-list" style="min-height:120px"></div>' +
+        // 8/4 grid: feed left, detail right
+        '<div style="display:grid;grid-template-columns:8fr 4fr;gap:var(--s-lg);align-items:start">' +
+          '<div id="inbox-list" style="display:flex;flex-direction:column;gap:12px;min-height:120px;min-width:0"></div>' +
+          '<aside id="inbox-detail" class="tc-card-glass" style="padding:24px;display:flex;flex-direction:column;gap:14px;border-top:1px solid rgba(255,255,255,0.10);min-width:0;align-self:start;position:sticky;top:24px">' +
+            '<div class="tc-mono-label" style="color:var(--outline);font-size:10px;letter-spacing:0.08em">DETAIL VIEW</div>' +
+            '<div class="tc-text-dim" style="font-size:12px;line-height:1.55">Select a message on the left to view details and take action.</div>' +
+          '</aside>' +
         '</div>' +
       '</div>';
   } else {
@@ -31841,6 +31848,81 @@ function _inboxOnAgentChange(id) {
   _inboxSelectedAgent = id;
   _inboxRefresh();
 }
+
+// Tech-mode inbox: client-side fuzzy filter on the cached message list
+window._inboxFilter = function(q) {
+  q = (q || '').toLowerCase().trim();
+  var cards = document.querySelectorAll('.inbox-msg-card');
+  cards.forEach(function(card) {
+    if (!q) { card.style.display = ''; return; }
+    var txt = (card.textContent || '').toLowerCase();
+    card.style.display = (txt.indexOf(q) >= 0) ? '' : 'none';
+  });
+};
+
+// Tech-mode inbox: select a message and populate the right-side DETAIL VIEW
+window._inboxSelectMsg = function(mid) {
+  var msgs = window._inboxMsgCache || [];
+  var m = msgs.find(function(x){ return x.id === mid; });
+  var detail = document.getElementById('inbox-detail');
+  if (!m || !detail) return;
+
+  // Highlight selected card
+  document.querySelectorAll('.inbox-msg-card').forEach(function(card) {
+    if (card.getAttribute('data-mid') === mid) {
+      card.style.borderLeft = '3px solid var(--primary)';
+      card.style.background = 'rgba(192,193,255,0.04)';
+    } else {
+      card.style.borderLeft = '3px solid transparent';
+      card.style.background = '';
+    }
+  });
+
+  var statusBadge;
+  if (m.state === 'new') {
+    statusBadge = '<span class="tc-mono-label" style="display:inline-flex;align-items:center;gap:6px;color:var(--secondary);font-size:11px"><span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>UNREAD MESSAGE</span>';
+  } else if (m.priority === 'urgent') {
+    statusBadge = '<span class="tc-mono-label" style="display:inline-flex;align-items:center;gap:6px;color:var(--error);font-size:11px"><span style="width:6px;height:6px;border-radius:50%;background:var(--error);animation:pulse-dot 2s infinite ease-in-out"></span>URGENT PRIORITY</span>';
+  } else if (m.state === 'acked') {
+    statusBadge = '<span class="tc-mono-label" style="display:inline-flex;align-items:center;gap:6px;color:var(--cyber-lime, #adff2f);font-size:11px"><span class="material-symbols-outlined" style="font-size:13px">check_circle</span>RESOLVED</span>';
+  } else {
+    statusBadge = '<span class="tc-mono-label" style="display:inline-flex;align-items:center;gap:6px;color:var(--outline);font-size:11px">'+_inboxEsc((m.state||'read').toUpperCase())+'</span>';
+  }
+
+  // Action buttons
+  var actions = '';
+  if (m.state !== 'acked') {
+    actions += '<button onclick="_inboxAck(\''+_inboxEsc(m.id)+'\')" style="background:var(--primary-fixed);color:var(--on-primary-fixed);padding:11px 18px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:none;cursor:pointer;width:100%;display:inline-flex;align-items:center;justify-content:center;gap:8px;box-shadow:0 4px 14px rgba(192,193,255,0.20);margin-bottom:8px">' +
+      '<span class="material-symbols-outlined" style="font-size:16px">check_circle</span> MARK AS RESOLVED</button>';
+  }
+  actions += '<button onclick="_inboxReply(\''+_inboxEsc(m.id)+'\',\''+_inboxEsc(m.from_agent)+'\')" style="background:rgba(255,255,255,0.04);color:var(--on-surface);padding:10px 18px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:1px solid var(--outline-variant);cursor:pointer;width:100%;display:inline-flex;align-items:center;justify-content:center;gap:8px">' +
+    '<span class="material-symbols-outlined" style="font-size:16px">reply</span> REPLY</button>';
+  if (m.thread_id && m.thread_id !== m.id) {
+    actions += '<button onclick="_inboxShowThread(\''+_inboxEsc(m.thread_id)+'\')" style="background:transparent;color:var(--outline);padding:8px 18px;font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;border:none;cursor:pointer;width:100%;display:inline-flex;align-items:center;justify-content:center;gap:6px;margin-top:8px">' +
+      '<span class="material-symbols-outlined" style="font-size:14px">forum</span> VIEW THREAD</button>';
+  }
+
+  // First line as title
+  var lines = (m.content || '').split('\n');
+  var title = lines[0] || '(no content)';
+  var body = lines.slice(1).join('\n').trim() || '';
+
+  detail.innerHTML = '' +
+    '<div class="tc-mono-label" style="color:var(--outline);font-size:10px;letter-spacing:0.08em">DETAIL VIEW</div>' +
+    // Decorative top accent — gradient strip in lieu of stitch's image
+    '<div style="height:120px;border-radius:var(--r-md);background:linear-gradient(135deg,rgba(192,193,255,0.20),rgba(137,206,255,0.10) 50%,rgba(13,13,21,0.4)),repeating-linear-gradient(45deg,transparent,transparent 10px,rgba(192,193,255,0.04) 10px,rgba(192,193,255,0.04) 11px);position:relative;overflow:hidden;border:1px solid rgba(255,255,255,0.06)">' +
+      '<div style="position:absolute;inset:0;background:radial-gradient(ellipse at 30% 30%,rgba(192,193,255,0.25),transparent 60%)"></div>' +
+    '</div>' +
+    '<h3 style="font-family:var(--font-display);font-size:18px;font-weight:600;color:var(--on-surface);margin:4px 0 0;line-height:1.3">'+_inboxEsc(title)+'</h3>' +
+    statusBadge +
+    (body ? '<p class="tc-text-dim" style="font-size:13px;line-height:1.65;margin:0;white-space:pre-wrap;word-break:break-word">'+_inboxEsc(body)+'</p>' : '') +
+    '<div style="display:flex;flex-wrap:wrap;gap:6px">' +
+      '<span class="tc-mono-label" style="padding:3px 8px;border-radius:var(--r-md);background:var(--surface-container-low);color:var(--outline);border:1px solid var(--outline-variant);font-size:10px">FROM ' + _inboxEsc((m.from_agent || 'system').toUpperCase()) + '</span>' +
+      '<span class="tc-mono-label" style="padding:3px 8px;border-radius:var(--r-md);background:var(--surface-container-low);color:var(--outline);border:1px solid var(--outline-variant);font-size:10px;font-family:var(--font-mono)">' + _inboxEsc(m.id.slice(0, 12)) + '</span>' +
+      '<span class="tc-mono-label" style="padding:3px 8px;border-radius:var(--r-md);background:var(--surface-container-low);color:var(--outline);border:1px solid var(--outline-variant);font-size:10px">' + _inboxEsc(_inboxFmtTs(m.created_at)) + '</span>' +
+    '</div>' +
+    '<div style="display:flex;flex-direction:column;gap:8px;margin-top:8px">' + actions + '</div>';
+};
 
 async function _inboxRefresh() {
   var listEl = document.getElementById('inbox-list');
@@ -31872,53 +31954,75 @@ async function _inboxRefresh() {
     }
 
     if (_techIb) {
-      // Stitch-style table: STATE / PRIORITY / FROM / MESSAGE / TIME / ACTIONS
-      var stateChip = function(state) {
-        if (state === 'new') return '<span class="tc-mono-label" style="padding:3px 8px;border-radius:9999px;background:rgba(137,206,255,0.10);color:var(--secondary);border:1px solid rgba(137,206,255,0.30);font-size:10px;display:inline-flex;align-items:center;gap:4px"><span style="width:5px;height:5px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>NEW</span>';
-        if (state === 'read') return '<span class="tc-mono-label" style="padding:3px 8px;border-radius:9999px;background:rgba(255,255,255,0.04);color:var(--outline);border:1px solid var(--outline-variant);font-size:10px">READ</span>';
-        if (state === 'acked') return '<span class="tc-mono-label" style="padding:3px 8px;border-radius:9999px;background:rgba(173,255,47,0.10);color:var(--cyber-lime, #adff2f);border:1px solid rgba(173,255,47,0.30);font-size:10px;display:inline-flex;align-items:center;gap:4px"><span class="material-symbols-outlined" style="font-size:11px">check</span>ACKED</span>';
-        return '<span class="tc-mono-label" style="padding:3px 8px;border-radius:9999px;background:rgba(255,255,255,0.04);color:var(--outline);border:1px solid var(--outline-variant);font-size:10px">' + _inboxEsc((state||'').toUpperCase()) + '</span>';
+      // Stitch_24 SYSTEM FEED layout: vertical stack of message cards
+      // each with icon block, title, description preview, and category
+      // chips. Click → populate DETAIL VIEW side panel.
+      window._inboxMsgCache = msgs;  // for selection
+      var iconFor = function(m) {
+        var p = (m.priority || '').toLowerCase();
+        var src = (m.from_agent || '').toLowerCase();
+        var cn = (m.content || '').toLowerCase();
+        if (p === 'urgent' || /anomaly|fail|error|critical/.test(cn)) return { ic: 'memory', tint: 'rgba(255,180,171,0.12)', fg: 'var(--error)' };
+        if (/deploy|release|complete|success/.test(cn)) return { ic: 'rocket_launch', tint: 'rgba(173,255,47,0.10)', fg: 'var(--cyber-lime, #adff2f)' };
+        if (/conflict|require|action/.test(cn)) return { ic: 'fork_right', tint: 'rgba(255,183,131,0.10)', fg: 'var(--tertiary)' };
+        if (/audit|security|compliance/.test(cn)) return { ic: 'shield', tint: 'rgba(137,206,255,0.10)', fg: 'var(--secondary)' };
+        return { ic: 'forum', tint: 'rgba(192,193,255,0.10)', fg: 'var(--primary)' };
       };
-      var prioChip = function(p) {
-        if (p === 'urgent') return '<span class="tc-mono-label" style="color:var(--error);font-size:10px;display:inline-flex;align-items:center;gap:3px"><span class="material-symbols-outlined" style="font-size:12px">priority_high</span>URGENT</span>';
-        if (p === 'low') return '<span class="tc-mono-label" style="color:var(--outline);font-size:10px">LOW</span>';
-        return '<span class="tc-mono-label" style="color:var(--on-surface-variant);font-size:10px">NORMAL</span>';
+      var categoryChips = function(m) {
+        var chips = [];
+        // Priority chip
+        if (m.priority === 'urgent') {
+          chips.push('<span class="tc-mono-label" style="padding:2px 7px;border-radius:var(--r-md);background:rgba(255,180,171,0.10);color:var(--error);border:1px solid rgba(255,180,171,0.30);font-size:9px">URGENT</span>');
+        } else if (m.priority === 'low') {
+          chips.push('<span class="tc-mono-label" style="padding:2px 7px;border-radius:var(--r-md);background:rgba(255,255,255,0.04);color:var(--outline);border:1px solid var(--outline-variant);font-size:9px">LOW</span>');
+        }
+        // State chip (only show non-default)
+        if (m.state === 'new') {
+          chips.push('<span class="tc-mono-label" style="padding:2px 7px;border-radius:var(--r-md);background:rgba(137,206,255,0.10);color:var(--secondary);border:1px solid rgba(137,206,255,0.30);font-size:9px">NEW</span>');
+        } else if (m.state === 'acked') {
+          chips.push('<span class="tc-mono-label" style="padding:2px 7px;border-radius:var(--r-md);background:rgba(173,255,47,0.10);color:var(--cyber-lime, #adff2f);border:1px solid rgba(173,255,47,0.30);font-size:9px">ACKED</span>');
+        }
+        // From-agent tag
+        chips.push('<span class="tc-mono-label" style="padding:2px 7px;border-radius:var(--r-md);background:var(--surface-container-low);color:var(--outline);border:1px solid var(--outline-variant);font-size:9px">'+_inboxEsc((m.from_agent || 'system').toUpperCase())+'</span>');
+        return chips.join(' ');
       };
 
-      var rows = msgs.map(function(m) {
-        var preview = _inboxEsc((m.content || '').slice(0, 100)) + ((m.content || '').length > 100 ? '…' : '');
-        var actions = '';
-        if (m.state !== 'acked') {
-          actions += '<button onclick="_inboxAck(\''+_inboxEsc(m.id)+'\')" title="Ack" style="background:transparent;border:none;color:var(--outline);padding:6px;cursor:pointer;border-radius:var(--r-md);display:inline-flex;align-items:center;justify-content:center" onmouseover="this.style.color=\'var(--cyber-lime, #adff2f)\';this.style.background=\'rgba(173,255,47,0.10)\'" onmouseout="this.style.color=\'var(--outline)\';this.style.background=\'\'"><span class="material-symbols-outlined" style="font-size:18px">check_circle</span></button>';
-        }
-        actions += '<button onclick="_inboxReply(\''+_inboxEsc(m.id)+'\',\''+_inboxEsc(m.from_agent)+'\')" title="Reply" style="background:transparent;border:none;color:var(--outline);padding:6px;cursor:pointer;border-radius:var(--r-md);display:inline-flex;align-items:center;justify-content:center" onmouseover="this.style.color=\'var(--primary)\';this.style.background=\'rgba(192,193,255,0.10)\'" onmouseout="this.style.color=\'var(--outline)\';this.style.background=\'\'"><span class="material-symbols-outlined" style="font-size:18px">reply</span></button>';
-        if (m.thread_id && m.thread_id !== m.id) {
-          actions += '<button onclick="_inboxShowThread(\''+_inboxEsc(m.thread_id)+'\')" title="Thread" style="background:transparent;border:none;color:var(--outline);padding:6px;cursor:pointer;border-radius:var(--r-md);display:inline-flex;align-items:center;justify-content:center" onmouseover="this.style.color=\'var(--secondary)\'" onmouseout="this.style.color=\'var(--outline)\'"><span class="material-symbols-outlined" style="font-size:18px">forum</span></button>';
-        }
-        return '<tr style="border-bottom:1px solid rgba(255,255,255,0.05);transition:background 0.15s" onmouseover="this.style.background=\'rgba(255,255,255,0.03)\'" onmouseout="this.style.background=\'transparent\'">' +
-          '<td style="padding:14px 18px">'+stateChip(m.state)+'</td>' +
-          '<td style="padding:14px 18px">'+prioChip(m.priority)+'</td>' +
-          '<td style="padding:14px 18px"><div style="display:flex;align-items:center;gap:8px"><span class="material-symbols-outlined" style="font-size:16px;color:var(--outline)">smart_toy</span><span style="font-size:13px;color:var(--on-surface);font-weight:500">'+_inboxEsc(m.from_agent)+'</span></div></td>' +
-          '<td style="padding:14px 18px;max-width:340px"><div style="font-size:13px;color:var(--on-surface);line-height:1.5;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">'+preview+'</div></td>' +
-          '<td style="padding:14px 18px;font-family:var(--font-mono);font-size:11px;letter-spacing:0.03em;color:var(--outline);white-space:nowrap">'+_inboxFmtTs(m.created_at)+'</td>' +
-          '<td style="padding:14px 18px;white-space:nowrap"><div style="display:flex;gap:2px;justify-content:flex-end">'+actions+'</div></td>' +
-        '</tr>';
+      var titleOf = function(m) {
+        var t = (m.content || '').split('\n')[0];
+        if (t.length > 80) t = t.slice(0, 78) + '…';
+        return t;
+      };
+      var bodyOf = function(m) {
+        var lines = (m.content || '').split('\n');
+        var rest = lines.slice(1).join(' ').trim() || lines[0] || '';
+        if (rest.length > 160) rest = rest.slice(0, 158) + '…';
+        return rest;
+      };
+
+      var feedHtml = msgs.map(function(m, idx) {
+        var icon = iconFor(m);
+        var isFirstUnread = (idx === 0 && m.state === 'new');
+        var border = isFirstUnread ? 'border-left:3px solid var(--primary)' : 'border-left:3px solid transparent';
+        return '<div class="tc-card-glass inbox-msg-card" data-mid="'+_inboxEsc(m.id)+'" ' +
+            'style="padding:16px 18px;display:flex;align-items:flex-start;gap:14px;border-top:1px solid rgba(255,255,255,0.10);'+border+';cursor:pointer;transition:all 0.15s" ' +
+            'onclick="_inboxSelectMsg(\''+_inboxEsc(m.id)+'\')" ' +
+            'onmouseover="this.style.background=\'rgba(255,255,255,0.02)\'" ' +
+            'onmouseout="this.style.background=\'\'">' +
+          '<div style="width:42px;height:42px;border-radius:var(--r-md);background:'+icon.tint+';border:1px solid rgba(255,255,255,0.06);display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+            '<span class="material-symbols-outlined" style="font-size:22px;color:'+icon.fg+'">'+icon.ic+'</span>' +
+          '</div>' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-size:14px;font-weight:600;color:var(--on-surface);line-height:1.35;margin-bottom:4px">'+_inboxEsc(titleOf(m))+'</div>' +
+            (bodyOf(m) ? '<div class="tc-text-dim" style="font-size:12px;line-height:1.55;margin-bottom:8px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">'+_inboxEsc(bodyOf(m))+'</div>' : '') +
+            '<div style="display:flex;flex-wrap:wrap;gap:5px">'+categoryChips(m)+'</div>' +
+          '</div>' +
+          '<div class="tc-mono-label" style="color:var(--outline);font-size:9px;flex-shrink:0;white-space:nowrap;letter-spacing:0.04em">'+_inboxEsc(_inboxFmtTs(m.created_at))+'</div>' +
+        '</div>';
       }).join('');
 
-      listEl.innerHTML =
-        '<table style="width:100%;border-collapse:collapse;background:transparent">' +
-          '<thead>' +
-            '<tr style="border-bottom:1px solid rgba(255,255,255,0.10);background:rgba(255,255,255,0.03)">' +
-              '<th class="tc-mono-label" style="padding:14px 18px;text-align:left;color:var(--outline);font-size:10px;letter-spacing:0.08em;font-weight:500">State</th>' +
-              '<th class="tc-mono-label" style="padding:14px 18px;text-align:left;color:var(--outline);font-size:10px;letter-spacing:0.08em;font-weight:500">Priority</th>' +
-              '<th class="tc-mono-label" style="padding:14px 18px;text-align:left;color:var(--outline);font-size:10px;letter-spacing:0.08em;font-weight:500">From</th>' +
-              '<th class="tc-mono-label" style="padding:14px 18px;text-align:left;color:var(--outline);font-size:10px;letter-spacing:0.08em;font-weight:500">Message</th>' +
-              '<th class="tc-mono-label" style="padding:14px 18px;text-align:left;color:var(--outline);font-size:10px;letter-spacing:0.08em;font-weight:500">Time</th>' +
-              '<th class="tc-mono-label" style="padding:14px 18px;text-align:right;color:var(--outline);font-size:10px;letter-spacing:0.08em;font-weight:500">Actions</th>' +
-            '</tr>' +
-          '</thead>' +
-          '<tbody>' + rows + '</tbody>' +
-        '</table>';
+      listEl.innerHTML = feedHtml;
+      // Auto-select the first message into the detail view
+      if (msgs.length) _inboxSelectMsg(msgs[0].id);
       _inboxFetchCount();
       return;
     }
