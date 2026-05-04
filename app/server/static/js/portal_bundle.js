@@ -3088,6 +3088,13 @@ function renderRolesSkillsHubTech() {
     else if (r.current === 'skill-categories' && typeof renderSkillCategoriesAdmin === 'function') {
       renderSkillCategoriesAdmin();
     }
+    else if (r.current === 'v2-templates' && typeof window.renderV2TemplatesSubTab === 'function') {
+      window.renderV2TemplatesSubTab(sc);
+    }
+    else if (r.current === 'v2-tiers' && typeof window.renderV2TierBindingsSubTab === 'function') {
+      sc.innerHTML = '<div id="v2-tier-bindings-container"></div>';
+      window.renderV2TierBindingsSubTab(document.getElementById('v2-tier-bindings-container'));
+    }
   } catch (e) {
     sc.innerHTML = '<div class="tc-card" style="color:var(--error);padding:var(--s-lg)">' + esc(e.message) + '</div>';
   } finally {
