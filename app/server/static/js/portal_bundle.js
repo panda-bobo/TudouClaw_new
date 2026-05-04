@@ -9776,7 +9776,18 @@ async function denyRequest(approvalId) {
 // ============ Audit Log ============
 function renderAudit() {
   const c = document.getElementById('content');
-  c.innerHTML = `
+  let _techAud = false;
+  try { _techAud = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+  const auditHeader = _techAud
+    ? '<div style="margin-bottom:var(--s-md)">' +
+        '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px">' +
+          '<span>EVENT TRAIL</span>' +
+          '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
+        '</div>' +
+        '<h1 class="tc-h2" style="margin-top:6px">Audit Log</h1>' +
+      '</div>'
+    : '';
+  c.innerHTML = auditHeader + `
     <div style="margin-bottom:12px">
       <select id="audit-filter" onchange="renderAudit()" style="padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);color:var(--text)">
         <option value="">All Actions</option>
@@ -18320,10 +18331,23 @@ async function renderWorkflows() {
     var html = '<div style="max-width:1200px;margin:0 auto">';
 
     // ── Header ──（"自定义创建" 按钮在 topbar，这里只保留标题）
-    html += '<div style="margin-bottom:20px">';
-    html += '<h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:24px;font-weight:800;margin:0">Workflows</h2>';
-    html += '<p style="font-size:12px;color:var(--text3);margin-top:4px">选择模板快速创建，或自定义工作流流程</p>';
-    html += '</div>';
+    var _techWf = false;
+    try { _techWf = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+    if (_techWf) {
+      html += '<div style="margin-bottom:var(--s-lg)">' +
+        '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px">' +
+          '<span>ORCHESTRATION GRID</span>' +
+          '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
+        '</div>' +
+        '<h1 class="tc-h2" style="margin-top:6px">Workflows</h1>' +
+        '<p class="tc-text-dim" style="font-size:12px;margin-top:6px;line-height:1.55">Pick a template or design a custom flow.</p>' +
+      '</div>';
+    } else {
+      html += '<div style="margin-bottom:20px">';
+      html += '<h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:24px;font-weight:800;margin:0">Workflows</h2>';
+      html += '<p style="font-size:12px;color:var(--text3);margin-top:4px">选择模板快速创建，或自定义工作流流程</p>';
+      html += '</div>';
+    }
 
     // ── My Workflows (已创建的) ──
     if (wfs.length) {
@@ -23038,14 +23062,32 @@ async function _renderKmShared() {
         + '</div>';
     }).join('');
 
+    var _techShared = false;
+    try { _techShared = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+    var sharedHeader = _techShared
+      ? '<div style="flex:1;min-width:240px">' +
+          '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px">' +
+            '<span>WIKI / SHARED VAULT</span>' +
+            '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
+          '</div>' +
+          '<h1 class="tc-h2" style="margin-top:6px">Shared Knowledge</h1>' +
+          '<div class="tc-text-dim" style="font-size:12px;margin-top:6px">RAG-indexed knowledge available to all enterprise agents.</div>' +
+        '</div>'
+      : '<div><div style="font-size:15px;font-weight:700;color:var(--text)">共享知识库</div>' +
+        '<div style="font-size:12px;color:var(--text3);margin-top:2px">所有企业办公智能体共享的 RAG 知识，支持向量语义检索</div></div>';
+    var sharedActions = _techShared
+      ? '<div style="display:flex;gap:8px;flex-shrink:0">' +
+          '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="_kmShowImport(\'knowledge\',\'\')"><span class="material-symbols-outlined" style="font-size:14px">upload_file</span> IMPORT</button>' +
+          '<button class="tc-btn tc-btn-primary tc-btn-sm" onclick="_kmShowAddEntry()"><span class="material-symbols-outlined" style="font-size:14px">add</span> NEW ENTRY</button>' +
+        '</div>'
+      : '<div style="display:flex;gap:8px">' +
+          '<button class="btn btn-sm" onclick="_kmShowImport(\'knowledge\',\'\')"><span class="material-symbols-outlined" style="font-size:14px">upload_file</span> 批量导入</button>' +
+          '<button class="btn btn-primary btn-sm" onclick="_kmShowAddEntry()"><span class="material-symbols-outlined" style="font-size:14px">add</span> 新增条目</button>' +
+        '</div>';
     sc.innerHTML = ''
-      + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">'
-        + '<div><div style="font-size:15px;font-weight:700;color:var(--text)">共享知识库</div>'
-        + '<div style="font-size:12px;color:var(--text3);margin-top:2px">所有企业办公智能体共享的 RAG 知识，支持向量语义检索</div></div>'
-        + '<div style="display:flex;gap:8px">'
-          + '<button class="btn btn-sm" onclick="_kmShowImport(\'knowledge\',\'\')"><span class="material-symbols-outlined" style="font-size:14px">upload_file</span> 批量导入</button>'
-          + '<button class="btn btn-primary btn-sm" onclick="_kmShowAddEntry()"><span class="material-symbols-outlined" style="font-size:14px">add</span> 新增条目</button>'
-        + '</div>'
+      + '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;gap:12px;flex-wrap:wrap">'
+        + sharedHeader
+        + sharedActions
       + '</div>'
       + '<div style="display:flex;gap:10px;margin-bottom:16px">'
         + '<input id="km-search-input" placeholder="搜索知识库..." style="flex:1;font-size:13px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:8px 12px" onkeydown="if(event.key===\'Enter\')_kmSearch()">'
@@ -28841,10 +28883,15 @@ function renderToolsApprovalsHub() {
 // Risk → color: low=green, moderate=amber, high=red, red=dark red.
 async function renderToolDenylist() {
   var c = document.getElementById('content');
+  var _techTd = false;
+  try { _techTd = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+  var tdTitle = _techTd
+    ? '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px"><span>RISK SHIELD</span><span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span></div><h1 class="tc-h2" style="margin:6px 0 0">Tool Denylist</h1>'
+    : '<h2 style="margin:0;font-size:20px;font-weight:800">工具禁用清单</h2>';
   c.innerHTML =
     '<div style="padding:18px">' +
       '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;gap:14px">' +
-        '<div style="flex:1"><h2 style="margin:0;font-size:20px;font-weight:800">工具禁用清单</h2>' +
+        '<div style="flex:1">' + tdTitle +
         '<p style="font-size:12px;color:var(--text3);margin-top:4px;max-width:760px">' +
           '右侧开关关闭 = 全局禁用（所有 agent 都无法调用，优先级最高）。' +
           '修改立即生效，写入 <code>~/.tudou_claw/tool_denylist.json</code>。' +
@@ -29130,12 +29177,16 @@ async function renderPermissionsPanel() {
     var nodesResp = await api('GET', '/api/portal/nodes').catch(function(){return null;});
     var allNodes = (nodesResp && nodesResp.nodes) || [];
 
+    var _techPm = false;
+    try { _techPm = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+    var pmHeaderTitle = _techPm
+      ? '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px"><span>ACCESS CONTROL</span><span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span></div><h1 class="tc-h2" style="margin:6px 0 0">' + window.t('perm.title', 'User Management') + '</h1>'
+      : '<h3 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:20px;font-weight:700;margin:0 0 4px">' + window.t('perm.title', '用户管理') + '</h3>';
     c.innerHTML = ''
       + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:20px">'
       +   '<div>'
-      +     '<h3 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:20px;font-weight:700;margin:0 0 4px">'
-      +       window.t('perm.title', '用户管理') + '</h3>'
-      +     '<p style="font-size:12px;color:var(--text3);margin:0">'
+      +     pmHeaderTitle
+      +     '<p style="font-size:12px;color:var(--text3);margin-top:6px;margin-bottom:0">'
       +       window.t('perm.subtitle',
           'superAdmin 管全部；admin 只能管理被授权节点上的 agent 与该节点的配置；user 只能使用 agent。')
       +     '</p>'
