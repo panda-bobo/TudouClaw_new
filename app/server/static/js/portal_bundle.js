@@ -10003,8 +10003,22 @@ async function loadAuditLog() {
 // ============ Tokens ============
 function renderTokens(container) {
   const c = container || document.getElementById('content');
-  // + Create Token lives in topbar (settings tab handler)
-  c.innerHTML = `<div id="tokens-list"></div>`;
+  let _techTk = false;
+  try { _techTk = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+  if (_techTk) {
+    c.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:flex-end;gap:var(--s-md);margin-bottom:var(--s-lg);flex-wrap:wrap">' +
+      '<div style="flex:1;min-width:240px">' +
+        '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px"><span>ACCESS CIPHERS</span><span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span></div>' +
+        '<h2 style="font-family:var(--font-display);font-size:24px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:8px 0 6px">API Tokens</h2>' +
+        '<p class="tc-text-dim" style="font-size:13px;line-height:1.55;max-width:680px">Bearer tokens for programmatic access. Each token is bound to an admin user; revoking the user invalidates all their tokens.</p>' +
+      '</div>' +
+      (typeof showCreateToken === 'function'
+        ? '<button onclick="showCreateToken()" style="background:var(--primary-fixed);color:var(--on-primary-fixed);padding:10px 20px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:8px;box-shadow:0 4px 14px rgba(192,193,255,0.20)"><span class="material-symbols-outlined" style="font-size:16px">add_circle</span> CREATE TOKEN</button>'
+        : '') +
+    '</div>' + '<div id="tokens-list"></div>';
+  } else {
+    c.innerHTML = '<div id="tokens-list"></div>';
+  }
   loadTokens();
 }
 
@@ -11457,7 +11471,16 @@ function renderNodeConfig(container) {
     if (!data || epoch !== _renderEpoch) return;
     const configs = data.configs || [];
     const isHub = portalMode === 'hub';
-    c.innerHTML = `
+    let _techNc = false;
+    try { _techNc = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+    c.innerHTML = _techNc
+      ? '<div style="margin-bottom:var(--s-lg)">' +
+          '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px"><span>NODE FABRIC</span><span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span></div>' +
+          '<h2 style="font-family:var(--font-display);font-size:24px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:8px 0 6px">Node Configuration</h2>' +
+          '<p class="tc-text-dim" style="font-size:13px;line-height:1.55;max-width:680px">Per-node secrets, tokens, and environment variables. ' + (isHub ? 'Admin can manage all nodes.' : 'You can only edit local node config.') + '</p>' +
+        '</div>' +
+        '<div id="node-config-list"></div>'
+      : `
       <div style="margin-bottom:20px">
         <h3 style="font-family:'Plus Jakarta Sans',sans-serif;font-size:20px;font-weight:700;margin-bottom:4px">Node Configuration</h3>
         <p style="color:var(--text2);font-size:13px">Per-node secrets, tokens, and environment variables. ${isHub ? 'Admin can manage all nodes.' : 'You can only edit local node config.'}</p>
