@@ -11679,11 +11679,22 @@ async function renderScheduler() {
   content.style.padding = '24px';
   // "+ New Job" lives in the topbar (showView handler). Keep header
   // title-only to avoid button duplication.
-  const schedHeader = ''
-    + '<div style="margin-bottom:20px">'
-    + '  <h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:22px;font-weight:800;margin:0">定时任务</h2>'
-    + '  <p style="font-size:12px;color:var(--text3);margin-top:4px">Scheduled Jobs · 按 cron 或间隔自动触发 agent</p>'
-    + '</div>';
+  let _techSch = false;
+  try { _techSch = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+  const schedHeader = _techSch
+    ? '<div style="margin-bottom:var(--s-lg)">' +
+        '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px">' +
+          '<span>CRON FABRIC</span>' +
+          '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
+        '</div>' +
+        '<h1 class="tc-h2" style="margin-top:6px">Scheduled Jobs</h1>' +
+        '<p class="tc-text-dim" style="font-size:12px;margin-top:6px">Cron- or interval-triggered agent runs.</p>' +
+      '</div>'
+    : ''
+      + '<div style="margin-bottom:20px">'
+      + '  <h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:22px;font-weight:800;margin:0">定时任务</h2>'
+      + '  <p style="font-size:12px;color:var(--text3);margin-top:4px">Scheduled Jobs · 按 cron 或间隔自动触发 agent</p>'
+      + '</div>';
   content.innerHTML = schedHeader + '<div style="color:var(--text3);padding:20px">Loading scheduled tasks...</div>';
   let jobsData, presetsData, agentsData;
   try {
