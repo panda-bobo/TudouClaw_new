@@ -27720,9 +27720,17 @@ async function loadSkillStore() {
     var stats = document.getElementById('store-stats');
     if (stats) {
       var by = s.by_source || {};
-      var pill = function(k,v){ return '<span style="padding:2px 8px;border:1px solid var(--border);border-radius:10px;margin-right:6px">'+esc(k)+': '+v+'</span>'; };
-      stats.innerHTML = '共 ' + (s.total||0) + ' 个 · 已安装 ' + (s.installed||0) + ' · '
-        + Object.keys(by).map(function(k){ return pill(k, by[k]); }).join('');
+      var _techStats = false;
+      try { _techStats = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+      if (_techStats) {
+        // Compact mono-label stats line, no per-source pills (those just
+        // duplicate the source dropdown filter below the hero).
+        stats.innerHTML = (s.total||0) + ' SKILLS · ' + (s.installed||0) + ' INSTALLED';
+      } else {
+        var pill = function(k,v){ return '<span style="padding:2px 8px;border:1px solid var(--border);border-radius:10px;margin-right:6px">'+esc(k)+': '+v+'</span>'; };
+        stats.innerHTML = '共 ' + (s.total||0) + ' 个 · 已安装 ' + (s.installed||0) + ' · '
+          + Object.keys(by).map(function(k){ return pill(k, by[k]); }).join('');
+      }
     }
     if (!_skillStoreState.entries.length) {
       box.innerHTML = '<div style="padding:20px;text-align:center">目录为空。把 SKILL.md 或 manifest.yaml 放到 data/skill_catalog/ 下再点"重新扫描"。</div>';
