@@ -1363,10 +1363,12 @@
  *      style strings used across the codebase.
  */
 [data-theme="tech"] .modal-overlay,
+[data-theme="tech"] #modal-overlay,
 [data-theme="tech"] body > div[style*="position:fixed"][style*="inset:0"][style*="background:rgba(0,0,0"],
 [data-theme="tech"] body > div[style*="position:fixed"][style*="background:rgba(0, 0, 0"],
 [data-theme="tech"] body > div[style*="position:fixed"][style*="z-index:9999"],
-[data-theme="tech"] body > div[style*="position:fixed"][style*="z-index:999"] {
+[data-theme="tech"] body > div[style*="position:fixed"][style*="z-index:999"],
+[data-theme="tech"] body > div[style*="position:fixed"][style*="z-index:1000"] {
   background: rgba(7, 0, 50, 0.65) !important;
   backdrop-filter: blur(8px);
 }
