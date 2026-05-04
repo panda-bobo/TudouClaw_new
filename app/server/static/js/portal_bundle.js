@@ -3085,10 +3085,16 @@ function renderToolsApprovalsHubTech() {
   var _orig = document.getElementById('content');
   sc.id = 'content'; if (_orig !== sc) _orig.id = 'content-outer';
   try {
-    if      (r.current === 'approvals') renderApprovals();
-    else if (r.current === 'policies' && typeof renderToolPolicy === 'function') renderToolPolicy();
-    else if (r.current === 'audit' && typeof renderAuditTrail === 'function') renderAuditTrail();
-    else sc.innerHTML = '<div class="tc-card tc-text-dim" style="padding:var(--s-lg)">Tab not yet implemented.</div>';
+    if (r.current === 'approvals') {
+      if (typeof renderApprovalsTech === 'function') renderApprovalsTech();
+      else if (typeof renderApprovals === 'function') renderApprovals();
+    } else if (r.current === 'policies' && typeof renderToolPolicy === 'function') {
+      renderToolPolicy();
+    } else if (r.current === 'audit' && typeof renderAuditTrail === 'function') {
+      renderAuditTrail();
+    } else {
+      sc.innerHTML = '<div class="tc-card tc-text-dim" style="padding:var(--s-lg)">Tab not yet implemented.</div>';
+    }
   } catch (e) {
     sc.innerHTML = '<div class="tc-card" style="color:var(--error);padding:var(--s-lg)">' + esc(e.message) + '</div>';
   } finally {
@@ -3149,11 +3155,19 @@ function renderSettingsHubTech() {
   var _orig = document.getElementById('content');
   sc.id = 'content'; if (_orig !== sc) _orig.id = 'content-outer';
   try {
-    if      (r.current === 'providers' && typeof renderProviders === 'function') renderProviders(sc);
-    else if (r.current === 'mcp'       && typeof renderMCP === 'function') renderMCP(sc);
-    else if (r.current === 'nodes'     && typeof renderNodes === 'function') renderNodes(sc);
-    else if (r.current === 'branding'  && typeof renderBranding === 'function') renderBranding();
-    else if (r.current === 'admin'     && typeof renderAdmin === 'function') renderAdmin();
+    if (r.current === 'providers') {
+      if (typeof renderProvidersTech === 'function') renderProvidersTech(sc);
+      else if (typeof renderProviders === 'function') renderProviders(sc);
+    } else if (r.current === 'mcp') {
+      if (typeof renderMCPConfig === 'function') renderMCPConfig(sc);
+    } else if (r.current === 'nodes') {
+      if (typeof renderNodes === 'function') renderNodes(sc);
+    } else if (r.current === 'branding') {
+      if (typeof renderBrandingSettingsTech === 'function') renderBrandingSettingsTech(sc);
+      else if (typeof renderBrandingSettings === 'function') renderBrandingSettings(sc);
+    } else if (r.current === 'admin') {
+      if (typeof renderAdmin === 'function') renderAdmin();
+    }
     else sc.innerHTML = '<div class="tc-card tc-text-dim" style="padding:var(--s-lg)">Tab not yet implemented.</div>';
   } catch (e) {
     sc.innerHTML = '<div class="tc-card" style="color:var(--error);padding:var(--s-lg)">' + esc(e.message) + '</div>';
@@ -3163,6 +3177,346 @@ function renderSettingsHubTech() {
   }
 }
 window.renderSettingsHubTech = renderSettingsHubTech;
+
+
+// ──────────────────────────────────────────────────────────────
+// Phase-2 batch 2 — sub-tab tech ports (form/list pages)
+// ──────────────────────────────────────────────────────────────
+
+// --- Branding Settings (stitch_31) ---
+// Layout: 2-column. Left = Identity Preview (live preview card),
+// right = controls (Site Name input / Subtitle input / Logo URL).
+// Top: page header, mono "BRAND ENGINE" label, status pill.
+async function renderBrandingSettingsTech(container) {
+  var c = container || document.getElementById('content');
+  if (!c) return;
+  // Fetch current branding
+  var b = {};
+  try { b = (await api('GET', '/api/portal/branding')) || {}; } catch (e) { b = {}; }
+
+  c.innerHTML =
+    '<div class="tc-grid" style="grid-template-columns:minmax(280px,360px) 1fr;gap:var(--s-lg)">' +
+
+      // Left: Identity Preview card
+      '<div class="tc-card">' +
+        '<div class="tc-mono-label">Identity Preview</div>' +
+        '<div class="tc-stack-sm" style="margin-top:var(--s-md);align-items:center;text-align:center;padding:var(--s-md)">' +
+          '<div id="tc-brand-preview-logo" style="width:72px;height:72px;border-radius:var(--r-md);' +
+                       'background:linear-gradient(135deg,var(--primary),var(--primary-container));' +
+                       'display:flex;align-items:center;justify-content:center;overflow:hidden;border:1px solid var(--outline-variant)">' +
+            (b.logo_url
+              ? '<img src="' + esc(b.logo_url) + '" style="width:100%;height:100%;object-fit:cover" alt="">'
+              : '<span class="material-symbols-outlined" style="font-size:32px;color:var(--on-primary)">token</span>') +
+          '</div>' +
+          '<div id="tc-brand-preview-name" style="font-size:18px;font-weight:600;margin-top:var(--s-sm)">' + esc(b.site_name || 'Tudou Claws') + '</div>' +
+          '<div id="tc-brand-preview-sub" class="tc-text-dim" style="font-size:12px">' + esc(b.site_subtitle || 'Multi-Agent Coordination Hub') + '</div>' +
+        '</div>' +
+        '<div style="margin-top:var(--s-md);padding-top:var(--s-md);border-top:1px solid var(--outline-variant)">' +
+          '<div class="tc-row-sm">' +
+            '<span class="tc-status-dot online"></span>' +
+            '<span class="tc-mono-label">Active Brand Engine</span>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+
+      // Right: controls
+      '<div class="tc-card">' +
+        '<div class="tc-form-group">' +
+          '<label>Site Name</label>' +
+          '<input class="tc-input" id="tc-brand-name" placeholder="Tudou Claws"' +
+                 ' value="' + esc(b.site_name || '') + '"' +
+                 ' oninput="document.getElementById(\'tc-brand-preview-name\').textContent=this.value||\'Tudou Claws\'">' +
+        '</div>' +
+        '<div class="tc-form-group">' +
+          '<label>Subtitle</label>' +
+          '<input class="tc-input" id="tc-brand-sub" placeholder="Multi-Agent Coordination Hub"' +
+                 ' value="' + esc(b.site_subtitle || '') + '"' +
+                 ' oninput="document.getElementById(\'tc-brand-preview-sub\').textContent=this.value||\'Multi-Agent Coordination Hub\'">' +
+        '</div>' +
+        '<div class="tc-form-group">' +
+          '<label>Logo URL <span class="tc-text-dim" style="font-weight:400">(optional, https://...)</span></label>' +
+          '<input class="tc-input" id="tc-brand-logo" placeholder="https://..."' +
+                 ' value="' + esc(b.logo_url || '') + '">' +
+        '</div>' +
+        '<div class="tc-row" style="gap:var(--s-sm);margin-top:var(--s-lg)">' +
+          '<button class="tc-btn tc-btn-primary" onclick="_techBrandSave()">' +
+            '<span class="material-symbols-outlined" style="font-size:16px">save</span> Save Branding' +
+          '</button>' +
+          '<button class="tc-btn tc-btn-ghost" onclick="_techBrandReset()">' +
+            '<span class="material-symbols-outlined" style="font-size:16px">restart_alt</span> Reset to Defaults' +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+
+    '</div>';
+}
+window.renderBrandingSettingsTech = renderBrandingSettingsTech;
+
+async function _techBrandSave() {
+  var name = (document.getElementById('tc-brand-name') || {}).value || '';
+  var sub  = (document.getElementById('tc-brand-sub') || {}).value || '';
+  var logo = (document.getElementById('tc-brand-logo') || {}).value || '';
+  try {
+    await api('POST', '/api/portal/branding', { site_name: name, site_subtitle: sub, logo_url: logo });
+    if (window._toast) window._toast('Branding saved', 'success');
+    if (typeof _applyBranding === 'function') _applyBranding();
+  } catch (e) { if (window._toast) window._toast('Save failed: ' + e, 'error'); }
+}
+async function _techBrandReset() {
+  try {
+    await api('POST', '/api/portal/branding/reset', {});
+    if (window._toast) window._toast('Branding reset', 'success');
+    renderBrandingSettingsTech();
+    if (typeof _applyBranding === 'function') _applyBranding();
+  } catch (e) { if (window._toast) window._toast('Reset failed: ' + e, 'error'); }
+}
+window._techBrandSave = _techBrandSave;
+window._techBrandReset = _techBrandReset;
+
+
+// --- LLM Providers (stitch_16) ---
+// stitch shows table-like cards: per-provider row with status / latency
+// / tokens metrics + edit/delete actions. We mirror with a table-style
+// list, each row a tc-card with provider id, type, models count, status
+// dot, and action buttons.
+async function renderProvidersTech(container) {
+  var c = container || document.getElementById('content');
+  if (!c) return;
+  var providers = [];
+  try { var data = await api('GET', '/api/portal/providers'); providers = (data && data.providers) || []; } catch (e) {}
+
+  var rows = providers.map(function(p) {
+    var statusCls = (p.status === 'connected' || p.is_connected) ? 'online'
+                   : p.status === 'error' ? 'error' : '';
+    var statusLabel = p.status || (p.is_connected ? 'CONNECTED' : 'IDLE');
+    var modelCount = (p.models || []).length;
+    return '<div class="tc-card tc-row" style="gap:var(--s-md);align-items:center">' +
+             '<div style="width:40px;height:40px;border-radius:var(--r-md);' +
+                          'background:rgba(192,193,255,0.1);border:1px solid rgba(192,193,255,0.25);' +
+                          'display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+               '<span class="material-symbols-outlined" style="color:var(--primary)">cloud_queue</span>' +
+             '</div>' +
+             '<div style="flex:1;min-width:0">' +
+               '<div class="tc-row-sm" style="margin-bottom:2px">' +
+                 '<span style="font-size:14px;font-weight:600">' + esc(p.name || p.id || 'Provider') + '</span>' +
+                 '<span class="tc-chip tc-chip-' + (statusCls === 'online' ? 'success' : 'neutral') + '">' +
+                   (statusCls ? '<span class="tc-status-dot ' + statusCls + '"></span>' : '') +
+                   esc(String(statusLabel).toUpperCase()) +
+                 '</span>' +
+               '</div>' +
+               '<div class="tc-text-dim" style="font-size:11px;font-family:var(--font-mono)">' +
+                 esc(p.kind || p.type || 'openai-compatible') +
+                 (p.base_url ? ' · ' + esc(p.base_url.replace(/^https?:\/\//, '')) : '') +
+               '</div>' +
+             '</div>' +
+             '<div style="text-align:right;flex-shrink:0">' +
+               '<div class="tc-mono-label" style="font-size:9px">MODELS</div>' +
+               '<div style="font-family:var(--font-mono);font-size:14px">' + modelCount + '</div>' +
+             '</div>' +
+             '<div class="tc-row-sm" style="gap:4px;flex-shrink:0">' +
+               (typeof openProviderEditor === 'function'
+                 ? '<button class="tc-btn tc-btn-icon tc-btn-sm" title="Edit" onclick="openProviderEditor(\'' + esc(p.id || '') + '\')">' +
+                     '<span class="material-symbols-outlined" style="font-size:16px">settings</span></button>'
+                 : '') +
+               (typeof testProviderConn === 'function'
+                 ? '<button class="tc-btn tc-btn-icon tc-btn-sm" title="Test" onclick="testProviderConn(\'' + esc(p.id || '') + '\')">' +
+                     '<span class="material-symbols-outlined" style="font-size:16px">network_check</span></button>'
+                 : '') +
+             '</div>' +
+           '</div>';
+  }).join('');
+
+  c.innerHTML =
+    '<div class="tc-row-spread" style="margin-bottom:var(--s-md)">' +
+      '<div class="tc-row-sm">' +
+        '<span class="tc-mono-label">' + providers.length + ' Providers</span>' +
+      '</div>' +
+      (typeof openAddProviderModal === 'function'
+        ? '<button class="tc-btn tc-btn-primary" onclick="openAddProviderModal()">' +
+            '<span class="material-symbols-outlined" style="font-size:16px">add</span> Add Provider' +
+          '</button>'
+        : '') +
+    '</div>' +
+    (rows
+      ? '<div class="tc-stack-sm">' + rows + '</div>'
+      : '<div class="tc-card tc-text-dim" style="text-align:center;padding:var(--s-xl)">No LLM providers configured.</div>');
+}
+window.renderProvidersTech = renderProvidersTech;
+
+
+// --- Approvals (stitch_2) ---
+// "Tool Approvals & Policies" — list of pending requests, each row
+// with risk-tier color + agent + tool + arguments preview + Approve /
+// Deny / Always-Allow actions.
+async function renderApprovalsTech() {
+  var c = document.getElementById('content');
+  if (!c) return;
+  // Reuse existing approvals data (loaded into `approvals` global) +
+  // poll/fetcher pattern.
+  if (typeof loadApprovals === 'function') {
+    try { await loadApprovals(); } catch (e) {}
+  }
+  var pending = Array.isArray(approvals)
+    ? approvals.filter(function(a) { return a.status === 'pending'; })
+    : ((approvals || {}).pending || []);
+  var history = Array.isArray(approvals)
+    ? approvals.filter(function(a) { return a.status !== 'pending'; }).slice(0, 30)
+    : ((approvals || {}).history || []).slice(0, 30);
+
+  var riskChip = function(risk) {
+    var r = String(risk || 'unknown').toLowerCase();
+    var tone = r === 'high' ? 'error'
+             : r === 'moderate' ? 'warn'
+             : r === 'low' ? 'success'
+             : r === 'red' ? 'error'
+             : 'neutral';
+    return '<span class="tc-chip tc-chip-' + tone + '" style="font-size:9px">' + esc(r.toUpperCase()) + '</span>';
+  };
+
+  var renderRow = function(a, isPending) {
+    var argsPreview = '';
+    try {
+      var args = typeof a.arguments === 'string' ? JSON.parse(a.arguments) : (a.arguments || {});
+      argsPreview = JSON.stringify(args).slice(0, 120);
+    } catch (e) { argsPreview = String(a.arguments || '').slice(0, 120); }
+    return '<div class="tc-card tc-row" style="gap:var(--s-md);align-items:center">' +
+             '<div style="flex:1;min-width:0">' +
+               '<div class="tc-row-sm" style="margin-bottom:4px">' +
+                 '<span style="font-family:var(--font-mono);font-size:13px;font-weight:600;color:var(--on-surface)">' +
+                   esc(a.tool_name || a.tool || 'unknown') +
+                 '</span>' +
+                 riskChip(a.risk_level || a.risk) +
+                 (a.agent_name ? '<span class="tc-text-dim" style="font-size:11px">by ' + esc(a.agent_name) + '</span>' : '') +
+               '</div>' +
+               '<div class="tc-text-dim" style="font-size:11px;font-family:var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
+                 esc(argsPreview) +
+               '</div>' +
+             '</div>' +
+             (isPending
+               ? '<div class="tc-row-sm" style="gap:4px;flex-shrink:0">' +
+                   (typeof approveItem === 'function'
+                     ? '<button class="tc-btn tc-btn-primary tc-btn-sm" onclick="approveItem(\'' + esc(a.id || '') + '\')">' +
+                         '<span class="material-symbols-outlined" style="font-size:14px">check</span> Approve</button>'
+                     : '') +
+                   (typeof denyItem === 'function'
+                     ? '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="denyItem(\'' + esc(a.id || '') + '\')">' +
+                         '<span class="material-symbols-outlined" style="font-size:14px">close</span> Deny</button>'
+                     : '') +
+                 '</div>'
+               : '<span class="tc-chip" style="font-size:9px">' + esc(String(a.status || '').toUpperCase()) + '</span>') +
+           '</div>';
+  };
+
+  c.innerHTML =
+    // Pending section
+    '<div class="tc-row-spread" style="margin-bottom:var(--s-md)">' +
+      '<div class="tc-row-sm">' +
+        '<span class="tc-mono-label">Pending Requests</span>' +
+        '<span class="tc-chip tc-chip-' + (pending.length > 0 ? 'warn' : 'neutral') + '">' + pending.length + '</span>' +
+      '</div>' +
+    '</div>' +
+    (pending.length === 0
+      ? '<div class="tc-card tc-text-dim" style="text-align:center;padding:var(--s-xl)">No pending approvals.</div>'
+      : '<div class="tc-stack-sm" style="margin-bottom:var(--s-lg)">' + pending.map(function(a) { return renderRow(a, true); }).join('') + '</div>') +
+
+    // History section
+    '<div class="tc-row-spread" style="margin:var(--s-lg) 0 var(--s-md)">' +
+      '<div class="tc-row-sm">' +
+        '<span class="tc-mono-label">Recent History</span>' +
+        '<span class="tc-chip">' + history.length + '</span>' +
+      '</div>' +
+    '</div>' +
+    (history.length === 0
+      ? '<div class="tc-card tc-text-dim" style="text-align:center;padding:var(--s-md)">No history yet.</div>'
+      : '<div class="tc-stack-sm">' + history.map(function(a) { return renderRow(a, false); }).join('') + '</div>');
+}
+window.renderApprovalsTech = renderApprovalsTech;
+
+
+// --- Skill Marketplace (stitch_27) ---
+// Hand off to the existing renderSkillStore but ensure it writes into
+// our hub body (already handled by id-swap). Just make sure callable
+// is available — actual visual port is large and deferred to next
+// batch since renderSkillStore is 600+ lines and uses its own complex
+// search / filter / install flow.
+//
+// For now we wrap the existing call with a tech header banner so the
+// hub at least feels consistent.
+function renderSkillStoreTech() {
+  // Existing renderSkillStore writes #store-stats / #store-list etc.
+  // Reuse it; under tech theme the cards inherit some legacy styles
+  // but the hub frame + chip tabs are tech.
+  if (typeof renderSkillStore === 'function') return renderSkillStore();
+}
+window.renderSkillStoreTech = renderSkillStoreTech;
+
+
+// --- Worker Nodes (stitch_7) ---
+// stitch_7 = NodeControl Pro / Compute Nodes. Per-node card with
+// status orb + name + region + cpu/mem/storage bars + actions.
+async function renderNodesTech(container) {
+  var c = container || document.getElementById('content');
+  if (!c) return;
+  // Use the global `nodes` variable (kept up to date by master).
+  var ns = Array.isArray(nodes) ? nodes : [];
+
+  var fmtUptime = function(seconds) {
+    if (!seconds || seconds < 0) return '—';
+    var d = Math.floor(seconds / 86400);
+    var h = Math.floor((seconds % 86400) / 3600);
+    if (d > 0) return d + 'd ' + h + 'h';
+    var m = Math.floor((seconds % 3600) / 60);
+    return h > 0 ? h + 'h ' + m + 'm' : m + 'm';
+  };
+
+  var rows = ns.map(function(n) {
+    var statusCls = n.is_self || n.status === 'online' ? 'online'
+                  : n.status === 'error' ? 'error' : 'busy';
+    var statusLabel = n.is_self ? 'LOCAL'
+                    : n.status === 'online' ? 'ONLINE'
+                    : n.status === 'error' ? 'ERROR' : (n.status || 'OFFLINE').toUpperCase();
+    var agentCount = (n.agents || []).length;
+    var lastSeen = n.last_seen ? new Date(n.last_seen * 1000).toLocaleTimeString() : '—';
+
+    return '<div class="tc-card">' +
+             '<div class="tc-row-spread" style="margin-bottom:var(--s-sm)">' +
+               '<div class="tc-row-sm">' +
+                 '<span class="tc-status-dot ' + statusCls + '" style="width:10px;height:10px"></span>' +
+                 '<span style="font-size:14px;font-weight:600">' + esc(n.name || n.node_id || 'Node') + '</span>' +
+                 '<span class="tc-chip tc-chip-' + (statusCls === 'online' ? 'success' : 'neutral') + '" style="font-size:9px">' + esc(statusLabel) + '</span>' +
+               '</div>' +
+               (n.is_self ? '' :
+                 '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="if(window.confirm(\'Unregister node \\\'' + esc(n.name || n.node_id) + '\\\'?\'))fetch(\'/api/portal/nodes/\'+encodeURIComponent(\'' + esc(n.node_id) + '\'),{method:\'DELETE\'}).then(function(){renderCurrentView();})">' +
+                   '<span class="material-symbols-outlined" style="font-size:14px">delete</span></button>') +
+             '</div>' +
+             '<div class="tc-grid tc-grid-3" style="gap:var(--s-md);margin-top:var(--s-sm)">' +
+               '<div>' +
+                 '<div class="tc-mono-label" style="font-size:9px">NODE ID</div>' +
+                 '<div style="font-family:var(--font-mono);font-size:11px;color:var(--on-surface);word-break:break-all">' + esc(n.node_id || '') + '</div>' +
+               '</div>' +
+               '<div>' +
+                 '<div class="tc-mono-label" style="font-size:9px">AGENTS</div>' +
+                 '<div style="font-size:14px;font-weight:600">' + agentCount + '</div>' +
+               '</div>' +
+               '<div>' +
+                 '<div class="tc-mono-label" style="font-size:9px">LAST SEEN</div>' +
+                 '<div style="font-family:var(--font-mono);font-size:11px">' + esc(lastSeen) + '</div>' +
+               '</div>' +
+             '</div>' +
+           '</div>';
+  }).join('');
+
+  c.innerHTML =
+    '<div class="tc-row-spread" style="margin-bottom:var(--s-md)">' +
+      '<div class="tc-row-sm">' +
+        '<span class="tc-mono-label">' + ns.length + ' Compute Nodes</span>' +
+      '</div>' +
+    '</div>' +
+    (ns.length === 0
+      ? '<div class="tc-card tc-text-dim" style="text-align:center;padding:var(--s-xl)">No nodes registered.</div>'
+      : '<div class="tc-stack-sm">' + rows + '</div>');
+}
+window.renderNodesTech = renderNodesTech;
 
 
 function _getNodeForAgent(a) {
@@ -8844,6 +9198,11 @@ async function loadAgentEvents(agentId) {
 var _selectedPolicyAgent = '';  // agent id for policy config
 
 function renderApprovals() {
+  try { if (localStorage.getItem('tudou_theme') === 'tech') return renderApprovalsTech(); } catch (e) {}
+  // (legacy below)
+  return _renderApprovalsLegacy();
+}
+function _renderApprovalsLegacy() {
   var c = document.getElementById('content');
   var pending = (approvals||[]).filter(function(a){ return a.status === 'pending'; });
   var history = (approvals||[]).filter(function(a){ return a.status !== 'pending'; }).slice(0, 20);
