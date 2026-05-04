@@ -3102,10 +3102,13 @@ window.renderRolesSkillsHubTech = renderRolesSkillsHubTech;
 function renderToolsApprovalsHubTech() {
   var c = document.getElementById('content');
   if (!c) return;
+  // Match legacy hub: approvals / denylist / mcpconfig + extras (policy, audit)
   var tabs = [
     { id: 'approvals', label: 'Pending Requests',  icon: 'verified_user' },
-    { id: 'policies',  label: 'Tool Risk & Policy', icon: 'shield' },
-    { id: 'audit',     label: 'Audit Trail',        icon: 'history' },
+    { id: 'denylist',  label: 'Tool Denylist',     icon: 'block' },
+    { id: 'policy',    label: 'Risk Policy',       icon: 'shield' },
+    { id: 'mcpconfig', label: 'MCP Servers',       icon: 'hub' },
+    { id: 'audit',     label: 'Audit Trail',       icon: 'history' },
   ];
   var r = _techHubPage({ label: 'Governance Console', title: 'Tool Approvals & Policies' }, tabs, 'tools');
   c.innerHTML = r.html;
@@ -3117,10 +3120,14 @@ function renderToolsApprovalsHubTech() {
     if (r.current === 'approvals') {
       if (typeof renderApprovalsTech === 'function') renderApprovalsTech();
       else if (typeof renderApprovals === 'function') renderApprovals();
-    } else if (r.current === 'policies' && typeof renderToolPolicy === 'function') {
-      renderToolPolicy();
-    } else if (r.current === 'audit' && typeof renderAuditTrail === 'function') {
-      renderAuditTrail();
+    } else if (r.current === 'denylist') {
+      if (typeof renderToolDenylist === 'function') renderToolDenylist();
+    } else if (r.current === 'policy') {
+      if (typeof renderPolicyConfig === 'function') renderPolicyConfig(sc);
+    } else if (r.current === 'mcpconfig') {
+      if (typeof renderMCPConfig === 'function') renderMCPConfig(sc);
+    } else if (r.current === 'audit') {
+      if (typeof renderAudit === 'function') renderAudit();
     } else {
       sc.innerHTML = '<div class="tc-card tc-text-dim" style="padding:var(--s-lg)">Tab not yet implemented.</div>';
     }
@@ -3170,12 +3177,20 @@ window.renderKnowledgeMemoryHubTech = renderKnowledgeMemoryHubTech;
 function renderSettingsHubTech() {
   var c = document.getElementById('content');
   if (!c) return;
+  // Match legacy hub feature parity — branding / system / config /
+  // providers / mcp / nodeconfig / nodes / audit / permissions / tokens
   var tabs = [
-    { id: 'providers', label: 'LLM Providers',    icon: 'cloud_queue' },
-    { id: 'mcp',       label: 'MCP Servers',      icon: 'extension' },
-    { id: 'nodes',     label: 'Worker Nodes',     icon: 'device_hub' },
-    { id: 'branding',  label: 'Branding',         icon: 'palette' },
-    { id: 'admin',     label: 'Permissions',      icon: 'admin_panel_settings' },
+    { id: 'branding',    label: 'Branding',     icon: 'palette' },
+    { id: 'system',      label: 'System',       icon: 'tune' },
+    { id: 'config',      label: 'Global Config',icon: 'settings' },
+    { id: 'providers',   label: 'LLM Providers',icon: 'cloud_queue' },
+    { id: 'mcp',         label: 'MCP Servers',  icon: 'extension' },
+    { id: 'llm_tiers',   label: 'LLM Tiers',    icon: 'stacked_line_chart' },
+    { id: 'nodeconfig',  label: 'Node Config',  icon: 'tune' },
+    { id: 'nodes',       label: 'Worker Nodes', icon: 'device_hub' },
+    { id: 'audit',       label: 'Audit Log',    icon: 'assignment' },
+    { id: 'tokens',      label: 'API Tokens',   icon: 'key' },
+    { id: 'admin',       label: 'Permissions',  icon: 'admin_panel_settings' },
   ];
   var r = _techHubPage({ label: 'Command Center', title: 'System Settings' }, tabs, 'settings');
   c.innerHTML = r.html;
@@ -3184,18 +3199,31 @@ function renderSettingsHubTech() {
   var _orig = document.getElementById('content');
   sc.id = 'content'; if (_orig !== sc) _orig.id = 'content-outer';
   try {
-    if (r.current === 'providers') {
+    if (r.current === 'branding') {
+      if (typeof renderBrandingSettingsTech === 'function') renderBrandingSettingsTech(sc);
+      else if (typeof renderBrandingSettings === 'function') renderBrandingSettings(sc);
+    } else if (r.current === 'system') {
+      if (typeof renderSystemSettings === 'function') renderSystemSettings(sc);
+    } else if (r.current === 'config') {
+      if (typeof renderConfig === 'function') renderConfig(sc);
+    } else if (r.current === 'providers') {
       if (typeof renderProvidersTech === 'function') renderProvidersTech(sc);
       else if (typeof renderProviders === 'function') renderProviders(sc);
     } else if (r.current === 'mcp') {
       if (typeof renderMCPConfig === 'function') renderMCPConfig(sc);
+    } else if (r.current === 'llm_tiers') {
+      if (typeof renderLLMTiers === 'function') renderLLMTiers(sc);
+    } else if (r.current === 'nodeconfig') {
+      if (typeof renderNodeConfig === 'function') renderNodeConfig(sc);
     } else if (r.current === 'nodes') {
       if (typeof renderNodes === 'function') renderNodes(sc);
-    } else if (r.current === 'branding') {
-      if (typeof renderBrandingSettingsTech === 'function') renderBrandingSettingsTech(sc);
-      else if (typeof renderBrandingSettings === 'function') renderBrandingSettings(sc);
+    } else if (r.current === 'audit') {
+      if (typeof renderAudit === 'function') renderAudit();
+    } else if (r.current === 'tokens') {
+      if (typeof renderTokens === 'function') renderTokens(sc);
     } else if (r.current === 'admin') {
-      if (typeof renderAdmin === 'function') renderAdmin();
+      if (typeof renderPermissionsPanel === 'function') renderPermissionsPanel();
+      else if (typeof renderAdmin === 'function') renderAdmin();
     }
     else sc.innerHTML = '<div class="tc-card tc-text-dim" style="padding:var(--s-lg)">Tab not yet implemented.</div>';
   } catch (e) {
@@ -3314,61 +3342,104 @@ async function renderProvidersTech(container) {
   var providers = [];
   try { var data = await api('GET', '/api/portal/providers'); providers = (data && data.providers) || []; } catch (e) {}
 
-  var rows = providers.map(function(p) {
-    var statusCls = (p.status === 'connected' || p.is_connected) ? 'online'
-                   : p.status === 'error' ? 'error' : '';
-    var statusLabel = p.status || (p.is_connected ? 'CONNECTED' : 'IDLE');
+  // Bento-grid layout (stitch_16): glass-panel cards in 2-col grid.
+  // Each card has provider name + ENABLED/DISABLED chip top, kind +
+  // base URL, models count + edit/test buttons.
+  var cards = providers.map(function(p) {
+    var enabled = (p.status === 'connected' || p.is_connected || p.enabled !== false);
+    var statusLabel = enabled ? 'ENABLED' : 'DISABLED';
+    var statusColor = enabled ? 'var(--cyber-lime, #adff2f)' : 'var(--outline)';
     var modelCount = (p.models || []).length;
-    return '<div class="tc-card tc-row" style="gap:var(--s-md);align-items:center">' +
-             '<div style="width:40px;height:40px;border-radius:var(--r-md);' +
-                          'background:rgba(192,193,255,0.1);border:1px solid rgba(192,193,255,0.25);' +
-                          'display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
-               '<span class="material-symbols-outlined" style="color:var(--primary)">cloud_queue</span>' +
+    var iconKind = (p.kind || p.type || '').toLowerCase();
+    var icon = iconKind.indexOf('ollama') >= 0 ? 'home_iot_device'
+             : iconKind.indexOf('anthropic') >= 0 ? 'token'
+             : iconKind.indexOf('openai') >= 0 ? 'sparkles'
+             : iconKind.indexOf('google') >= 0 ? 'travel_explore'
+             : 'cloud_queue';
+    return '<div class="tc-card-glass" style="padding:var(--s-lg);display:flex;flex-direction:column;gap:var(--s-md);position:relative;overflow:hidden;border-top:1px solid rgba(255,255,255,0.10)' + (enabled ? ';box-shadow:0 0 15px rgba(192,193,255,0.10)' : '') + '">' +
+             // Top-right status chip
+             '<div style="position:absolute;top:var(--s-md);right:var(--s-md);display:flex;align-items:center;gap:6px;font-family:var(--font-mono);font-size:10px;letter-spacing:0.05em;color:' + statusColor + '">' +
+               (enabled ? '<span style="width:6px;height:6px;border-radius:50%;background:' + statusColor + ';animation:pulse-dot 2s infinite ease-in-out"></span>' : '<span style="width:6px;height:6px;border-radius:50%;background:' + statusColor + '"></span>') +
+               statusLabel +
              '</div>' +
-             '<div style="flex:1;min-width:0">' +
-               '<div class="tc-row-sm" style="margin-bottom:2px">' +
-                 '<span style="font-size:14px;font-weight:600">' + esc(p.name || p.id || 'Provider') + '</span>' +
-                 '<span class="tc-chip tc-chip-' + (statusCls === 'online' ? 'success' : 'neutral') + '">' +
-                   (statusCls ? '<span class="tc-status-dot ' + statusCls + '"></span>' : '') +
-                   esc(String(statusLabel).toUpperCase()) +
-                 '</span>' +
+             // Header: icon + name + kind
+             '<div style="display:flex;align-items:flex-start;gap:14px;padding-right:90px">' +
+               '<div style="width:48px;height:48px;border-radius:var(--r-md);background:rgba(192,193,255,0.10);border:1px solid rgba(192,193,255,0.25);display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+                 '<span class="material-symbols-outlined" style="color:var(--primary);font-size:24px">' + icon + '</span>' +
                '</div>' +
-               '<div class="tc-text-dim" style="font-size:11px;font-family:var(--font-mono)">' +
-                 esc(p.kind || p.type || 'openai-compatible') +
-                 (p.base_url ? ' · ' + esc(p.base_url.replace(/^https?:\/\//, '')) : '') +
+               '<div style="flex:1;min-width:0">' +
+                 '<div class="tc-mono-label" style="color:var(--outline);margin-bottom:4px">' +
+                   esc(String(p.kind || p.type || 'openai-compatible').toUpperCase()) +
+                 '</div>' +
+                 '<div style="font-size:18px;font-weight:700;color:var(--on-surface);line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' +
+                   esc(p.name || p.id || 'Provider') +
+                 '</div>' +
                '</div>' +
              '</div>' +
-             '<div style="text-align:right;flex-shrink:0">' +
-               '<div class="tc-mono-label" style="font-size:9px">MODELS</div>' +
-               '<div style="font-family:var(--font-mono);font-size:14px">' + modelCount + '</div>' +
-             '</div>' +
-             '<div class="tc-row-sm" style="gap:4px;flex-shrink:0">' +
-               (typeof openProviderEditor === 'function'
-                 ? '<button class="tc-btn tc-btn-icon tc-btn-sm" title="Edit" onclick="openProviderEditor(\'' + esc(p.id || '') + '\')">' +
-                     '<span class="material-symbols-outlined" style="font-size:16px">settings</span></button>'
-                 : '') +
-               (typeof testProviderConn === 'function'
-                 ? '<button class="tc-btn tc-btn-icon tc-btn-sm" title="Test" onclick="testProviderConn(\'' + esc(p.id || '') + '\')">' +
-                     '<span class="material-symbols-outlined" style="font-size:16px">network_check</span></button>'
-                 : '') +
+             // Base URL line
+             (p.base_url
+               ? '<div class="tc-text-dim" style="font-size:11px;font-family:var(--font-mono);letter-spacing:0.03em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:8px 12px;background:var(--surface-container-lowest);border:1px solid var(--outline-variant);border-radius:var(--r-md)">' +
+                   esc(p.base_url) +
+                 '</div>'
+               : '') +
+             // Stats row + actions
+             '<div style="display:flex;align-items:center;justify-content:space-between;padding-top:12px;border-top:1px solid var(--outline-variant);margin-top:auto">' +
+               '<div style="display:flex;gap:24px">' +
+                 '<div>' +
+                   '<div class="tc-mono-label" style="color:var(--outline);font-size:9px;margin-bottom:2px">MODELS</div>' +
+                   '<div style="font-family:var(--font-mono);font-size:18px;font-weight:700;color:var(--primary)">' + modelCount + '</div>' +
+                 '</div>' +
+                 (p.timeout_s ? '<div>' +
+                   '<div class="tc-mono-label" style="color:var(--outline);font-size:9px;margin-bottom:2px">TIMEOUT</div>' +
+                   '<div style="font-family:var(--font-mono);font-size:14px;color:var(--on-surface)">' + p.timeout_s + 's</div>' +
+                 '</div>' : '') +
+               '</div>' +
+               '<div style="display:flex;gap:6px">' +
+                 (typeof testProviderConn === 'function'
+                   ? '<button class="tc-btn tc-btn-ghost tc-btn-sm" title="Test connection" onclick="testProviderConn(\'' + esc(p.id || '') + '\')" style="padding:6px;min-width:0">' +
+                       '<span class="material-symbols-outlined" style="font-size:16px">network_check</span></button>'
+                   : '') +
+                 (typeof openProviderEditor === 'function'
+                   ? '<button class="tc-btn tc-btn-ghost tc-btn-sm" title="Edit" onclick="openProviderEditor(\'' + esc(p.id || '') + '\')" style="padding:6px;min-width:0">' +
+                       '<span class="material-symbols-outlined" style="font-size:16px">edit</span></button>'
+                   : '') +
+                 (typeof deleteProvider === 'function'
+                   ? '<button class="tc-btn tc-btn-ghost tc-btn-sm" title="Delete" onclick="deleteProvider(\'' + esc(p.id || '') + '\')" style="padding:6px;min-width:0;color:var(--error)">' +
+                       '<span class="material-symbols-outlined" style="font-size:16px">delete</span></button>'
+                   : '') +
+               '</div>' +
              '</div>' +
            '</div>';
   }).join('');
 
   c.innerHTML =
-    '<div class="tc-row-spread" style="margin-bottom:var(--s-md)">' +
-      '<div class="tc-row-sm">' +
-        '<span class="tc-mono-label">' + providers.length + ' Providers</span>' +
+    '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:var(--s-lg);gap:var(--s-md);flex-wrap:wrap">' +
+      '<div style="flex:1;min-width:240px">' +
+        '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px">' +
+          '<span>SYSTEM ARCHITECTURE</span>' +
+          '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
+        '</div>' +
+        '<h1 class="tc-h2" style="margin-top:6px">LLM Providers</h1>' +
+        '<p class="tc-text-dim" style="font-size:12px;margin-top:6px;line-height:1.55;max-width:560px">Backend orchestration for autonomous agents. Configure local instances, cloud endpoints, and model behaviors. ' + providers.length + ' providers configured.</p>' +
       '</div>' +
       (typeof openAddProviderModal === 'function'
-        ? '<button class="tc-btn tc-btn-primary" onclick="openAddProviderModal()">' +
-            '<span class="material-symbols-outlined" style="font-size:16px">add</span> Add Provider' +
+        ? '<button class="tc-btn tc-btn-primary tc-btn-sm" onclick="openAddProviderModal()">' +
+            '<span class="material-symbols-outlined" style="font-size:14px">add_circle</span> ADD PROVIDER' +
           '</button>'
         : '') +
     '</div>' +
-    (rows
-      ? '<div class="tc-stack-sm">' + rows + '</div>'
-      : '<div class="tc-card tc-text-dim" style="text-align:center;padding:var(--s-xl)">No LLM providers configured.</div>');
+    (cards
+      ? '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:var(--s-md)">' + cards + '</div>'
+      : '<div class="tc-card" style="text-align:center;padding:60px 20px;border-style:dashed">' +
+          '<span class="material-symbols-outlined" style="font-size:48px;color:var(--outline)">cloud_off</span>' +
+          '<div style="font-size:14px;color:var(--on-surface-variant);margin-top:14px;margin-bottom:8px">No LLM providers configured</div>' +
+          '<div class="tc-text-dim" style="font-size:12px;margin-bottom:20px">Add your first provider to enable agent chat.</div>' +
+          (typeof openAddProviderModal === 'function'
+            ? '<button class="tc-btn tc-btn-primary tc-btn-sm" onclick="openAddProviderModal()">' +
+                '<span class="material-symbols-outlined" style="font-size:14px">add_circle</span> ADD FIRST PROVIDER' +
+              '</button>'
+            : '') +
+        '</div>');
 }
 window.renderProvidersTech = renderProvidersTech;
 
@@ -18401,7 +18472,7 @@ async function renderWorkflows() {
     // ── My Workflows (已创建的) ──
     if (wfs.length) {
       html += '<div style="margin-bottom:28px">';
-      html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px"><span class="material-symbols-outlined" style="font-size:20px;color:var(--primary)">account_tree</span><span style="font-size:16px;font-weight:700">我的工作流</span><span style="font-size:11px;color:var(--text3);background:var(--surface3);padding:2px 8px;border-radius:10px">' + wfs.length + '</span></div>';
+      html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px"><span class="material-symbols-outlined" style="font-size:20px;color:var(--primary)">account_tree</span><span style="font-size:16px;font-weight:700">' + (_techWf ? 'My Workflows' : '我的工作流') + '</span><span style="font-size:11px;color:var(--text3);background:var(--surface3);padding:2px 8px;border-radius:10px">' + wfs.length + '</span></div>';
       html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px">';
       wfs.forEach(function(wf) {
         var stepsArr = wf.steps || [];
@@ -18433,7 +18504,7 @@ async function renderWorkflows() {
     if (catalog.length) {
       html += '<div style="margin-bottom:20px">';
       html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">';
-      html += '<div style="display:flex;align-items:center;gap:8px"><span class="material-symbols-outlined" style="font-size:20px;color:#FF9800">auto_awesome</span><span style="font-size:16px;font-weight:700">模板市场</span><span style="font-size:11px;color:var(--text3)">Template Catalog</span></div>';
+      html += '<div style="display:flex;align-items:center;gap:8px"><span class="material-symbols-outlined" style="font-size:20px;color:#FF9800">auto_awesome</span><span style="font-size:16px;font-weight:700">' + (_techWf ? 'Template Catalog' : '模板市场') + '</span>' + (_techWf ? '' : '<span style="font-size:11px;color:var(--text3)">Template Catalog</span>') + '</div>';
       html += '</div>';
 
       // Category filter tabs
@@ -18576,19 +18647,19 @@ function renderSelfImprovement() {
   }
   // Secondary line: agents with SI + roles
   html += '<div style="display:flex;gap:16px;margin-bottom:18px;font-size:11px;color:var(--text3)">';
-  html += '<span>自改进启用: <b style="color:var(--text1)">'+siCount+'/'+agents.length+'</b></span>';
-  html += '<span>有经验的角色: <b id="si-metric-roles" style="color:var(--text1)">-</b></span>';
+  html += '<span>' + (_techMode ? 'SELF-IMPROVE ENABLED' : '自改进启用') + ': <b style="color:var(--text1)">'+siCount+'/'+agents.length+'</b></span>';
+  html += '<span>' + (_techMode ? 'ROLES WITH XP' : '有经验的角色') + ': <b id="si-metric-roles" style="color:var(--text1)">-</b></span>';
   html += '</div>';
 
-  // ── Row 2: Learning Plan Board (主动学习任务看板) ──
+  // ── Row 2: Learning Plan Board ──
   html += '<div class="card" style="padding:16px;margin-bottom:18px">';
-  html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px"><span class="material-symbols-outlined" style="font-size:18px;color:#4CAF50">task_alt</span><span style="font-weight:700;font-size:14px">学习计划看板</span><span style="font-size:11px;color:var(--text3)">Learning Plan Board</span></div>';
+  html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px"><span class="material-symbols-outlined" style="font-size:18px;color:#4CAF50">task_alt</span><span style="font-weight:700;font-size:14px">' + (_techMode ? 'Learning Plan Board' : '学习计划看板') + '</span>' + (_techMode ? '' : '<span style="font-size:11px;color:var(--text3)">Learning Plan Board</span>') + '</div>';
   html += '<div id="si-plan-board" style="max-height:600px;overflow-y:auto"><div style="color:var(--text3);font-size:12px;text-align:center;padding:20px">Loading...</div></div>';
   html += '</div>';
 
-  // ── Row 3: Retrospective Insights (复盘洞察) ──
+  // ── Row 3: Retrospective Insights ──
   html += '<div class="card" style="padding:16px;margin-bottom:18px">';
-  html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px"><span class="material-symbols-outlined" style="font-size:18px;color:#FF9800">lightbulb</span><span style="font-weight:700;font-size:14px">复盘洞察</span><span style="font-size:11px;color:var(--text3)">Retrospective Insights — 最新为准，冲突时覆盖历史</span></div>';
+  html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px"><span class="material-symbols-outlined" style="font-size:18px;color:#FF9800">lightbulb</span><span style="font-weight:700;font-size:14px">' + (_techMode ? 'Retrospective Insights' : '复盘洞察') + '</span>' + (_techMode ? '<span style="font-size:11px;color:var(--text3)">Latest wins on conflict</span>' : '<span style="font-size:11px;color:var(--text3)">Retrospective Insights — 最新为准，冲突时覆盖历史</span>') + '</div>';
   html += '<div id="si-insights" style="max-height:280px;overflow-y:auto"><div style="color:var(--text3);font-size:12px;text-align:center;padding:20px">Loading...</div></div>';
   html += '</div>';
 
