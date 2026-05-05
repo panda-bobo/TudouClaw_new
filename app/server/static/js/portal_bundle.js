@@ -26031,55 +26031,104 @@ function _canvasRenderEditor() {
   var c = document.getElementById('content');
   var wf = _canvasState.current;
   if (!wf) return;
+  var _techCe = false;
+  try { _techCe = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
   // Persist user's preferred log panel state across renders. Default
   // collapsed; auto-opens when a run starts (handled in _canvasStartRun).
   var logExpanded = !!_canvasState._logExpanded;
   var logHeightPx = logExpanded ? 220 : 32;
+  // Tech-mode tokens
+  var paneBg = _techCe ? 'rgba(13,13,21,0.50)' : 'var(--surface)';
+  var paneBorder = _techCe ? 'var(--outline-variant)' : 'var(--border)';
+  var inputBg = _techCe ? 'var(--surface-container-lowest)' : 'var(--bg)';
+  // Tech mono pill helper for the toolbar
+  var techPill = function(onclick, icon, label, primary) {
+    var bg = primary ? 'var(--primary-fixed)' : 'rgba(255,255,255,0.04)';
+    var color = primary ? 'var(--on-primary-fixed)' : 'var(--on-surface)';
+    var border = primary ? 'none' : '1px solid var(--outline-variant)';
+    var glow = primary ? 'box-shadow:0 4px 14px rgba(192,193,255,0.20);' : '';
+    return '<button onclick="' + onclick + '" style="background:' + bg + ';color:' + color + ';padding:7px 14px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:10px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:' + border + ';cursor:pointer;display:inline-flex;align-items:center;gap:6px;' + glow + '"><span class="material-symbols-outlined" style="font-size:14px">' + icon + '</span>' + label + '</button>';
+  };
   c.innerHTML =
       '<div style="display:flex;flex-direction:column;height:calc(100vh - 80px)">'
     // Toolbar
-    + '  <div style="display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--border);background:var(--surface)">'
-    + '    <button class="btn btn-ghost btn-sm" onclick="renderCanvasPage()"><span class="material-symbols-outlined" style="font-size:16px">arrow_back</span> 返回列表</button>'
-    + '    <input id="canvas-name" value="' + esc(wf.name) + '" style="font-weight:600;font-size:14px;padding:4px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);flex:1;max-width:340px">'
+    + '  <div style="display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid ' + paneBorder + ';background:' + paneBg + ';' + (_techCe ? 'backdrop-filter:blur(20px)' : '') + '">'
+    + (_techCe
+        ? techPill('renderCanvasPage()', 'arrow_back', 'BACK')
+        : '<button class="btn btn-ghost btn-sm" onclick="renderCanvasPage()"><span class="material-symbols-outlined" style="font-size:16px">arrow_back</span> 返回列表</button>')
+    + (_techCe
+        ? '<span class="tc-mono-label" style="color:var(--outline);font-size:10px;letter-spacing:0.08em">WORKFLOW</span>'
+        : '')
+    + '    <input id="canvas-name" value="' + esc(wf.name) + '" style="font-weight:600;font-size:14px;padding:6px 10px;border:1px solid ' + paneBorder + ';border-radius:var(--r-md, 4px);background:' + inputBg + ';color:var(--on-surface, var(--text));flex:1;max-width:340px;outline:none' + (_techCe ? ';font-family:var(--font-display)' : '') + '">'
     +      _canvasStatusBadge(wf.executable_status || 'draft')
     + '    <span id="canvas-run-status-pill" style="display:none"></span>'
-    + '    <button id="canvas-artifacts-btn" onclick="_canvasOpenArtifactsModal()" style="display:none;padding:3px 10px;font-size:11px;border-radius:11px;background:var(--chip-info-bg);color:var(--chip-info-fg);border:none;font-weight:600;cursor:pointer;margin-left:6px;align-items:center;gap:4px">'
-    +      _ui.icon('folder_zip', {size: 14, va: '-3px'}) + ' 交付件 <span id="canvas-artifacts-count">0</span></button>'
-    + (wf.id ? '    <button onclick="_canvasOpenRunHistoryModal()" title="查看历史运行 + 加载任意一次的日志" style="padding:3px 10px;font-size:11px;border-radius:11px;background:var(--overlay-6);color:var(--text2);border:none;font-weight:600;cursor:pointer;margin-left:6px;display:inline-flex;align-items:center;gap:4px">'
-    +      _ui.icon('history', {size: 14, va: '-3px'}) + ' 运行历史</button>' : '')
-    + '    <span style="font-size:11px;color:var(--text3);font-family:monospace">' + esc(wf.id || '(unsaved)') + '</span>'
+    + '    <button id="canvas-artifacts-btn" onclick="_canvasOpenArtifactsModal()" style="display:none;padding:3px 10px;font-size:11px;border-radius:11px;background:var(--chip-info-bg, rgba(137,206,255,0.10));color:var(--chip-info-fg, var(--secondary));border:none;font-weight:600;cursor:pointer;margin-left:6px;align-items:center;gap:4px">'
+    +      _ui.icon('folder_zip', {size: 14, va: '-3px'}) + ' ' + (_techCe ? 'ARTIFACTS' : '交付件') + ' <span id="canvas-artifacts-count">0</span></button>'
+    + (wf.id ? '    <button onclick="_canvasOpenRunHistoryModal()" title="' + (_techCe ? 'View run history' : '查看历史运行') + '" style="padding:5px 10px;font-size:10px;border-radius:var(--r-md);background:rgba(255,255,255,0.04);color:var(--on-surface-variant, var(--text2));border:1px solid ' + paneBorder + ';font-family:' + (_techCe ? 'var(--font-mono)' : 'inherit') + ';' + (_techCe ? 'letter-spacing:0.05em;text-transform:uppercase;' : 'font-weight:600;') + 'cursor:pointer;margin-left:6px;display:inline-flex;align-items:center;gap:4px">'
+    +      _ui.icon('history', {size: 14, va: '-3px'}) + ' ' + (_techCe ? 'HISTORY' : '运行历史') + '</button>' : '')
+    + '    <span style="font-size:10px;color:var(--outline, var(--text3));font-family:var(--font-mono, monospace);letter-spacing:0.03em">' + esc(wf.id || '(unsaved)') + '</span>'
     + '    <div style="margin-left:auto;display:flex;gap:6px">'
     +        (wf.id ? _canvasStatusActions(wf) : '')
-    + '      <button class="btn btn-sm" onclick="_canvasExportJson()"><span class="material-symbols-outlined" style="font-size:14px">download</span> 导出 JSON</button>'
-    + '      <button class="btn btn-primary btn-sm" onclick="_canvasSave()"><span class="material-symbols-outlined" style="font-size:14px">save</span> 保存</button>'
+    + (_techCe
+        ? techPill('_canvasExportJson()', 'download', 'EXPORT JSON', false)
+        + techPill('_canvasSave()', 'save', 'SAVE', true)
+        : '<button class="btn btn-sm" onclick="_canvasExportJson()"><span class="material-symbols-outlined" style="font-size:14px">download</span> 导出 JSON</button>'
+        + '<button class="btn btn-primary btn-sm" onclick="_canvasSave()"><span class="material-symbols-outlined" style="font-size:14px">save</span> 保存</button>')
     + '    </div>'
     + '  </div>'
     + '  <div style="display:flex;flex:1;min-height:0">'
     // Left palette
-    + '    <div style="width:160px;border-right:1px solid var(--border);padding:12px;overflow-y:auto;background:var(--surface)">'
-    + '      <div style="font-size:11px;color:var(--text3);margin-bottom:8px;font-weight:600">节点工具栏</div>'
+    + '    <div style="width:' + (_techCe ? '200px' : '160px') + ';border-right:1px solid ' + paneBorder + ';padding:' + (_techCe ? '18px 14px' : '12px') + ';overflow-y:auto;background:' + paneBg + ';' + (_techCe ? 'backdrop-filter:blur(20px)' : '') + '">'
+    + (_techCe
+        ? '<div class="tc-mono-label" style="color:var(--on-surface-variant);font-size:10px;letter-spacing:0.08em;margin-bottom:14px;display:flex;align-items:center;gap:6px"><span class="material-symbols-outlined" style="font-size:14px">inventory_2</span>NODE TOOLBOX</div>' +
+          '<div class="tc-mono-label" style="color:var(--outline);font-size:9px;letter-spacing:0.10em;margin-bottom:8px">PRIMARY COMPONENTS</div>'
+        : '<div style="font-size:11px;color:var(--text3);margin-bottom:8px;font-weight:600">节点工具栏</div>')
     +        Object.keys(_NODE_TYPES).map(function(t) {
               var nt = _NODE_TYPES[t];
+              if (_techCe) {
+                return '<div draggable="true" ondragstart="_canvasPaletteDragStart(event,\'' + t + '\')" ' +
+                  'style="padding:10px 12px;margin-bottom:8px;border:1px solid rgba(255,255,255,0.05);border-radius:var(--r-md);background:var(--surface-container-high);cursor:grab;display:flex;align-items:center;gap:10px;transition:border-color 0.15s,background 0.15s" ' +
+                  'onmouseover="this.style.borderColor=\'rgba(192,193,255,0.30)\';this.style.background=\'var(--surface-container-highest)\'" ' +
+                  'onmouseout="this.style.borderColor=\'rgba(255,255,255,0.05)\';this.style.background=\'var(--surface-container-high)\'">' +
+                  '<div style="width:32px;height:32px;border-radius:var(--r-md);background:' + nt.color + '20;display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+                    '<span style="color:' + nt.color + ';font-size:18px">' + nt.icon + '</span>' +
+                  '</div>' +
+                  '<div style="flex:1;min-width:0">' +
+                    '<div style="font-size:12px;font-weight:600;color:var(--on-surface)">' + esc(nt.label) + '</div>' +
+                  '</div>' +
+                '</div>';
+              }
               return '<div draggable="true" ondragstart="_canvasPaletteDragStart(event,\'' + t + '\')" '
                    + 'style="padding:8px 10px;margin-bottom:6px;border:1px solid var(--border);border-radius:6px;background:var(--bg);cursor:grab;display:flex;align-items:center;gap:6px;font-size:12px">'
                    + '<span style="color:' + nt.color + ';font-size:16px">' + nt.icon + '</span>'
                    + esc(nt.label) + '</div>';
             }).join('')
-    + '      <div style="font-size:10px;color:var(--text3);margin-top:14px;line-height:1.5">'
-    + '        💡 拖到右侧画布<br>'
-    + '        💡 单击节点选中<br>'
-    + '        💡 节点右侧 ● 拖到另一节点 = 连线<br>'
-    + '        💡 选中后按 Delete 删除'
-    + '      </div>'
+    + (_techCe
+        ? '<div class="tc-text-dim" style="font-size:11px;line-height:1.7;margin-top:18px;padding-top:14px;border-top:1px solid var(--outline-variant)">' +
+            '<div>Drag onto canvas</div>' +
+            '<div>Click to select</div>' +
+            '<div>Drag node ● → another = link</div>' +
+            '<div>Select + Delete to remove</div>' +
+          '</div>'
+        : '<div style="font-size:10px;color:var(--text3);margin-top:14px;line-height:1.5">' +
+            '💡 拖到右侧画布<br>' +
+            '💡 单击节点选中<br>' +
+            '💡 节点右侧 ● 拖到另一节点 = 连线<br>' +
+            '💡 选中后按 Delete 删除' +
+          '</div>')
     + '    </div>'
     // SVG canvas (center)
-    + '    <div id="canvas-svg-host" style="flex:1;background:var(--bg);overflow:auto;position:relative" ondragover="event.preventDefault()" ondrop="_canvasDrop(event)">'
-    + '      <svg id="canvas-svg" width="2400" height="1400" style="display:block;background-image:radial-gradient(circle, var(--border) 1px, transparent 1px);background-size:20px 20px"></svg>'
+    + '    <div id="canvas-svg-host" style="flex:1;background:' + (_techCe ? 'var(--surface-container-lowest)' : 'var(--bg)') + ';overflow:auto;position:relative" ondragover="event.preventDefault()" ondrop="_canvasDrop(event)">'
+    + '      <svg id="canvas-svg" width="2400" height="1400" style="display:block;background-image:radial-gradient(circle, ' + (_techCe ? 'rgba(192,193,255,0.06)' : 'var(--border)') + ' 1px, transparent 1px);background-size:24px 24px"></svg>'
     + '    </div>'
     // Right config panel
-    + '    <div id="canvas-config-panel" style="width:280px;border-left:1px solid var(--border);padding:14px;overflow-y:auto;background:var(--surface)">'
-    + '      <div style="font-size:11px;color:var(--text3)">未选中节点</div>'
-    + '      <div style="font-size:12px;color:var(--text3);margin-top:10px;line-height:1.5">点击画布上的节点查看 / 编辑属性</div>'
+    + '    <div id="canvas-config-panel" style="width:' + (_techCe ? '320px' : '280px') + ';border-left:1px solid ' + paneBorder + ';padding:18px;overflow-y:auto;background:' + paneBg + ';' + (_techCe ? 'backdrop-filter:blur(20px)' : '') + '">'
+    + (_techCe
+        ? '<div class="tc-mono-label" style="color:var(--on-surface-variant);font-size:10px;letter-spacing:0.08em;margin-bottom:14px">NODE PROPERTIES</div>' +
+          '<div class="tc-text-dim" style="font-size:11px;line-height:1.55;font-family:var(--font-mono);letter-spacing:0.03em">NO NODE SELECTED</div>' +
+          '<div class="tc-text-dim" style="font-size:12px;color:var(--outline);margin-top:10px;line-height:1.55">Click any node on the canvas to view / edit its properties.</div>'
+        : '<div style="font-size:11px;color:var(--text3)">未选中节点</div>' +
+          '<div style="font-size:12px;color:var(--text3);margin-top:10px;line-height:1.5">点击画布上的节点查看 / 编辑属性</div>')
     + '    </div>'
     + '  </div>'
     // Bottom log drawer — collapsed by default, auto-opens on run start.
