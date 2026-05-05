@@ -2212,7 +2212,10 @@ function renderCurrentView() {
     case 'agent': {
       var agentObj = agents.find(function(a){ return a.id === currentAgent; });
       titleEl.textContent = agentObj ? (agentObj.role||'general') + '-' + agentObj.name : 'Agent';
-      actionsEl.innerHTML =
+      // Tech mode: action buttons render inline in renderAgentChatTech's
+      // header. Skip the topbar injection so the buttons aren't
+      // duplicated (and the topbar itself is hidden in tech).
+      if (!_techRcv) actionsEl.innerHTML =
           '<button class="btn btn-ghost btn-sm" onclick="editAgentProfile(\''+currentAgent+'\')"><span class="material-symbols-outlined" style="font-size:16px">edit</span> Settings</button>'
         + '<button class="btn btn-ghost btn-sm" id="agent-inbox-btn" onclick="_showAgentInboxModal(\''+currentAgent+'\')"><span class="material-symbols-outlined" style="font-size:16px">inbox</span> ' + window.t('chat.inbox', '收件箱') + '<span class="badge notification hidden" id="agent-inbox-btn-badge" style="margin-left:6px">0</span></button>'
         + '<button class="btn btn-ghost btn-sm" id="agent-ckpt-btn" onclick="_showAgentCheckpointsModal(\''+currentAgent+'\')"><span class="material-symbols-outlined" style="font-size:16px">bookmark</span> ' + window.t('chat.checkpoints', '检查点') + '<span class="badge notification hidden" id="agent-ckpt-btn-badge" style="margin-left:6px">0</span></button>'
@@ -3055,7 +3058,12 @@ window._techHubSwitch = _techHubSwitch;
 function _techWrapTopLevel(opts, legacyFn) {
   var c = document.getElementById('content');
   if (!c) return;
-  c.innerHTML = _techPageHeader(opts) + '<div id="tech-tl-body"></div>';
+  // No wrapper-level page header. Each ported page renders its own
+  // hero — the topbar already shows the page name and the wrapper's
+  // "Workspace / Project Management" h2 was duplicating identity that
+  // the page body already provides. Wrapper now just hands the legacy
+  // body a clean #content slot.
+  c.innerHTML = '<div id="tech-tl-body"></div>';
   var sc = document.getElementById('tech-tl-body');
   if (!sc) return;
   var _orig = c;
@@ -5166,7 +5174,15 @@ function renderAgentChatTech(agentId) {
           '</div>' +
         '</div>' +
       '</div>' +
-      '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0">' +
+      '<div style="display:flex;align-items:center;gap:4px;flex-shrink:0">' +
+        // Topbar's per-agent buttons (Settings / Inbox / Checkpoints /
+        // Clear / Delete) live here in tech mode so the global topbar
+        // can stay hidden — keeps action chrome on a single layer.
+        '<button onclick="editAgentProfile(\'' + agentId + '\')" title="Settings" style="background:transparent;border:none;color:var(--outline);padding:8px;cursor:pointer;border-radius:var(--r-md);display:inline-flex;align-items:center;justify-content:center;transition:all 0.15s" onmouseover="this.style.background=\'rgba(255,255,255,0.04)\';this.style.color=\'var(--primary)\'" onmouseout="this.style.background=\'\';this.style.color=\'var(--outline)\'"><span class="material-symbols-outlined" style="font-size:18px">settings</span></button>' +
+        '<button id="agent-inbox-btn" onclick="_showAgentInboxModal(\'' + agentId + '\')" title="Inbox" style="background:transparent;border:none;color:var(--outline);padding:8px;cursor:pointer;border-radius:var(--r-md);display:inline-flex;align-items:center;justify-content:center;position:relative;transition:all 0.15s" onmouseover="this.style.background=\'rgba(255,255,255,0.04)\';this.style.color=\'var(--secondary)\'" onmouseout="this.style.background=\'\';this.style.color=\'var(--outline)\'"><span class="material-symbols-outlined" style="font-size:18px">inbox</span><span class="badge notification hidden" id="agent-inbox-btn-badge" style="position:absolute;top:2px;right:2px;font-size:9px;min-width:14px;height:14px;border-radius:9999px;background:var(--primary);color:var(--on-primary);display:flex;align-items:center;justify-content:center">0</span></button>' +
+        '<button id="agent-ckpt-btn" onclick="_showAgentCheckpointsModal(\'' + agentId + '\')" title="Checkpoints" style="background:transparent;border:none;color:var(--outline);padding:8px;cursor:pointer;border-radius:var(--r-md);display:inline-flex;align-items:center;justify-content:center;position:relative;transition:all 0.15s" onmouseover="this.style.background=\'rgba(255,255,255,0.04)\';this.style.color=\'var(--secondary)\'" onmouseout="this.style.background=\'\';this.style.color=\'var(--outline)\'"><span class="material-symbols-outlined" style="font-size:18px">bookmark</span><span class="badge notification hidden" id="agent-ckpt-btn-badge" style="position:absolute;top:2px;right:2px;font-size:9px;min-width:14px;height:14px;border-radius:9999px;background:var(--primary);color:var(--on-primary);display:flex;align-items:center;justify-content:center">0</span></button>' +
+        '<button onclick="clearAgent(\'' + agentId + '\')" title="Clear chat" style="background:transparent;border:none;color:var(--outline);padding:8px;cursor:pointer;border-radius:var(--r-md);display:inline-flex;align-items:center;justify-content:center;transition:all 0.15s" onmouseover="this.style.background=\'rgba(255,255,255,0.04)\';this.style.color=\'var(--tertiary)\'" onmouseout="this.style.background=\'\';this.style.color=\'var(--outline)\'"><span class="material-symbols-outlined" style="font-size:18px">delete_sweep</span></button>' +
+        '<button onclick="deleteAgent(\'' + agentId + '\')" title="Delete agent" style="background:transparent;border:none;color:var(--outline);padding:8px;cursor:pointer;border-radius:var(--r-md);display:inline-flex;align-items:center;justify-content:center;transition:all 0.15s" onmouseover="this.style.background=\'rgba(255,180,171,0.10)\';this.style.color=\'var(--error)\'" onmouseout="this.style.background=\'\';this.style.color=\'var(--outline)\'"><span class="material-symbols-outlined" style="font-size:18px">delete</span></button>' +
         // Preprocessor badge slot (kept hidden; populated elsewhere)
         '<span id="prep-badge-' + agentId + '" style="display:none"></span>' +
       '</div>' +
@@ -22666,14 +22682,23 @@ function _renderOrchCanvasWorkflows(d) {
     return;
   }
   var workflows = (d && d.workflows) || [];
+  var _techCv = false;
+  try { _techCv = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
 
-  // Section header — with "新建" CTA so the empty state has a clear next step.
-  var headerHtml = _ui.sectionHeader('画布工作流', {
-    icon: 'view_kanban',
-    count: workflows.length + ' 个',
-    action: '<button class="btn btn-sm btn-primary" onclick="renderCanvasPage()" title="进入画布编辑器" style="padding:5px 12px;font-size:11px">'
-      + _ui.icon('add', {size:14}) + ' 新建 / 管理</button>',
-  });
+  // Section header — in legacy mode the "新建 / 管理" CTA pill sits on
+  // the right. In tech mode the CTA is rendered as a dashed-border
+  // card that lives inside the workflow grid (visually consistent
+  // with the workflow cards), so the section header drops the action.
+  var headerHtml = _ui.sectionHeader(
+    _techCv ? 'Canvas Workflows' : '画布工作流',
+    {
+      icon: 'view_kanban',
+      count: _techCv ? workflows.length : (workflows.length + ' 个'),
+      action: _techCv ? '' :
+        '<button class="btn btn-sm btn-primary" onclick="renderCanvasPage()" title="进入画布编辑器" style="padding:5px 12px;font-size:11px">'
+        + _ui.icon('add', {size:14}) + ' 新建 / 管理</button>',
+    }
+  );
 
   // Left-edge status stripe — token-based for theme awareness.
   var stripeColor = function(st) {
@@ -22755,6 +22780,22 @@ function _renderOrchCanvasWorkflows(d) {
             + '</div>'
             + '</div>';
         }).join('')
+      // Tech-mode "+ New Workflow" card sits as a dashed-bordered tile
+      // inside the grid so the add affordance lives in the same visual
+      // tier as the workflow cards (matches user request: "添加按钮，
+      // 显示为卡片形式").
+      + (_techCv
+        ? '<div onclick="renderCanvasPage()" ' +
+            'onmouseover="this.style.borderColor=\'rgba(192,193,255,0.50)\';this.style.background=\'rgba(192,193,255,0.05)\'" ' +
+            'onmouseout="this.style.borderColor=\'\';this.style.background=\'\'" ' +
+            'style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;min-height:172px;border:2px dashed rgba(192,193,255,0.25);border-radius:12px;background:transparent;cursor:pointer;transition:all 0.18s;padding:20px;text-align:center">' +
+            '<div style="width:48px;height:48px;border-radius:9999px;background:rgba(192,193,255,0.10);border:1px solid rgba(192,193,255,0.30);display:flex;align-items:center;justify-content:center">' +
+              '<span class="material-symbols-outlined" style="color:var(--primary);font-size:24px">add</span>' +
+            '</div>' +
+            '<div class="tc-mono-label" style="color:var(--primary);font-size:11px;letter-spacing:0.05em">NEW WORKFLOW</div>' +
+            '<div class="tc-text-dim" style="font-size:11px;line-height:1.5">Drag nodes in the canvas editor to build a DAG</div>' +
+          '</div>'
+        : '')
       + '</div>';
   }
 

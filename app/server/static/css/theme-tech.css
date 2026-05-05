@@ -849,13 +849,14 @@
   align-items: center !important;
   gap: var(--s-md) !important;
 }
+[data-theme="tech"] .topbar {
+  /* Topbar entirely hidden in tech mode for visual consistency. Every
+   * page now puts its identity AND its action buttons in the body
+   * hero — no parallel chrome on top. Saves ~56px of vertical space. */
+  display: none !important;
+}
 [data-theme="tech"] .topbar #view-title {
-  font-size: var(--type-body-md-size) !important;
-  font-weight: 600 !important;
-  color: var(--on-surface) !important;
-  font-family: var(--font-mono);
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
+  display: none !important;
 }
 [data-theme="tech"] .topbar .topbar-actions { display: flex; gap: 6px; }
 [data-theme="tech"] .topbar .btn {
