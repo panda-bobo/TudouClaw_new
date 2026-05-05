@@ -4248,6 +4248,14 @@ function renderDashboard() {
   // Build robot avatar helper (delegates to global _robotIconUrl
   // so PNG / SVG dispatch is consistent everywhere).
   var robotSrc = function(a) {
+    // Prefer the realistic aether portrait so the Dashboard matches
+    // the rest of the tech-mode chrome (Agent Directory / Memory /
+    // Agent Chat all use these). Fall back to the legacy pixel-art
+    // robot only if _aetherAvatarUrl can't resolve the role.
+    if (typeof _aetherAvatarUrl === 'function') {
+      var aether = _aetherAvatarUrl(a.role || 'general');
+      if (aether) return aether;
+    }
     var rid = a.robot_avatar || ('robot_' + (a.role || 'general'));
     return _robotIconUrl(rid);
   };
@@ -4624,6 +4632,14 @@ function renderDashboardTech() {
   };
 
   var robotSrc = function(a) {
+    // Prefer the realistic aether portrait so the Dashboard matches
+    // the rest of the tech-mode chrome (Agent Directory / Memory /
+    // Agent Chat all use these). Fall back to the legacy pixel-art
+    // robot only if _aetherAvatarUrl can't resolve the role.
+    if (typeof _aetherAvatarUrl === 'function') {
+      var aether = _aetherAvatarUrl(a.role || 'general');
+      if (aether) return aether;
+    }
     var rid = a.robot_avatar || ('robot_' + (a.role || 'general'));
     return _robotIconUrl(rid);
   };
@@ -14992,12 +15008,21 @@ window._eaSelectedAvatar = '';
 function _renderAvatarGrid(containerId, selectedVar, clickFunc) {
   var c = document.getElementById(containerId);
   if (!c) return;
+  var _techAv = false;
+  try { _techAv = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
   c.innerHTML = _AVATAR_ROLES.map(function(r) {
     var id = 'robot_' + r;
     var sel = (window[selectedVar] === id) ? 'border:2px solid var(--primary);box-shadow:0 0 6px var(--primary)' : 'border:2px solid transparent';
+    // Tech mode: render aether portraits in a circular crop so the
+    // grid matches the rest of the tech chrome (Agent Directory cards
+    // / Memory hub avatars / Agent Chat header all use these). The
+    // saved id is still robot_<role> so backend behavior is unchanged.
+    var imgHtml = _techAv && typeof _aetherAvatarUrl === 'function'
+      ? '<div style="width:48px;height:48px;border-radius:9999px;overflow:hidden;border:1px solid var(--outline-variant, rgba(255,255,255,0.10));margin:0 auto"><img src="' + _aetherAvatarUrl(r) + '" style="width:100%;height:100%;object-fit:cover" onerror="this.outerHTML=\'<span class=material-symbols-outlined style=font-size:36px;color:var(--outline)>smart_toy</span>\'"></div>'
+      : '<img src="' + _robotIconUrl(id) + '" style="width:40px;height:40px" onerror="this.outerHTML=\'<span class=material-symbols-outlined style=font-size:36px;color:var(--text3)>smart_toy</span>\'">';
     return '<div onclick="'+clickFunc+'(\''+id+'\')" style="cursor:pointer;border-radius:8px;padding:4px;text-align:center;'+sel+';transition:all .15s">'
-      + '<img src="' + _robotIconUrl(id) + '" style="width:40px;height:40px" onerror="this.outerHTML=\'<span class=material-symbols-outlined style=font-size:36px;color:var(--text3)>smart_toy</span>\'">'
-      + '<div style="font-size:10px;color:var(--text2);margin-top:2px">'+r+'</div></div>';
+      + imgHtml
+      + '<div style="font-size:10px;color:var(--text2);margin-top:4px">'+r+'</div></div>';
   }).join('');
 }
 
@@ -15830,10 +15855,17 @@ async function showSoulEditor(agentId) {
 
   // Populate robot grid
   var grid = document.getElementById('soul-robot-grid');
+  var _techSr = false;
+  try { _techSr = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
   _robotList.forEach(function(r) {
     var selected = (robotAvatar === r.id) ? 'border:2px solid var(--primary);box-shadow:0 0 8px var(--primary)' : 'border:2px solid transparent';
+    // Strip 'robot_' prefix so _aetherAvatarUrl can resolve the role.
+    var roleKey = (r.id || '').replace(/^robot_/, '');
+    var imgHtml = _techSr && typeof _aetherAvatarUrl === 'function'
+      ? '<div style="width:48px;height:48px;border-radius:9999px;overflow:hidden;border:1px solid var(--outline-variant, rgba(255,255,255,0.10))"><img src="' + _aetherAvatarUrl(roleKey) + '" style="width:100%;height:100%;object-fit:cover"></div>'
+      : '<img src="' + _robotIconUrl(r.id) + '" style="width:40px;height:40px">';
     grid.innerHTML += '<div class="soul-robot-option" data-robot="'+r.id+'" onclick="_selectRobot(this,\''+r.id+'\')" style="cursor:pointer;padding:8px;border-radius:10px;'+selected+';background:var(--surface);display:flex;flex-direction:column;align-items:center;gap:4px;transition:all 0.2s">' +
-      '<img src="' + _robotIconUrl(r.id) + '" style="width:40px;height:40px">' +
+      imgHtml +
       '<span style="font-size:9px;color:var(--text3);font-weight:600">'+r.label+'</span>' +
     '</div>';
   });
@@ -17138,7 +17170,14 @@ async function renderProjectDetail(projId) {
       // strips the "robot_" prefix as needed. Falls back to the
       // canvas-drawn _miniRobotDataURL only when the agent is not
       // in the cache (e.g. remote node not yet synced).
+      var _techPm = false;
+      try { _techPm = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
       var _memberAvatar = function(ag, role) {
+        // Tech mode: aether portrait keyed by role.
+        if (_techPm && typeof _aetherAvatarUrl === 'function') {
+          var roleKey = (ag && ag.role) || role || 'general';
+          return _aetherAvatarUrl(roleKey);
+        }
         if (ag && ag.robot_avatar) return _robotIconUrl(ag.robot_avatar);
         if (ag) return _robotIconUrl('robot_' + (ag.role || 'general'));
         return _miniRobotDataURL(role || 'general');
