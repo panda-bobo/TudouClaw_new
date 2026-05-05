@@ -179,6 +179,15 @@ class DomainKnowledgeBase:
     reranker_model: str = ""
     tags: list[str] = field(default_factory=list)
     doc_count: int = 0
+    # Index health (added 2026-05-05). The vector store is the
+    # source of truth — `doc_count` was historically optimistic
+    # (incremented per chunk, even when embedding silently failed).
+    # `indexed_count` mirrors actual successful upserts and lets the
+    # UI flag mismatches. `last_ingest_error` captures the last
+    # embedding-pipeline error (e.g., "Ollama bge-m3 unavailable")
+    # so the operator knows WHY ingestion stalled.
+    indexed_count: int = 0
+    last_ingest_error: str = ""
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -190,6 +199,8 @@ class DomainKnowledgeBase:
             "embedding_provider_id": self.embedding_provider_id,
             "reranker_model": self.reranker_model,
             "tags": self.tags, "doc_count": self.doc_count,
+            "indexed_count": self.indexed_count,
+            "last_ingest_error": self.last_ingest_error,
             "created_at": self.created_at, "updated_at": self.updated_at,
         }
 
@@ -206,6 +217,8 @@ class DomainKnowledgeBase:
             reranker_model=d.get("reranker_model", ""),
             tags=d.get("tags", []),
             doc_count=d.get("doc_count", 0),
+            indexed_count=d.get("indexed_count", 0),
+            last_ingest_error=d.get("last_ingest_error", ""),
             created_at=d.get("created_at", time.time()),
             updated_at=d.get("updated_at", time.time()),
         )
@@ -318,6 +331,43 @@ class DomainKBStore:
             kb.doc_count += delta
             kb.updated_at = time.time()
             self._save()
+
+    def record_ingest(self, kb_id: str, attempted: int, succeeded: int,
+                      error: str = ""):
+        """Record one ingest attempt's outcome.
+
+        ``attempted`` = number of chunks the ingester saw.
+        ``succeeded`` = number actually written to the vector store.
+        ``error``     = embedding/storage error message, empty if all
+                        chunks landed.
+
+        Updates both ``doc_count`` (legacy total) and ``indexed_count``
+        (actual rows in Chroma) so the UI can flag mismatches without
+        re-counting Chroma every render.
+        """
+        kb = self._kbs.get(kb_id)
+        if not kb:
+            return
+        kb.doc_count += int(attempted or 0)
+        kb.indexed_count += int(succeeded or 0)
+        kb.last_ingest_error = (error or "")[:300]
+        kb.updated_at = time.time()
+        self._save()
+
+    def reset_index_state(self, kb_id: str):
+        """Wipe stale doc_count / indexed_count / last_ingest_error.
+
+        Called by the "retry" path after the operator triggers a full
+        re-ingest, so the new run starts from zero counts.
+        """
+        kb = self._kbs.get(kb_id)
+        if not kb:
+            return
+        kb.doc_count = 0
+        kb.indexed_count = 0
+        kb.last_ingest_error = ""
+        kb.updated_at = time.time()
+        self._save()
 
 
 _domain_kb_store: DomainKBStore | None = None
@@ -549,6 +599,14 @@ class RAGProviderRegistry:
         avoid the lookup for the (more frequent) memory_facts /
         memory_episodes / knowledge collections so the hot path stays
         cheap.
+
+        2026-05-05 fix: when the KB also routes embedding through an
+        LLM provider (``embedding_provider_id`` set), return None so
+        ``_get_chroma_collection`` doesn't try to load the model name
+        as a SentenceTransformers id (it usually isn't — e.g. "bge-m3"
+        is the Ollama model name, not the HF id "BAAI/bge-m3"). The
+        actual upsert path in ``_ingest_local`` passes precomputed
+        ``embeddings=vec`` so the chroma-side embed_fn is irrelevant.
         """
         if not collection or not collection.startswith("domain_"):
             return None
@@ -556,7 +614,13 @@ class RAGProviderRegistry:
             store = get_domain_kb_store()
             kb_id = collection[len("domain_"):]
             kb = store.get(kb_id)
-            if kb and kb.embedding_model:
+            if not kb:
+                return None
+            # If LLM-provider embedding is wired, skip the local
+            # sentence-transformers loader entirely.
+            if kb.embedding_provider_id:
+                return None
+            if kb.embedding_model:
                 return kb.embedding_model
         except Exception:
             pass
@@ -589,16 +653,22 @@ class RAGProviderRegistry:
         builds an ad-hoc OpenAI-compat ``RAGProviderEntry``, hands it
         to ``_embed_via_openai_compat``. Returns None on lookup
         failure (caller decides whether to surface or fall back).
+
+        2026-05-05 fix: this used to ``from .llm import get_provider``
+        which doesn't exist — the module exports ``get_registry()``.
+        Import failed silently and EVERY embedding call returned None,
+        which is why agent KBs that point at Ollama silently never
+        indexed anything.
         """
         if not texts:
             return []
         try:
-            from .llm import get_provider as _get_llm_provider
-        except Exception:
-            logger.warning("LLM provider registry import failed")
+            from .llm import get_registry as _get_llm_registry
+        except Exception as e:
+            logger.warning("LLM provider registry import failed: %s", e)
             return None
         try:
-            llm = _get_llm_provider(llm_provider_id)
+            llm = _get_llm_registry().get(llm_provider_id)
         except Exception as e:
             logger.warning("LLM provider %s lookup failed: %s",
                            llm_provider_id, e)
@@ -1485,6 +1555,7 @@ class RAGProviderRegistry:
         if provider.api_key:
             headers["Authorization"] = f"Bearer {provider.api_key}"
 
+        import requests as http_requests
         out: list[list[float]] = []
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i + batch_size]

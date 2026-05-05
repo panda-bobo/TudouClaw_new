@@ -9,12 +9,123 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from .. import knowledge as _knowledge
 from ._common import _get_hub
 
 logger = logging.getLogger(__name__)
+
+
+# ── Query-intent classifier (HCS RAG-inspired, 2026-05-05) ────────────
+#
+# Detects whether the user's RAG query is asking for an aggregate
+# count / overview, vs. detailed content. Used by knowledge_lookup to
+# auto-route ``mode="search"`` to ``mode="outline"`` when the user
+# clearly wants a roll-up — saves the agent from doing 5+ wrong
+# vector-search calls before figuring out it should be counting.
+#
+# Conservative: false-negatives (failing to route) just keep the
+# original behaviour. False-positives (wrongly routing detail
+# questions to outline) are bad — that's why we have the detail-keyword
+# blocker as Phase 2.
+
+# Strong patterns that almost always indicate aggregate intent.
+_STAT_PATTERNS = [
+    re.compile(r"(?:每个|各个|各).*(?:多少|数量|几个|个数)"),     # "每个云服务有多少..."
+    re.compile(r"(?:多少|几个)\s*个?\s*(?:用例|测试|服务|文档|场景|章节|条目|案例)"),
+    re.compile(r"(?:包含|含有|有)\s*多少"),
+    re.compile(r"统计.*?(?:用例|服务|文档|场景|案例|条数|数量)"),
+    re.compile(r"(?:用例|服务|文档|场景|案例)\s*(?:数量|个数|总数|多少)"),
+    re.compile(r"(?:总共|一共|合计)\s*(?:有|多少|几个)"),
+]
+
+# Weaker keywords; require ≥2 to trigger overview mode by themselves.
+_OVERVIEW_KEYWORDS = (
+    "包含", "哪些", "有什么", "总结", "概述", "总共",
+    "全部", "所有", "目录", "清单", "汇总", "统计",
+    "覆盖", "涵盖", "什么内容", "什么文档", "内容概览",
+)
+
+# Single-keyword strong signals: stat keyword + any overview keyword → stat.
+_STAT_KEYWORDS = ("统计", "多少个", "总共", "一共", "数量", "个数", "多少")
+
+# Detail signals — block stat classification (user wants the actual content).
+_DETAIL_KEYWORDS = (
+    "详细", "具体", "介绍", "说明", "描述", "每个的内容",
+    "分别是什么", "怎么做", "如何", "步骤", "用例内容",
+    "列出内容", "完整列出",
+)
+
+# Detail patterns that should override stat patterns (e.g. "9 个用例分别是什么").
+_DETAIL_PATTERNS = [
+    re.compile(r"\d+\s*个.*(?:是什么|有哪些|分别|具体)"),
+    re.compile(r"(?:详细|具体).*(?:说明|介绍|描述|列出)"),
+    re.compile(r"(?:每个|每一个).*(?:内容|步骤|用例|是什么)"),
+    re.compile(r"(?:介绍|说明).*(?:内容|用例|步骤|流程)"),
+]
+
+
+def _classify_rag_intent(query: str) -> str:
+    """Return one of: 'stat' (overview/aggregate), 'detail' (specific
+    content asked), 'normal' (default — don't reroute).
+
+    Order matters:
+      1. Strong stat patterns — short-circuit to 'stat'
+      2. Stat keyword + overview keyword combo → 'stat'
+      3. Detail keywords / patterns — short-circuit to 'detail'
+         (means: even if a stat keyword leaks in, the user wants content)
+      4. ≥2 overview keywords → 'stat'
+      5. Otherwise → 'normal'
+    """
+    if not query or not isinstance(query, str):
+        return "normal"
+    q = query.strip()
+    # Phase 1: strong stat patterns.
+    for pat in _STAT_PATTERNS:
+        if pat.search(q):
+            return "stat"
+    # Phase 2: stat keyword + ≥1 overview keyword combo.
+    has_stat = any(kw in q for kw in _STAT_KEYWORDS)
+    overview_count = sum(1 for kw in _OVERVIEW_KEYWORDS if kw in q)
+    if has_stat and overview_count >= 1:
+        return "stat"
+    # Phase 3: detail blocks override.
+    for kw in _DETAIL_KEYWORDS:
+        if kw in q:
+            return "detail"
+    for pat in _DETAIL_PATTERNS:
+        if pat.search(q):
+            return "detail"
+    # Phase 4: 2+ overview keywords.
+    if overview_count >= 2:
+        return "stat"
+    return "normal"
+
+
+# Prelude prepended to every knowledge_lookup result. Reminds the LLM
+# of four rules that previously caused user-visible quality issues:
+#   1. Don't fall back to "see original doc" / "refer to source" —
+#      those land as "knowledge base is broken" complaints.
+#   2. Tables: keep ALL rows and columns; don't summarize away cells.
+#   3. Cite the source_file + heading_path, not just "chunk N".
+#   4. When multiple chunks cover the same topic, integrate before
+#      answering (don't pick one and ignore the rest).
+_RAG_RESULT_PRELUDE = (
+    "[knowledge_lookup protocol]\n"
+    "Retrieval results follow. Answer directly from this content. Hard rules:\n"
+    "1. **NEVER** reply with \"please consult the document\" / \"refer to the "
+    "original\" / \"see the source for details\" — you **must** answer from "
+    "the retrieved content. If information is incomplete, give what you have "
+    "and then state explicitly what is missing.\n"
+    "2. Tables: render **all rows and columns** as a Markdown table. Do not "
+    "elide cells with \"...\" / \"etc.\" / \"and so on\".\n"
+    "3. Cite as `[source_file §heading_path]`, not \"chunk 1\".\n"
+    "4. When multiple chunks cover the same topic from different angles, "
+    "**synthesize** before answering — don't quote one chunk and drop the "
+    "rest.\n\n"
+)
 
 
 # knowledge_lookup: max results per RAG tier before merging.
@@ -847,6 +958,26 @@ def _tool_knowledge_lookup(query: str = "", entry_id: str = "",
         if _dup is not None:
             return _dup
 
+    # ── Auto-route by intent (HCS-inspired, 2026-05-05) ───────────────
+    # When caller passed mode="search" (the default) but the query
+    # clearly asks for a count / overview, flip to mode="outline"
+    # automatically. Saves ~5 wrong vector-search calls before the
+    # agent figures it out itself.
+    _intent_banner = ""
+    if _q_str and not entry_id and _mode_for_dedup == "search":
+        _intent = _classify_rag_intent(_q_str)
+        if _intent == "stat":
+            mode = "outline"
+            _mode_for_dedup = "outline"
+            _intent_banner = (
+                "[auto-routed: search → outline]\n"
+                "Detected statistical/aggregate intent in query "
+                f"({_q_str[:60]}...). Returning per-file unique heading_paths\n"
+                "instead of top-k chunks. If you actually wanted full content, "
+                "re-call with mode=\"search\" explicitly.\n\n"
+            )
+            logger.info("knowledge_lookup auto-routed to outline: %r", _q_str[:80])
+
     # ── Wiki layer search (PRIMARY for agent-written knowledge) ──
     # The wiki holds everything wiki_ingest writes (experience /
     # methodology / template / pattern / reference). Search it BEFORE
@@ -877,6 +1008,14 @@ def _tool_knowledge_lookup(query: str = "", entry_id: str = "",
     # Prepend wiki block if non-empty.
     if wiki_lines:
         _result = "\n".join(wiki_lines) + "\n\n[knowledge base]\n" + _result
+
+    # Anti-laziness prelude (HCS-inspired): inject hard rules so the
+    # agent never falls back to "请查阅文档" or summarizes tables away.
+    # Skipped for empty results — adds noise to "no hits" replies.
+    if _result and "no_hits" not in _result.lower() and len(_result) > 50:
+        _result = _RAG_RESULT_PRELUDE + _intent_banner + _result
+    elif _intent_banner:
+        _result = _intent_banner + _result
 
     if _q_str and not entry_id:
         try:

@@ -41,7 +41,7 @@ _AMPLIFY_SYSTEM_PROMPT = """你是一个提示词优化助手。把用户给 AI 
    - 补**结构化分节**(背景 / 目标 / 边界 / 交付物)
    - 列出**为完成此任务建议追加的信息**(如缺少时间窗、地理范围、目标受众,提醒用户补)
 4. **不要编造领域事实**:不要凭空加具体数字、机构名、案例。结构是你的;事实是用户的。
-5. **agent 上下文相关**:如果给了 agent 的 role/expertise,改写后的 prompt 要贴近该 agent 能做的事,不要让一个云架构师去写文案。
+5. **agent 上下文相关**:如果给了 agent 的 role/expertise/skills,改写后的 prompt 要**贴近该 agent 实际能做的事**——优先调用列出的 skills,不要让 agent 干列表里没有的事(例:agent 没装 `html-ppt` 就别要求"用 html-ppt 渲染")。
 
 # 输出格式 — 严格 JSON,不要包 ```json``` 围栏
 {
@@ -88,7 +88,8 @@ def _looks_already_specific(raw: str) -> bool:
     return False
 
 
-def _build_user_message(raw: str, agent_ctx: str = "") -> str:
+def _build_user_message(raw: str, agent_ctx: str = "",
+                        agent_skills: str = "") -> str:
     """Combine the agent context (if any) with the raw prompt into a
     single user message. Keep formatting minimal so the model has clear
     boundaries between context and prompt-to-rewrite."""
@@ -96,6 +97,10 @@ def _build_user_message(raw: str, agent_ctx: str = "") -> str:
     if agent_ctx:
         parts.append("# Target agent context")
         parts.append(agent_ctx)
+        parts.append("")
+    if agent_skills:
+        parts.append("# Available skills (rewrite must stay within these capabilities)")
+        parts.append(agent_skills)
         parts.append("")
     parts.append("# User's raw prompt (rewrite this)")
     parts.append(raw)
@@ -132,6 +137,63 @@ def _agent_context_string(agent) -> str:
         return "\n".join(bits)
     except Exception:
         return ""
+
+
+def _agent_skills_string(agent, *, max_skills: int = 12,
+                          desc_chars: int = 60) -> str:
+    """Compact one-line-per-skill roster for the amplifier.
+
+    Deliberately separate from the much heavier
+    ``_build_granted_skills_roster`` used in the agent's own system
+    prompt — that one carries QA gate boilerplate, instruction text, and
+    formatting we don't want to spend tokens on for a single rewrite
+    pass. Here we just want: "what can this agent actually do?"
+
+    Format:
+        - skill_name: short description (≤ desc_chars chars, single line)
+        ...
+        ... (+N more)
+
+    Returns "" when the agent has no skills granted or the registry
+    isn't reachable.
+    """
+    if agent is None:
+        return ""
+    try:
+        from ...skills.engine import get_registry as _get_skill_registry
+        reg = _get_skill_registry()
+        if reg is None:
+            return ""
+        installs = reg.list_for_agent(agent.id)
+    except Exception as e:
+        logger.debug("amplifier skill roster lookup failed: %s", e)
+        return ""
+    if not installs:
+        return ""
+    sorted_installs = sorted(
+        installs,
+        key=lambda i: ((i.manifest.name or i.id or "").lower(), i.id),
+    )
+    lines: list[str] = []
+    for inst in sorted_installs[:max_skills]:
+        m = inst.manifest
+        name = (m.name or inst.id or "?").strip()
+        desc = ""
+        try:
+            if hasattr(m, "get_description"):
+                desc = m.get_description("zh-CN") or ""
+        except Exception:
+            pass
+        if not desc:
+            desc = getattr(m, "description", "") or ""
+        desc = str(desc).replace("\n", " ").strip()
+        if len(desc) > desc_chars:
+            desc = desc[: desc_chars - 1].rstrip() + "…"
+        lines.append(f"- {name}: {desc}" if desc else f"- {name}")
+    overflow = len(sorted_installs) - max_skills
+    if overflow > 0:
+        lines.append(f"… (+{overflow} more)")
+    return "\n".join(lines)
 
 
 def _resolve_provider_model(agent) -> tuple[str, str]:
@@ -199,11 +261,13 @@ async def amplify_prompt(
     agent_id = (body.get("agent_id") or "").strip()
     agent = hub.get_agent(agent_id) if agent_id else None
     agent_ctx = _agent_context_string(agent) if agent else ""
+    agent_skills = _agent_skills_string(agent) if agent else ""
     provider, model = _resolve_provider_model(agent)
 
     messages = [
         {"role": "system", "content": _AMPLIFY_SYSTEM_PROMPT},
-        {"role": "user", "content": _build_user_message(raw, agent_ctx)},
+        {"role": "user",
+         "content": _build_user_message(raw, agent_ctx, agent_skills)},
     ]
 
     try:

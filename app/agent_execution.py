@@ -122,6 +122,16 @@ def _stream_chat_to_response(llm_mod, messages: list[dict],
                 rc = ev.get("text") or ""
                 if rc:
                     reasoning_parts.append(rc)
+                    # Live-emit so the frontend Thinking toggle can
+                    # stream the reasoning into a collapsible panel.
+                    # The UI hides this stream by default; users opt
+                    # in via the toggle next to the chat input.
+                    if on_event and AE is not None:
+                        try:
+                            on_event(AE(time.time(), "reasoning_delta",
+                                         {"content": rc}))
+                        except Exception:
+                            pass
             elif etype == "tool_use_start":
                 tid = ev.get("id") or f"call_{len(tool_buffers)}"
                 tool_buffers[tid] = {
@@ -640,6 +650,17 @@ class AgentExecutionMixin:
         )
         if _active_sw:
             allowed_dirs.append(_active_sw)
+        # ── ALWAYS allow this agent's own home workspace ──
+        # 2026-05-05 fix — agents store their context (Project.md /
+        # Tasks.md / etc.) under workspaces/agents/{id}/workspace/.
+        # When sandbox root is set to a project/meeting/canvas-run dir,
+        # agents need to read their own context files unconditionally.
+        try:
+            _own_ws = str(self._get_agent_workspace())
+            if _own_ws and _own_ws not in allowed_dirs:
+                allowed_dirs.append(_own_ws)
+        except Exception:
+            pass
         # Admin-granted access to other agents' workspaces.
         from . import DEFAULT_DATA_DIR as _DEFAULT_DD2
         data_dir = _os.environ.get("TUDOU_CLAW_DATA_DIR") or _DEFAULT_DD2

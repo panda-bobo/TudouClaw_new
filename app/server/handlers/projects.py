@@ -159,6 +159,10 @@ def try_handle(handler, path: str, hub, body: dict, auth,
     if "/tasks/" in path and path.endswith("/approve-step"):
         return _handle_approve_step(handler, path, hub, body, auth, actor_name, user_role)
 
+    # ── Reopen completed workflow step ──
+    if "/tasks/" in path and path.endswith("/reopen-step"):
+        return _handle_reopen_step(handler, path, hub, body, auth, actor_name, user_role)
+
     # ── Project lifecycle ──
     if path.endswith("/status"):
         return _handle_status(handler, path, hub, body, auth, actor_name, user_role)
@@ -1100,6 +1104,117 @@ def _handle_approve_step(handler, path, hub, body, auth, actor_name, user_role) 
         handler._json({"ok": True, "task": task.to_dict()})
     except Exception as exc:
         logger.exception("approve_step error: %s", exc)
+        handler._json({"error": str(exc)}, 500)
+    return True
+
+
+def _handle_reopen_step(handler, path, hub, body, auth, actor_name, user_role) -> bool:
+    """POST /api/portal/projects/{id}/tasks/{tid}/reopen-step
+
+    Re-open a DONE workflow step so the assigned agent can re-run it.
+    Resets status DONE→TODO, clears prior result and timestamps,
+    notifies the team via system message, and re-fires the agent so it
+    starts work again. Idempotent on already-non-DONE steps (returns
+    400 with explanation).
+
+    Optional body field ``reason`` is appended to the system note +
+    the agent trigger so the agent knows why it's being re-run.
+    Optional body field ``cascade`` (default false): if true, also
+    reopen every later WF Step that depends on this one — useful when
+    you discover a flaw that invalidates downstream work.
+    """
+    try:
+        import re
+        from ...project import ProjectTaskStatus as _PTS
+        parts = path.split("/")
+        proj_id = parts[4]
+        task_id = parts[6]
+        reason = (body.get("reason") or "").strip()
+        cascade = bool(body.get("cascade", False))
+        proj = hub.get_project(proj_id)
+        if not proj:
+            handler._json({"error": "Project not found"}, 404)
+            return True
+        task = next((t for t in proj.tasks if t.id == task_id), None)
+        if not task:
+            handler._json({"error": "Task not found"}, 404)
+            return True
+        if task.status != _PTS.DONE:
+            handler._json({
+                "error": f"Only DONE steps can be reopened; this step is "
+                         f"{getattr(task.status, 'value', task.status)!r}",
+            }, 400)
+            return True
+        # Reset the target step.
+        reopened: list = []
+        def _reset(t):
+            t.status = _PTS.TODO
+            t.result = ""
+            t.completed_at = 0.0
+            t.updated_at = time.time()
+            md = getattr(t, "metadata", None) or {}
+            md.pop("pending_approval", None)
+            md.pop("pending_step_index", None)
+            t.metadata = md
+            reopened.append(t)
+        _reset(task)
+        # Optional cascade: also reset all later DONE WF Steps.
+        if cascade:
+            try:
+                wf_tasks = [t for t in proj.tasks if t.title.startswith("[WF Step")]
+                wf_tasks.sort(key=lambda t: int(
+                    (re.search(r'\[WF Step (\d+)\]', t.title)
+                     or type('', (), {'group': lambda s, x: '0'})()).group(1)
+                ))
+                target_idx = next((i for i, t in enumerate(wf_tasks)
+                                   if t.id == task_id), -1)
+                if target_idx >= 0:
+                    for t in wf_tasks[target_idx + 1:]:
+                        if t.status == _PTS.DONE:
+                            _reset(t)
+            except Exception as _ce:
+                logger.debug("cascade reopen failed: %s", _ce)
+        # System message.
+        step_name = re.sub(r'^\[WF Step \d+\]\s*', '', task.title)
+        suffix = f" — {reason}" if reason else ""
+        cascade_note = (f" + {len(reopened) - 1} downstream step(s)"
+                        if cascade and len(reopened) > 1 else "")
+        proj.post_message(
+            sender="system", sender_name="System",
+            content=(f"🔄 Step \"{step_name}\" reopened by "
+                     f"{actor_name or 'admin'}{cascade_note}{suffix}. "
+                     f"Owner agent will re-run."),
+            msg_type="system",
+        )
+        # Re-fire the owner agent.
+        if task.assigned_to:
+            try:
+                trigger = (
+                    f"步骤「{step_name}」已被管理员重新打开"
+                    + (f"，原因：{reason}。" if reason else "。")
+                    + "请重新执行该步骤并产出新的结果。"
+                )
+                import threading
+                threading.Thread(
+                    target=hub.project_chat_engine._agent_respond,
+                    args=(proj, task.assigned_to, trigger),
+                    daemon=True,
+                ).start()
+            except Exception as _re:
+                logger.debug("reopen agent trigger failed: %s", _re)
+        hub._save_projects()
+        auth.audit("reopen_step", actor=actor_name, role=user_role,
+                   target=f"{proj_id}/{task_id}",
+                   detail=(f"reason={reason!r} cascade={cascade} "
+                           f"reopened={len(reopened)}"),
+                   ip=get_client_ip(handler))
+        handler._json({
+            "ok": True,
+            "reopened_count": len(reopened),
+            "task": task.to_dict(),
+        })
+    except Exception as exc:
+        logger.exception("reopen_step error: %s", exc)
         handler._json({"error": str(exc)}, 500)
     return True
 

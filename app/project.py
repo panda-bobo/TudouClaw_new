@@ -129,6 +129,17 @@ class ProjectTask:
     parent_task_id: str = ""
     role_hint: str = ""
     decomp_metadata: dict = field(default_factory=dict)
+    # ── Stage-aware file pinning (added 2026-05-05) ──
+    # input_files  — declared in the workflow template (B); the agent
+    #                MUST read these and ONLY these for context. When
+    #                non-empty, the dispatcher tells the agent
+    #                "do NOT glob_files / search — these are your inputs".
+    # output_files — auto-tracked from write_file/edit_file calls (A) +
+    #                optionally pre-declared in the template. Used by
+    #                downstream steps as their input_files.
+    # Both are paths RELATIVE to the project's shared workspace dir.
+    input_files: list = field(default_factory=list)
+    output_files: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -150,6 +161,8 @@ class ProjectTask:
             "parent_task_id": self.parent_task_id,
             "role_hint": self.role_hint,
             "decomp_metadata": dict(self.decomp_metadata or {}),
+            "input_files": list(self.input_files or []),
+            "output_files": list(self.output_files or []),
         }
 
     @staticmethod
@@ -175,6 +188,8 @@ class ProjectTask:
             parent_task_id=d.get("parent_task_id", "") or "",
             role_hint=d.get("role_hint", "") or "",
             decomp_metadata=dict(d.get("decomp_metadata") or {}),
+            input_files=list(d.get("input_files") or []),
+            output_files=list(d.get("output_files") or []),
         )
 
     # ── Step-level helpers ──
@@ -992,11 +1007,51 @@ class Project:
         return None
 
     def remove_deliverable(self, deliverable_id: str) -> bool:
+        """Remove a deliverable from this project AND delete its
+        underlying file from disk (if any). 2026-05-05 — file deletion
+        added so a deleted deliverable no longer haunts agents that
+        later read_file the same path expecting current content.
+
+        File path resolution: ``file_path`` is stored relative to the
+        project's shared working_dir (``working_dir`` field). If both
+        are set and resolve to a real file, it's removed best-effort.
+        Symlink-walk + outside-of-working-dir paths are NOT followed
+        — security guard, never delete arbitrary disk paths even if
+        the deliverable record claims them.
+        """
+        import os
         with self._lock:
-            before = len(self.deliverables)
-            self.deliverables = [dv for dv in self.deliverables if dv.id != deliverable_id]
+            target = next((dv for dv in self.deliverables
+                           if dv.id == deliverable_id), None)
+            if target is None:
+                return False
+            self.deliverables = [dv for dv in self.deliverables
+                                 if dv.id != deliverable_id]
             self.updated_at = time.time()
-            return len(self.deliverables) < before
+        # Disk cleanup outside the lock — fs ops can be slow.
+        try:
+            fp = (target.file_path or "").strip()
+            wd = (self.working_dir or "").strip()
+            if fp and wd:
+                # Build absolute path; reject any path that escapes the
+                # project's shared working_dir via .. or symlinks.
+                abs_root = os.path.realpath(wd)
+                abs_target = os.path.realpath(os.path.join(wd, fp))
+                if abs_target.startswith(abs_root + os.sep) and os.path.isfile(abs_target):
+                    try:
+                        os.remove(abs_target)
+                        logger.info("Removed deliverable file: %s", abs_target)
+                    except OSError as _ose:
+                        logger.warning("deliverable file rm failed for %s: %s",
+                                       abs_target, _ose)
+                elif fp:
+                    logger.debug(
+                        "deliverable file skip (escaped working_dir or missing): %s",
+                        abs_target,
+                    )
+        except Exception as _de:
+            logger.debug("deliverable file cleanup error: %s", _de)
+        return True
 
     def add_issue(self, title: str, description: str = "",
                    severity: str = "medium", reporter: str = "",
@@ -1062,12 +1117,19 @@ class Project:
         wf_id = workflow_template.get("id", "")
         wf_steps = workflow_template.get("steps", [])
 
-        # 构建 step_index → agent_id 映射
-        agent_map = {}
+        # 构建 step_index → assignment 映射 (含所有用户字段，不只是 agent_id)
+        # 2026-05-05 fix: 之前只 keep agent_id，导致 require_approval / 其他
+        # 用户在 UI 设置的字段在 rebind 时被丢，重新打开 Edit Project 弹窗
+        # 看不到之前勾的"审核"。改成保留每个 step 的完整 dict。
+        assignment_map: dict[int, dict] = {}
+        agent_map: dict[int, str] = {}
         for sa in step_assignments:
             idx = sa.get("step_index")
+            if idx is None:
+                continue
+            assignment_map[idx] = dict(sa)
             aid = sa.get("agent_id", "")
-            if idx is not None and aid:
+            if aid:
                 agent_map[idx] = aid
 
         # 更新 binding
@@ -1082,17 +1144,25 @@ class Project:
             for i, step in enumerate(wf_steps):
                 agent_id = agent_map.get(i, "")
                 step_id = step.get("id", "")
-                binding_assignments.append({
-                    "step_index": i,
-                    "step_id": step_id,
-                    "agent_id": agent_id,
-                })
+                user_sa = assignment_map.get(i, {})
+                # Preserve every user-supplied field (require_approval +
+                # any future ones); just stamp/refresh the canonical ids.
+                binding_entry = dict(user_sa)
+                binding_entry["step_index"] = i
+                binding_entry["step_id"] = step_id
+                binding_entry["agent_id"] = agent_id
+                binding_assignments.append(binding_entry)
 
                 # 创建对应的 ProjectTask
                 step_name = step.get("name", f"Step {i + 1}")
                 step_desc = step.get("description", "")
                 input_spec = step.get("input_spec", step.get("input_desc", ""))
                 output_spec = step.get("output_spec", step.get("output_desc", ""))
+                # Stage-aware file pinning (B): pre-declared input/output
+                # paths from the template. Both fall through to empty
+                # lists; auto-tracking (A) fills output_files at runtime.
+                input_files = list(step.get("input_files") or [])
+                output_files = list(step.get("output_files") or [])
 
                 task_desc_parts = []
                 if step_desc:
@@ -1108,6 +1178,8 @@ class Project:
                     assigned_to=agent_id,
                     created_by="workflow",
                     priority=0,
+                    input_files=input_files,
+                    output_files=output_files,
                 )
                 self.tasks.append(task)
                 created_tasks.append(task)
@@ -1871,6 +1943,10 @@ class ProjectChatEngine:
           Tasks without deps are handled by the legacy linear advancer.
         - Excludes IN_PROGRESS / BLOCKED / DONE / CANCELLED — status is
           the authoritative "not yet started" signal.
+        - Excludes tasks marked ``metadata.pending_approval=True`` —
+          ``_auto_progress_next_step`` parks WF steps that require human
+          review here so the heartbeat dispatcher doesn't pick them up
+          again and bypass the approval gate (2026-05-05 bug fix).
         """
         done_ids = {t.id for t in project.tasks
                     if t.status == ProjectTaskStatus.DONE}
@@ -1880,6 +1956,11 @@ class ProjectChatEngine:
                 continue
             if not t.depends_on:
                 # No deps declared → legacy linear path owns this task
+                continue
+            # Skip tasks parked awaiting human approval. `metadata` is a
+            # free-form dict on ProjectTask; missing/None means "not parked".
+            md = getattr(t, "metadata", None) or {}
+            if md.get("pending_approval"):
                 continue
             if all(dep_id in done_ids for dep_id in t.depends_on):
                 ready.append(t)
@@ -2808,6 +2889,59 @@ class ProjectChatEngine:
         if prev_results:
             prev_context = "\n前序步骤产出:\n" + "\n".join(prev_results[-3:])  # 最多3条
 
+        # ── Stage-aware file pinning (2026-05-05) ──
+        # Build the explicit "upstream files" block. Sources merged:
+        #   1. Auto-tracked output_files from EVERY upstream done task
+        #      (populated by post-tool middleware on write_file/edit_file).
+        #   2. Pre-declared input_files on THIS task (from workflow template).
+        # Dedup while preserving order; cap at 30 entries to keep prompt
+        # bounded when projects sprawl.
+        upstream_files: list[tuple[str, str]] = []   # [(path, source_label)]
+        seen_paths: set = set()
+        for t in wf_tasks[:completed_idx + 1]:
+            if t.status != ProjectTaskStatus.DONE:
+                continue
+            sname = re.sub(r'^\[WF Step \d+\]\s*', '', t.title)
+            for fp in (t.output_files or []):
+                fp = (fp or "").strip()
+                if not fp or fp in seen_paths:
+                    continue
+                seen_paths.add(fp)
+                upstream_files.append((fp, sname))
+                if len(upstream_files) >= 30:
+                    break
+            if len(upstream_files) >= 30:
+                break
+        # B: pre-declared inputs on this step take priority — surface them
+        # at the TOP of the list so agent reads them first.
+        declared = []
+        for fp in (next_task.input_files or []):
+            fp = (fp or "").strip()
+            if not fp:
+                continue
+            declared.append((fp, "Declared input"))
+            if fp in seen_paths:
+                # already auto-tracked; bump to top by removing duplicate
+                upstream_files = [(p, s) for (p, s) in upstream_files if p != fp]
+            else:
+                seen_paths.add(fp)
+        upstream_files = declared + upstream_files
+
+        files_block = ""
+        if upstream_files:
+            lines = ["", "## 📂 本步骤指定输入文件（直接 read_file 这些，**严禁** glob_files / **/* / search 探索）"]
+            for fp, src in upstream_files:
+                lines.append(f"  - `{fp}` (来源: {src})")
+            files_block = "\n".join(lines)
+
+        # If THIS task has declared output_files, tell agent to write to those exact paths.
+        outputs_block = ""
+        if next_task.output_files:
+            lines = ["", "## 📤 本步骤期望输出文件（用 write_file 写到这些路径）"]
+            for fp in next_task.output_files:
+                lines.append(f"  - `{fp}`")
+            outputs_block = "\n".join(lines)
+
         # 更新任务状态为 IN_PROGRESS
         next_task.status = ProjectTaskStatus.IN_PROGRESS
         next_task.updated_at = time.time()
@@ -2820,14 +2954,17 @@ class ProjectChatEngine:
             msg_type="system",
         )
 
-        logger.info("WF auto-progress: triggering agent %s for step '%s' in project %s",
-                     agent_name, next_step_name, project.name)
+        logger.info("WF auto-progress: triggering agent %s for step '%s' in project %s "
+                    "(upstream files: %d)",
+                     agent_name, next_step_name, project.name, len(upstream_files))
 
         # 构建触发消息并在后台启动 Agent
         trigger_msg = (
             f"上一个步骤「{completed_step_name}」已完成。\n"
             f"现在轮到你执行「{next_step_name}」。\n"
-            f"{prev_context}\n"
+            f"{prev_context}"
+            f"{files_block}"
+            f"{outputs_block}\n\n"
             f"请根据你的职责和前序步骤的产出，立即开始执行这个步骤。"
             f"完成后请在回复中包含 ✅ 和 '已完成' 来标记步骤完成。"
         )

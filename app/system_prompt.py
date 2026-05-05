@@ -57,7 +57,12 @@ _TOOL_RULES_ZH = (
     "start_step + 调实际工具,不是再讲一遍计划。\n"
     "• 可拆为独立子任务 → team_create 启子 agent 并行(3 个并行 ~1 分钟 vs "
     "串行 ~3 分钟)。\n"
-    "• Bash / 敏感写入可能需要人工审批;被拒时告知用户并给替代方案。"
+    "• Bash / 敏感写入可能需要人工审批;被拒时告知用户并给替代方案。\n"
+    "• 📂 **文件读取规则(关键)**:当任务消息里出现 `## 📂 本步骤指定输入文件` "
+    "块时,**只 read_file 列出的那些路径**。**严禁** glob_files / `**/*` / "
+    "ls / find / search 探索其它文件 —— 框架已经把上游产出和本步骤所需的"
+    "文件清单准备好了,你的工作是消费它们,不是重新发现。如果列表不足以完成任务,"
+    "回复中明确说『缺少 X 文件』,让上游补,不要自己瞎搜。"
 )
 
 _TOOL_RULES_EN = (
@@ -75,7 +80,14 @@ _TOOL_RULES_EN = (
     "• Independent subtasks → use team_create for parallel sub-agents "
     "(3 sub-agents ~1 min vs serial ~3 min).\n"
     "• Bash / sensitive writes may require human approval; if denied, "
-    "tell the user and propose an alternative."
+    "tell the user and propose an alternative.\n"
+    "• 📂 **File-read rule (critical)**: When the task message contains a "
+    "`## 📂 Pinned input files` block, **read ONLY the listed paths via "
+    "read_file**. **DO NOT** use glob_files / `**/*` / ls / find / search "
+    "to discover other files — the framework already prepared the upstream "
+    "outputs and required inputs for this step. Your job is to consume them, "
+    "not rediscover. If the list is insufficient, reply explicitly with "
+    "\"missing file X\" so upstream can supply it; don't guess-search."
 )
 
 

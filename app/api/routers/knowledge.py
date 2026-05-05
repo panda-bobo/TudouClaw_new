@@ -406,6 +406,113 @@ async def list_domain_knowledge_bases(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/domain-kb/health")
+async def domain_kb_health(
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Per-KB health check.
+
+    Body: ``{"kb_id": "..."}`` (omit for ALL KBs).
+
+    Compares the registry's ``doc_count`` / ``indexed_count`` against
+    the actual chunk count in ChromaDB. Returns one row per KB:
+
+      ``registry_count``  — what the JSON registry remembers
+      ``indexed_count``   — what the registry recorded as actually written
+      ``chroma_count``    — live count from the vector store
+      ``mismatch``        — registry > chroma (silent failure detected)
+      ``last_ingest_error`` — captured failure message, if any
+
+    Cheap: chroma's ``count()`` is O(1).
+    """
+    try:
+        from ...rag_provider import get_domain_kb_store, get_rag_registry
+        store = get_domain_kb_store()
+        kb_id = (body or {}).get("kb_id", "")
+        if kb_id:
+            kbs = [store.get(kb_id)] if store.get(kb_id) else []
+        else:
+            kbs = store.list_all()
+        if not kbs:
+            return {"items": []}
+
+        reg = get_rag_registry()
+        results = []
+        for kb in kbs:
+            chroma_count = -1  # -1 sentinel = couldn't probe
+            probe_error = ""
+            try:
+                # Reach into the local memory manager to ask the actual
+                # collection how many rows it holds. Wraps in try because
+                # remote-provider KBs don't have a local Chroma collection.
+                if not kb.provider_id or kb.provider_id == "local":
+                    mm = reg._get_memory_manager()
+                    if mm:
+                        coll = mm._get_chroma_collection(
+                            kb.collection,
+                            model_name=reg._resolve_kb_embed_model(kb.collection),
+                        )
+                        chroma_count = coll.count()
+            except Exception as e:
+                probe_error = str(e)[:200]
+
+            registry_count = kb.doc_count
+            indexed_count = kb.indexed_count
+            # Mismatch detection — prefer chroma_count when available,
+            # otherwise fall back to indexed_count vs doc_count.
+            if chroma_count >= 0:
+                mismatch = max(0, registry_count - chroma_count)
+                healthy = (chroma_count == registry_count) and not kb.last_ingest_error
+            else:
+                mismatch = max(0, registry_count - indexed_count)
+                healthy = (registry_count == indexed_count) and not kb.last_ingest_error
+
+            results.append({
+                "kb_id": kb.id,
+                "name": kb.name,
+                "registry_count": registry_count,
+                "indexed_count": indexed_count,
+                "chroma_count": chroma_count,
+                "chroma_probe_error": probe_error,
+                "mismatch": mismatch,
+                "last_ingest_error": kb.last_ingest_error,
+                "healthy": healthy,
+            })
+        return {"items": results}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/domain-kb/reset-index-state")
+async def domain_kb_reset_index_state(
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Reset doc_count / indexed_count / last_ingest_error to zero.
+
+    Used by the "Retry ingest" UX in the KB card: after the operator
+    re-uploads documents, they call this first to wipe the stale
+    optimistic counters so the new run reports correct totals.
+    """
+    try:
+        from ...rag_provider import get_domain_kb_store
+        store = get_domain_kb_store()
+        kb_id = (body or {}).get("kb_id", "")
+        if not kb_id or not store.get(kb_id):
+            raise HTTPException(404, "knowledge base not found")
+        store.reset_index_state(kb_id)
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # Curated list of embedding models the UI proactively recommends.
 # Marker fields:
 #   recommended  — UI pre-selects this (and shows ⭐ badge)
@@ -1072,10 +1179,27 @@ def _docx_to_markdown(raw: bytes) -> tuple[str, str]:
             # Table
             elif tag.endswith("}tbl"):
                 table = Table(child, doc)
+                # Emit each row, KEEPING empty cells so column alignment is
+                # preserved (HCS Acceptance Test docs have many sparse rows
+                # like Manage 模型版本 / 获取模型详情 — dropping empty cells
+                # collapses 3 columns to 1 and the LLM later renders them
+                # with bizarre missing-column gaps).
+                # Skip the row only if EVERY cell is empty.
+                _row_lines: list[str] = []
                 for row in table.rows:
-                    cells = [c.text.strip() for c in row.cells if c.text.strip()]
-                    if cells:
-                        parts.append(" | ".join(cells))
+                    cell_texts = [c.text.strip() for c in row.cells]
+                    if not any(cell_texts):
+                        continue
+                    _row_lines.append("| " + " | ".join(cell_texts) + " |")
+                # Inject a Markdown table separator after the first (header)
+                # row so downstream renderers + the LLM treat it as a real
+                # table. Width = same number of cells as the header row.
+                if _row_lines:
+                    n_cols = _row_lines[0].count("|") - 1
+                    if n_cols > 0:
+                        sep = "|" + ("---|" * n_cols)
+                        _row_lines.insert(1, sep)
+                    parts.extend(_row_lines)
             # Other body elements (sectPr, sdt, etc.) — skip silently
         return "\n\n".join(parts), "python-docx-headings"
     except Exception as e:
@@ -1323,10 +1447,128 @@ def _force_char_slice(text: str, size: int) -> list[str]:
     return [text[i:i + size] for i in range(0, len(text), size) if text[i:i + size].strip()]
 
 
+# ── Table-atomic split (HCS RAG-inspired, 2026-05-05) ─────────────────
+#
+# Markdown tables encode structured data (test cases, parameter lists,
+# pricing matrices). Splitting them mid-row destroys the column→value
+# binding and makes retrieval useless. We detect table blocks before
+# the recursive splitter runs and emit each table as a single atomic
+# chunk — even if it exceeds chunk_size. A 2KB table chunk is
+# strictly better than two halves with broken columns.
+
+# A "table line" has at least 2 pipes (one cell separator on each
+# side, or two internal separators). The flatten pass in
+# ``_docx_to_markdown`` joins cells with " | " — a single pipe per
+# row. Table SEPARATOR rows (`---`) are |---|---|---| style.
+_TABLE_LINE_RE = _re_rag.compile(r"\|")
+_TABLE_SEP_RE = _re_rag.compile(r"^\s*\|?\s*[-:]+\s*(?:\|\s*[-:]+\s*)+\|?\s*$")
+
+
+def _looks_like_table_line(line: str) -> bool:
+    """A line that participates in a Markdown table row.
+
+    Heuristic: has ≥1 pipe AND either (a) ≥2 pipes (cell separator
+    style) or (b) is a separator row (``---|---|---``). Single-pipe
+    lines are too ambiguous (could be regex / shell pipe / CJK quote).
+    """
+    if not line or "|" not in line:
+        return False
+    if _TABLE_SEP_RE.match(line):
+        return True
+    return line.count("|") >= 2
+
+
+def _peel_table_blocks(body: str) -> list[tuple[str, str]]:
+    """Split ``body`` into a sequence of (kind, text) blocks where
+    ``kind`` is 'table' or 'text'. Tables are kept as single atomic
+    units regardless of size; text runs are returned as-is for the
+    downstream recursive splitter to handle.
+
+    A table is detected as a run of ≥2 consecutive ``_looks_like_table_line``
+    lines (with optional blanks between). Single stray pipe lines are
+    treated as text (avoids false positives on CJK quotes / shell
+    snippets).
+    """
+    if not body:
+        return []
+    lines = body.split("\n")
+    out: list[tuple[str, str]] = []
+    buf_kind: str | None = None
+    buf_lines: list[str] = []
+
+    def flush():
+        nonlocal buf_kind, buf_lines
+        if buf_lines:
+            text = "\n".join(buf_lines).strip("\n")
+            if text.strip():
+                out.append((buf_kind or "text", text))
+        buf_kind = None
+        buf_lines = []
+
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        if _looks_like_table_line(line):
+            # Look ahead: is this a real table (≥2 consecutive table lines)
+            # or a one-off pipe? Allow one blank line between rows.
+            j = i + 1
+            tbl_lines = [line]
+            while j < n:
+                if _looks_like_table_line(lines[j]):
+                    tbl_lines.append(lines[j])
+                    j += 1
+                elif lines[j].strip() == "" and j + 1 < n and _looks_like_table_line(lines[j + 1]):
+                    tbl_lines.append(lines[j])
+                    j += 1
+                else:
+                    break
+            if len(tbl_lines) >= 2:
+                # Real table: flush text buffer, emit table as one block.
+                if buf_kind == "text":
+                    flush()
+                buf_kind = "table"
+                buf_lines = tbl_lines
+                flush()
+                i = j
+                continue
+        # Plain text line.
+        if buf_kind != "text":
+            flush()
+            buf_kind = "text"
+        buf_lines.append(line)
+        i += 1
+    flush()
+    return out
+
+
 def _recursive_split(body: str, chunk_size: int) -> list[str]:
-    """Hierarchical split: paragraphs → sentences → char. Returns
-    chunk-body strings sized at or below ``chunk_size`` (overlap added
-    later by the caller)."""
+    """Hierarchical split: tables (atomic) → paragraphs → sentences → char.
+
+    Returns chunk-body strings; each chunk is at or below ``chunk_size``
+    UNLESS it's an atomic table block, which is emitted whole regardless
+    of size. Overlap is added later by the caller.
+    """
+    body = (body or "").strip()
+    if not body:
+        return []
+
+    # Peel off tables first — they ride through as single chunks.
+    blocks = _peel_table_blocks(body)
+    if any(k == "table" for k, _ in blocks):
+        out: list[str] = []
+        for kind, text in blocks:
+            if kind == "table":
+                out.append(text.strip())
+            else:
+                out.extend(_recursive_split_text_only(text, chunk_size))
+        return [c for c in out if c.strip()]
+    return _recursive_split_text_only(body, chunk_size)
+
+
+def _recursive_split_text_only(body: str, chunk_size: int) -> list[str]:
+    """Original paragraph→sentence→char hierarchical splitter.
+    Caller has already filtered out atomic table blocks."""
     body = (body or "").strip()
     if not body:
         return []
@@ -1424,6 +1666,14 @@ def _chunk_text_for_rag(text: str, base_id: str, base_title: str,
                 continue
             chunk_idx += 1
             content = piece.strip()
+            # Heading-prepend (HCS RAG-inspired, 2026-05-05): inline the
+            # heading path into the chunk body so each chunk is
+            # self-describing in retrieval context. Without this, a chunk
+            # of pure table cells loses all semantic context. Skip if
+            # the chunk already starts with the heading (avoids dup
+            # when the splitter's first piece naturally contains it).
+            if heading_path and not content.startswith(heading_path):
+                content = f"# {heading_path}\n\n{content}"
             title_suffix = f" · {heading_path}" if heading_path else ""
             display_title = (
                 base_title + title_suffix
@@ -1476,8 +1726,20 @@ async def import_domain_knowledge(
         if not chunks:
             return {"ok": True, "count": 0, "chunks": 0}
         count = get_rag_registry().ingest(kb.provider_id, kb.collection, chunks)
-        store.increment_doc_count(kb_id, len(chunks))
-        return {"ok": True, "count": count, "chunks": len(chunks)}
+        # Track BOTH attempted (len(chunks)) and succeeded (count) so the
+        # KB health badge can flag mismatches. count < len(chunks) means
+        # some chunks failed to embed (Ollama down / model missing /
+        # remote provider rejected the request).
+        err_msg = ""
+        if count < len(chunks):
+            err_msg = (f"{len(chunks) - count} of {len(chunks)} chunks did not "
+                       f"reach the vector store — check the embedding "
+                       f"provider (kb.embedding_provider_id={kb.embedding_provider_id!r}, "
+                       f"model={kb.embedding_model!r}).")
+        store.record_ingest(kb_id, attempted=len(chunks), succeeded=count, error=err_msg)
+        return {"ok": True, "count": count, "chunks": len(chunks),
+                "indexed_total": kb.indexed_count, "doc_total": kb.doc_count,
+                "warning": err_msg}
     except HTTPException:
         raise
     except ImportError:
@@ -1680,7 +1942,13 @@ async def import_files_into_domain_kb(
         ingest_count = await run_in_threadpool(
             reg.ingest, kb.provider_id, kb.collection, deduped,
         )
-        store.increment_doc_count(kb_id, len(deduped))
+        err_msg = ""
+        if ingest_count < len(deduped):
+            err_msg = (f"{len(deduped) - ingest_count} of {len(deduped)} chunks "
+                       f"did not reach the vector store — check the embedding "
+                       f"provider (embedding_provider_id={kb.embedding_provider_id!r}, "
+                       f"model={kb.embedding_model!r}).")
+        store.record_ingest(kb_id, attempted=len(deduped), succeeded=ingest_count, error=err_msg)
 
         return {
             "ok": True,
@@ -1877,7 +2145,13 @@ async def import_folder_into_domain_kb(
         ingest_count = get_rag_registry().ingest(
             kb.provider_id, kb.collection, all_chunks,
         )
-        store.increment_doc_count(kb_id, len(all_chunks))
+        err_msg = ""
+        if ingest_count < len(all_chunks):
+            err_msg = (f"{len(all_chunks) - ingest_count} of {len(all_chunks)} "
+                       f"chunks did not reach the vector store — check the "
+                       f"embedding provider (embedding_provider_id={kb.embedding_provider_id!r}, "
+                       f"model={kb.embedding_model!r}).")
+        store.record_ingest(kb_id, attempted=len(all_chunks), succeeded=ingest_count, error=err_msg)
 
         return {
             "ok": True,

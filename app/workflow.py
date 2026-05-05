@@ -215,6 +215,12 @@ class StepTemplate:
     max_retries: int = 1
     # 角色提示 — 建议用什么角色的 Agent 来执行（非强制绑定）
     suggested_role: str = ""
+    # ── Stage-aware file pinning (added 2026-05-05) ──
+    # Pre-declared file paths (relative to project's shared workspace).
+    # bind_workflow propagates these onto the resulting ProjectTask
+    # so the dispatcher's "## 📂 Pinned input files" block carries them.
+    input_files: list[str] = field(default_factory=list)
+    output_files: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -229,6 +235,8 @@ class StepTemplate:
             "skip_condition": self.skip_condition,
             "max_retries": self.max_retries,
             "suggested_role": self.suggested_role,
+            "input_files": list(self.input_files or []),
+            "output_files": list(self.output_files or []),
         }
 
     @staticmethod
@@ -245,6 +253,8 @@ class StepTemplate:
             skip_condition=d.get("skip_condition", ""),
             max_retries=d.get("max_retries", 1),
             suggested_role=d.get("suggested_role", d.get("role", "")),
+            input_files=list(d.get("input_files") or []),
+            output_files=list(d.get("output_files") or []),
         )
 
 

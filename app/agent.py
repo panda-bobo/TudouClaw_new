@@ -20,6 +20,7 @@ import concurrent.futures
 import json
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -4521,6 +4522,40 @@ class Agent:
             except Exception:
                 pass
 
+        # 0.05 Plan-already-emitted guard — system prompt tells the model
+        # "📋 plan only on first response", but weak / quantized models
+        # ignore that rule after a chat resume or context compression
+        # (they no longer see their own earlier plan and re-emit it).
+        # Scan history for any prior assistant message containing the
+        # plan header; if found, inject a hard "do not repeat" line into
+        # the dynamic context. Cheap O(N) over messages.
+        try:
+            _has_prior_plan = False
+            for _m in self.messages:
+                if _m.get("role") != "assistant":
+                    continue
+                _c = _m.get("content")
+                if isinstance(_c, str) and (
+                    "📋 计划" in _c or "📋 Plan" in _c
+                    or "📋计划" in _c or "📋Plan" in _c
+                ):
+                    _has_prior_plan = True
+                    break
+            if _has_prior_plan:
+                _try_add(
+                    "<plan_already_emitted>\n"
+                    "本对话稍早你已经输出过 📋 计划块。**严禁本轮再次输出 📋 计划块**。\n"
+                    "直接执行下一步未完成动作；如需回顾计划请参考上文已有内容，"
+                    "进度只用 `✓ 第 N 步：…` 单行汇报。\n"
+                    "</plan_already_emitted>",
+                    "plan_dedupe",
+                )
+        except Exception as _pde:
+            try:
+                logger.debug("plan_already_emitted guard skipped: %s", _pde)
+            except Exception:
+                pass
+
         # 1. Shared Knowledge Wiki (lightweight title list)
         try:
             from . import knowledge as _kb
@@ -4558,8 +4593,16 @@ class Agent:
         if mm and current_query and total_chars < max_dynamic_chars:
             try:
                 mem_config = self._get_memory_config()
+                # Pass current scope so MemoryManager can drop facts
+                # / episodes scoped to OTHER projects/tasks (2026-05-05).
+                # task_id resolution: if agent is currently advancing a
+                # named WF Step, we don't have direct access to it here
+                # — best-effort use project_id only; task-scoped recall
+                # will be added when WF runner sets a task context.
+                _cur_pid = getattr(self, "project_id", "") or ""
                 memory_context = mm.retrieve_for_prompt(
                     self.id, current_query, config=mem_config,
+                    current_project_id=_cur_pid,
                 )
                 _try_add(memory_context or "", "memory_l2l3")
                 # ── 记录本次记忆注入的体量，供 portal 展示"记忆使用比例" ──
@@ -7255,6 +7298,21 @@ Write only the summary body. Do not include any preamble or prefix."""
         except Exception as _mw_err:
             logger.debug("post_tool middleware skipped: %s", _mw_err)
 
+        # ── Stage-aware file pinning (2026-05-05) — auto-track outputs ──
+        # When the agent calls write_file / edit_file inside a project
+        # workflow step, append the touched path to the current task's
+        # output_files. The next step's trigger then includes those paths
+        # so downstream agents read them directly instead of glob-searching.
+        # Only effective for write/edit tools that actually succeeded
+        # (tool_result not starting with "Error:") and only when this
+        # agent has an active project task.
+        if tool_name in ("write_file", "edit_file") and isinstance(result, str) \
+                and not result.lstrip().lower().startswith("error"):
+            try:
+                self._track_workflow_output(arguments)
+            except Exception as _tr_err:
+                logger.debug("workflow-output tracking skipped: %s", _tr_err)
+
         # Forensic audit: capture full arguments + result + elapsed.
         # The smoking gun for the 2026-04-29 self-sent-email incident
         # was that the audit log only had "SUCCESS [exit code: 0]" with
@@ -7270,6 +7328,96 @@ Write only the summary body. Do not include any preamble or prefix."""
             elapsed_ms=_elapsed_ms,
         )
         return result
+
+    def _track_workflow_output(self, arguments: dict) -> None:
+        """Append a written/edited file path to the current WF task's
+        ``output_files`` so the next step's trigger can surface it.
+
+        Resolution rules:
+          * Agent must be in a project context (``self.project_id`` set).
+          * The active WF Step task is the one assigned to this agent
+            with status IN_PROGRESS. (Workflows are linear so there's at
+            most one such task per agent at a time.)
+          * Path stored RELATIVE to the project's shared workspace dir.
+            Absolute paths outside the shared dir are skipped (out of
+            scope for downstream agents).
+          * Dedup: never push the same path twice.
+          * Cap at 30 entries per task to prevent unbounded growth.
+        """
+        import os as _os
+        pid = getattr(self, "project_id", "") or ""
+        if not pid or not isinstance(arguments, dict):
+            return
+        path_arg = (arguments.get("path") or arguments.get("file_path")
+                    or arguments.get("filename") or "").strip()
+        if not path_arg:
+            return
+        # Resolve hub + project
+        try:
+            import sys as _sys
+            _llm_mod = _sys.modules.get(__package__ + ".llm") if __package__ else None
+            hub = getattr(_llm_mod, "_active_hub", None) if _llm_mod else None
+        except Exception:
+            hub = None
+        if hub is None:
+            return
+        project = hub.get_project(pid) if hasattr(hub, "get_project") else None
+        if project is None:
+            return
+        # Find this agent's active WF Step task
+        from .project import ProjectTaskStatus as _PTS
+        active = None
+        for t in project.tasks:
+            if (t.assigned_to == self.id
+                    and t.status == _PTS.IN_PROGRESS
+                    and t.title.startswith("[WF Step")):
+                active = t
+                break
+        if active is None:
+            return
+        # Compute path relative to the project's shared workspace
+        try:
+            shared_root = ""
+            if hasattr(self, "get_shared_workspace_path"):
+                shared_root = type(self).get_shared_workspace_path(pid) or ""
+            if shared_root:
+                if _os.path.isabs(path_arg):
+                    abs_root = _os.path.realpath(shared_root)
+                    abs_path = _os.path.realpath(path_arg)
+                    if abs_path == abs_root or abs_path.startswith(abs_root + _os.sep):
+                        rel = _os.path.relpath(abs_path, abs_root)
+                    else:
+                        return  # path outside shared workspace
+                else:
+                    rel = path_arg.lstrip("./").lstrip(".\\")
+            else:
+                # No shared workspace → store as-is (best-effort).
+                rel = path_arg
+        except Exception:
+            rel = path_arg
+        rel = rel.strip()
+        if not rel:
+            return
+        # Append + dedup + cap
+        try:
+            cur = list(active.output_files or [])
+            if rel in cur:
+                return
+            cur.append(rel)
+            if len(cur) > 30:
+                cur = cur[-30:]
+            active.output_files = cur
+            active.updated_at = time.time()
+            try:
+                hub._save_projects()
+            except Exception:
+                pass
+            logger.debug(
+                "WF output tracked: project=%s task=%s path=%r (total=%d)",
+                pid[:8], active.id[:6], rel, len(cur),
+            )
+        except Exception as _e:
+            logger.debug("output-track append failed: %s", _e)
 
     def _sandbox_scope(self):
         """Install a sandbox policy rooted at this agent's working_dir."""
@@ -7297,6 +7445,22 @@ Write only the summary body. Do not include any preamble or prefix."""
         _shared_ws = self.get_active_shared_workspace()
         if _shared_ws:
             allowed_dirs.append(_shared_ws)
+        # ── ALWAYS allow this agent's own home workspace ──
+        # 2026-05-05 fix — agents store their context (Project.md /
+        # Tasks.md / Skills.md / MCP.md) under
+        # ``workspaces/agents/{id}/workspace/``. When the agent runs
+        # inside a project / meeting / canvas-run, sandbox root is set
+        # to that surface's shared dir → reading the agent's OWN
+        # context files (`read_file Project.md`) failed with "escapes
+        # jail" and the agent fell back to bash, burning tool budget.
+        # Adding the home workspace to allowed_dirs unconditionally
+        # makes self-context always reachable regardless of current jail.
+        try:
+            _own_ws = str(self._get_agent_workspace())
+            if _own_ws and _own_ws not in allowed_dirs:
+                allowed_dirs.append(_own_ws)
+        except Exception:
+            pass
         # Add workspaces of authorized agents
         from . import DEFAULT_DATA_DIR as _DEFAULT_DD2
         data_dir = _os.environ.get("TUDOU_CLAW_DATA_DIR") or _DEFAULT_DD2
@@ -8455,13 +8619,15 @@ Write only the summary body. Do not include any preamble or prefix."""
                                               "content": final_content})
                             self._log(evt.kind, evt.data)
                             _emit(evt)
+                        _final_text = self._strip_redundant_plan_block(
+                            content or final_content)
                         self.messages.append({"role": "assistant",
-                                              "content": content or final_content,
+                                              "content": _final_text,
                                               "_source": "llm"})
                         break
 
                     assistant_msg: dict = {"role": "assistant",
-                                           "content": content,
+                                           "content": self._strip_redundant_plan_block(content),
                                            "_source": "llm"}
                     assistant_msg["tool_calls"] = tool_calls
                     if _reasoning_content:
@@ -8740,22 +8906,26 @@ Write only the summary body. Do not include any preamble or prefix."""
                             # returns synthetic error without hitting the tool.
                             if call_id in _blocked_calls:
                                 return name, _blocked_calls[call_id], call_id
-                            # Inject caller agent ID
-                            if name in ("team_create", "send_message", "task_update",
-                                        "mcp_call", "bash", "write_file", "edit_file",
-                                        "submit_deliverable", "create_goal",
-                                        "update_goal_progress", "create_milestone",
-                                        "update_milestone_status"):
-                                arguments["_caller_agent_id"] = self.id
-                                try:
-                                    from .tools import _get_current_scope
-                                    _scope = _get_current_scope()
-                                    if _scope.get("project_id"):
-                                        arguments["_project_id"] = _scope["project_id"]
-                                    if _scope.get("meeting_id"):
-                                        arguments["_meeting_id"] = _scope["meeting_id"]
-                                except Exception:
-                                    pass
+                            # Inject caller agent ID for ALL tools.
+                            # 2026-05-05 — was a hardcoded allow-list which
+                            # silently broke memory_recall / knowledge_lookup /
+                            # read_file / glob_files (they all need caller
+                            # context but weren't on the list, so they returned
+                            # "requires a calling agent context" or fell back
+                            # to wrong path resolution). Tools that don't care
+                            # about this key just ignore it (kwargs absorb it
+                            # via **_ / **kw); middleware already filters
+                            # underscore-prefixed args from LLM validation.
+                            arguments["_caller_agent_id"] = self.id
+                            try:
+                                from .tools import _get_current_scope
+                                _scope = _get_current_scope()
+                                if _scope.get("project_id"):
+                                    arguments["_project_id"] = _scope["project_id"]
+                                if _scope.get("meeting_id"):
+                                    arguments["_meeting_id"] = _scope["meeting_id"]
+                            except Exception:
+                                pass
                             # Execute
                             if name == "plan_update":
                                 return name, self._handle_plan_update(arguments), call_id
@@ -8807,10 +8977,20 @@ Write only the summary body. Do not include any preamble or prefix."""
                                 results.append((name, result, call_id))
                                 continue
 
-                            # Inject caller agent ID for tools that need agent context
-                            if name in ("team_create", "send_message", "task_update",
-                                        "mcp_call", "bash", "write_file", "edit_file"):
-                                arguments["_caller_agent_id"] = self.id
+                            # Inject caller agent ID for ALL tools (sequential
+                            # path mirror of the parallel path above; was the
+                            # same hardcoded-list bug that broke memory_recall
+                            # etc.).
+                            arguments["_caller_agent_id"] = self.id
+                            try:
+                                from .tools import _get_current_scope
+                                _scope = _get_current_scope()
+                                if _scope.get("project_id"):
+                                    arguments["_project_id"] = _scope["project_id"]
+                                if _scope.get("meeting_id"):
+                                    arguments["_meeting_id"] = _scope["meeting_id"]
+                            except Exception:
+                                pass
 
                             # Handle plan_update internally (needs agent context)
                             if name == "plan_update":
@@ -11409,6 +11589,54 @@ Write only the summary body. Do not include any preamble or prefix."""
 
         lines.append("</plan_state>")
         return "\n".join(lines)
+
+    def _strip_redundant_plan_block(self, content: str) -> str:
+        """Remove a duplicate 📋 计划 block from `content` when an earlier
+        assistant message in this conversation already contained one.
+
+        Belt-and-suspenders for the dynamic-context guard injected by
+        ``_build_dynamic_context``: if the model still re-emits the plan
+        despite being told not to, we strip it before persisting so the
+        UI / downstream extractors don't see two plans.
+
+        Returns content unchanged when (a) there's no prior plan or
+        (b) this content has no 📋 header. Pure function — no I/O.
+        """
+        if not content or not isinstance(content, str):
+            return content
+        if "📋" not in content:
+            return content
+        has_prior = False
+        for _m in self.messages:
+            if _m.get("role") != "assistant":
+                continue
+            _c = _m.get("content")
+            if isinstance(_c, str) and (
+                "📋 计划" in _c or "📋 Plan" in _c
+                or "📋计划" in _c or "📋Plan" in _c
+            ):
+                has_prior = True
+                break
+        if not has_prior:
+            return content
+        # Strip a fenced ``` block that contains 📋 ...
+        fenced = re.sub(
+            r"```[a-zA-Z]*\n\s*📋[^\n]*\n.*?```\s*",
+            "",
+            content,
+            flags=re.DOTALL,
+        )
+        # Strip a non-fenced inline block: "📋 计划\n1. ...\n2. ..."
+        # up to the first blank line / non-numbered line.
+        stripped = re.sub(
+            r"📋\s*(?:计划|Plan)[^\n]*\n"          # header line
+            r"(?:[ \t]*(?:Step\s*|第\s*)?\d+[\s\.\)、:：][^\n]*\n)+"  # numbered lines
+            r"\n?",                                 # optional trailing blank
+            "",
+            fenced,
+            flags=re.IGNORECASE,
+        )
+        return stripped.lstrip("\n")
 
     def get_execution_plans(self, limit: int = 10) -> list[dict]:
         """Get recent execution plans."""

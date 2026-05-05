@@ -532,19 +532,44 @@ async def project_abort(
     project.
 
     Uses the centralized abort_registry:
-      - Flips abort flag so agent loops exit between turns
+      - Flips abort flag on ``project:{id}`` AND every per-task key
+        ``project:{id}:task:{tid}`` (agents register their work under
+        the per-task key — aborting only the parent key was a no-op
+        bug fixed 2026-05-05).
       - Kills tracked OS processes (python scripts, compilers, etc.)
       - Appends a system note to project chat so members see it
     """
     try:
         project = _get_project_or_404(hub, project_id)
         from ... import abort_registry as _ar
-        result = _ar.abort(_ar.project_key(project.id))
+        # Cascade abort: parent project key + every per-task key.
+        # Each call kills its own subprocesses and flips the flag the
+        # agent loop polls between turns.
+        results = []
+        results.append(_ar.abort(_ar.project_key(project.id)))
+        for t in (project.tasks or []):
+            try:
+                tid = getattr(t, "id", "")
+                if not tid:
+                    continue
+                r = _ar.abort(_ar.project_task_key(project.id, tid))
+                if r.get("found"):
+                    results.append(r)
+            except Exception as _te:
+                logger.debug("abort task key failed for %s: %s", tid, _te)
+        # Aggregate counts for the system message.
+        total_killed: list[int] = []
+        any_aborted = False
+        for r in results:
+            total_killed.extend(r.get("killed_pids") or [])
+            if r.get("aborted_now"):
+                any_aborted = True
         try:
-            killed_n = len(result.get("killed_pids") or [])
-            note = "🛑 项目执行已强制终止"
-            if killed_n:
-                note += f"（已停止 {killed_n} 个子进程）"
+            note = "🛑 Project execution force-aborted"
+            if total_killed:
+                note += f" (terminated {len(total_killed)} subprocess(es))"
+            if not any_aborted:
+                note += " — no in-flight tasks found"
             project.post_message(
                 sender="system", sender_name="系统",
                 content=note, msg_type="system",
@@ -552,7 +577,12 @@ async def project_abort(
             hub._save_projects()
         except Exception:
             pass
-        return {"ok": True, "abort": result}
+        return {
+            "ok": True,
+            "aborted_keys": len(results),
+            "killed_pids": total_killed,
+            "any_aborted": any_aborted,
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -1787,6 +1817,81 @@ async def get_deliverables_by_agent(
     except HTTPException:
         raise
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/projects/{project_id}/files/delete")
+async def delete_project_file(
+    project_id: str,
+    body: dict = Body(...),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Delete a file from the project's shared workspace.
+
+    Body: ``{"rel_path": "task-abc/foo.md"}`` — path relative to
+    ``~/.tudou_claw/workspaces/shared/<project_id>/``.
+
+    Hard rules:
+    - Path must resolve INSIDE the shared dir (no .. / symlink escape).
+    - Only files (not directories) — folder deletion would be too
+      destructive for an inline button.
+    - Idempotent: missing file returns ok=true with note.
+
+    Use case: agent wrote a wrong artifact, user wants to delete it
+    so the next read_file call doesn't surface stale content.
+    """
+    proj = _get_project_or_404(hub, project_id)
+    rel_path = (body.get("rel_path") or "").strip()
+    if not rel_path:
+        raise HTTPException(status_code=400, detail="rel_path is required")
+    try:
+        import os as _os
+        from ...agent import Agent as _Agent
+        shared_dir = _Agent.get_shared_workspace_path(project_id)
+        if not shared_dir or not _os.path.isdir(shared_dir):
+            raise HTTPException(status_code=404, detail="shared workspace not found")
+        abs_root = _os.path.realpath(shared_dir)
+        abs_target = _os.path.realpath(_os.path.join(shared_dir, rel_path))
+        # Containment guard — reject paths that escape via .. or symlink.
+        if not (abs_target == abs_root
+                or abs_target.startswith(abs_root + _os.sep)):
+            raise HTTPException(status_code=400,
+                                detail="path escapes shared workspace")
+        if not _os.path.exists(abs_target):
+            return {"ok": True, "skipped": True, "reason": "file not found"}
+        if _os.path.isdir(abs_target):
+            raise HTTPException(status_code=400,
+                                detail="cannot delete directories via this endpoint")
+        try:
+            _os.remove(abs_target)
+        except OSError as ose:
+            raise HTTPException(status_code=500, detail=f"rm failed: {ose}")
+        # Also clear any matching deliverable record(s) so they don't
+        # haunt the deliverables list pointing at a missing file.
+        removed_dvs: list[str] = []
+        try:
+            for dv in list(proj.deliverables):
+                if (dv.file_path or "").strip().lstrip("./") == rel_path.lstrip("./"):
+                    proj.remove_deliverable(dv.id)
+                    removed_dvs.append(dv.id)
+        except Exception as _de:
+            logger.debug("dv reconciliation failed: %s", _de)
+        try:
+            proj.post_message(
+                sender="system", sender_name="System",
+                content=f"🗑️ File deleted: `{rel_path}`",
+                msg_type="system",
+            )
+            hub._save_projects()
+        except Exception:
+            pass
+        return {"ok": True, "deleted": rel_path,
+                "deliverable_records_removed": removed_dvs}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("delete_project_file failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 

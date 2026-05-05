@@ -36,7 +36,21 @@ logger = logging.getLogger("tudou.memory")
 
 @dataclass
 class EpisodicEntry:
-    """L2 — 一段对话的摘要。"""
+    """L2 — 一段对话的摘要。
+
+    Provenance fields (added 2026-05-05) — let recall filter by scope
+    and let UI show "where did this come from":
+      project_id        — which project the conversation lived under
+                          (empty for solo chat)
+      task_id           — which project task it was tied to
+                          (empty when not task-bound)
+      source_message_id — first message id in the summarized range
+                          (UI deep-links here)
+      scope             — 'global' | 'project:{id}' | 'task:{id}' |
+                          'agent:{id}'. Defaults to 'agent:{agent_id}'.
+                          Recall filters by scope so cross-project
+                          memory pollution stops.
+    """
     id: str = ""
     agent_id: str = ""
     summary: str = ""
@@ -45,6 +59,10 @@ class EpisodicEntry:
     turn_end: int = 0
     message_count: int = 0      # 被摘要的原始消息条数
     created_at: float = 0.0
+    project_id: str = ""
+    task_id: str = ""
+    source_message_id: str = ""
+    scope: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -53,6 +71,9 @@ class EpisodicEntry:
             "turn_start": self.turn_start, "turn_end": self.turn_end,
             "message_count": self.message_count,
             "created_at": self.created_at,
+            "project_id": self.project_id, "task_id": self.task_id,
+            "source_message_id": self.source_message_id,
+            "scope": self.scope,
         }
 
     @classmethod
@@ -63,6 +84,10 @@ class EpisodicEntry:
             turn_start=d.get("turn_start", 0), turn_end=d.get("turn_end", 0),
             message_count=d.get("message_count", 0),
             created_at=d.get("created_at", 0.0),
+            project_id=d.get("project_id", ""),
+            task_id=d.get("task_id", ""),
+            source_message_id=d.get("source_message_id", ""),
+            scope=d.get("scope", ""),
         )
 
 
@@ -104,6 +129,14 @@ class SemanticFact:
     # P0 dream 维护：用于识别"很久没被检索过"的孤立 fact
     last_accessed_at: float = 0.0
     access_count: int = 0
+    # ── Provenance + scope (added 2026-05-05) ──
+    # See EpisodicEntry for the full doc — same semantics for L3 facts.
+    # scope drives recall filtering: in project X, only see facts with
+    # scope='global' OR scope='project:X' OR scope='agent:{this}'.
+    project_id: str = ""
+    task_id: str = ""
+    source_message_id: str = ""
+    scope: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -113,6 +146,9 @@ class SemanticFact:
             "created_at": self.created_at, "updated_at": self.updated_at,
             "last_accessed_at": self.last_accessed_at,
             "access_count": self.access_count,
+            "project_id": self.project_id, "task_id": self.task_id,
+            "source_message_id": self.source_message_id,
+            "scope": self.scope,
         }
 
     @classmethod
@@ -127,6 +163,10 @@ class SemanticFact:
             updated_at=d.get("updated_at", 0.0),
             last_accessed_at=d.get("last_accessed_at", 0.0),
             access_count=d.get("access_count", 0),
+            project_id=d.get("project_id", ""),
+            task_id=d.get("task_id", ""),
+            source_message_id=d.get("source_message_id", ""),
+            scope=d.get("scope", ""),
         )
 
 
@@ -430,6 +470,11 @@ class MemoryManager:
         for col_def in (
             "last_accessed_at REAL NOT NULL DEFAULT 0",
             "access_count INTEGER NOT NULL DEFAULT 0",
+            # ── Provenance + scope (added 2026-05-05) ──
+            "project_id TEXT NOT NULL DEFAULT ''",
+            "task_id TEXT NOT NULL DEFAULT ''",
+            "source_message_id TEXT NOT NULL DEFAULT ''",
+            "scope TEXT NOT NULL DEFAULT ''",
         ):
             try:
                 col_name = col_def.split()[0]
@@ -438,9 +483,41 @@ class MemoryManager:
             except sqlite3.OperationalError as e:
                 if "duplicate column" not in str(e).lower():
                     logger.warning("memory: ALTER TABLE failed: %s", e)
+        # Mirror the provenance migration for the L2 episodic table —
+        # same fields, same semantics. Episodic entries also need to
+        # know which project/task the conversation lived in.
+        for col_def in (
+            "project_id TEXT NOT NULL DEFAULT ''",
+            "task_id TEXT NOT NULL DEFAULT ''",
+            "source_message_id TEXT NOT NULL DEFAULT ''",
+            "scope TEXT NOT NULL DEFAULT ''",
+        ):
+            try:
+                col_name = col_def.split()[0]
+                c.execute(f"ALTER TABLE memory_episodic ADD COLUMN {col_def}")
+                logger.info("memory: migrated memory_episodic add column %s", col_name)
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    logger.warning("memory: ALTER TABLE failed: %s", e)
         try:
             c.execute("CREATE INDEX IF NOT EXISTS idx_ms_accessed "
                       "ON memory_semantic(last_accessed_at)")
+        except sqlite3.OperationalError:
+            pass
+        # Indexes for scope-filtered recall (the hot path in retrieve_for_prompt).
+        try:
+            c.execute("CREATE INDEX IF NOT EXISTS idx_ms_scope "
+                      "ON memory_semantic(agent_id, scope)")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            c.execute("CREATE INDEX IF NOT EXISTS idx_ms_project "
+                      "ON memory_semantic(project_id)")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            c.execute("CREATE INDEX IF NOT EXISTS idx_me_scope "
+                      "ON memory_episodic(agent_id, scope)")
         except sqlite3.OperationalError:
             pass
         c.commit()
@@ -564,17 +641,30 @@ class MemoryManager:
             entry.id = str(uuid.uuid4())
         if not entry.created_at:
             entry.created_at = time.time()
+        # ── Auto-inject provenance from agent context (same as save_fact) ──
+        if entry.agent_id and (not entry.project_id or not entry.scope):
+            try:
+                self._inject_agent_context(entry)
+            except Exception as _ace:
+                logger.debug("agent-context inject for episodic %s skipped: %s",
+                             entry.id, _ace)
+        # Default scope: 'agent:{id}' if still blank after auto-inject.
+        if not entry.scope and entry.agent_id:
+            entry.scope = f"agent:{entry.agent_id}"
 
         with self._rlock:
             self._conn.execute("""
                 INSERT OR REPLACE INTO memory_episodic
                 (id, agent_id, summary, keywords, turn_start, turn_end,
-                 message_count, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 message_count, created_at,
+                 project_id, task_id, source_message_id, scope)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 entry.id, entry.agent_id, entry.summary, entry.keywords,
                 entry.turn_start, entry.turn_end, entry.message_count,
                 entry.created_at,
+                entry.project_id, entry.task_id,
+                entry.source_message_id, entry.scope,
             ))
             self._conn.commit()
 
@@ -670,20 +760,74 @@ class MemoryManager:
             if not fact.updated_at:
                 fact.updated_at = now
 
+        # ── Auto-inject provenance from agent context ──
+        # If caller didn't specify project_id / scope, pull from the
+        # agent's CURRENT state via Hub. Saves having to thread context
+        # through every save_fact call site. Best-effort; failures fall
+        # back to agent-scoped (the safe default).
+        if fact.agent_id and (not fact.project_id or not fact.scope):
+            try:
+                self._inject_agent_context(fact)
+            except Exception as _ace:
+                logger.debug("agent-context inject for fact %s skipped: %s",
+                             fact.id, _ace)
+        # Default scope: 'agent:{id}' if not set after auto-inject.
+        if not fact.scope and fact.agent_id:
+            fact.scope = f"agent:{fact.agent_id}"
+
         with self._rlock:
             self._conn.execute("""
                 INSERT OR REPLACE INTO memory_semantic
                 (id, agent_id, category, content, source, confidence,
-                 created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 created_at, updated_at,
+                 project_id, task_id, source_message_id, scope)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 fact.id, fact.agent_id, fact.category, fact.content,
                 fact.source, fact.confidence, fact.created_at, fact.updated_at,
+                fact.project_id, fact.task_id,
+                fact.source_message_id, fact.scope,
             ))
             self._conn.commit()
 
         # Also store in ChromaDB for vector search
         self.vector_store_fact(fact)
+
+    def _inject_agent_context(self, entry):
+        """Look up the agent in Hub and fill in project_id / scope if blank.
+
+        Works for both SemanticFact and EpisodicEntry — they share the
+        provenance fields. Pure best-effort: any failure leaves entry
+        unchanged (caller falls back to defaults).
+
+        Note on category bypass: contact / preference / user_pref are
+        identity-level — they should NOT get auto-scoped to a project,
+        otherwise the user's profile would disappear when switching
+        projects. Force scope='global' for those.
+        """
+        try:
+            from ..hub import get_hub
+            hub = get_hub()
+        except Exception:
+            return
+        if hub is None:
+            return
+        agent = hub.get_agent(entry.agent_id) if hasattr(hub, "get_agent") else None
+        if agent is None:
+            return
+        # Identity-level memories → global scope, no project binding.
+        IDENTITY_CATS = ("contact", "preference", "user_pref")
+        if getattr(entry, "category", "") in IDENTITY_CATS:
+            if not entry.scope:
+                entry.scope = "global"
+            return
+        # Otherwise: pull current project from agent.
+        cur_pid = getattr(agent, "project_id", "") or ""
+        if cur_pid and not entry.project_id:
+            entry.project_id = cur_pid
+        if not entry.scope:
+            entry.scope = (f"project:{cur_pid}" if cur_pid
+                           else f"agent:{entry.agent_id}")
 
     def _touch_facts(self, fact_ids: list[str]) -> None:
         """Bump last_accessed_at + access_count on the given fact ids.
@@ -1337,6 +1481,14 @@ class MemoryManager:
                 "confidence": fact.confidence,
                 "created_at": fact.created_at or time.time(),
                 "content_len": len(fact.content),
+                # ── Provenance + scope (added 2026-05-05) ──
+                # Round-tripped on retrieval so scope filter works for
+                # vector-search hits (FTS-only path reads SQLite directly
+                # so scope is already populated there).
+                "project_id": fact.project_id or "",
+                "task_id": fact.task_id or "",
+                "source_message_id": fact.source_message_id or "",
+                "scope": fact.scope or "",
             }
             # 语义去重: 查询最近似的一条，distance < 阈值则视为重复 → 用同一 id upsert
             if coll.count() > 0:
@@ -1391,6 +1543,11 @@ class MemoryManager:
                 "turn_end": entry.turn_end,
                 "message_count": entry.message_count,
                 "created_at": entry.created_at or time.time(),
+                # Provenance round-trip — see vector_store_fact for context.
+                "project_id": entry.project_id or "",
+                "task_id": entry.task_id or "",
+                "source_message_id": entry.source_message_id or "",
+                "scope": entry.scope or "",
             }
             coll.upsert(
                 ids=[entry.id],
@@ -1616,6 +1773,10 @@ class MemoryManager:
                     source=meta.get("source", ""),
                     confidence=meta.get("confidence", 0.5),
                     created_at=meta.get("created_at", 0),
+                    project_id=meta.get("project_id", ""),
+                    task_id=meta.get("task_id", ""),
+                    source_message_id=meta.get("source_message_id", ""),
+                    scope=meta.get("scope", ""),
                 ), sim))
             return scored
         except Exception as e:
@@ -1662,6 +1823,10 @@ class MemoryManager:
                     source=meta.get("source", ""),
                     confidence=meta.get("confidence", 0.5),
                     created_at=meta.get("created_at", 0),
+                    project_id=meta.get("project_id", ""),
+                    task_id=meta.get("task_id", ""),
+                    source_message_id=meta.get("source_message_id", ""),
+                    scope=meta.get("scope", ""),
                 ))
             return facts
 
@@ -1702,6 +1867,10 @@ class MemoryManager:
                     turn_end=meta.get("turn_end", 0),
                     message_count=0,
                     created_at=meta.get("created_at", 0),
+                    project_id=meta.get("project_id", ""),
+                    task_id=meta.get("task_id", ""),
+                    source_message_id=meta.get("source_message_id", ""),
+                    scope=meta.get("scope", ""),
                 ))
             return entries
 
@@ -1776,9 +1945,43 @@ class MemoryManager:
     # often unrelated to the user's current query (top-K would miss).
     _ALWAYS_INJECT_CATEGORIES = ("contact", "preference", "rule")
 
+    def _is_in_scope(self, scope: str, agent_id: str,
+                     project_id: str, task_id: str) -> bool:
+        """Check if a memory entry's ``scope`` is admissible in the
+        current retrieval context.
+
+        Rules:
+          - empty scope (legacy)         → ALLOW (back-compat with pre-2026-05-05 entries)
+          - 'global'                     → ALLOW (everywhere)
+          - 'agent:{id}'                 → ALLOW only when id == agent_id
+          - 'project:{pid}'              → ALLOW only when pid == project_id
+          - 'task:{tid}'                 → ALLOW only when tid == task_id
+          - anything else                → DROP
+
+        Bottom line: in project A you never see project B's task-bound
+        memories; in solo (no project_id) you only see global +
+        agent-scoped facts.
+        """
+        if not scope:
+            return True  # legacy entries written before 2026-05-05
+        if scope == "global":
+            return True
+        if ":" not in scope:
+            return False
+        kind, val = scope.split(":", 1)
+        if kind == "agent":
+            return val == agent_id
+        if kind == "project":
+            return bool(project_id) and val == project_id
+        if kind == "task":
+            return bool(task_id) and val == task_id
+        return False
+
     def retrieve_for_prompt(self, agent_id: str,
                             current_query: str,
                             config: Optional[MemoryConfig] = None,
+                            current_project_id: str = "",
+                            current_task_id: str = "",
                             ) -> str:
         """
         根据当前用户输入检索相关记忆，返回注入 system prompt 的文本。
@@ -1824,6 +2027,20 @@ class MemoryManager:
         other_facts = [f for f in other_facts if f.id not in pinned_ids]
         facts = pinned_facts + other_facts
 
+        # ── Scope filter (2026-05-05) ──
+        # In project context, drop facts scoped to a different project /
+        # task. ALWAYS-INJECT categories (contact / preference) bypass —
+        # they're identity, not project knowledge.
+        if facts:
+            facts = [
+                f for f in facts
+                if (f.category in self._ALWAYS_INJECT_CATEGORIES
+                    or f.category in ("preference", "user_pref")
+                    or self._is_in_scope(getattr(f, "scope", ""),
+                                         agent_id, current_project_id,
+                                         current_task_id))
+            ]
+
         if facts:
             facts.sort(key=lambda f: self._CATEGORY_PRIORITY.get(f.category, 9))
             contact_lines = []
@@ -1857,6 +2074,14 @@ class MemoryManager:
                 agent_id, current_query,
                 top_k=config.l2_retrieve_top_k,
             )
+        # Same scope filter for L2 episodes (2026-05-05).
+        if episodes:
+            episodes = [
+                ep for ep in episodes
+                if self._is_in_scope(getattr(ep, "scope", ""),
+                                     agent_id, current_project_id,
+                                     current_task_id)
+            ]
         if episodes:
             ep_lines = []
             for ep in episodes:

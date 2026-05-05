@@ -1520,6 +1520,245 @@
   background: var(--surface) !important;
 }
 
+/* Promote per-row legacy cards inside project panes to glass-card
+ * styling without touching the JS template literals. Targets the
+ * inline `background:var(--surface);border-radius:Xpx;border:1px ...`
+ * pattern used by every row in Goals / Milestones / Deliverables /
+ * Issues / Overview lists. */
+[data-theme="tech"] [id^="proj-pane-"] div[style*="background:var(--surface)"][style*="border-radius"] {
+  background: var(--glass-bg) !important;
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border) !important;
+  border-top: 1px solid rgba(255, 255, 255, 0.10) !important;
+  box-shadow: 0 0 12px -3px rgba(192, 193, 255, 0.06);
+}
+/* Section wrappers (📁 project root / agent grouping). They use
+ * `background:var(--overlay-2)` instead of `--surface` — same glass
+ * promotion. */
+[data-theme="tech"] [id^="proj-pane-"] div[style*="background:var(--overlay-2)"][style*="border-radius"] {
+  background: rgba(31, 31, 39, 0.45) !important;
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border) !important;
+}
+
+/* Orchestration sub-tab bodies — same glass promotion for the inline
+ * `background:var(--surface);border-radius:Xpx;border:1px solid var(--border)`
+ * pattern used by the four sub-tab renderers (Pipelines / Agents /
+ * Preproc / Overview). Selectors target the section ids each renderer
+ * writes into. */
+[data-theme="tech"] #orch-overview-cards > div,
+[data-theme="tech"] #orch-pipelines-section > div[style*="background:var(--surface)"],
+[data-theme="tech"] #orch-agents-section > div[style*="background:var(--surface)"],
+[data-theme="tech"] #orch-preprocessor-section > div[style*="background:var(--surface)"],
+[data-theme="tech"] #orch-canvas-section > div[style*="background:var(--surface)"] {
+  background: var(--glass-bg) !important;
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border) !important;
+  border-top: 1px solid rgba(255, 255, 255, 0.10) !important;
+  box-shadow: 0 0 12px -3px rgba(192, 193, 255, 0.06);
+}
+
+/* ── Agent chat header icon buttons — defensive reset ────────────
+ * The renderAgentChatTech header icons use inline onmouseover/out
+ * handlers to swap background. If the user click-focuses one and
+ * moves the cursor away while the focus still owns it, the natively
+ * tinted :focus background can stick. Force transparent on focus to
+ * always match the hover-out state. */
+[data-theme="tech"] button[title="Settings"]:focus,
+[data-theme="tech"] button[title="Inbox"]:focus,
+[data-theme="tech"] button[title="Checkpoints"]:focus,
+[data-theme="tech"] button[title="Clear chat"]:focus,
+[data-theme="tech"] button[title="Delete agent"]:focus,
+[data-theme="tech"] button[title="Settings"]:focus-visible,
+[data-theme="tech"] button[title="Inbox"]:focus-visible,
+[data-theme="tech"] button[title="Checkpoints"]:focus-visible,
+[data-theme="tech"] button[title="Clear chat"]:focus-visible,
+[data-theme="tech"] button[title="Delete agent"]:focus-visible {
+  background: transparent !important;
+  outline: none;
+}
+
+/* ── Audit Log table (renderAudit) ──────────────────────────── */
+[data-theme="tech"] .audit-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  font-size: 12px;
+}
+[data-theme="tech"] .audit-table th {
+  background: var(--surface-container-low);
+  color: var(--on-surface-variant);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--outline-variant);
+}
+[data-theme="tech"] .audit-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  color: var(--on-surface);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+[data-theme="tech"] .audit-table tr:last-child td { border-bottom: none; }
+[data-theme="tech"] .audit-table tr:hover td { background: rgba(192, 193, 255, 0.04); }
+[data-theme="tech"] .audit-table .tag.tag-green {
+  background: rgba(137, 206, 255, 0.10);
+  color: var(--secondary);
+  border: 1px solid rgba(137, 206, 255, 0.25);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  letter-spacing: 0.05em;
+}
+[data-theme="tech"] .audit-table .tag.tag-red {
+  background: rgba(255, 180, 171, 0.10);
+  color: var(--error);
+  border: 1px solid rgba(255, 180, 171, 0.25);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  letter-spacing: 0.05em;
+}
+
+/* ── Token list rows (renderTokens / loadTokens) ─────────────── */
+[data-theme="tech"] .token-item {
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  border-top: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: var(--r-lg);
+  padding: var(--s-md);
+  margin-bottom: var(--s-sm);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--s-md);
+  box-shadow: 0 0 12px -3px rgba(192, 193, 255, 0.08);
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+[data-theme="tech"] .token-item:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px -4px rgba(192, 193, 255, 0.30);
+}
+[data-theme="tech"] .token-item .token-id {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--outline);
+  letter-spacing: 0.03em;
+}
+[data-theme="tech"] .token-item .tag {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  letter-spacing: 0.05em;
+  margin-left: 4px;
+}
+[data-theme="tech"] .token-item .tag.tag-green {
+  background: rgba(137, 206, 255, 0.10) !important;
+  color: var(--secondary) !important;
+  border: 1px solid rgba(137, 206, 255, 0.25) !important;
+}
+[data-theme="tech"] .token-item .tag.tag-red {
+  background: rgba(255, 180, 171, 0.10) !important;
+  color: var(--error) !important;
+  border: 1px solid rgba(255, 180, 171, 0.25) !important;
+}
+[data-theme="tech"] .token-item .tag.tag-blue {
+  background: rgba(192, 193, 255, 0.10) !important;
+  color: var(--primary) !important;
+  border: 1px solid rgba(192, 193, 255, 0.25) !important;
+}
+
+/* ── Node Configuration cards (renderNodeConfig) ─────────────── */
+[data-theme="tech"] #node-config-list > .card {
+  background: var(--glass-bg) !important;
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border) !important;
+  border-top: 1px solid rgba(255, 255, 255, 0.10) !important;
+  border-radius: var(--r-lg) !important;
+  padding: var(--s-lg) !important;
+  box-shadow: 0 0 12px -3px rgba(192, 193, 255, 0.06);
+}
+[data-theme="tech"] #node-config-list table { font-size: 12px; }
+[data-theme="tech"] #node-config-list th {
+  font-family: var(--font-mono);
+  letter-spacing: 0.05em;
+}
+[data-theme="tech"] #node-config-list td {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+/* ── Form widgets in modals (create-agent / create-kb / etc.) ──
+ * The modal-overlay rule already gives the outer panel glass chrome.
+ * This sweeps the form-group inputs / selects / textareas inside any
+ * modal so they match the rest of the tech theme instead of falling
+ * back to legacy form CSS. */
+[data-theme="tech"] .modal .form-group label,
+[data-theme="tech"] #modal-overlay .form-group label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--on-surface-variant);
+  margin-bottom: 6px;
+  display: block;
+}
+[data-theme="tech"] .modal .form-group input[type="text"],
+[data-theme="tech"] .modal .form-group input[type="password"],
+[data-theme="tech"] .modal .form-group input[type="number"],
+[data-theme="tech"] .modal .form-group input[type="email"],
+[data-theme="tech"] .modal .form-group input[type="url"],
+[data-theme="tech"] .modal .form-group select,
+[data-theme="tech"] .modal .form-group textarea,
+[data-theme="tech"] #modal-overlay .form-group input[type="text"],
+[data-theme="tech"] #modal-overlay .form-group input[type="password"],
+[data-theme="tech"] #modal-overlay .form-group input[type="number"],
+[data-theme="tech"] #modal-overlay .form-group input[type="email"],
+[data-theme="tech"] #modal-overlay .form-group input[type="url"],
+[data-theme="tech"] #modal-overlay .form-group select,
+[data-theme="tech"] #modal-overlay .form-group textarea {
+  background: var(--surface-container-low) !important;
+  border: 1px solid var(--outline-variant) !important;
+  border-radius: var(--r-md) !important;
+  color: var(--on-surface) !important;
+  font-size: 13px;
+  padding: 8px 12px;
+  width: 100%;
+  box-sizing: border-box;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+[data-theme="tech"] .modal .form-group input:focus,
+[data-theme="tech"] .modal .form-group select:focus,
+[data-theme="tech"] .modal .form-group textarea:focus,
+[data-theme="tech"] #modal-overlay .form-group input:focus,
+[data-theme="tech"] #modal-overlay .form-group select:focus,
+[data-theme="tech"] #modal-overlay .form-group textarea:focus {
+  outline: none;
+  border-color: var(--primary) !important;
+  box-shadow: 0 0 0 3px rgba(192, 193, 255, 0.15);
+}
+
 /* ── Chat input box re-skin (legacy renders) ──────────────────── */
 [data-theme="tech"] .chat-input-wrap {
   background: rgba(31, 31, 39, 0.6) !important;

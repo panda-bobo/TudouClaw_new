@@ -1020,20 +1020,29 @@ class Hub:
     # ---- Agent persistence ----
 
     def _load_agents(self):
-        """Load agents from SQLite (primary) or JSON (fallback)."""
+        """Load agents from a SINGLE source of truth.
+
+        2026-05-05 — strict single-source policy (matches ``_save_agents``).
+        No SQLite→JSON fallback: if SQLite is available, it IS the source,
+        and an empty-but-present DB means "no agents" (NOT "fall back to
+        JSON and resurrect deleted agents"). The old fallback was a
+        consistency hazard — JSON could have stale rows that re-appeared
+        whenever the SQLite count happened to be 0.
+        """
         import os
-        # 优先从 SQLite 加载
-        if self._db and self._db.count("agents") > 0:
+        if self._db:
+            # SQLite is the source. count==0 means "really no agents",
+            # not "try JSON next".
             try:
                 for d in self._db.load_agents():
                     agent = Agent.from_persist_dict(d)
                     self.agents[agent.id] = agent
                 logger.info("Loaded %d agents from SQLite", len(self.agents))
-                self._auto_migrate_role_defaults()
-                return
             except Exception as e:
-                logger.warning("SQLite agent load failed, trying JSON: %s", e)
-        # JSON fallback
+                logger.warning("SQLite agent load failed: %s", e)
+            self._auto_migrate_role_defaults()
+            return
+        # No DB — JSON is the source.
         if not os.path.exists(self._agents_file):
             return
         try:
@@ -1185,17 +1194,41 @@ class Hub:
             )
 
     def _save_agents(self):
-        """Persist agents to SQLite (primary) + JSON (backup) + workspace."""
+        """Persist agents to SQLite + JSON, **kept in sync**.
+
+        2026-05-05 — Dual-write is fine, but post-write the two stores
+        MUST contain the same set of rows; otherwise a delete that
+        succeeds in one store and fails in the other resurrects the
+        ghost on next restart. Both writes here are "full snapshot
+        replace" semantics:
+
+          * SQLite: upsert every live agent, then DELETE any row not in
+            ``self.agents`` (drops orphans from prior delete-failures).
+          * JSON: rewrite the whole file from the live in-memory set.
+
+        The third sink (per-workspace ``workspaces/{id}/agent.json``)
+        used to be written here too — that was a dead write (never
+        loaded back) and a consistency hazard, so it's gone.
+        """
         import os
         os.makedirs(self._data_dir, exist_ok=True)
-        # SQLite — 逐个 upsert
+        live_ids = {a.id for a in self.agents.values()}
+        # ── SQLite (snapshot replace) ──
         if self._db:
             try:
                 for a in self.agents.values():
                     self._db.save_agent(a.to_persist_dict())
+                # Drop any row in DB whose id is no longer in memory.
+                for d in (self._db.load_agents() or []):
+                    aid = d.get("id") or d.get("agent_id") or ""
+                    if aid and aid not in live_ids:
+                        try:
+                            self._db.delete_agent(aid)
+                        except Exception as _de:
+                            logger.debug("orphan agent prune failed for %s: %s", aid, _de)
             except Exception as e:
                 logger.warning("SQLite agent save failed: %s", e)
-        # JSON backup (保留兼容性)
+        # ── JSON (full snapshot replace) ──
         data = {"agents": [a.to_persist_dict()
                            for a in self.agents.values()]}
         try:
@@ -1203,9 +1236,6 @@ class Hub:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.warning("Failed to save agents to %s: %s", self._agents_file, e)
-        # Also save each agent to its own workspace
-        for agent in self.agents.values():
-            self._save_agent_workspace(agent)
 
     def sync_all_agent_mcps(self):
         """Sync MCP bindings from MCPManager into all loaded agents.

@@ -134,6 +134,14 @@ function _startFloaterHeartbeat() {
 }
 
 async function _maybeActivateDesktopFloater() {
+  // Desktop Floater feature is currently DISABLED in the UI per the
+  // 2026-05-05 product call. The HTTP/heartbeat plumbing above stays
+  // intact so re-enabling later is just a matter of removing this
+  // early return + un-hiding the agent-edit modal section in
+  // app/templates/portal.html (search "Desktop Floater feature is
+  // hidden").
+  return;
+  /* eslint-disable */
   try {
     const res = await fetch('/api/portal/agents/desktop');
     if (!res.ok) return;
@@ -146,7 +154,6 @@ async function _maybeActivateDesktopFloater() {
       if (alive) {
         await _floaterFire('POST', '/show');
       } else {
-        // Scheme launches the .app; macOS asks once, then silent.
         const a = document.createElement('a');
         a.href = 'tudouclaw://open';
         a.style.display = 'none';
@@ -155,12 +162,9 @@ async function _maybeActivateDesktopFloater() {
         a.remove();
       }
     }
-    // Always heartbeat — silent when app isn't up yet, recovers
-    // automatically once the launch completes a few hundred ms later.
     _startFloaterHeartbeat();
-  } catch (_) {
-    // Floater not installed / scheme not registered → nothing to do.
-  }
+  } catch (_) {}
+  /* eslint-enable */
 }
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', _maybeActivateDesktopFloater);
@@ -174,10 +178,10 @@ if (document.readyState === 'loading') {
 // from portal.html's design system (--chip-*, --ui-shadow-*, etc).
 //
 // Usage:
-//   _ui.chip('已完成', 'success')      → small status chip
+//   _ui.chip('Completed', 'success')      → small status chip
 //   _ui.icon('check_circle')            → Material Symbols span
 //   _ui.iconChip('star', '已标记', 'success')  → icon + label chip
-//   _ui.sectionHeader('画布工作流', {icon:'view_kanban', count:3, action:'<button...>'})
+//   _ui.sectionHeader('Canvas Workflow', {icon:'view_kanban', count:3, action:'<button...>'})
 //   _ui.emptyState({icon:'inbox', title:'暂无工作流', hint:'...', cta:'<button...>'})
 //
 // Existing inline-style code keeps working — these are additive.
@@ -260,7 +264,7 @@ window._ui = (function() {
       + 'border:1px dashed var(--border);border-radius:12px">'
       + '<div style="margin-bottom:10px">' + iconHtml + '</div>'
       + '<div style="font-size:14px;color:var(--text2);font-weight:600;margin-bottom:6px">'
-      +   _esc(opts.title || '暂无数据') + '</div>'
+      +   _esc(opts.title || 'No data') + '</div>'
       + (opts.hint ? '<div style="font-size:12px;color:var(--text3);line-height:1.5;'
         + 'margin-bottom:14px;max-width:360px;margin-left:auto;margin-right:auto">'
         + _esc(opts.hint) + '</div>' : '')
@@ -339,8 +343,8 @@ window._ui = (function() {
       '<h4>确认操作</h4>' +
       '<p>' + String(message).replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</p>' +
       '<div class="confirm-actions">' +
-        '<button class="btn btn-ghost" id="_confirm-no">取消</button>' +
-        '<button class="btn btn-primary" id="_confirm-yes">确定</button>' +
+        '<button class="btn btn-ghost" id="_confirm-no">Cancel</button>' +
+        '<button class="btn btn-primary" id="_confirm-yes">OK</button>' +
       '</div>';
     overlay.appendChild(panel);
     document.body.appendChild(overlay);
@@ -371,8 +375,8 @@ window._ui = (function() {
       '<h4>' + String(message).replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</h4>' +
       '<input type="text" id="_prompt-input" value="' + (defaultVal||'').replace(/"/g,'&quot;') + '" />' +
       '<div class="confirm-actions">' +
-        '<button class="btn btn-ghost" id="_prompt-no">取消</button>' +
-        '<button class="btn btn-primary" id="_prompt-yes">确定</button>' +
+        '<button class="btn btn-ghost" id="_prompt-no">Cancel</button>' +
+        '<button class="btn btn-primary" id="_prompt-yes">OK</button>' +
       '</div>';
     overlay.appendChild(panel);
     document.body.appendChild(overlay);
@@ -489,12 +493,12 @@ window._ui = (function() {
       cancelBtn.type = 'button';
       cancelBtn.className = 'btn btn-ghost btn-sm';
       cancelBtn.style.cssText = 'padding:4px 12px;font-size:12px';
-      cancelBtn.textContent = opts.cancelLabel || '取消';
+      cancelBtn.textContent = opts.cancelLabel || 'Cancel';
       var okBtn = document.createElement('button');
       okBtn.type = 'button';
       okBtn.className = 'btn btn-primary btn-sm';
       okBtn.style.cssText = 'padding:4px 12px;font-size:12px';
-      okBtn.textContent = opts.okLabel || '确定';
+      okBtn.textContent = opts.okLabel || 'OK';
       btnRow.appendChild(cancelBtn);
       btnRow.appendChild(okBtn);
       panel.appendChild(btnRow);
@@ -831,25 +835,36 @@ function _renderUnifiedChatInput(opts) {
       // Control row: [attach][stt?]    [provider+model?]    [abort?][send]
       '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
         // Left controls (attach, stt)
-        '<button type="button" title="上传图片/文件" onclick="document.getElementById(\'' + fileInputId + '\').click()" ' +
+        '<button type="button" title="Upload image/file" onclick="document.getElementById(\'' + fileInputId + '\').click()" ' +
           'style="background:transparent;border:1px solid var(--overlay-10);border-radius:8px;padding:5px 8px;cursor:pointer;display:flex;align-items:center;gap:4px;color:var(--text3);transition:all .15s" ' +
           'onmouseenter="this.style.borderColor=\'var(--primary-tint-30)\';this.style.color=\'var(--text)\'" ' +
           'onmouseleave="this.style.borderColor=\'var(--overlay-10)\';this.style.color=\'var(--text3)\'">' +
           '<span class="material-symbols-outlined" style="font-size:16px">attach_file</span>' +
         '</button>' +
         (o.showSTT ? (
-          '<button type="button" id="stt-btn-' + id + '" title="语音输入 (STT)" onclick="_toggleSTT(\'' + id + '\')" ' +
+          '<button type="button" id="stt-btn-' + id + '" title="Voice input (STT)" onclick="_toggleSTT(\'' + id + '\')" ' +
             'style="background:transparent;border:1px solid var(--overlay-10);border-radius:8px;padding:5px 8px;cursor:pointer;display:flex;align-items:center;gap:4px;color:var(--text3);transition:all .15s" ' +
             'onmouseenter="this.style.borderColor=\'var(--primary-tint-30)\';this.style.color=\'var(--text)\'" ' +
             'onmouseleave="this.style.borderColor=\'var(--overlay-10)\';this.style.color=\'var(--text3)\'">' +
             '<span class="material-symbols-outlined" style="font-size:16px">mic</span>' +
           '</button>'
         ) : '') +
+        // Thinking toggle (agent scope only) — when ON, the assistant
+        // bubble shows a collapsible THINKING panel populated by SSE
+        // `reasoning_delta` events emitted from the LLM stream.
+        // Persisted per-agent via localStorage key `tudou_show_thinking_<id>`.
+        (scope === 'agent' ? (
+          '<button type="button" id="thinking-toggle-' + id + '" title="Show thinking process (streams reasoning_content via SSE)" onclick="_toggleShowThinking(\'' + id + '\')" ' +
+            'style="background:transparent;border:1px solid var(--overlay-10);border-radius:8px;padding:5px 8px;cursor:pointer;display:flex;align-items:center;gap:4px;color:var(--text3);transition:all .15s">' +
+            '<span class="material-symbols-outlined" style="font-size:16px" id="thinking-icon-' + id + '">psychology</span>' +
+            '<span style="font-size:11px">Thinking</span>' +
+          '</button>'
+        ) : '') +
         (o.showAmplify ? (
-          '<button type="button" id="amplify-toggle-' + id + '" title="✨ 优化提示词 (开/关)" onclick="_amplifyToggleClick(\'' + id + '\')" ' +
+          '<button type="button" id="amplify-toggle-' + id + '" title="✨ Optimize prompt (toggle)" onclick="_amplifyToggleClick(\'' + id + '\')" ' +
             'style="background:transparent;border:1px solid var(--overlay-10);border-radius:8px;padding:5px 8px;cursor:pointer;display:flex;align-items:center;gap:4px;color:var(--text3);transition:all .15s">' +
             '<span class="material-symbols-outlined" style="font-size:16px">auto_awesome</span>' +
-            '<span style="font-size:11px">优化</span>' +
+            '<span style="font-size:11px">Optimize</span>' +
           '</button>'
         ) : '') +
         // Middle: provider + model selectors (agent only)
@@ -866,7 +881,7 @@ function _renderUnifiedChatInput(opts) {
         // Right controls — push to right with spacer
         '<div style="flex:1"></div>' +
         (o.showAbort ? (
-          '<button type="button" title="强制终止当前对话 + kill 子进程" onclick="agentAbort(\'' + id + '\')" ' +
+          '<button type="button" title="Force-abort current chat + kill subprocesses" onclick="agentAbort(\'' + id + '\')" ' +
             'style="background:transparent;border:1px solid rgba(239,68,68,0.4);border-radius:8px;padding:5px 8px;cursor:pointer;display:flex;align-items:center;color:var(--error);transition:all .15s" ' +
             'onmouseenter="this.style.background=\'rgba(239,68,68,0.08)\'" ' +
             'onmouseleave="this.style.background=\'transparent\'">' +
@@ -874,7 +889,7 @@ function _renderUnifiedChatInput(opts) {
           '</button>'
         ) : '') +
         // Send button — primary CTA, large
-        '<button type="button" title="发送" onclick="' + sendFn + "('" + id + "')" + '"' + disAttrs +
+        '<button type="button" title="Send" onclick="' + sendFn + "('" + id + "')" + '"' + disAttrs +
           ' style="background:var(--primary);border:none;border-radius:10px;padding:8px 14px;cursor:' + (disabled ? 'not-allowed' : 'pointer') +
             ';display:flex;align-items:center;gap:4px;color:#0f0e2e;font-weight:700;transition:transform .1s"' +
           ' onmousedown="this.style.transform=\'scale(0.95)\'" onmouseup="this.style.transform=\'\'">' +
@@ -885,6 +900,96 @@ function _renderUnifiedChatInput(opts) {
   return html;
 }
 window._renderUnifiedChatInput = _renderUnifiedChatInput;
+
+// ── Thinking toggle (per-agent, persisted) ──────────────────────────
+// When ON, the SSE handler appends a collapsible "THINKING" panel
+// above the assistant bubble and live-streams `reasoning_delta` chunks
+// into it. When OFF (default), reasoning is dropped on the floor.
+window._isShowThinking = function(agentId) {
+  try { return localStorage.getItem('tudou_show_thinking_' + agentId) === '1'; }
+  catch (e) { return false; }
+};
+window._toggleShowThinking = function(agentId) {
+  var on = !_isShowThinking(agentId);
+  try { localStorage.setItem('tudou_show_thinking_' + agentId, on ? '1' : '0'); } catch (e) {}
+  _refreshThinkingToggleUi(agentId);
+};
+window._refreshThinkingToggleUi = function(agentId) {
+  var btn = document.getElementById('thinking-toggle-' + agentId);
+  var icon = document.getElementById('thinking-icon-' + agentId);
+  if (!btn) return;
+  var on = _isShowThinking(agentId);
+  btn.style.borderColor = on ? 'var(--primary)' : 'var(--overlay-10)';
+  btn.style.background = on ? 'rgba(192,193,255,0.10)' : 'transparent';
+  btn.style.color = on ? 'var(--primary)' : 'var(--text3)';
+  if (icon) icon.style.color = on ? 'var(--primary)' : 'var(--text3)';
+};
+
+
+// ============ Click-once button lock ============================
+// Prevents double-submit on Create / Save buttons. Usage:
+//   <button onclick="_lockBtn(this,'Creating…',createMeeting)">Create</button>
+//   <button onclick="_lockBtn(this,'Saving…',_kmSaveDomainKb)">Save</button>
+//   <button onclick="_lockBtn(this,'Creating…',createProjectTask,'projId123')">Create</button>
+//
+// While locked: button is disabled, dimmed, shows a spinner + busyText.
+// Auto-unlocks when:
+//   - the wrapped fn returns a Promise that settles (success or rejection)
+//   - OR after 30s safety timer fires (covers fns that fire-and-forget
+//     async work via api() without returning the promise)
+//   - on synchronous throw, immediate unlock + rethrow
+// If the modal closes (button removed from DOM), the lock state is moot.
+(function _wireLockBtnHelper() {
+  if (window._lockBtn) return;
+  // Inject CSS keyframe once (shared with amplify spinner if present).
+  if (!document.getElementById('_lockbtn_kf')) {
+    var st = document.createElement('style');
+    st.id = '_lockbtn_kf';
+    st.textContent = '@keyframes _lockbtn_spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}';
+    (document.head || document.documentElement).appendChild(st);
+  }
+  window._lockBtn = function(btnEl, busyText, fn /*, ...args */) {
+    if (!btnEl || btnEl.dataset.lockedOnce === '1') return;
+    if (typeof fn !== 'function') {
+      console.warn('[_lockBtn] fn must be a function, got', fn);
+      return;
+    }
+    btnEl.dataset.lockedOnce = '1';
+    var orig = btnEl.innerHTML;
+    var origOpacity = btnEl.style.opacity;
+    var origCursor = btnEl.style.cursor;
+    btnEl.disabled = true;
+    btnEl.style.opacity = '0.55';
+    btnEl.style.cursor = 'not-allowed';
+    btnEl.innerHTML =
+      '<span class="material-symbols-outlined" style="font-size:14px;animation:_lockbtn_spin 1s linear infinite;vertical-align:middle">progress_activity</span> ' +
+      (busyText || 'Working…');
+    var unlock = function() {
+      if (!btnEl.isConnected) return;  // button removed (modal closed) — nothing to do
+      btnEl.dataset.lockedOnce = '';
+      btnEl.disabled = false;
+      btnEl.style.opacity = origOpacity;
+      btnEl.style.cursor = origCursor;
+      btnEl.innerHTML = orig;
+    };
+    var safetyTimer = setTimeout(unlock, 30000);
+    var args = Array.prototype.slice.call(arguments, 3);
+    try {
+      var ret = fn.apply(null, args);
+      if (ret && typeof ret.then === 'function') {
+        ret.then(
+          function() { clearTimeout(safetyTimer); unlock(); },
+          function() { clearTimeout(safetyTimer); unlock(); }
+        );
+      }
+      // Sync fns: rely on safetyTimer (or modal close) to unlock.
+    } catch (e) {
+      clearTimeout(safetyTimer);
+      unlock();
+      throw e;
+    }
+  };
+})();
 
 
 // ============ Prompt amplifier (✨ 优化提示词) =========================
@@ -916,12 +1021,12 @@ function _amplifySyncToggleVisual(agentId) {
     btn.style.borderColor = 'var(--primary)';
     btn.style.color = 'var(--primary)';
     btn.style.background = 'color-mix(in srgb, var(--primary) 12%, transparent)';
-    btn.title = '✨ 优化提示词 (开,点击关闭)';
+    btn.title = '✨ Optimize prompt (ON, click to disable)';
   } else {
     btn.style.borderColor = 'var(--overlay-10)';
     btn.style.color = 'var(--text3)';
     btn.style.background = 'transparent';
-    btn.title = '✨ 优化提示词 (关,点击开启)';
+    btn.title = '✨ Optimize prompt (OFF, click to enable)';
   }
 }
 
@@ -932,7 +1037,7 @@ function _amplifyToggleClick(agentId) {
   } catch (e) {}
   _amplifySyncToggleVisual(agentId);
   if (typeof window._toast === 'function') {
-    window._toast(on ? '提示词优化已关闭' : '✨ 提示词优化已开启 — 下次发送前会先改写',
+    window._toast(on ? 'Prompt optimization disabled' : '✨ Prompt optimization enabled — your input will be rewritten before sending',
                   on ? 'info' : 'success');
   }
 }
@@ -976,7 +1081,7 @@ window._amplifyToggleClick = _amplifyToggleClick;
 
 async function _amplifyRunAndPreview(agentId, rawText) {
   var inputEl = document.getElementById('chat-input-' + agentId);
-  var sendBtn = inputEl ? inputEl.closest('.uci-shell').querySelector('button[title="发送"]') : null;
+  var sendBtn = inputEl ? inputEl.closest('.uci-shell').querySelector('button[title="Send"]') : null;
   // Lock the input + send btn while we wait — prevents double-send.
   if (inputEl) inputEl.disabled = true;
   if (sendBtn) sendBtn.disabled = true;
@@ -995,7 +1100,7 @@ async function _amplifyRunAndPreview(agentId, rawText) {
     _amplifyDismiss(agentId);
     if (inputEl) inputEl.disabled = false;
     if (sendBtn) sendBtn.disabled = false;
-    if (window._toast) window._toast('优化失败: ' + (e && e.message || e), 'error');
+    if (window._toast) window._toast('Amplify failed:' + (e && e.message || e), 'error');
     try { console.error('[amplify] error', e); } catch(_){}
     return;
   }
@@ -1004,7 +1109,7 @@ async function _amplifyRunAndPreview(agentId, rawText) {
 
   if (!res || !res.ok) {
     _amplifyDismiss(agentId);
-    if (window._toast) window._toast('优化失败: ' + ((res && res.error) || '未知'), 'error');
+    if (window._toast) window._toast('Amplify failed:' + ((res && res.error) || 'unknown'), 'error');
     return;
   }
   // Backend short-circuit: input was already specific. Dismiss the
@@ -1012,7 +1117,7 @@ async function _amplifyRunAndPreview(agentId, rawText) {
   if (res.skipped) {
     _amplifyDismiss(agentId);
     if (window._toast) {
-      window._toast('💡 ' + (res.rationale || '原输入已具体,直接发送'), 'info');
+      window._toast('💡 ' + (res.rationale || 'Input already specific, sending as-is'), 'info');
     }
     window._skipAmplifyOnce[agentId] = true;
     sendAgentMsg(agentId);
@@ -1048,7 +1153,7 @@ function _renderAmplifyLoading(agentId) {
       'align-items:center;gap:10px;font-size:13px;color:var(--text2)">' +
       '<span class="material-symbols-outlined" style="font-size:18px;color:var(--primary);' +
         'animation:amplify-spin 1.4s linear infinite">auto_awesome</span>' +
-      '<span>正在优化提示词...</span>' +
+      '<span>Optimizing prompt…</span>' +
     '</div>' +
     '<style>@keyframes amplify-spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}</style>';
 }
@@ -1070,7 +1175,7 @@ function _renderAmplifyPreview(agentId, original, amplified, rationale) {
         'color:var(--text2);line-height:1.5">' +
         '<span class="material-symbols-outlined" style="font-size:16px;color:var(--primary);' +
           'flex-shrink:0;margin-top:1px">auto_awesome</span>' +
-        '<div><b style="color:var(--text)">优化预览</b>' +
+        '<div><b style="color:var(--text)">Optimized preview</b>' +
           (rationale ? ' · ' + esc(rationale) : '') +
         '</div>' +
       '</div>' +
@@ -1088,21 +1193,21 @@ function _renderAmplifyPreview(agentId, original, amplified, rationale) {
           'padding:7px 14px;color:#0f0e2e;font-weight:600;font-size:12px;cursor:pointer;' +
           'display:flex;align-items:center;gap:4px">' +
           '<span class="material-symbols-outlined" style="font-size:14px">check</span>' +
-          '用这个发送' +
+          'Send this' +
         '</button>' +
         '<button type="button" onclick="_amplifyUseOriginal(\'' + agentId + '\')" ' +
           'style="background:transparent;border:1px solid var(--overlay-10);' +
           'border-radius:8px;padding:7px 12px;color:var(--text2);font-size:12px;' +
           'cursor:pointer;display:flex;align-items:center;gap:4px">' +
           '<span class="material-symbols-outlined" style="font-size:14px">undo</span>' +
-          '用原文' +
+          'Use original' +
         '</button>' +
         '<button type="button" onclick="_amplifyDismiss(\'' + agentId + '\')" ' +
           'style="background:transparent;border:1px solid var(--overlay-10);' +
           'border-radius:8px;padding:7px 12px;color:var(--text3);font-size:12px;' +
           'cursor:pointer;display:flex;align-items:center;gap:4px">' +
           '<span class="material-symbols-outlined" style="font-size:14px">close</span>' +
-          '取消' +
+          'Cancel' +
         '</button>' +
       '</div>' +
     '</div>';
@@ -1125,7 +1230,7 @@ function _amplifyConfirmSend(agentId) {
   if (!ta || !inputEl) return;
   var text = (ta.value || '').trim();
   if (!text) {
-    if (window._toast) window._toast('优化文本不能为空', 'warning');
+    if (window._toast) window._toast('Amplified text cannot be empty', 'warning');
     return;
   }
   inputEl.value = text;
@@ -1271,7 +1376,7 @@ function _renderArtifactPanelShell(scope, id) {
     // Header bar (always visible — collapse toggle + title)
     '<div style="display:flex;align-items:center;gap:6px;padding:8px 10px;border-bottom:1px solid var(--overlay-6);flex-shrink:0">' +
       '<button onclick="_ltArtifactToggleCollapse(\'' + scope + '\',\'' + esc(id) + '\')" ' +
-        'title="' + (collapsed ? '展开预览面板' : '收起预览面板') + '" ' +
+        'title="' + (collapsed ? 'Expand preview panel' : 'Collapse preview panel') + '" ' +
         'style="background:transparent;border:none;color:var(--text3);cursor:pointer;padding:2px;' +
           'display:flex;align-items:center;border-radius:4px"' +
         ' onmouseenter="this.style.background=\'var(--surface2)\'" ' +
@@ -1292,7 +1397,7 @@ function _renderArtifactPanelShell(scope, id) {
       // Content area (fills remaining space)
       '<div id="lt-artifact-body-' + key + '" style="flex:1;overflow:auto;padding:14px 16px;font-size:13px;line-height:1.55;color:var(--text)">' +
         '<div style="color:var(--text3);font-size:12px;text-align:center;padding:30px 10px;line-height:1.6">' +
-          '🪶 还没有产出文件<br><span style="font-size:11px;opacity:0.7">agent 调用 write_file / edit_file 后,<br>文件会出现在这里实时预览</span>' +
+          '🪶 No artifacts yet<br><span style="font-size:11px;opacity:0.7">After the agent calls write_file / edit_file,<br>files will appear here for live preview</span>' +
         '</div>' +
       '</div>') +
     '</div>';
@@ -1386,7 +1491,7 @@ window._ltArtifactRefresh = async function(scope, id) {
     tabsEl.innerHTML = '';
     if (toolbarEl) toolbarEl.style.display = 'none';
     bodyEl.innerHTML = '<div style="color:var(--text3);font-size:12px;text-align:center;padding:30px 10px;line-height:1.6">' +
-      '🪶 还没有产出文件<br><span style="font-size:11px;opacity:0.7">agent 调用 write_file / edit_file 后,<br>文件会出现在这里实时预览</span>' +
+      '🪶 No artifacts yet<br><span style="font-size:11px;opacity:0.7">After the agent calls write_file / edit_file,<br>files will appear here for live preview</span>' +
       '</div>';
     return;
   }
@@ -1449,11 +1554,11 @@ async function _ltArtifactRenderActive(scope, id) {
     var attachUrl = '/api/portal/attachment?path=' + encodeURIComponent(path);
     toolbarEl.innerHTML =
       '<span style="font-size:10px;color:var(--text3);font-family:monospace;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(path) + '">' + esc(path) + '</span>' +
-      '<a href="' + attachUrl + '" download title="下载" ' +
+      '<a href="' + attachUrl + '" download title="Download" ' +
         'style="background:transparent;border:1px solid var(--overlay-10);color:var(--text3);' +
           'padding:3px 6px;border-radius:5px;cursor:pointer;display:flex;align-items:center;text-decoration:none">' +
         '<span class="material-symbols-outlined" style="font-size:14px">download</span></a>' +
-      '<button onclick="_ltArtifactCopy(\'' + scope + '\',\'' + esc(id) + '\')" title="复制内容" ' +
+      '<button onclick="_ltArtifactCopy(\'' + scope + '\',\'' + esc(id) + '\')" title="Copy content" ' +
         'style="background:transparent;border:1px solid var(--overlay-10);color:var(--text3);' +
           'padding:3px 6px;border-radius:5px;cursor:pointer;display:flex;align-items:center">' +
         '<span class="material-symbols-outlined" style="font-size:14px">content_copy</span></button>';
@@ -1477,11 +1582,11 @@ async function _ltArtifactRenderActive(scope, id) {
   }
 
   // Markdown / code / text: fetch via existing /api/portal/file-preview endpoint
-  bodyEl.innerHTML = '<div style="color:var(--text3);font-size:11px;text-align:center;padding:20px">加载中…</div>';
+  bodyEl.innerHTML = '<div style="color:var(--text3);font-size:11px;text-align:center;padding:20px">Loading…</div>';
   try {
     var data = await api('POST', '/api/portal/file-preview', {path: path});
     if (!data || data.error) {
-      bodyEl.innerHTML = '<div style="color:var(--error);font-size:11px;padding:10px">加载失败: ' + esc((data && data.error) || '?') + '</div>';
+      bodyEl.innerHTML = '<div style="color:var(--error);font-size:11px;padding:10px">Load failed:' + esc((data && data.error) || '?') + '</div>';
       return;
     }
     if (kind === 'markdown' && (data.kind === 'markdown' || data.text)) {
@@ -1501,7 +1606,7 @@ async function _ltArtifactRenderActive(scope, id) {
       window._ltArtifactState[_ltArtifactKey(scope, id)]._content = data.text || '';
     }
   } catch (e) {
-    bodyEl.innerHTML = '<div style="color:var(--error);font-size:11px;padding:10px">加载失败: ' + esc(String(e)) + '</div>';
+    bodyEl.innerHTML = '<div style="color:var(--error);font-size:11px;padding:10px">Load failed:' + esc(String(e)) + '</div>';
   }
 }
 
@@ -1573,10 +1678,10 @@ function hideModal(name) {
 }
 
 function showChangePasswordModal() {
-  var html = '<h3 style="margin-bottom:16px">修改密码</h3>';
-  html += '<div class="form-group"><label>当前密码</label><input id="cpw-old" type="password" placeholder="Enter current password"></div>';
-  html += '<div class="form-group"><label>新密码</label><input id="cpw-new" type="password" placeholder="At least 6 characters"></div>';
-  html += '<div class="form-group"><label>确认新密码</label><input id="cpw-confirm" type="password" placeholder="Repeat new password"></div>';
+  var html = '<h3 style="margin-bottom:16px">Change Password</h3>';
+  html += '<div class="form-group"><label>Current password</label><input id="cpw-old" type="password" placeholder="Enter current password"></div>';
+  html += '<div class="form-group"><label>New password</label><input id="cpw-new" type="password" placeholder="At least 6 characters"></div>';
+  html += '<div class="form-group"><label>Confirm new password</label><input id="cpw-confirm" type="password" placeholder="Repeat new password"></div>';
   html += '<div class="form-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button>';
   html += '<button class="btn btn-primary" onclick="submitChangePassword()">Save</button></div>';
   showCustomModal(html);
@@ -1585,14 +1690,14 @@ async function submitChangePassword() {
   var oldPw = document.getElementById('cpw-old').value;
   var newPw = document.getElementById('cpw-new').value;
   var confirmPw = document.getElementById('cpw-confirm').value;
-  if (!oldPw || !newPw) { alert('请填写所有字段'); return; }
-  if (newPw.length < 6) { alert('新密码至少6位'); return; }
-  if (newPw !== confirmPw) { alert('两次密码不一致'); return; }
+  if (!oldPw || !newPw) { alert('Please fill all fields'); return; }
+  if (newPw.length < 6) { alert('New password must be at least 6 characters'); return; }
+  if (newPw !== confirmPw) { alert('Passwords do not match'); return; }
   var data = await api('POST', '/api/portal/admins/change-password', {
     user_id: _adminCtx.user_id, old_password: oldPw, new_password: newPw
   });
-  if (data && data.ok) { closeModal(); alert('密码修改成功'); }
-  else { alert((data && data.error) || '修改失败'); }
+  if (data && data.ok) { closeModal(); alert('Password changed successfully'); }
+  else { alert((data && data.error) || 'Change failed'); }
 }
 
 function logout() {
@@ -1987,7 +2092,7 @@ function _showResumeConfirm(task) {
       + '</div>';
   } else {
     btnRow = '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:18px">'
-      + '<button class="btn btn-ghost btn-sm" onclick="_resumeConfirmCancel()">取消</button>'
+      + '<button class="btn btn-ghost btn-sm" onclick="_resumeConfirmCancel()">Cancel</button>'
       + '<button class="btn btn-ghost btn-sm" style="color:var(--error)" '
       +   'onclick="_resumeConfirmDiscard(\'' + esc(task.id) + '\')">放弃此任务</button>'
       + '<button class="btn btn-primary btn-sm" '
@@ -2032,14 +2137,14 @@ async function _resumeConfirmContinue(taskId) {
       if (r.agent_id && typeof window.showAgentView === 'function') {
         try { window.showAgentView(r.agent_id, null); } catch(e){}
       }
-      if (window._toast) window._toast('已恢复任务,Agent 正在续跑', 'success');
+      if (window._toast) window._toast('Task resumed, Agent is continuing', 'success');
     } else {
-      alert('继续失败: ' + (r && r.error ? r.error : 'unknown'));
-      if (btn) { btn.disabled = false; btn.textContent = '▶ 继续'; }
+      alert('Continue failed:' + (r && r.error ? r.error : 'unknown'));
+      if (btn) { btn.disabled = false; btn.textContent = '▶ Resume'; }
     }
   } catch (e) {
-    alert('继续失败: ' + e.message);
-    if (btn) { btn.disabled = false; btn.textContent = '▶ 继续'; }
+    alert('Continue failed:' + e.message);
+    if (btn) { btn.disabled = false; btn.textContent = '▶ Resume'; }
   }
 }
 
@@ -2056,7 +2161,7 @@ async function _resumeConfirmDiscard(taskId) {
     _resumeConfirmCancel();
     _checkResumableTasks();
   } catch (e) {
-    alert('放弃失败: ' + e.message);
+    alert('Abort failed:' + e.message);
   }
 }
 
@@ -2069,12 +2174,12 @@ async function _resumeConfirmComplete(taskId) {
     if (r && r.ok) {
       _resumeConfirmCancel();
       _checkResumableTasks();
-      if (window._toast) window._toast('已确认完成', 'success');
+      if (window._toast) window._toast('Marked as done', 'success');
     } else {
-      alert('确认失败: ' + (r && r.error ? r.error : 'unknown'));
+      alert('Confirm failed:' + (r && r.error ? r.error : 'unknown'));
     }
   } catch (e) {
-    alert('确认失败: ' + e.message);
+    alert('Confirm failed:' + e.message);
   }
 }
 
@@ -2085,12 +2190,12 @@ async function _resumeConversationTask(taskId) {
     var r = await api('GET', '/api/portal/conversation-tasks/resumable');
     var task = (r && r.tasks || []).find(function(t){ return t.id === taskId; });
     if (!task) {
-      alert('任务记录不存在');
+      alert('Task record not found');
       return;
     }
     _showResumeConfirm(task);
   } catch (e) {
-    alert('无法加载任务详情: ' + e.message);
+    alert('Cannot load task details:' + e.message);
   }
 }
 
@@ -2217,8 +2322,8 @@ function renderCurrentView() {
       // duplicated (and the topbar itself is hidden in tech).
       if (!_techRcv) actionsEl.innerHTML =
           '<button class="btn btn-ghost btn-sm" onclick="editAgentProfile(\''+currentAgent+'\')"><span class="material-symbols-outlined" style="font-size:16px">edit</span> Settings</button>'
-        + '<button class="btn btn-ghost btn-sm" id="agent-inbox-btn" onclick="_showAgentInboxModal(\''+currentAgent+'\')"><span class="material-symbols-outlined" style="font-size:16px">inbox</span> ' + window.t('chat.inbox', '收件箱') + '<span class="badge notification hidden" id="agent-inbox-btn-badge" style="margin-left:6px">0</span></button>'
-        + '<button class="btn btn-ghost btn-sm" id="agent-ckpt-btn" onclick="_showAgentCheckpointsModal(\''+currentAgent+'\')"><span class="material-symbols-outlined" style="font-size:16px">bookmark</span> ' + window.t('chat.checkpoints', '检查点') + '<span class="badge notification hidden" id="agent-ckpt-btn-badge" style="margin-left:6px">0</span></button>'
+        + '<button class="btn btn-ghost btn-sm" id="agent-inbox-btn" onclick="_showAgentInboxModal(\''+currentAgent+'\')"><span class="material-symbols-outlined" style="font-size:16px">inbox</span> ' + window.t('chat.inbox', 'Inbox') + '<span class="badge notification hidden" id="agent-inbox-btn-badge" style="margin-left:6px">0</span></button>'
+        + '<button class="btn btn-ghost btn-sm" id="agent-ckpt-btn" onclick="_showAgentCheckpointsModal(\''+currentAgent+'\')"><span class="material-symbols-outlined" style="font-size:16px">bookmark</span> ' + window.t('chat.checkpoints', 'Checkpoints') + '<span class="badge notification hidden" id="agent-ckpt-btn-badge" style="margin-left:6px">0</span></button>'
         + '<button class="btn btn-ghost btn-sm" onclick="clearAgent(\''+currentAgent+'\')"><span class="material-symbols-outlined" style="font-size:16px">delete_sweep</span> Clear Chat</button>'
         + '<button class="btn btn-danger btn-sm" onclick="deleteAgent(\''+currentAgent+'\')"><span class="material-symbols-outlined" style="font-size:16px">delete</span> Delete</button>';
       // Refresh per-agent inbox + checkpoint counts on the buttons.
@@ -2296,7 +2401,7 @@ function renderCurrentView() {
       break;
     }
     case 'templates': {
-      titleEl.textContent = t('nav.rolesSkills', '专业领域');
+      titleEl.textContent = t('nav.rolesSkills', 'Domains');
       renderTemplateLibrary();
       break;
     }
@@ -2313,7 +2418,7 @@ function renderCurrentView() {
       break;
     }
     case 'projects': {
-      titleEl.textContent = t('nav.projects', '项目与任务');
+      titleEl.textContent = t('nav.projects', 'Projects & Tasks');
       renderProjectsHub();
       break;
     }
@@ -2323,16 +2428,16 @@ function renderCurrentView() {
       break;
     }
     case 'orchestration': {
-      titleEl.textContent = t('nav.orchestration', '编排');
+      titleEl.textContent = t('nav.orchestration', 'Orchestration');
       actionsEl.innerHTML =
-          '<button class="btn btn-sm" onclick="showView(\'canvas\', null)"><span class="material-symbols-outlined" style="font-size:14px">account_tree</span> 编排画布</button>'
-        + '<button class="btn btn-sm" onclick="renderOrchestrationPage()"><span class="material-symbols-outlined" style="font-size:14px">refresh</span> 刷新</button>';
+          '<button class="btn btn-sm" onclick="showView(\'canvas\', null)"><span class="material-symbols-outlined" style="font-size:14px">account_tree</span> Canvas</button>'
+        + '<button class="btn btn-sm" onclick="renderOrchestrationPage()"><span class="material-symbols-outlined" style="font-size:14px">refresh</span> Refresh</button>';
       renderOrchestrationPage();
       break;
     }
     case 'canvas': {
-      titleEl.textContent = t('nav.canvas', '编排画布');
-      actionsEl.innerHTML = '<button class="btn btn-sm" onclick="showView(\'orchestration\', null)"><span class="material-symbols-outlined" style="font-size:14px">arrow_back</span> 返回编排</button>';
+      titleEl.textContent = t('nav.canvas', 'Canvas');
+      actionsEl.innerHTML = '<button class="btn btn-sm" onclick="showView(\'orchestration\', null)"><span class="material-symbols-outlined" style="font-size:14px">arrow_back</span> Back to Orchestration</button>';
       renderCanvasPage();
       break;
     }
@@ -2343,7 +2448,7 @@ function renderCurrentView() {
       break;
     }
     case 'self-improvement': {
-      titleEl.textContent = t('page.selfImprove', 'Agent Self-Improvement (自我改进)');
+      titleEl.textContent = t('page.selfImprove', 'Agent Self-Improvement');
       try { renderSelfImprovement(); } catch(re) { console.error('renderSelfImprovement error:', re); c.innerHTML = '<div style="color:var(--error);padding:20px">Self-Improvement render error: '+re.message+'</div>'; }
       break;
     }
@@ -2368,22 +2473,22 @@ function renderCurrentView() {
       break;
     }
     case 'knowledge-memory': {
-      titleEl.textContent = t('nav.knowledge', '知识与记忆');
+      titleEl.textContent = t('nav.knowledge', 'Knowledge & Memory');
       renderKnowledgeMemoryHub();
       break;
     }
     case 'roles-skills': {
-      titleEl.textContent = t('nav.rolesSkills', '角色与技能');
+      titleEl.textContent = t('nav.rolesSkills', 'Roles & Skills');
       renderRolesSkillsHub();
       break;
     }
     case 'tools-approvals': {
-      titleEl.textContent = t('nav.toolsApprovals', '工具与审批');
+      titleEl.textContent = t('nav.toolsApprovals', 'Tools & Approvals');
       renderToolsApprovalsHub();
       break;
     }
     case 'integrations': {
-      titleEl.textContent = t('nav.integrations', '集成与通知');
+      titleEl.textContent = t('nav.integrations', 'Integrations & Notifications');
       // Add Channel is rendered inline by renderChannels and only on
       // the Channels tab — this prevents the button from leaking into
       // the Inbox tab when the user switches sub-tabs.
@@ -2396,7 +2501,7 @@ function renderCurrentView() {
       break;
     }
     case 'settings-hub': {
-      titleEl.textContent = t('nav.settings', '系统设置');
+      titleEl.textContent = t('nav.settings', 'System Settings');
       renderSettingsHub();
       break;
     }
@@ -2497,7 +2602,7 @@ async function _loadDomainKbOptions() {
       var kb = kbs.find(function(k){ return k.id === sel.value; });
       if (kb) {
         info.style.display = 'block';
-        info.innerHTML = '<b>'+esc(kb.name)+'</b> — '+esc(kb.description||'无描述')
+        info.innerHTML = '<b>'+esc(kb.name)+'</b> — '+esc(kb.description||'No description')
           + '<br>'+kb.doc_count+' 文档块 · Collection: '+esc(kb.collection)
           + (kb.tags.length ? '<br>标签: '+kb.tags.map(function(t){return esc(t)}).join(', ') : '');
       }
@@ -2657,26 +2762,73 @@ var _STATUS_META = {
 // aesthetic). Files at /static/robots/aether/aether_<role>.png.
 //
 // Direct hits (file exists for these roles):
+// 14 portraits, each tied to ONE canonical archetype. Stitch_33
+// established a 9-archetype persona model (STRATEGIST / ARCHITECT /
+// EXECUTOR / AUDITOR / VALIDATOR / ORCHESTRATOR / EVANGELIST /
+// BUILDER / ANALYST). Those 9 archetypes line up with 9 of our
+// portraits; the remaining 5 (designer / security / support /
+// researcher / general) cover specialist roles.
 var _AETHER_PORTRAITS = new Set([
-  'ceo', 'cto', 'coder', 'reviewer', 'tester', 'pm', 'marketing',
-  'developer', 'support', 'data', 'security', 'designer',
-  'researcher', 'general',
+  'ceo',         // STRATEGIST
+  'cto',         // ARCHITECT
+  'coder',       // EXECUTOR
+  'reviewer',    // AUDITOR
+  'tester',      // VALIDATOR (stitch_33 new)
+  'pm',          // ORCHESTRATOR (stitch_33 new)
+  'marketing',   // EVANGELIST (stitch_33 new)
+  'developer',   // BUILDER (stitch_33 new)
+  'data',        // ANALYST (stitch_33 new)
+  'designer',    // own role
+  'security',    // own role
+  'support',     // own role
+  'researcher',  // own role
+  'general',     // catch-all
 ]);
 
-// Alias map for our roles that don't have a literal portrait file —
-// reuse the nearest archetype.
+// Alias map: persona archetype names + legacy role names → canonical
+// portrait. Stitch_33's 9 archetypes get FIRST-CLASS unique portraits;
+// legacy/synthetic role names share the nearest archetype.
 var _AETHER_ALIASES = {
-  architect:         'cto',          // tech leadership
-  devops:            'security',     // ops + reliability vibe
-  product_architect: 'pm',           // PM-flavored
-  tech_expert:       'researcher',   // analytical
-  specialist:        'researcher',   // niche-domain expert
-  media:             'marketing',    // communicator class
-  meeting:           'support',      // friendly note-taker
+  // ── Stitch_33 archetype names (capitalised forms also map here) ──
+  strategist:        'ceo',         // → STRATEGIST
+  architect:         'cto',         // → ARCHITECT (stitch_33: ARCHITECT = The CTO)
+  executor:          'coder',       // → EXECUTOR
+  auditor:           'reviewer',    // → AUDITOR
+  validator:         'tester',      // → VALIDATOR (NEW)
+  orchestrator:      'pm',          // → ORCHESTRATOR (NEW)
+  evangelist:        'marketing',   // → EVANGELIST (NEW)
+  builder:           'developer',   // → BUILDER (NEW)
+  analyst:           'data',        // → ANALYST (NEW)
+
+  // ── Stitch_34 archetypes that share existing portraits ──
+  linguist:          'support',     // translator → support helper face
+  optimizer:         'coder',       // efficiency tuner → coder face
+  observer:          'reviewer',    // monitor → reviewer face
+  legal:             'security',    // compliance → security face
+  memory:            'researcher',  // historian → researcher face
+  network:           'marketing',   // connector → marketing face
+  trainer:           'pm',          // coach → pm face
+  forecaster:        'data',        // prophet → data face
+
+  // ── Legacy role names (share with closest archetype) ──
+  devops:            'security',    // shares with `security` base role
+  product_architect: 'pm',          // shares with ORCHESTRATOR/pm
+  tech_expert:       'researcher',  // shares with `researcher` base role
+  specialist:        'researcher',  // shares with `researcher` base role
+  media:             'marketing',   // shares with EVANGELIST/marketing
+  meeting:           'support',     // shares with `support` base role
+  qa:                'reviewer',    // shares with AUDITOR/reviewer
+  ops:               'security',    // shares with `devops`/`security`
+  researcher_v2:     'researcher',  // synthetic alias
 };
 
-function _aetherAvatarUrl(role) {
-  var r = String(role || '').toLowerCase();
+function _aetherAvatarUrl(roleOrAvatar) {
+  // Accepts either a bare role ("designer") or the robot_avatar form
+  // ("robot_designer"). The latter is what gets persisted on the
+  // agent record when the operator picks an avatar in the edit modal,
+  // so call sites can hand us either field interchangeably.
+  var r = String(roleOrAvatar || '').toLowerCase();
+  if (r.indexOf('robot_') === 0) r = r.slice(6);
   if (_AETHER_PORTRAITS.has(r)) {
     return '/static/robots/aether/aether_' + r + '.png';
   }
@@ -2689,13 +2841,22 @@ function _aetherAvatarUrl(role) {
   return '/static/robots/aether/aether_general.png';
 }
 
+// Resolve the right Aether portrait for an agent, preferring the
+// operator-picked robot_avatar over the inferred role. Use this from
+// any tech-mode renderer that displays an agent's face.
+function _aetherAvatarFor(agent) {
+  if (!agent) return _aetherAvatarUrl('general');
+  return _aetherAvatarUrl(agent.robot_avatar || agent.role || 'general');
+}
+window._aetherAvatarFor = _aetherAvatarFor;
+
 function _renderAgentCardTech(a) {
   var role = (a.role || 'general').toLowerCase();
   var statusKey = (a.status || 'offline').toLowerCase();
   var sm = _STATUS_META[statusKey] || _STATUS_META.offline;
   var prof = a.profile || {};
   // Prefer realistic aether portrait; fall back to pixel-art robot.
-  var aether = _aetherAvatarUrl(role);
+  var aether = _aetherAvatarFor(a);
   var avatarUrl = aether || _robotIconUrl(a.robot_avatar || ('robot_' + (a.role || 'general')));
   var isAether = !!aether;
 
@@ -3217,7 +3378,10 @@ function renderSettingsHubTech() {
     { id: 'config',      label: 'Global Config',icon: 'settings' },
     { id: 'providers',   label: 'LLM Providers',icon: 'cloud_queue' },
     { id: 'mcp',         label: 'MCP Servers',  icon: 'extension' },
-    { id: 'llm_tiers',   label: 'LLM Tiers',    icon: 'stacked_line_chart' },
+    // 'llm_tiers' tab hidden — replaced by per-agent LLM Router. Render
+    // function (renderLLMTiers) and dispatch case kept below for any
+    // deep-links / external nav.
+    // { id: 'llm_tiers',   label: 'LLM Tiers',    icon: 'stacked_line_chart' },
     { id: 'nodeconfig',  label: 'Node Config',  icon: 'tune' },
     { id: 'nodes',       label: 'Worker Nodes', icon: 'device_hub' },
     { id: 'audit',       label: 'Audit Log',    icon: 'assignment' },
@@ -3573,14 +3737,12 @@ async function renderApprovalsTech() {
              '</div>' +
              (isPending
                ? '<div class="tc-row-sm" style="gap:4px;flex-shrink:0">' +
-                   (typeof approveItem === 'function'
-                     ? '<button class="tc-btn tc-btn-primary tc-btn-sm" onclick="approveItem(\'' + esc(a.id || '') + '\')">' +
-                         '<span class="material-symbols-outlined" style="font-size:14px">check</span> Approve</button>'
-                     : '') +
-                   (typeof denyItem === 'function'
-                     ? '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="denyItem(\'' + esc(a.id || '') + '\')">' +
-                         '<span class="material-symbols-outlined" style="font-size:14px">close</span> Deny</button>'
-                     : '') +
+                   '<button class="tc-btn tc-btn-primary tc-btn-sm" onclick="approveRequest(\'' + esc(a.approval_id || a.id || '') + '\')" title="Approve this request once">' +
+                     '<span class="material-symbols-outlined" style="font-size:14px">check</span> Approve</button>' +
+                   '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="approveRequest(\'' + esc(a.approval_id || a.id || '') + '\',\'session\')" title="Approve and skip future prompts in this session">' +
+                     '<span class="material-symbols-outlined" style="font-size:14px">all_inclusive</span> Always</button>' +
+                   '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="denyRequest(\'' + esc(a.approval_id || a.id || '') + '\')" style="color:var(--error)">' +
+                     '<span class="material-symbols-outlined" style="font-size:14px">close</span> Deny</button>' +
                  '</div>'
                : '<span class="tc-chip" style="font-size:9px">' + esc(String(a.status || '').toUpperCase()) + '</span>') +
            '</div>';
@@ -3648,52 +3810,98 @@ async function renderNodesTech(container) {
     return h > 0 ? h + 'h ' + m + 'm' : m + 'm';
   };
 
+  // Stitch_26-style bento card. Same recipe as RAG / Wiki — glass
+  // panel + ghost icon + small icon-square + status pill + h3 + stats
+  // grid + action row. Self / online / error nodes use distinct accent
+  // tints so the operator can scan health at a glance.
   var rows = ns.map(function(n) {
-    var statusCls = n.is_self || n.status === 'online' ? 'online'
-                  : n.status === 'error' ? 'error' : 'busy';
-    var statusLabel = n.is_self ? 'LOCAL'
-                    : n.status === 'online' ? 'ONLINE'
-                    : n.status === 'error' ? 'ERROR' : (n.status || 'OFFLINE').toUpperCase();
+    var isSelf = !!n.is_self;
+    var isOnline = !isSelf && n.status === 'online';
+    var isError = !isSelf && n.status === 'error';
+    var statusLabel = isSelf ? 'LOCAL'
+                    : isOnline ? 'ONLINE'
+                    : isError ? 'ERROR'
+                    : (n.status || 'OFFLINE').toUpperCase();
+    var accent, accentRGB;
+    if (isSelf) { accent = 'var(--cyber-lime, #adff2f)'; accentRGB = '173,255,47'; }
+    else if (isError) { accent = 'var(--error)'; accentRGB = '255,180,171'; }
+    else if (isOnline) { accent = 'var(--secondary)'; accentRGB = '137,206,255'; }
+    else { accent = 'var(--outline)'; accentRGB = '144,143,160'; }
     var agentCount = (n.agents || []).length;
     var lastSeen = n.last_seen ? new Date(n.last_seen * 1000).toLocaleTimeString() : '—';
+    var nodeIdShort = (n.node_id || '').length > 18 ? (n.node_id || '').slice(0, 16) + '…' : (n.node_id || '');
 
-    return '<div class="tc-card">' +
-             '<div class="tc-row-spread" style="margin-bottom:var(--s-sm)">' +
-               '<div class="tc-row-sm">' +
-                 '<span class="tc-status-dot ' + statusCls + '" style="width:10px;height:10px"></span>' +
-                 '<span style="font-size:14px;font-weight:600">' + esc(n.name || n.node_id || 'Node') + '</span>' +
-                 '<span class="tc-chip tc-chip-' + (statusCls === 'online' ? 'success' : 'neutral') + '" style="font-size:9px">' + esc(statusLabel) + '</span>' +
-               '</div>' +
-               (n.is_self ? '' :
-                 '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="if(window.confirm(\'Unregister node \\\'' + esc(n.name || n.node_id) + '\\\'?\'))fetch(\'/api/portal/nodes/\'+encodeURIComponent(\'' + esc(n.node_id) + '\'),{method:\'DELETE\'}).then(function(){renderCurrentView();})">' +
-                   '<span class="material-symbols-outlined" style="font-size:14px">delete</span></button>') +
+    return '<div class="tc-card-glass" style="' +
+             'padding:var(--s-lg);display:flex;flex-direction:column;gap:14px;' +
+             'position:relative;overflow:hidden;border-top:1px solid rgba(255,255,255,0.15);' +
+             (isOnline || isSelf ? 'box-shadow:0 0 15px -3px rgba(' + accentRGB + ',0.30);' : '') +
+           '">' +
+             // Ghost hub icon top-right
+             '<div style="position:absolute;top:0;right:0;padding:14px;pointer-events:none">' +
+               '<span class="material-symbols-outlined" style="font-size:64px;color:rgba(' + accentRGB + ',0.18);margin:-12px -12px 0 0">' + (isSelf ? 'home' : 'lan') + '</span>' +
              '</div>' +
-             '<div class="tc-grid tc-grid-3" style="gap:var(--s-md);margin-top:var(--s-sm)">' +
+             // Header: icon-square + status pill
+             '<div style="display:flex;justify-content:space-between;align-items:flex-start;position:relative">' +
+               '<div style="padding:8px;background:rgba(' + accentRGB + ',0.10);border:1px solid rgba(' + accentRGB + ',0.20);border-radius:var(--r-md);display:inline-flex">' +
+                 '<span class="material-symbols-outlined" style="font-size:22px;color:' + accent + ';font-variation-settings:\'FILL\' 1">' + (isSelf ? 'computer' : 'dns') + '</span>' +
+               '</div>' +
+               '<div style="display:flex;align-items:center;gap:6px;background:var(--surface-container-high);padding:4px 10px;border-radius:9999px;border:1px solid rgba(255,255,255,0.05)">' +
+                 '<span style="width:6px;height:6px;border-radius:50%;background:' + accent + ';' + (isOnline || isSelf ? 'animation:pulse-dot 2s infinite ease-in-out;box-shadow:0 0 6px ' + accent + ';' : '') + '"></span>' +
+                 '<span class="tc-mono-label" style="font-size:10px;color:var(--on-surface);letter-spacing:0.05em">' + esc(statusLabel) + '</span>' +
+               '</div>' +
+             '</div>' +
+             // Title + subtitle
+             '<div style="position:relative">' +
+               '<h3 style="font-family:var(--font-display);font-size:20px;font-weight:600;color:var(--on-surface);margin:0;letter-spacing:-0.01em;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(n.name || n.node_id || 'Node') + '</h3>' +
+               '<p class="tc-mono-label" style="font-size:10px;color:var(--on-surface-variant);margin:4px 0 0;font-family:var(--font-mono)">ID: ' + esc(nodeIdShort) + '</p>' +
+             '</div>' +
+             // 2-col stats grid
+             '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:12px 0;border-top:1px solid rgba(255,255,255,0.05);border-bottom:1px solid rgba(255,255,255,0.05)">' +
                '<div>' +
-                 '<div class="tc-mono-label" style="font-size:9px">NODE ID</div>' +
-                 '<div style="font-family:var(--font-mono);font-size:11px;color:var(--on-surface);word-break:break-all">' + esc(n.node_id || '') + '</div>' +
+                 '<p class="tc-mono-label" style="font-size:10px;color:var(--outline);margin:0 0 4px">AGENTS</p>' +
+                 '<p style="font-family:var(--font-body);font-size:18px;font-weight:600;color:' + accent + ';margin:0">' + agentCount + '</p>' +
                '</div>' +
                '<div>' +
-                 '<div class="tc-mono-label" style="font-size:9px">AGENTS</div>' +
-                 '<div style="font-size:14px;font-weight:600">' + agentCount + '</div>' +
+                 '<p class="tc-mono-label" style="font-size:10px;color:var(--outline);margin:0 0 4px">LAST SEEN</p>' +
+                 '<p style="font-family:var(--font-mono);font-size:13px;color:var(--on-surface);margin:0">' + esc(lastSeen) + '</p>' +
                '</div>' +
-               '<div>' +
-                 '<div class="tc-mono-label" style="font-size:9px">LAST SEEN</div>' +
-                 '<div style="font-family:var(--font-mono);font-size:11px">' + esc(lastSeen) + '</div>' +
-               '</div>' +
+             '</div>' +
+             // Footer: REMOVE button (omitted for self)
+             '<div style="display:flex;gap:8px;margin-top:auto">' +
+               (isSelf
+                 ? '<button class="tc-mono-label" disabled style="flex:1;padding:8px 0;background:rgba(173,255,47,0.08);color:var(--cyber-lime, #adff2f);border:1px solid rgba(173,255,47,0.20);border-radius:var(--r-md);font-size:10px;cursor:default;letter-spacing:0.05em">THIS MACHINE</button>'
+                 : '<button onclick="if(window.confirm(\'Unregister node \\\'' + esc(n.name || n.node_id) + '\\\'?\'))fetch(\'/api/portal/nodes/\'+encodeURIComponent(\'' + esc(n.node_id) + '\'),{method:\'DELETE\'}).then(function(){renderCurrentView();})" class="tc-mono-label" ' +
+                          'style="flex:1;padding:8px 0;background:rgba(255,180,171,0.06);border:1px solid rgba(255,180,171,0.20);border-radius:var(--r-md);color:var(--error);font-size:10px;cursor:pointer;letter-spacing:0.05em;display:inline-flex;align-items:center;justify-content:center;gap:6px;transition:all 0.15s" ' +
+                          'onmouseover="this.style.background=\'rgba(255,180,171,0.14)\'" onmouseout="this.style.background=\'rgba(255,180,171,0.06)\'">' +
+                     '<span class="material-symbols-outlined" style="font-size:14px">delete</span> REMOVE' +
+                   '</button>') +
              '</div>' +
            '</div>';
   }).join('');
 
-  c.innerHTML =
-    '<div class="tc-row-spread" style="margin-bottom:var(--s-md)">' +
-      '<div class="tc-row-sm">' +
-        '<span class="tc-mono-label">' + ns.length + ' Compute Nodes</span>' +
+  // Dashed "Connect Node" tile — sits in the same grid so the add
+  // affordance is visually peer to the node cards (matches the dashed
+  // Add Workflow pattern in the orchestration list).
+  var addCard =
+    '<div onclick="showModal(\'add-node\')" ' +
+         'onmouseover="this.style.borderColor=\'rgba(192,193,255,0.50)\';this.style.background=\'rgba(192,193,255,0.05)\'" ' +
+         'onmouseout="this.style.borderColor=\'\';this.style.background=\'\'" ' +
+         'style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;min-height:240px;border:2px dashed rgba(192,193,255,0.25);border-radius:var(--r-lg);background:transparent;cursor:pointer;transition:all 0.18s;padding:var(--s-lg);text-align:center">' +
+      '<div style="width:48px;height:48px;border-radius:9999px;background:rgba(192,193,255,0.10);border:1px solid rgba(192,193,255,0.30);display:flex;align-items:center;justify-content:center">' +
+        '<span class="material-symbols-outlined" style="color:var(--primary);font-size:24px">add</span>' +
       '</div>' +
+      '<div class="tc-mono-label" style="color:var(--primary);font-size:11px;letter-spacing:0.05em">CONNECT NODE</div>' +
+      '<div class="tc-text-dim" style="font-size:11px;line-height:1.5;max-width:200px">Register a remote machine to scale agent capacity across hosts</div>' +
+    '</div>';
+
+  c.innerHTML =
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-md);gap:var(--s-md);flex-wrap:wrap">' +
+      '<span class="tc-mono-label" style="color:var(--on-surface-variant)">' + ns.length + ' COMPUTE NODE' + (ns.length === 1 ? '' : 'S') + '</span>' +
     '</div>' +
-    (ns.length === 0
-      ? '<div class="tc-card tc-text-dim" style="text-align:center;padding:var(--s-xl)">No nodes registered.</div>'
-      : '<div class="tc-stack-sm">' + rows + '</div>');
+    '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:var(--s-lg)">' +
+      rows +
+      addCard +
+    '</div>';
 }
 window.renderNodesTech = renderNodesTech;
 
@@ -4074,7 +4282,7 @@ function _dashLoadActivityAndQueue(projects, epoch) {
             title: t.title || '(untitled)',
             step_name: '',
             priority: t.priority || 0,
-            context: '直派任务',
+            context: 'Direct Dispatch Task',
             click: 'showAgentView(\''+a.id+'\',null)',
           });
         }
@@ -4120,7 +4328,7 @@ function _dashLoadActivityAndQueue(projects, epoch) {
               ts: ts, agent_id: a.id,
               icon: 'check_circle', color: 'var(--success)',
               verb: '完成了任务', label: title,
-              context: '直派任务',
+              context: 'Direct Dispatch Task',
               click: 'showAgentView(\''+a.id+'\',null)',
             });
           }
@@ -4141,7 +4349,7 @@ window._ltShowLearningDetail = function(agentId, learningId) {
   var hist = (window._ltLearningHistoryCache || {})[agentId] || [];
   var entry = hist.find(function(h){ return h.id === learningId; });
   if (!entry) {
-    window._toast && window._toast('未找到学习记录,可能已过期', 'warning');
+    window._toast && window._toast('No learning record found (may have expired)', 'warning');
     return;
   }
   var modal = document.createElement('div');
@@ -4261,7 +4469,7 @@ function renderDashboard() {
     // Agent Chat all use these). Fall back to the legacy pixel-art
     // robot only if _aetherAvatarUrl can't resolve the role.
     if (typeof _aetherAvatarUrl === 'function') {
-      var aether = _aetherAvatarUrl(a.role || 'general');
+      var aether = _aetherAvatarFor(a);
       if (aether) return aether;
     }
     var rid = a.robot_avatar || ('robot_' + (a.role || 'general'));
@@ -4545,7 +4753,7 @@ function renderDashboard() {
             '<div style="display:flex;gap:6px;justify-content:flex-end;margin-top:8px">' +
               '<button onclick="reviewStep(\''+esc(it.proj_id)+'\',\''+esc(it.task_id)+'\',\''+esc(it.step.id)+'\',\'reject\')" style="font-size:11px;background:rgba(239,68,68,0.15);color:#ef4444;border:1px solid rgba(239,68,68,0.4);border-radius:4px;padding:4px 12px;cursor:pointer;font-weight:600">✗ 驳回</button>' +
               '<button onclick="reviewStep(\''+esc(it.proj_id)+'\',\''+esc(it.task_id)+'\',\''+esc(it.step.id)+'\',\'approve\')" style="font-size:11px;background:#22c55e;color:#000;border:none;border-radius:4px;padding:4px 14px;cursor:pointer;font-weight:700">✓ 通过</button>' +
-              '<button onclick="openProject(\''+esc(it.proj_id)+'\')" style="font-size:11px;background:transparent;color:var(--text3);border:1px solid var(--overlay-10);border-radius:4px;padding:4px 10px;cursor:pointer">查看</button>' +
+              '<button onclick="openProject(\''+esc(it.proj_id)+'\')" style="font-size:11px;background:transparent;color:var(--text3);border:1px solid var(--overlay-10);border-radius:4px;padding:4px 10px;cursor:pointer">View</button>' +
             '</div>' +
           '</div>';
         }).join('');
@@ -4645,7 +4853,7 @@ function renderDashboardTech() {
     // Agent Chat all use these). Fall back to the legacy pixel-art
     // robot only if _aetherAvatarUrl can't resolve the role.
     if (typeof _aetherAvatarUrl === 'function') {
-      var aether = _aetherAvatarUrl(a.role || 'general');
+      var aether = _aetherAvatarFor(a);
       if (aether) return aether;
     }
     var rid = a.robot_avatar || ('robot_' + (a.role || 'general'));
@@ -4951,7 +5159,7 @@ function renderAgentChat(agentId) {
       '<button class="btn btn-sm btn-primary" onclick="(document.getElementById(\'agent-quick-provider-' + agentId + '\')||{}).focus&&document.getElementById(\'agent-quick-provider-' + agentId + '\').focus()" ' +
         'style="font-size:11px">选择 LLM</button>' +
     '</div>';
-  var _inputPlaceholder = _hasLLM ? t('chat.placeholder', 'Direct Agent Tasking...') : '🚫 请先为该 Agent 选择 LLM';
+  var _inputPlaceholder = _hasLLM ? t('chat.placeholder', 'Direct Agent Tasking...') : '🚫 Please select an LLM for this Agent first';
   var _inputDisabledAttrs = _hasLLM ? '' : ' disabled aria-disabled="true"';
   var _inputDisabledStyle = _hasLLM ? '' : 'opacity:0.4;cursor:not-allowed;';
   c.innerHTML = '' +
@@ -4969,7 +5177,7 @@ function renderAgentChat(agentId) {
           // removed 2026-04-27 — every agent is V2 by default now, so
           // the distinction no longer means anything to the user.
           '<button class="btn btn-ghost btn-sm" onclick="showSoulEditor(\'' + agentId + '\')" title="Edit SOUL.md" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" style="font-size:14px">auto_awesome</span> <span data-i18n="chat.soul">SOUL</span></button>' +
-          '<button class="btn btn-ghost btn-sm" onclick="showThinkingPanel(\'' + agentId + '\')" title="' + t('chat.think.tooltip') + '" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" style="font-size:14px">psychology</span> <span data-i18n="chat.think">Think</span></button>' +
+          '<button class="btn btn-ghost btn-sm" onclick="showThinkingPanel(\'' + agentId + '\')" title="Summarize the last N turns and insert as an assistant message" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" style="font-size:14px">summarize</span> Summarize</button>' +
           '<button id="tts-btn-' + agentId + '" class="btn btn-ghost btn-sm" onclick="_toggleTTS(\'' + agentId + '\')" title="自动朗读新消息 (Auto TTS)" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" style="font-size:14px;color:var(--text3)">volume_up</span></button>' +
           '<button class="btn btn-ghost btn-sm" onclick="wakeAgent(\'' + agentId + '\')" title="' + t('chat.wake.tooltip') + '" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" style="font-size:14px">notifications_active</span> <span data-i18n="chat.wake">Wake</span></button>' +
           '<button id="rag-btn-' + agentId + '" class="btn btn-ghost btn-sm" onclick="_toggleRagOnly(\'' + agentId + '\')" title="' + t('chat.rag.off') + '" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" id="rag-icon-' + agentId + '" style="font-size:14px;color:var(--text3)">search</span> <span data-i18n="chat.rag">RAG</span></button>' +
@@ -5128,7 +5336,7 @@ function renderAgentChatTech(agentId) {
   var agRole = esc(ag.role || 'general');
   var agName = esc(ag.name || 'Agent');
   var agDisplayName = agRole + '-' + agName;
-  var avatarUrl = _aetherAvatarUrl(ag.role || 'general');
+  var avatarUrl = _aetherAvatarFor(ag);
   var modelShort = (ag.model || 'default').split('/').pop().split(':')[0];
   if (modelShort.length > 24) modelShort = modelShort.slice(0, 22) + '..';
 
@@ -5188,12 +5396,17 @@ function renderAgentChatTech(agentId) {
       '</div>' +
     '</div>' +
 
-    // ── Action sub-bar (Soul / Think / TTS / Wake / RAG) ──
+    // ── Action sub-bar (Soul / Summarize / TTS / Wake / RAG) ──
+    // Renamed Think → Summarize 2026-05-05: the underlying call is
+    // `/think-now` which summarizes the recent N turns and inserts the
+    // summary as an assistant bubble (NOT real-time reasoning). The
+    // live-thinking display lives on the Thinking toggle next to the
+    // chat input.
     '<div class="agent-chat-actbar">' +
       '<button class="ach-act" onclick="showSoulEditor(\'' + agentId + '\')" title="Edit SOUL.md">' +
         '<span class="material-symbols-outlined">auto_awesome</span>Soul</button>' +
-      '<button class="ach-act" onclick="showThinkingPanel(\'' + agentId + '\')" title="Open thinking panel">' +
-        '<span class="material-symbols-outlined">psychology</span>Think</button>' +
+      '<button class="ach-act" onclick="showThinkingPanel(\'' + agentId + '\')" title="Summarize the last N turns and insert the summary as an assistant message">' +
+        '<span class="material-symbols-outlined">summarize</span>Summarize</button>' +
       '<button id="tts-btn-' + agentId + '" class="ach-act" onclick="_toggleTTS(\'' + agentId + '\')" title="Auto TTS">' +
         '<span class="material-symbols-outlined">volume_up</span>TTS</button>' +
       '<button class="ach-act" onclick="wakeAgent(\'' + agentId + '\')" title="Wake agent">' +
@@ -5734,8 +5947,8 @@ function renderExecutionSteps(agentId, plan) {
   var _statusChip = function(status) {
     var cfg = {
       'completed':   {bg:'rgba(63,185,80,0.15)',  fg:'#3fb950', label:'done'},
-      'in_progress': {bg:'var(--primary-tint-15)', fg:'var(--primary)', label:'进行中'},
-      'failed':      {bg:'rgba(239,68,68,0.15)',  fg:'#ef4444', label:'失败'},
+      'in_progress': {bg:'var(--primary-tint-15)', fg:'var(--primary)', label:'In Progress'},
+      'failed':      {bg:'rgba(239,68,68,0.15)',  fg:'#ef4444', label:'Failed'},
       'skipped':     {bg:'var(--surface3)',        fg:'var(--text3)', label:'跳过'},
       'pending':     {bg:'var(--surface3)',        fg:'var(--text3)', label:'待办'},
     }[status] || {bg:'var(--surface3)',fg:'var(--text3)',label:status};
@@ -5850,7 +6063,7 @@ async function _resumeStaleStep(agentId, stepId) {
     _suppressStaleUI(agentId, stepId);
     loadExecutionSteps(agentId);
   } catch (e) {
-    alert('继续失败: ' + (e.message || e));
+    alert('Continue failed:' + (e.message || e));
   }
 }
 
@@ -5864,7 +6077,7 @@ async function _skipStaleStep(agentId, stepId) {
     _suppressStaleUI(agentId, stepId);
     loadExecutionSteps(agentId);
   } catch (e) {
-    alert('跳过失败: ' + (e.message || e));
+    alert('Skip failed:' + (e.message || e));
   }
 }
 
@@ -5988,7 +6201,7 @@ async function quickSwitchModel(agentId) {
   // reject). If user picked a provider with no models, just refresh the
   // dropdown without persisting; if both empty, clear binding explicitly.
   if ((provider && !model) || (!provider && model)) {
-    _toast && _toast('该 Provider 暂无可用模型,请选其他 Provider', 'warning');
+    _toast && _toast('No models available for this Provider, please choose another', 'warning');
     return;
   }
   await api('POST', '/api/portal/agent/' + agentId + '/profile', { provider: provider, model: model });
@@ -6001,7 +6214,7 @@ async function quickSwitchModel(agentId) {
   var inputEl = document.getElementById('chat-input-' + agentId);
   if (inputEl) {
     inputEl.disabled = !hasLLM;
-    inputEl.placeholder = hasLLM ? 'Direct Agent Tasking...' : '🚫 请先为该 Agent 选择 LLM';
+    inputEl.placeholder = hasLLM ? 'Direct Agent Tasking...' : '🚫 Please select an LLM for this Agent first';
   }
   var banner = document.getElementById('llm-missing-banner-' + agentId);
   if (banner && hasLLM) banner.remove();
@@ -6686,7 +6899,7 @@ window._deleteBubble = async function(btnEl, agentId, role) {
     var data = {};
     try { data = await resp.json(); } catch(_) {}
     if (!data.ok) {
-      alert((data.error || '删除失败') + (data.event_removed === false && data.message_removed === false ? ' (未找到匹配)' : ''));
+      alert((data.error || 'Delete failed') + (data.event_removed === false && data.message_removed === false ? ' (未找到匹配)' : ''));
       return;
     }
     // Remove the DOM node. For assistant bubbles we remove the whole row
@@ -6701,7 +6914,7 @@ window._deleteBubble = async function(btnEl, agentId, role) {
     if (target && target.parentNode) target.parentNode.removeChild(target);
   } catch (e) {
     console.error('_deleteBubble error', e);
-    alert('删除失败: ' + e.message);
+    alert('Delete failed:' + e.message);
   }
 };
 
@@ -6868,7 +7081,7 @@ function _renderFileCard(ref) {
       } else if (typeof window.previewFile === 'function') {
         window.previewFile(localPath, name, previewKind);
       } else {
-        alert('预览功能未就绪');
+        alert('Preview not ready');
       }
     };
     a.appendChild(prev);
@@ -7229,7 +7442,7 @@ async function _confirmIframeLogin(agentId, btn) {
       btn.disabled = false;
     }
   } catch(e) {
-    if (status) status.textContent = '⚠ ' + (e.message || '请求失败');
+    if (status) status.textContent = '⚠ ' + (e.message || 'Request failed');
     btn.disabled = false;
   }
 }
@@ -7267,7 +7480,7 @@ async function _submitLoginCredentials(agentId, btn) {
       btn.disabled = false;
     }
   } catch(e) {
-    if (status) status.textContent = '⚠ ' + (e.message || '请求失败');
+    if (status) status.textContent = '⚠ ' + (e.message || 'Request failed');
     btn.disabled = false;
   }
 }
@@ -7317,11 +7530,11 @@ async function _retryLogin(btn) {
           '<span style="color:#3b82f6;font-size:13px">已重置 ' + esc(siteName || url) + ' 的登录限制，请重新指示 Agent 执行任务</span></div>';
       }
     } else {
-      btn.textContent = '重试失败';
+      btn.textContent = 'Retry failed';
       btn.disabled = false;
     }
   } catch(e) {
-    btn.textContent = '重试失败';
+    btn.textContent = 'Retry failed';
     btn.disabled = false;
   }
 }
@@ -7689,8 +7902,11 @@ async function _classifyIntentWithTimeout(agentId, rawText) {
 // Scope key:
 //   solo:    "agent:{agentId}"
 //   meeting: "meeting:{meetingId}"
-// (Project chat does NOT use this queue — see UX notes; each user
-// message there is its own fan-out event.)
+//   project: "project:{projectId}"  (added 2026-05-05; auto-flushes when
+//            ALL agents in window._projectTyping[projId].pending have
+//            posted their reply. Avoids the "user double-fans-out 3
+//            messages while agents still thinking" UX where each
+//            agent gets interrupted mid-turn.)
 // ─────────────────────────────────────────────────────────────────────
 window._pendingQueue = window._pendingQueue || {};
 var _PENDING_QUEUE_CAP = 5;
@@ -7726,6 +7942,11 @@ function _isScopeBusy(scope, id) {
         && cur.active_speakers.length > 0) return true;
     return false;
   }
+  if (scope === 'project') {
+    var pSlot = (window._projectTyping || {})[id];
+    if (pSlot && pSlot.pending && Object.keys(pSlot.pending).length > 0) return true;
+    return false;
+  }
   return false;
 }
 
@@ -7741,6 +7962,10 @@ function _pendingQueueHostInfo(scope, id) {
   if (scope === 'meeting') {
     var meetingInput = document.getElementById('mtg-msg-input');
     return meetingInput ? { input: meetingInput, host: meetingInput.parentElement } : null;
+  }
+  if (scope === 'project') {
+    var projInput = document.getElementById('project-chat-input-' + id);
+    return projInput ? { input: projInput, host: projInput.parentElement } : null;
   }
   return null;
 }
@@ -7764,8 +7989,10 @@ function _renderPendingQueue(scope, id) {
     info.host.insertBefore(existing, info.input);
   }
   var hint = scope === 'meeting'
-    ? '将在下一轮 round 开始前合并注入'
-    : '将在当前回合结束后合并发送';
+    ? 'Will merge into next round'
+    : (scope === 'project'
+        ? 'Will fan out as one merged message after current replies'
+        : 'Will send as one merged turn after current reply');
   var header = '<div style="color:var(--text3);font-size:10px;display:flex;justify-content:space-between">'
     + '<span>📋 待发送 ' + items.length + '/' + _PENDING_QUEUE_CAP + ' 条</span>'
     + '<span style="opacity:0.7">' + hint + '</span>'
@@ -7854,6 +8081,24 @@ async function _pendingQueueFlush(scope, id) {
     } catch (e) {
       console.error('flush meeting interjection failed', e);
     }
+  } else if (scope === 'project') {
+    // Inject merged text + attachments into the project chat input,
+    // then call sendProjectMsg with the skip-queue flag so we bypass
+    // the busy gate (the gate is what caused us to enqueue in the
+    // first place; without skip we'd recurse). The send fn handles
+    // the user-bubble render, @mention parsing, and respondent
+    // tracking like a normal send.
+    var pInputEl = document.getElementById('project-chat-input-' + id);
+    if (!pInputEl) return;
+    pInputEl.value = combinedText;
+    try { _autoGrowChatInput(pInputEl); } catch(_){}
+    var pList = _projAttachList(id);
+    pList.length = 0;
+    combinedAttachments.forEach(function(a){ pList.push(a); });
+    try { _renderProjAttachPreview(id); } catch(_){}
+    window._projSkipQueueOnce = window._projSkipQueueOnce || {};
+    window._projSkipQueueOnce[id] = true;
+    try { await sendProjectMsg(id); } catch(e) { console.error('flush sendProjectMsg failed', e); }
   }
 }
 window._pendingQueueFlush = _pendingQueueFlush;
@@ -7864,7 +8109,7 @@ async function sendAgentMsg(agentId) {
   if(!inputEl) return;
   // Hard block: if the input is disabled (agent has no LLM), refuse to send.
   if (inputEl.disabled) {
-    alert('该 Agent 还没有配置 LLM。请先从顶部选择 provider / model。');
+    alert('This Agent has no LLM configured. Please choose provider / model at the top.');
     return;
   }
   var rawText = inputEl.value.trim();
@@ -7985,8 +8230,8 @@ async function sendAgentMsg(agentId) {
       var resp = await api('POST', '/api/portal/agent/' + encodeURIComponent(agentId) + '/recall',
         { query: slash.recallQuery });
       if (!resp || resp.error) {
-        addChatBubble(agentId, 'assistant', '❌ 回忆失败: ' + ((resp&&resp.error)||'?'), undefined, 'slash-cmd');
-        if (window._toast) window._toast('回忆失败: ' + ((resp&&resp.error)||'?'), 'error');
+        addChatBubble(agentId, 'assistant', '❌ Recall failed:' + ((resp&&resp.error)||'?'), undefined, 'slash-cmd');
+        if (window._toast) window._toast('Recall failed:' + ((resp&&resp.error)||'?'), 'error');
         return;
       }
       // Backend already returns the full markdown reply — render it as
@@ -7996,8 +8241,8 @@ async function sendAgentMsg(agentId) {
         window._toast('🔍 找到 ' + (resp.fact_count||0) + ' 条 L3 + ' + (resp.wiki_count||0) + ' 条 wiki', 'success');
       }
     } catch(e) {
-      addChatBubble(agentId, 'assistant', '❌ 回忆失败: ' + e, undefined, 'slash-cmd');
-      if (window._toast) window._toast('回忆失败: ' + e, 'error');
+      addChatBubble(agentId, 'assistant', '❌ Recall failed:' + e, undefined, 'slash-cmd');
+      if (window._toast) window._toast('Recall failed:' + e, 'error');
     }
     return;
   }
@@ -8012,8 +8257,8 @@ async function sendAgentMsg(agentId) {
       var resp = await api('POST', '/api/portal/agent/' + encodeURIComponent(agentId) + '/remember',
         { fact: slash.rememberFact });
       if (!resp || resp.error) {
-        addChatBubble(agentId, 'assistant', '❌ 记忆保存失败: ' + ((resp&&resp.error)||'?'), undefined, 'slash-cmd');
-        if (window._toast) window._toast('记忆保存失败: ' + ((resp&&resp.error)||'?'), 'error');
+        addChatBubble(agentId, 'assistant', '❌ 记忆Save failed:' + ((resp&&resp.error)||'?'), undefined, 'slash-cmd');
+        if (window._toast) window._toast('记忆Save failed:' + ((resp&&resp.error)||'?'), 'error');
         return;
       }
       addChatBubble(agentId, 'assistant', resp.reply || '✓ 已存入 L3 记忆', undefined, 'slash-cmd');
@@ -8023,8 +8268,8 @@ async function sendAgentMsg(agentId) {
         window._toast(msg + ' [' + (resp.category||'?').toUpperCase() + ']', 'success');
       }
     } catch(e) {
-      addChatBubble(agentId, 'assistant', '❌ 记忆保存失败: ' + e, undefined, 'slash-cmd');
-      if (window._toast) window._toast('记忆保存失败: ' + e, 'error');
+      addChatBubble(agentId, 'assistant', '❌ 记忆Save failed:' + e, undefined, 'slash-cmd');
+      if (window._toast) window._toast('记忆Save failed:' + e, 'error');
     }
     return;
   }
@@ -8038,8 +8283,8 @@ async function sendAgentMsg(agentId) {
       var resp = await api('POST', '/api/portal/agent/' + encodeURIComponent(agentId) + '/promote-task',
         { title: slash.taskTitle });
       if (!resp || resp.error) {
-        addChatBubble(agentId, 'assistant', '❌ 任务创建失败: ' + ((resp&&resp.error)||'?'), undefined, 'slash-cmd');
-        if (window._toast) window._toast('任务创建失败: ' + ((resp&&resp.error)||'?'), 'error');
+        addChatBubble(agentId, 'assistant', '❌ Task creation failed:' + ((resp&&resp.error)||'?'), undefined, 'slash-cmd');
+        if (window._toast) window._toast('Task creation failed:' + ((resp&&resp.error)||'?'), 'error');
         return;
       }
       addChatBubble(agentId, 'assistant', resp.reply || ('🚀 已创建任务 ' + (resp.task_id||'').slice(0,8)), undefined, 'slash-cmd');
@@ -8048,11 +8293,11 @@ async function sendAgentMsg(agentId) {
         try { window.loadConversationTasksIntoQueue(agentId); } catch(_){}
       }
       if (window._toast) {
-        window._toast('🚀 已创建跟踪任务 ' + (resp.task_id||'').slice(0,8), 'success');
+        window._toast('🚀 Tracking task created ' + (resp.task_id||'').slice(0,8), 'success');
       }
     } catch(e) {
-      addChatBubble(agentId, 'assistant', '❌ 任务创建失败: ' + e, undefined, 'slash-cmd');
-      if (window._toast) window._toast('任务创建失败: ' + e, 'error');
+      addChatBubble(agentId, 'assistant', '❌ Task creation failed:' + e, undefined, 'slash-cmd');
+      if (window._toast) window._toast('Task creation failed:' + e, 'error');
     }
     return;
   }
@@ -8066,17 +8311,17 @@ async function sendAgentMsg(agentId) {
       var resp = await api('POST', '/api/portal/agent/' + encodeURIComponent(agentId) + '/handoff',
         { target: slash.handoffTarget, message: slash.handoffMessage });
       if (!resp || resp.error) {
-        addChatBubble(agentId, 'assistant', '❌ 转交失败: ' + ((resp&&resp.error)||'?'), undefined, 'slash-cmd');
-        if (window._toast) window._toast('转交失败: ' + ((resp&&resp.error)||'?'), 'error');
+        addChatBubble(agentId, 'assistant', '❌ Handoff failed:' + ((resp&&resp.error)||'?'), undefined, 'slash-cmd');
+        if (window._toast) window._toast('Handoff failed:' + ((resp&&resp.error)||'?'), 'error');
         return;
       }
-      addChatBubble(agentId, 'assistant', resp.reply || ('➡️ 已转交给 ' + (resp.target_label||'?')), undefined, 'slash-cmd');
+      addChatBubble(agentId, 'assistant', resp.reply || ('➡️ Handed off to ' + (resp.target_label||'?')), undefined, 'slash-cmd');
       if (window._toast) {
-        window._toast('➡️ 已转交给 ' + (resp.target_label||'?'), 'success');
+        window._toast('➡️ Handed off to ' + (resp.target_label||'?'), 'success');
       }
     } catch(e) {
-      addChatBubble(agentId, 'assistant', '❌ 转交失败: ' + e, undefined, 'slash-cmd');
-      if (window._toast) window._toast('转交失败: ' + e, 'error');
+      addChatBubble(agentId, 'assistant', '❌ Handoff failed:' + e, undefined, 'slash-cmd');
+      if (window._toast) window._toast('Handoff failed:' + e, 'error');
     }
     return;
   }
@@ -8106,8 +8351,8 @@ async function sendAgentMsg(agentId) {
       var loadingEl = document.getElementById(loadingId);
       if (loadingEl) loadingEl.remove();
       if (!resp || resp.error) {
-        addChatBubble(agentId, 'assistant', '❌ 学习失败: ' + ((resp&&resp.error)||'?'), undefined, 'slash-cmd');
-        if (window._toast) window._toast('学习失败: ' + ((resp&&resp.error)||'?'), 'error');
+        addChatBubble(agentId, 'assistant', '❌ Learning failed:' + ((resp&&resp.error)||'?'), undefined, 'slash-cmd');
+        if (window._toast) window._toast('Learning failed:' + ((resp&&resp.error)||'?'), 'error');
         return;
       }
       addChatBubble(agentId, 'assistant', resp.reply || '✓ 学习完成', undefined, 'slash-cmd');
@@ -8119,8 +8364,8 @@ async function sendAgentMsg(agentId) {
     } catch(e) {
       var loadingEl2 = document.getElementById(loadingId);
       if (loadingEl2) loadingEl2.remove();
-      addChatBubble(agentId, 'assistant', '❌ 学习失败: ' + e, undefined, 'slash-cmd');
-      if (window._toast) window._toast('学习失败: ' + e, 'error');
+      addChatBubble(agentId, 'assistant', '❌ Learning failed:' + e, undefined, 'slash-cmd');
+      if (window._toast) window._toast('Learning failed:' + e, 'error');
     }
     return;
   }
@@ -8263,7 +8508,7 @@ async function sendAgentMsg(agentId) {
       if (code === 'NO_LLM_CONFIGURED') {
         if (inputEl) {
           inputEl.disabled = true;
-          inputEl.placeholder = '🚫 请先为该 Agent 选择 LLM';
+          inputEl.placeholder = '🚫 Please select an LLM for this Agent first';
         }
         if (thinkDiv.parentNode) thinkDiv.remove();
         _removeProgressBar(agentId);
@@ -8312,7 +8557,7 @@ function _getAgentRobotSrc(agentId) {
   // _robotIconUrl flow for any role _aetherAvatarUrl can't resolve.
   try {
     if (localStorage.getItem('tudou_theme') === 'tech' && typeof _aetherAvatarUrl === 'function') {
-      return _aetherAvatarUrl((a && a.role) || 'general');
+      return _aetherAvatarFor(a);
     }
   } catch (e) {}
   if (a && a.robot_avatar) return _robotIconUrl(a.robot_avatar);
@@ -8327,39 +8572,43 @@ function _createProgressBar(agentId) {
   bar.id = 'chat-progress-'+agentId;
   bar.className = 'chat-progress-bar';
   var robotSrc = _getAgentRobotSrc(agentId);
+  // Stitch_22-style progress card — glass panel with running pulse,
+  // mono kicker phase indicator, collapsible tool-call ledger. All
+  // strings English; replaces the old "工作中..." + "已调用工具 N 次"
+  // legacy chrome.
   bar.innerHTML = '' +
-    '<div style="display:flex;align-items:center;gap:8px;padding:8px 0">' +
-      '<div class="robot-working-container" id="robot-anim-'+agentId+'" style="position:relative;display:inline-flex;flex-direction:column;align-items:center">' +
-        '<div class="robot-status-bubble" id="robot-bubble-'+agentId+'" style="background:var(--primary);color:#fff;font-size:10px;padding:2px 8px;border-radius:8px;margin-bottom:4px;white-space:nowrap;animation:robotBubblePulse 1.5s infinite">工作中...</div>' +
+    '<div class="tc-card-glass" style="display:flex;align-items:flex-start;gap:12px;padding:12px 14px;border-top:1px solid rgba(255,255,255,0.10);box-shadow:0 0 12px -3px rgba(192,193,255,0.15);margin:6px 0">' +
+      '<div class="robot-working-container" id="robot-anim-'+agentId+'" style="position:relative;display:inline-flex;flex-direction:column;align-items:center;flex-shrink:0">' +
+        '<div class="robot-status-bubble" id="robot-bubble-'+agentId+'" class="tc-mono-label" style="background:var(--primary);color:var(--on-primary);font-size:9px;padding:2px 7px;border-radius:9999px;margin-bottom:4px;white-space:nowrap;animation:robotBubblePulse 1.5s infinite;letter-spacing:0.05em">WORKING</div>' +
         '<div style="position:relative">' +
-          '<img src="'+robotSrc+'" class="robot-working" style="width:36px;height:36px;animation:robotTyping 0.6s steps(2) infinite">' +
+          '<img src="'+robotSrc+'" class="robot-working" style="width:36px;height:36px;border-radius:50%;animation:robotTyping 0.6s steps(2) infinite">' +
           '<div style="position:absolute;bottom:-2px;right:-6px;font-size:10px;animation:robotTyping 0.4s steps(3) infinite">⌨️</div>' +
         '</div>' +
       '</div>' +
       '<div style="flex:1;min-width:0">' +
-        '<span class="chat-progress-phase" id="chat-progress-phase-'+agentId+'" style="font-size:12px;color:var(--text2)">Preparing...</span>' +
-        // ── Collapsed tool-call summary chip ──
-        // OfficeClaw-style: shows "✓ 已调用工具 N 次" with a count
-        // and a triangle to expand the full per-tool log. Default
-        // collapsed so chat doesn\'t turn into a scroll-fest of
-        // ▸ read_file / ▸ web_search / ... entries.
+        '<div class="tc-mono-label" style="color:var(--primary);letter-spacing:0.10em;font-size:10px;display:flex;align-items:center;gap:6px">' +
+          '<span style="width:6px;height:6px;border-radius:50%;background:var(--primary);box-shadow:0 0 6px var(--primary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
+          '<span class="chat-progress-phase" id="chat-progress-phase-'+agentId+'">PREPARING…</span>' +
+        '</div>' +
+        // Collapsed tool-call summary chip — stitch mono pill style.
         '<div id="tool-summary-'+agentId+'" class="tool-call-summary" '
-          + 'style="display:none;margin-top:6px;font-size:11px;'
-          + 'cursor:pointer;color:var(--text3);user-select:none" '
+          + 'style="display:none;margin-top:8px;font-size:10px;font-family:var(--font-mono);letter-spacing:0.05em;'
+          + 'cursor:pointer;color:var(--secondary);user-select:none" '
           + 'onclick="_toggleToolLog(\''+agentId+'\')">' +
-          '<span style="color:var(--success,#3a8e44)">✓</span> ' +
+          '<span style="color:var(--secondary)">✓</span> ' +
           '<span class="tool-summary-text" id="tool-summary-text-'+agentId+'">'
-            + '已调用工具 0 次</span> ' +
+            + '0 TOOL CALLS</span> ' +
           '<span class="tool-summary-arrow" id="tool-summary-arrow-'+agentId+'" '
             + 'style="display:inline-block;transition:transform 0.2s">▸</span>' +
         '</div>' +
         '<div id="tool-log-'+agentId+'" class="tool-activity-log" '
-          + 'style="display:none;margin-top:4px;max-height:160px;'
-          + 'overflow-y:auto;font-size:11px;line-height:1.6;'
-          + 'color:var(--text3,#999);scrollbar-width:thin;'
-          + 'border-left:2px solid var(--border,#444);padding-left:8px"></div>' +
+          + 'style="display:none;margin-top:6px;max-height:200px;'
+          + 'overflow-y:auto;font-size:11px;line-height:1.6;font-family:var(--font-mono);'
+          + 'color:var(--text3);scrollbar-width:thin;'
+          + 'border-left:2px solid var(--primary);padding-left:10px;'
+          + 'background:rgba(192,193,255,0.04);border-radius:6px;padding:8px 10px"></div>' +
       '</div>' +
-      '<button class="chat-progress-abort" id="chat-progress-abort-'+agentId+'" onclick="_abortTask(\''+agentId+'\')" title="Stop task">✕</button>' +
+      '<button class="chat-progress-abort" id="chat-progress-abort-'+agentId+'" onclick="_abortTask(\''+agentId+'\')" title="Stop task" style="background:transparent;border:1px solid rgba(255,180,171,0.30);color:var(--error);width:24px;height:24px;border-radius:6px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0">✕</button>' +
     '</div>';
   el.appendChild(bar);
   el.scrollTop = el.scrollHeight;
@@ -8464,7 +8713,7 @@ function _refreshToolSummary(agentId) {
     return tally[n] > 1 ? n + ' ×' + tally[n] : n;
   }).join(', ');
   if (names.length > 3) top += ', …';
-  txt.textContent = '已调用工具 ' + total + ' 次 — ' + top;
+  txt.textContent = total + ' TOOL CALL' + (total === 1 ? '' : 'S') + ' · ' + top;
 }
 
 function _appendToolCall(agentId, toolName, args) {
@@ -9066,7 +9315,7 @@ function _updateProgress(agentId, progress, phase) {
       }
     } else {
       phaseEl.textContent = phase || 'Working...';
-      if (bubble) bubble.textContent = phase || '工作中...';
+      if (bubble) bubble.textContent = phase || 'Working…';
     }
   }
   if(abortBtn && (progress >= 100 || phase === 'Done' || phase === 'Aborted' || phase === 'Failed')) {
@@ -9287,6 +9536,35 @@ async function _streamTaskEvents(agentId, taskId, thinkDiv, progressBar) {
             if(evt.type==='status') {
               _updateProgress(agentId, evt.progress||0, evt.phase||'');
               cursor = cursor;  // cursor updated by events
+            } else if(evt.type==='reasoning_delta') {
+              // Live reasoning stream from the LLM. Only render if the
+              // user opted in via the per-agent Thinking toggle —
+              // otherwise drop on the floor (matches old behaviour).
+              if (!evt.content || !window._isShowThinking || !_isShowThinking(agentId)) continue;
+              if (thinkDiv.parentNode) thinkDiv.remove();
+              // Pre-create the assistant bubble if not already mounted —
+              // the thinking panel hangs ABOVE the bubble so the eventual
+              // text reads top-to-bottom (think → answer).
+              if (!msgDiv) { msgDiv = addChatBubble(agentId, 'assistant', '', 0); }
+              var rPanel = msgDiv._reasoningPanel;
+              if (!rPanel) {
+                rPanel = document.createElement('details');
+                rPanel.open = true;
+                rPanel.className = 'agent-reasoning-panel';
+                rPanel.style.cssText = 'margin:6px 0 8px;border-left:2px solid var(--primary);padding:6px 10px;background:rgba(192,193,255,0.04);border-radius:6px;font-size:12px;color:var(--text2);line-height:1.55';
+                rPanel.innerHTML = '<summary style="cursor:pointer;color:var(--primary);font-family:var(--font-mono,monospace);letter-spacing:0.05em;font-size:10px;text-transform:uppercase;user-select:none">▾ THINKING</summary>' +
+                                   '<div class="reasoning-body" style="margin-top:6px;white-space:pre-wrap;font-family:var(--font-mono,monospace);font-size:11px;color:var(--text3);max-height:240px;overflow-y:auto"></div>';
+                // Insert ABOVE the bubble's text content
+                msgDiv.parentNode.insertBefore(rPanel, msgDiv);
+                msgDiv._reasoningPanel = rPanel;
+                msgDiv._reasoningText = '';
+              }
+              msgDiv._reasoningText += evt.content;
+              var body = rPanel.querySelector('.reasoning-body');
+              if (body) {
+                body.textContent = msgDiv._reasoningText;
+                body.scrollTop = body.scrollHeight;
+              }
             } else if(evt.type==='text_delta') {
               if (!evt.content) continue;  // Skip empty deltas
               if (thinkDiv.parentNode) thinkDiv.remove();
@@ -10118,6 +10396,14 @@ async function revokeToken(tokenId) {
 
 // ============ Nodes ============
 function renderNodes(container) {
+  // Tech mode dispatches to the bento-card port (stitch_26-style cards
+  // + dashed Connect Node tile). Settings hub calls this with `sc`,
+  // top-level call gets the global #content.
+  try {
+    if (localStorage.getItem('tudou_theme') === 'tech' && typeof renderNodesTech === 'function') {
+      return renderNodesTech(container);
+    }
+  } catch (e) {}
   var c = container || document.getElementById('content');
   if (!container) c.style.padding = '24px';
   var epoch = _renderEpoch;
@@ -10607,8 +10893,8 @@ function _initOfficeScene() {
     var isBusyOrLearning = a.status === 'busy' || isLearning;
     // Determine bubble text
     var bubble = '';
-    if (a.status === 'busy') bubble = '工作中...';
-    else if (isLearning) bubble = '📖 学习中...';
+    if (a.status === 'busy') bubble = 'Working…';
+    else if (isLearning) bubble = '📖 Learning…';
     else if (si.learning_queue_count > 0) bubble = '📋 待学习: ' + si.learning_queue_count;
     return {
       id: a.id,
@@ -10742,9 +11028,9 @@ function _initOfficeScene() {
           r.y += ((r.deskY - 16) - r.y) * 0.08;
         }
         if (r.status === 'busy') {
-          r.bubbleText = '工作中...';
+          r.bubbleText = 'Working…';
         } else if (r.isLearning) {
-          r.bubbleText = '📖 学习中...';
+          r.bubbleText = '📖 Learning…';
         }
       } else {
         // IDLE: 在地板上来回走
@@ -10918,14 +11204,84 @@ function _spRender(prompts) {
   _scenePrompts = prompts || [];
   var el = document.getElementById('scene-prompts-list');
   if (!el) return;
+  var _techSp = false;
+  try { _techSp = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
   if (_scenePrompts.length === 0) {
-    el.innerHTML = '<div style="color:var(--text3);text-align:center;padding:16px 0;font-size:13px">No system prompts yet. Click "Add Prompt" to create one.</div>';
+    el.innerHTML = _techSp
+      ? '<div class="tc-card-glass" style="grid-column:1/-1;padding:60px 20px;text-align:center;border-style:dashed">' +
+          '<span class="material-symbols-outlined" style="font-size:48px;color:var(--outline)">tune</span>' +
+          '<div style="font-size:14px;color:var(--on-surface-variant);margin-top:14px;margin-bottom:8px">No system prompts yet</div>' +
+          '<div class="tc-text-dim" style="font-size:12px">Click <b>ADD PROMPT</b> to create your first deployment-wide rule.</div>' +
+        '</div>'
+      : '<div style="color:var(--text3);text-align:center;padding:16px 0;font-size:13px">No system prompts yet. Click "Add Prompt" to create one.</div>';
     return;
   }
   var html = '';
   _scenePrompts.forEach(function(sp, i) {
     var enabled = sp.enabled !== false;
-    var preview = (sp.prompt || '').slice(0, 100) + ((sp.prompt || '').length > 100 ? '...' : '');
+    var preview = (sp.prompt || '').slice(0, 140);
+    var isLong = (sp.prompt || '').length > 140;
+
+    if (_techSp) {
+      var scope = sp.scope || 'all';
+      var scopeChips;
+      if (scope === 'all') {
+        scopeChips = '<span class="tc-mono-label" style="font-size:9px;padding:2px 8px;border-radius:9999px;background:rgba(192,193,255,0.10);border:1px solid rgba(192,193,255,0.25);color:var(--primary);letter-spacing:0.05em">ALL AGENTS</span>';
+      } else if ((sp.roles || []).length === 0) {
+        scopeChips = '<span class="tc-mono-label" style="font-size:9px;padding:2px 8px;border-radius:9999px;background:rgba(255,200,140,0.08);border:1px solid rgba(255,200,140,0.25);color:var(--warning,#f0ad4e);letter-spacing:0.05em">NO ROLES</span>';
+      } else {
+        scopeChips = (sp.roles || []).slice(0, 4).map(function(r) {
+          return '<span class="tc-mono-label" style="font-size:9px;padding:2px 8px;border-radius:9999px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.10);color:var(--on-surface);letter-spacing:0.05em">' + esc(r) + '</span>';
+        }).join('') +
+        ((sp.roles || []).length > 4 ? '<span class="tc-text-dim" style="font-size:10px">+' + ((sp.roles || []).length - 4) + '</span>' : '');
+      }
+      var accentRGB = enabled ? '192,193,255' : '144,143,160';
+      var statusDotStyle = enabled
+        ? 'background:var(--primary);animation:pulse-dot 2s infinite ease-in-out;box-shadow:0 0 6px var(--primary)'
+        : 'background:var(--outline)';
+      var statusLabel = enabled ? 'ACTIVE' : 'DISABLED';
+      html += '<div class="tc-card-glass" style="' +
+                'padding:var(--s-lg);display:flex;flex-direction:column;gap:14px;' +
+                'position:relative;overflow:hidden;border-top:1px solid rgba(255,255,255,0.15);' +
+                (enabled ? '' : 'opacity:0.55;') +
+              '">' +
+                // Ghost icon — top-right
+                '<div style="position:absolute;top:0;right:0;padding:14px;pointer-events:none">' +
+                  '<span class="material-symbols-outlined" style="font-size:64px;color:rgba(' + accentRGB + ',0.18);margin:-12px -12px 0 0">tune</span>' +
+                '</div>' +
+                // Header row: small icon badge (left) + status pill (right)
+                '<div style="display:flex;justify-content:space-between;align-items:flex-start;position:relative">' +
+                  '<div style="padding:8px;background:rgba(' + accentRGB + ',0.10);border:1px solid rgba(' + accentRGB + ',0.20);border-radius:var(--r-md);display:inline-flex">' +
+                    '<span class="material-symbols-outlined" style="font-size:22px;color:' + (enabled ? 'var(--primary)' : 'var(--outline)') + ';font-variation-settings:\'FILL\' 1">policy</span>' +
+                  '</div>' +
+                  '<label style="display:flex;align-items:center;gap:6px;background:var(--surface-container-high);padding:4px 10px;border-radius:9999px;border:1px solid rgba(255,255,255,0.05);cursor:pointer" title="Click to toggle">' +
+                    '<input type="checkbox" ' + (enabled ? 'checked' : '') + ' onchange="_spToggle(' + i + ',this.checked)" style="margin:0;cursor:pointer;accent-color:var(--primary)">' +
+                    '<span style="width:6px;height:6px;border-radius:50%;' + statusDotStyle + '"></span>' +
+                    '<span class="tc-mono-label" style="font-size:10px;color:var(--on-surface);letter-spacing:0.05em">' + statusLabel + '</span>' +
+                  '</label>' +
+                '</div>' +
+                // Title + preview
+                '<div style="position:relative">' +
+                  '<h3 style="font-family:var(--font-display);font-size:18px;font-weight:600;color:var(--on-surface);margin:0;letter-spacing:-0.01em;line-height:1.3">' + esc(sp.name || 'Unnamed') + '</h3>' +
+                  (preview
+                    ? '<p class="tc-text-dim" style="font-size:12px;line-height:1.5;margin:6px 0 0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-wrap">' + esc(preview) + (isLong ? '…' : '') + '</p>'
+                    : '<p class="tc-text-dim" style="font-size:12px;font-style:italic;margin:6px 0 0">No content</p>') +
+                '</div>' +
+                // Scope chips row
+                '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:8px 0;border-top:1px solid rgba(255,255,255,0.05);border-bottom:1px solid rgba(255,255,255,0.05)">' +
+                  '<span class="tc-mono-label" style="font-size:9px;color:var(--outline);letter-spacing:0.08em;min-width:48px">SCOPE</span>' +
+                  scopeChips +
+                '</div>' +
+                // Footer actions: Edit + Delete
+                '<div style="display:flex;gap:6px;margin-top:auto;flex-wrap:wrap">' +
+                  '<button onclick="_spEdit(' + i + ')" class="tc-mono-label" style="flex:1;padding:6px 10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:var(--r-md);color:var(--on-surface);font-size:10px;cursor:pointer;letter-spacing:0.05em;display:inline-flex;align-items:center;justify-content:center;gap:4px"><span class="material-symbols-outlined" style="font-size:14px">edit</span> EDIT</button>' +
+                  '<button onclick="_spDelete(' + i + ')" title="Delete" style="padding:6px 10px;background:rgba(255,180,171,0.06);border:1px solid rgba(255,180,171,0.20);border-radius:var(--r-md);color:var(--error);cursor:pointer;display:inline-flex;align-items:center"><span class="material-symbols-outlined" style="font-size:14px">delete</span></button>' +
+                '</div>' +
+              '</div>';
+      return;
+    }
+
+    // Legacy fallback (unchanged)
     html += '<div style="background:var(--surface);border-radius:8px;padding:12px;margin-bottom:8px;border:1px solid ' + (enabled ? 'var(--border-light)' : 'var(--border)') + ';opacity:' + (enabled ? '1' : '0.6') + '">'
       + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">'
         + '<div style="display:flex;align-items:center;gap:8px">'
@@ -10938,7 +11294,7 @@ function _spRender(prompts) {
           + '<button class="btn btn-sm" onclick="_spDelete(' + i + ')" style="padding:3px 8px;font-size:11px;color:var(--error)"><span class="material-symbols-outlined" style="font-size:14px">delete</span></button>'
         + '</div>'
       + '</div>'
-      + '<div style="font-size:12px;color:var(--text3);line-height:1.4;white-space:pre-wrap">' + esc(preview) + '</div>'
+      + '<div style="font-size:12px;color:var(--text3);line-height:1.4;white-space:pre-wrap">' + esc(preview) + (isLong ? '...' : '') + '</div>'
     + '</div>';
   });
   el.innerHTML = html;
@@ -10992,7 +11348,7 @@ function _spShowEditor(idx, sp) {
     + '<textarea id="sp-edit-prompt" rows="10" style="width:100%;padding:10px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;font-family:\'Fira Code\',\'Cascadia Code\',monospace;resize:vertical;line-height:1.6" placeholder="e.g. 编写代码时遵循以下规范...">' + esc(sp.prompt || '') + '</textarea></div>'
     + '<div style="display:flex;justify-content:flex-end;gap:8px">'
     + '<button class="btn btn-sm" onclick="document.getElementById(\'sp-edit-modal\').remove()" style="padding:6px 16px">Cancel</button>'
-    + '<button class="btn btn-sm btn-primary" onclick="_spSaveEditor(' + idx + ')" style="padding:6px 16px">Save</button>'
+    + '<button class="btn btn-sm btn-primary" onclick="_lockBtn(this,\'Saving…\',_spSaveEditor,' + idx + ')" style="padding:6px 16px">Save</button>'
     + '</div></div>';
   document.body.appendChild(modal);
   modal.addEventListener('click', function(e) { if (e.target === modal) modal.remove(); });
@@ -11126,45 +11482,94 @@ function renderConfig(container) {
       }
     }
 
-    c.innerHTML = `
-      <!-- System Prompts (unified) -->
-      <div class="card" style="margin-bottom:16px">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-          <div>
-            <div class="card-title" style="margin:0">
-              <span class="material-symbols-outlined" style="font-size:18px;vertical-align:middle;margin-right:4px;color:var(--primary)">tune</span>
-              System Prompts · 系统提示词
-            </div>
-            <div style="font-size:12px;color:var(--text3);margin-top:4px">
-              为所有 Agent 定义系统提示词。可按场景分条管理（如「全局规则」「复杂工程任务」「编码规范」等），启用的条目会注入到每个 Agent 的系统提示中。
-            </div>
-          </div>
-          <button class="btn btn-sm btn-primary" onclick="_spAdd()" style="padding:6px 14px">
-            <span class="material-symbols-outlined" style="font-size:15px;vertical-align:middle;margin-right:2px">add</span> Add Prompt
-          </button>
-        </div>
-        <div id="scene-prompts-list"></div>
-      </div>
+    var _techCfg = false;
+    try { _techCfg = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
 
-      <!-- Row 2: Role Presets (editable) -->
-      <div class="card">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
-          <div>
-            <div class="card-title" style="margin:0">
-              <span class="material-symbols-outlined" style="font-size:18px;vertical-align:middle;margin-right:4px;color:var(--primary)">person</span>
-              Role Presets · 角色预设
+    if (_techCfg) {
+      c.innerHTML = ''
+        + '<section style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:var(--s-xl);gap:var(--s-md);flex-wrap:wrap">'
+        +   '<div style="flex:1;min-width:240px">'
+        +     '<div class="tc-mono-label" style="color:var(--primary);letter-spacing:0.20em;display:flex;align-items:center;gap:8px">'
+        +       '<span style="width:8px;height:8px;border-radius:50%;background:var(--primary);box-shadow:0 0 8px var(--primary);animation:pulse-dot 2s infinite ease-in-out"></span>'
+        +       'RUNTIME GOVERNANCE'
+        +     '</div>'
+        +     '<h2 style="font-family:var(--font-display);font-size:30px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:6px 0 0">Global Configuration</h2>'
+        +     '<p class="tc-text-dim" style="font-size:14px;line-height:1.55;margin:8px 0 0;max-width:640px">Deployment-wide system prompts + role presets. Edits take effect on the next agent invocation.</p>'
+        +   '</div>'
+        + '</section>'
+        + '<section style="margin-bottom:var(--s-xl)">'
+        +   '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px">'
+        +     '<div>'
+        +       '<div class="tc-mono-label" style="display:flex;align-items:center;gap:8px;color:var(--on-surface-variant);letter-spacing:0.18em">'
+        +         '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);box-shadow:0 0 6px var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>'
+        +         '<span style="color:var(--secondary)">PROMPT INJECTION</span>'
+        +       '</div>'
+        +       '<h3 style="font-family:var(--font-display);font-size:18px;font-weight:600;color:var(--on-surface);margin:6px 0 0;letter-spacing:-0.01em">System Prompts</h3>'
+        +       '<p class="tc-text-dim" style="font-size:12px;margin:4px 0 0">Define base prompts for every agent — manage scene-scoped rules (Global Rules / Complex Engineering / Coding Standards / …). Enabled entries are injected into every agent\\\'s system prompt.</p>'
+        +     '</div>'
+        +     '<button onclick="_spAdd()" style="background:var(--primary-fixed);color:var(--on-primary-fixed);padding:9px 16px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:6px;box-shadow:0 4px 14px rgba(192,193,255,0.20)">'
+        +       '<span class="material-symbols-outlined" style="font-size:14px">add</span> ADD PROMPT'
+        +     '</button>'
+        +   '</div>'
+        +   '<div id="scene-prompts-list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:var(--s-lg)"></div>'
+        + '</section>'
+        + '<section>'
+        +   '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px">'
+        +     '<div>'
+        +       '<div class="tc-mono-label" style="display:flex;align-items:center;gap:8px;color:var(--on-surface-variant);letter-spacing:0.18em">'
+        +         '<span style="width:6px;height:6px;border-radius:50%;background:var(--primary);box-shadow:0 0 6px var(--primary);animation:pulse-dot 2s infinite ease-in-out"></span>'
+        +         '<span style="color:var(--primary)">ROLE LATTICE</span>'
+        +       '</div>'
+        +       '<h3 style="font-family:var(--font-display);font-size:18px;font-weight:600;color:var(--on-surface);margin:6px 0 0;letter-spacing:-0.01em">Role Presets</h3>'
+        +       '<p class="tc-text-dim" style="font-size:12px;margin:4px 0 0">Pickable when creating an agent. Edit system_prompt + profile attributes; saves take effect immediately.</p>'
+        +     '</div>'
+        +     '<button onclick="_rpShowCreate()" style="background:var(--primary-fixed);color:var(--on-primary-fixed);padding:9px 16px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:6px;box-shadow:0 4px 14px rgba(192,193,255,0.20)">'
+        +       '<span class="material-symbols-outlined" style="font-size:14px">add</span> NEW ROLE'
+        +     '</button>'
+        +   '</div>'
+        +   '<div id="role-presets-list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:var(--s-lg)"></div>'
+        + '</section>';
+    } else {
+      c.innerHTML = `
+        <!-- System Prompts (unified) -->
+        <div class="card" style="margin-bottom:16px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+            <div>
+              <div class="card-title" style="margin:0">
+                <span class="material-symbols-outlined" style="font-size:18px;vertical-align:middle;margin-right:4px;color:var(--primary)">tune</span>
+                System Prompts · 系统提示词
+              </div>
+              <div style="font-size:12px;color:var(--text3);margin-top:4px">
+                为所有 Agent 定义系统提示词。可按场景分条管理（如「全局规则」「复杂工程任务」「编码规范」等），启用的条目会注入到每个 Agent 的系统提示中。
+              </div>
             </div>
-            <div style="font-size:12px;color:var(--text3);margin-top:4px">
-              创建智能体时可选角色预设。编辑 system_prompt 和 profile 属性，点击保存后立即生效。
-            </div>
+            <button class="btn btn-sm btn-primary" onclick="_spAdd()" style="padding:6px 14px">
+              <span class="material-symbols-outlined" style="font-size:15px;vertical-align:middle;margin-right:2px">add</span> Add Prompt
+            </button>
           </div>
-          <button class="btn btn-sm btn-primary" onclick="_rpShowCreate()" style="padding:6px 14px">
-            <span class="material-symbols-outlined" style="font-size:15px;vertical-align:middle;margin-right:2px">add</span> 新建角色
-          </button>
+          <div id="scene-prompts-list"></div>
         </div>
-        <div id="role-presets-list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:10px"></div>
-      </div>
-    `;
+
+        <!-- Row 2: Role Presets (editable) -->
+        <div class="card">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+            <div>
+              <div class="card-title" style="margin:0">
+                <span class="material-symbols-outlined" style="font-size:18px;vertical-align:middle;margin-right:4px;color:var(--primary)">person</span>
+                Role Presets · 角色预设
+              </div>
+              <div style="font-size:12px;color:var(--text3);margin-top:4px">
+                创建智能体时可选角色预设。编辑 system_prompt 和 profile 属性，点击保存后立即生效。
+              </div>
+            </div>
+            <button class="btn btn-sm btn-primary" onclick="_rpShowCreate()" style="padding:6px 14px">
+              <span class="material-symbols-outlined" style="font-size:15px;vertical-align:middle;margin-right:2px">add</span> 新建角色
+            </button>
+          </div>
+          <div id="role-presets-list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:10px"></div>
+        </div>
+      `;
+    }
     // Populate role presets grid after innerHTML is set
     _rpRenderCards(cfg.role_presets || {});
     _spRender(_mergedPrompts);
@@ -11174,6 +11579,9 @@ function renderConfig(container) {
 function _rpRenderCards(presets) {
   var grid = document.getElementById('role-presets-list');
   if (!grid) return;
+  var _techRp = false;
+  try { _techRp = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+
   var html = '';
   Object.keys(presets).forEach(function(k) {
     var v = presets[k];
@@ -11181,6 +11589,62 @@ function _rpRenderCards(presets) {
     var expertiseStr = (p.expertise||[]).slice(0,4).join(', ');
     var skillsStr = (p.skills||[]).slice(0,4).join(', ');
     var isV2 = window._rpV2Ids && window._rpV2Ids.has(k);
+
+    if (_techRp) {
+      var promptPreview = (v.system_prompt || '').slice(0, 140);
+      var attrs = [];
+      if (p.personality) attrs.push({ label: 'PERSONALITY', value: p.personality });
+      if (expertiseStr)  attrs.push({ label: 'EXPERTISE',   value: expertiseStr });
+      if (skillsStr)     attrs.push({ label: 'SKILLS',      value: skillsStr });
+      var attrsHtml = attrs.length
+        ? '<div style="display:grid;grid-template-columns:1fr;gap:8px;padding:10px 0;border-top:1px solid rgba(255,255,255,0.05);border-bottom:1px solid rgba(255,255,255,0.05)">' +
+            attrs.map(function(a){
+              return '<div style="display:flex;align-items:baseline;gap:8px">' +
+                '<span class="tc-mono-label" style="font-size:9px;color:var(--outline);min-width:80px">' + a.label + '</span>' +
+                '<span style="font-family:var(--font-mono);font-size:11px;color:var(--on-surface);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(a.value) + '</span>' +
+              '</div>';
+            }).join('') +
+          '</div>'
+        : '';
+      var v2BtnTech = isV2
+        ? '<button onclick="_rpv2EditPlaybook(\'' + esc(k) + '\')" title="Edit Playbook (behaviour)" class="tc-mono-label" style="padding:6px 10px;background:rgba(192,193,255,0.10);border:1px solid rgba(192,193,255,0.30);border-radius:var(--r-md);color:var(--primary);font-size:10px;cursor:pointer;letter-spacing:0.05em;display:inline-flex;align-items:center;gap:4px"><span class="material-symbols-outlined" style="font-size:14px">tune</span></button>' +
+          '<button onclick="_rpv2Kpi(\'' + esc(k) + '\')" title="KPI" class="tc-mono-label" style="padding:6px 10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:var(--r-md);color:var(--on-surface);font-size:10px;cursor:pointer;letter-spacing:0.05em;display:inline-flex;align-items:center;gap:4px"><span class="material-symbols-outlined" style="font-size:14px">analytics</span></button>'
+        : '';
+      var accentRGB = isV2 ? '192,193,255' : '144,143,160';
+      html += '<div class="tc-card-glass" style="' +
+                'padding:var(--s-lg);display:flex;flex-direction:column;gap:14px;' +
+                'position:relative;overflow:hidden;border-top:1px solid rgba(255,255,255,0.15);' +
+                (isV2 ? 'box-shadow:0 0 15px -3px rgba(192,193,255,0.30);' : '') +
+              '">' +
+                '<div style="position:absolute;top:0;right:0;padding:14px;pointer-events:none">' +
+                  '<span class="material-symbols-outlined" style="font-size:64px;color:rgba(' + accentRGB + ',0.18);margin:-12px -12px 0 0">person</span>' +
+                '</div>' +
+                '<div style="display:flex;justify-content:space-between;align-items:flex-start;position:relative">' +
+                  '<div style="padding:8px;background:rgba(' + accentRGB + ',0.10);border:1px solid rgba(' + accentRGB + ',0.20);border-radius:var(--r-md);display:inline-flex">' +
+                    '<span class="material-symbols-outlined" style="font-size:22px;color:' + (isV2 ? 'var(--primary)' : 'var(--outline)') + ';font-variation-settings:\'FILL\' 1">badge</span>' +
+                  '</div>' +
+                  '<div style="display:flex;align-items:center;gap:6px;background:var(--surface-container-high);padding:4px 10px;border-radius:9999px;border:1px solid rgba(255,255,255,0.05)">' +
+                    '<span style="width:6px;height:6px;border-radius:50%;background:' + (isV2 ? 'var(--primary)' : 'var(--outline)') + ';' + (isV2 ? 'animation:pulse-dot 2s infinite ease-in-out;box-shadow:0 0 6px var(--primary);' : '') + '"></span>' +
+                    '<span class="tc-mono-label" style="font-size:10px;color:var(--on-surface);letter-spacing:0.05em">' + (isV2 ? 'V2 PLAYBOOK' : 'LEGACY') + '</span>' +
+                  '</div>' +
+                '</div>' +
+                '<div style="position:relative">' +
+                  '<h3 style="font-family:var(--font-display);font-size:18px;font-weight:600;color:var(--on-surface);margin:0;letter-spacing:-0.01em;line-height:1.3">' + esc(k) + '</h3>' +
+                  (promptPreview
+                    ? '<p class="tc-text-dim" style="font-size:12px;line-height:1.5;margin:6px 0 0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">' + esc(promptPreview) + (v.system_prompt.length > 140 ? '…' : '') + '</p>'
+                    : '<p class="tc-text-dim" style="font-size:12px;font-style:italic;margin:6px 0 0">No system prompt set</p>') +
+                '</div>' +
+                attrsHtml +
+                '<div style="display:flex;gap:6px;margin-top:auto;flex-wrap:wrap">' +
+                  v2BtnTech +
+                  '<button onclick="_rpShowEdit(\'' + esc(k) + '\')" class="tc-mono-label" style="flex:1;padding:6px 10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:var(--r-md);color:var(--on-surface);font-size:10px;cursor:pointer;letter-spacing:0.05em;display:inline-flex;align-items:center;justify-content:center;gap:4px"><span class="material-symbols-outlined" style="font-size:14px">edit</span> EDIT</button>' +
+                  '<button onclick="_rpDelete(\'' + esc(k) + '\')" title="Delete" style="padding:6px 10px;background:rgba(255,180,171,0.06);border:1px solid rgba(255,180,171,0.20);border-radius:var(--r-md);color:var(--error);cursor:pointer;display:inline-flex;align-items:center"><span class="material-symbols-outlined" style="font-size:14px">delete</span></button>' +
+                '</div>' +
+              '</div>';
+      return;
+    }
+
+    // Legacy fallback
     var v2Buttons = isV2
       ? '<button class="btn btn-sm" onclick="_rpv2EditPlaybook(\'' + esc(k) + '\')" style="padding:3px 8px;font-size:11px;color:var(--primary);border-color:var(--primary)" title="编辑 Playbook（行为约束）"><span class="material-symbols-outlined" style="font-size:14px">tune</span></button>'
         + '<button class="btn btn-sm" onclick="_rpv2Kpi(\'' + esc(k) + '\')" style="padding:3px 8px;font-size:11px" title="KPI"><span class="material-symbols-outlined" style="font-size:14px">analytics</span></button>'
@@ -11200,7 +11664,7 @@ function _rpRenderCards(presets) {
       + '<div style="font-size:12px;color:var(--text2);margin-bottom:6px;line-height:1.5;max-height:48px;overflow:hidden">' + esc((v.system_prompt||'').slice(0,120)) + (v.system_prompt && v.system_prompt.length > 120 ? '...' : '') + '</div>'
       + (p.personality ? '<div style="font-size:11px;color:var(--text3)"><b>性格:</b> ' + esc(p.personality) + '</div>' : '')
       + (expertiseStr ? '<div style="font-size:11px;color:var(--text3)"><b>专长:</b> ' + esc(expertiseStr) + '</div>' : '')
-      + (skillsStr ? '<div style="font-size:11px;color:var(--text3)"><b>技能:</b> ' + esc(skillsStr) + '</div>' : '')
+      + (skillsStr ? '<div style="font-size:11px;color:var(--text3)"><b>Skills:</b> ' + esc(skillsStr) + '</div>' : '')
     + '</div>';
   });
   grid.innerHTML = html;
@@ -11410,10 +11874,10 @@ function _rpShowEdit(roleKey) {
       + '<div class="form-group"><label>沟通风格 Communication</label><input id="rp-edit-comm" value="'+esc(p.communication_style||'')+'"></div>'
     + '</div>'
     + '<div class="form-group"><label>专长 Expertise (逗号分隔)</label><input id="rp-edit-expertise" value="'+esc((p.expertise||[]).join(', '))+'"></div>'
-    + '<div class="form-group"><label>技能 Skills (逗号分隔)</label><input id="rp-edit-skills" value="'+esc((p.skills||[]).join(', '))+'"></div>'
+    + '<div class="form-group"><label>Skills (comma separated)</label><input id="rp-edit-skills" value="'+esc((p.skills||[]).join(', '))+'"></div>'
     + '<div class="form-group"><label>允许的工具 Allowed Tools (逗号分隔，留空=全部)</label><input id="rp-edit-allowed" value="'+esc((p.allowed_tools||[]).join(', '))+'"></div>'
     + '<div class="form-group"><label>禁用的工具 Denied Tools (逗号分隔)</label><input id="rp-edit-denied" value="'+esc((p.denied_tools||[]).join(', '))+'"></div>'
-    + '<div class="form-actions"><button class="btn btn-ghost" onclick="document.getElementById(\'rp-edit-modal\').remove()">取消</button>'
+    + '<div class="form-actions"><button class="btn btn-ghost" onclick="document.getElementById(\'rp-edit-modal\').remove()">Cancel</button>'
     + '<button class="btn btn-primary" onclick="_rpSaveEdit(\''+esc(roleKey)+'\')">保存</button></div>'
     + '</div></div>';
   document.body.insertAdjacentHTML('beforeend', html);
@@ -11431,9 +11895,9 @@ function _rpShowCreate() {
       + '<div class="form-group"><label>沟通风格 Communication</label><input id="rp-new-comm" placeholder="e.g. technical, brief"></div>'
     + '</div>'
     + '<div class="form-group"><label>专长 Expertise (逗号分隔)</label><input id="rp-new-expertise" placeholder="data_analysis, statistics"></div>'
-    + '<div class="form-group"><label>技能 Skills (逗号分隔)</label><input id="rp-new-skills" placeholder="data_analysis, visualization"></div>'
-    + '<div class="form-actions"><button class="btn btn-ghost" onclick="document.getElementById(\'rp-create-modal\').remove()">取消</button>'
-    + '<button class="btn btn-primary" onclick="_rpSaveNew()">创建</button></div>'
+    + '<div class="form-group"><label>Skills (comma separated)</label><input id="rp-new-skills" placeholder="data_analysis, visualization"></div>'
+    + '<div class="form-actions"><button class="btn btn-ghost" onclick="document.getElementById(\'rp-create-modal\').remove()">Cancel</button>'
+    + '<button class="btn btn-primary" onclick="_lockBtn(this,\'Creating…\',_rpSaveNew)">Create</button></div>'
     + '</div></div>';
   document.body.insertAdjacentHTML('beforeend', html);
 }
@@ -11445,7 +11909,7 @@ function _rpParseList(val) {
 async function _rpSaveEdit(roleKey) {
   var name = (document.getElementById('rp-edit-name')||{}).value||'';
   var prompt = (document.getElementById('rp-edit-prompt')||{}).value||'';
-  if (!prompt.trim()) { alert('System Prompt 不能为空'); return; }
+  if (!prompt.trim()) { alert('System Prompt cannot be empty'); return; }
   var profile = {
     personality: (document.getElementById('rp-edit-personality')||{}).value||'',
     communication_style: (document.getElementById('rp-edit-comm')||{}).value||'',
@@ -11460,16 +11924,16 @@ async function _rpSaveEdit(roleKey) {
     });
     var m = document.getElementById('rp-edit-modal'); if(m) m.remove();
     renderConfig(document.getElementById('settings-content'));
-  } catch(e) { alert('保存失败: '+e); }
+  } catch(e) { alert('Save failed:'+e); }
 }
 
 async function _rpSaveNew() {
   var key = (document.getElementById('rp-new-key')||{}).value||'';
   var name = (document.getElementById('rp-new-name')||{}).value||'';
   var prompt = (document.getElementById('rp-new-prompt')||{}).value||'';
-  if (!key.trim()) { alert('角色名不能为空'); return; }
-  if (!prompt.trim()) { alert('System Prompt 不能为空'); return; }
-  if (!/^[a-z][a-z0-9_]*$/.test(key)) { alert('角色名只能使用小写字母、数字和下划线'); return; }
+  if (!key.trim()) { alert('Role name cannot be empty'); return; }
+  if (!prompt.trim()) { alert('System Prompt cannot be empty'); return; }
+  if (!/^[a-z][a-z0-9_]*$/.test(key)) { alert('Role name may only use lowercase letters, digits, and underscores'); return; }
   var profile = {
     personality: (document.getElementById('rp-new-personality')||{}).value||'',
     communication_style: (document.getElementById('rp-new-comm')||{}).value||'',
@@ -11490,7 +11954,7 @@ async function _rpDelete(roleKey) {
   try {
     await api('POST', '/api/portal/role-presets/delete', { key: roleKey });
     renderConfig(document.getElementById('settings-content'));
-  } catch(e) { alert('删除失败: '+e); }
+  } catch(e) { alert('Delete failed:'+e); }
 }
 
 // ============ Node Configuration ============
@@ -11717,35 +12181,85 @@ function renderTemplateLibrary(container) {
       '</div>';
     } else {
       html += '<div style="margin-bottom:20px">' +
-        '<h3 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:20px;font-weight:700;margin-bottom:4px">专业领域</h3>' +
-        '<p style="color:var(--text2);font-size:13px">Agent 执行任务时自动匹配对应专业领域，注入领域方法论和检查清单。共 ' + templates.length + ' 个领域。</p>' +
+        '<h3 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:20px;font-weight:700;margin-bottom:4px">Domain Library</h3>' +
+        '<p style="color:var(--text2);font-size:13px">Agent runs auto-match a domain template; injects methodology + checklist. ' + templates.length + ' domains.</p>' +
         '<button class="btn btn-primary btn-sm" style="margin-top:10px" onclick="showCreateTemplate()">' +
-          '<span class="material-symbols-outlined" style="font-size:14px">add</span> 新建专业领域</button>' +
+          '<span class="material-symbols-outlined" style="font-size:14px">add</span> New Domain</button>' +
       '</div>';
     }
 
     Object.keys(cats).sort().forEach(cat => {
-      html += '<div style="margin-bottom:24px">';
-      html += '<div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text3);margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid var(--border-light)">' + esc(cat) + ' (' + cats[cat].length + ')</div>';
-      html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px">';
-      cats[cat].forEach(t => {
-        html += '<div class="card" style="padding:16px;cursor:pointer;transition:all 0.2s;border:1px solid var(--border-light)" ' +
-          'onmouseenter="this.style.borderColor=\'var(--primary)\'" onmouseleave="this.style.borderColor=\'var(--border-light)\'" ' +
-          'onclick="viewTemplate(\'' + esc(t.id) + '\')">' +
-          '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">' +
-            '<span style="font-weight:700;font-size:14px;line-height:1.3">' + esc(t.name) + '</span>' +
-            '<span style="font-size:18px;flex-shrink:0;margin-left:8px">' + getCategoryIcon(cat) + '</span>' +
+      if (_techTpl) {
+        // Stitch_26-style bento. Section header is a tech mono kicker;
+        // each template is a glass card with ghost icon, status pill,
+        // h3, description, tag chips, and ROLES stat at the bottom.
+        html += '<div style="margin-bottom:var(--s-xl)">' +
+          '<div class="tc-mono-label" style="display:flex;align-items:center;gap:8px;margin-bottom:14px;color:var(--on-surface-variant);letter-spacing:0.18em">' +
+            '<span style="width:6px;height:6px;border-radius:50%;background:var(--primary);box-shadow:0 0 6px var(--primary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
+            '<span style="color:var(--primary)">' + esc(cat).toUpperCase() + '</span>' +
+            '<span style="color:var(--outline);font-family:var(--font-mono);font-size:11px">' + cats[cat].length + '</span>' +
           '</div>' +
-          '<div style="font-size:12px;color:var(--text2);line-height:1.4;margin-bottom:8px">' + esc(t.description||'').slice(0,100) + '</div>' +
-          '<div style="display:flex;flex-wrap:wrap;gap:4px">' +
-            (t.tags||[]).slice(0,4).map(tag => '<span style="font-size:10px;background:var(--surface3);padding:2px 6px;border-radius:4px;color:var(--text3)">' + esc(tag) + '</span>').join('') +
-          '</div>' +
-          '<div style="font-size:10px;color:var(--text3);margin-top:8px">' +
-            'Roles: ' + (t.roles||[]).slice(0,3).map(r => esc(r)).join(', ') +
-          '</div>' +
-        '</div>';
-      });
-      html += '</div></div>';
+          '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:var(--s-lg)">';
+        cats[cat].forEach(t => {
+          var tagPills = (t.tags || []).slice(0, 4).map(function(tag) {
+            return '<span class="tc-mono-label" style="padding:2px 8px;background:rgba(192,193,255,0.10);color:var(--primary);border:1px solid rgba(192,193,255,0.20);border-radius:9999px;font-size:9px;letter-spacing:0.05em">' + esc(tag) + '</span>';
+          }).join('');
+          var roleList = (t.roles || []).slice(0, 3).map(esc).join(', ') || '—';
+          html += '<div onclick="viewTemplate(\'' + esc(t.id) + '\')" class="tc-card-glass" style="' +
+                    'padding:var(--s-lg);display:flex;flex-direction:column;gap:14px;cursor:pointer;' +
+                    'position:relative;overflow:hidden;border-top:1px solid rgba(255,255,255,0.15);' +
+                    'box-shadow:0 0 12px -3px rgba(192,193,255,0.10);transition:transform 0.15s,box-shadow 0.15s" ' +
+                    'onmouseover="this.style.transform=\'translateY(-2px)\';this.style.boxShadow=\'0 8px 24px -4px rgba(192,193,255,0.30)\'" ' +
+                    'onmouseout="this.style.transform=\'\';this.style.boxShadow=\'0 0 12px -3px rgba(192,193,255,0.10)\'">' +
+                    '<div style="position:absolute;top:0;right:0;padding:14px;pointer-events:none">' +
+                      '<span class="material-symbols-outlined" style="font-size:64px;color:rgba(192,193,255,0.18);margin:-12px -12px 0 0">menu_book</span>' +
+                    '</div>' +
+                    '<div style="display:flex;justify-content:space-between;align-items:flex-start;position:relative">' +
+                      '<div style="padding:8px;background:rgba(192,193,255,0.10);border:1px solid rgba(192,193,255,0.20);border-radius:var(--r-md);display:inline-flex;font-size:18px">' +
+                        getCategoryIcon(cat) +
+                      '</div>' +
+                      '<div style="display:flex;align-items:center;gap:6px;background:var(--surface-container-high);padding:4px 10px;border-radius:9999px;border:1px solid rgba(255,255,255,0.05)">' +
+                        '<span style="width:6px;height:6px;border-radius:50%;background:var(--primary)"></span>' +
+                        '<span class="tc-mono-label" style="font-size:10px;color:var(--on-surface);letter-spacing:0.05em">DOMAIN</span>' +
+                      '</div>' +
+                    '</div>' +
+                    '<div style="position:relative">' +
+                      '<h3 style="font-family:var(--font-display);font-size:18px;font-weight:600;color:var(--on-surface);margin:0;letter-spacing:-0.01em;line-height:1.3">' + esc(t.name) + '</h3>' +
+                      '<p class="tc-text-dim" style="font-size:12px;line-height:1.5;margin:6px 0 0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">' + esc(t.description || '').slice(0, 140) + '</p>' +
+                    '</div>' +
+                    (tagPills ? '<div style="display:flex;flex-wrap:wrap;gap:4px">' + tagPills + '</div>' : '') +
+                    '<div style="display:grid;grid-template-columns:1fr;gap:14px;padding:12px 0;border-top:1px solid rgba(255,255,255,0.05);border-bottom:1px solid rgba(255,255,255,0.05)">' +
+                      '<div>' +
+                        '<p class="tc-mono-label" style="font-size:10px;color:var(--outline);margin:0 0 4px">ROLES (' + (t.roles || []).length + ')</p>' +
+                        '<p style="font-family:var(--font-mono);font-size:12px;color:var(--secondary);margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + roleList + '</p>' +
+                      '</div>' +
+                    '</div>' +
+                  '</div>';
+        });
+        html += '</div></div>';
+      } else {
+        html += '<div style="margin-bottom:24px">';
+        html += '<div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text3);margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid var(--border-light)">' + esc(cat) + ' (' + cats[cat].length + ')</div>';
+        html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px">';
+        cats[cat].forEach(t => {
+          html += '<div class="card" style="padding:16px;cursor:pointer;transition:all 0.2s;border:1px solid var(--border-light)" ' +
+            'onmouseenter="this.style.borderColor=\'var(--primary)\'" onmouseleave="this.style.borderColor=\'var(--border-light)\'" ' +
+            'onclick="viewTemplate(\'' + esc(t.id) + '\')">' +
+            '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">' +
+              '<span style="font-weight:700;font-size:14px;line-height:1.3">' + esc(t.name) + '</span>' +
+              '<span style="font-size:18px;flex-shrink:0;margin-left:8px">' + getCategoryIcon(cat) + '</span>' +
+            '</div>' +
+            '<div style="font-size:12px;color:var(--text2);line-height:1.4;margin-bottom:8px">' + esc(t.description||'').slice(0,100) + '</div>' +
+            '<div style="display:flex;flex-wrap:wrap;gap:4px">' +
+              (t.tags||[]).slice(0,4).map(tag => '<span style="font-size:10px;background:var(--surface3);padding:2px 6px;border-radius:4px;color:var(--text3)">' + esc(tag) + '</span>').join('') +
+            '</div>' +
+            '<div style="font-size:10px;color:var(--text3);margin-top:8px">' +
+              'Roles: ' + (t.roles||[]).slice(0,3).map(r => esc(r)).join(', ') +
+            '</div>' +
+          '</div>';
+        });
+        html += '</div></div>';
+      }
     });
     c.innerHTML = html;
   });
@@ -11805,7 +12319,7 @@ async function viewTemplate(templateId) {
 function showCreateTemplate() {
   const html = '<div style="padding:16px">' +
     '<h3 style="margin-bottom:16px">Create Template</h3>' +
-    '<div class="form-group"><label>Name</label><input id="tpl-name" placeholder="e.g. 性能优化技能"></div>' +
+    '<div class="form-group"><label>Name</label><input id="tpl-name" placeholder="e.g. Performance optimization skill"></div>' +
     '<div class="form-group"><label>Description</label><input id="tpl-desc" placeholder="Brief description"></div>' +
     '<div class="form-group"><label>Category</label><input id="tpl-cat" value="General" placeholder="e.g. Development, Security"></div>' +
     '<div class="form-group"><label>Roles (comma separated)</label><input id="tpl-roles" placeholder="e.g. Developer, Architect"></div>' +
@@ -11815,7 +12329,7 @@ function showCreateTemplate() {
     '</div>' +
     '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">' +
       '<button class="btn btn-sm" onclick="closeModal()">Cancel</button>' +
-      '<button class="btn btn-primary btn-sm" onclick="saveNewTemplate()">Create</button>' +
+      '<button class="btn btn-primary btn-sm" onclick="_lockBtn(this,\'Creating…\',saveNewTemplate)">Create</button>' +
     '</div></div>';
   showModalHTML(html);
 }
@@ -11868,7 +12382,7 @@ async function saveEditTemplate(templateId) {
 }
 
 async function deleteTemplate(templateId) {
-  if (!await confirm('确定要删除这个技能吗?')) return;
+  if (!await confirm('Delete this skill?')) return;
   await api('POST', '/api/portal/templates', { action: 'delete', template_id: templateId });
   closeModal();
   renderTemplateLibrary();
@@ -11893,8 +12407,8 @@ async function renderScheduler() {
       '</div>'
     : ''
       + '<div style="margin-bottom:20px">'
-      + '  <h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:22px;font-weight:800;margin:0">定时任务</h2>'
-      + '  <p style="font-size:12px;color:var(--text3);margin-top:4px">Scheduled Jobs · 按 cron 或间隔自动触发 agent</p>'
+      + '  <h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:22px;font-weight:800;margin:0">Scheduled Jobs</h2>'
+      + '  <p style="font-size:12px;color:var(--text3);margin-top:4px">Cron- or interval-triggered agent runs.</p>'
       + '</div>';
   content.innerHTML = schedHeader + '<div style="color:var(--text3);padding:20px">Loading scheduled tasks...</div>';
   let jobsData, presetsData, agentsData;
@@ -12029,7 +12543,7 @@ async function showCreateJob() {
     '<label id="job-prompt-label">Prompt Template</label><textarea id="job-prompt" class="input" rows="4" style="margin-bottom:8px" placeholder="Use {date}, {time}, {weekday} variables..."></textarea>' +
     '<label>Notify Channels (comma-separated IDs)</label><input id="job-channels" class="input" style="margin-bottom:8px">' +
     '<label>Tags (comma-separated)</label><input id="job-tags" class="input" style="margin-bottom:16px">' +
-    '<div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="saveNewJob()">Create</button>' +
+    '<div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="_lockBtn(this,\'Creating…\',saveNewJob)">Create</button>' +
     '<button class="btn" onclick="closeModal()">Cancel</button></div></div>';
   showModalHTML(html);
   window._jobWfTemplates = templates;
@@ -12072,7 +12586,7 @@ function _jobWorkflowChanged() {
   var templates = window._jobWfTemplates || [];
   var tmpl = templates.find(function(t){ return (t.id||t.template_id) === wfId; });
   if (!tmpl || !tmpl.steps || !tmpl.steps.length) {
-    container.innerHTML = '<div style="font-size:11px;color:var(--muted)">该模板没有定义步骤</div>';
+    container.innerHTML = '<div style="font-size:11px;color:var(--muted)">This template has no steps defined</div>';
     return;
   }
   var agentOpts = window._jobAgentOpts || '';
@@ -12082,7 +12596,7 @@ function _jobWorkflowChanged() {
       '<select class="job-step-agent input" data-step="'+i+'" style="flex:1;background:var(--surface);border:1px solid var(--overlay-10);border-radius:6px;padding:6px 8px;color:var(--text);font-size:12px">' +
         '<option value="">— 使用默认 Agent —</option>' + agentOpts +
       '</select>' +
-      '<label title="启动前需人工批准" style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text3);cursor:pointer;white-space:nowrap">' +
+      '<label title="Manual approval required before start" style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text3);cursor:pointer;white-space:nowrap">' +
         '<input type="checkbox" class="job-step-approval" data-step="'+i+'" style="cursor:pointer">审核' +
       '</label>' +
     '</div>';
@@ -12124,7 +12638,7 @@ async function saveNewJob() {
     var cwEl = document.getElementById('job-canvas-workflow-id');
     body.canvas_workflow_id = cwEl ? cwEl.value : '';
     if (!body.canvas_workflow_id) {
-      alert('请选择一个画布工作流。');
+      alert('Please select a canvas workflow.');
       return;
     }
     // Canvas workflow ignores agent_id + prompt at the job level
@@ -12174,7 +12688,7 @@ async function triggerJob(jobId) {
   try {
     var res = await api('POST', '/api/portal/scheduler/jobs', {action:'trigger', job_id:jobId});
     if (res.ok) {
-      alert('✅ Job triggered — agent正在后台执行...');
+      alert('✅ Job triggered — agent running in background…');
       setTimeout(function(){ _refreshSchedulerView(); }, 3000);
       setTimeout(function(){ _refreshSchedulerView(); }, 8000);
       setTimeout(function(){ _refreshSchedulerView(); }, 15000);
@@ -12492,7 +13006,7 @@ async function showAddMCP(preSelectCapId) {
       '<b>Node</b> 只绑定到当前 Node；<b>Multi-Node</b> 指定一组 Node 白名单。' +
     '</div>' +
     '<div id="mcp-test-result" style="margin-bottom:12px;font-size:12px"></div>' +
-    '<div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="saveMCP()">Add</button>' +
+    '<div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="_lockBtn(this,\'Adding…\',saveMCP)">Add</button>' +
     '<button class="btn" onclick="testMCP()">Test</button>' +
     '<button class="btn" onclick="closeModal()">Cancel</button></div></div>';
   showModalHTML(html);
@@ -12560,12 +13074,12 @@ async function submitChangeMCPScope(mcpId) {
   var payload = { action: 'change_scope', mcp_id: mcpId, scope: scope };
   if (scope === 'node') {
     var one = (document.getElementById('rescope-node-input').value || '').trim();
-    if (!one) { alert('Node scope 需要指定 target node id'); return; }
+    if (!one) { alert('Node scope requires a target node id'); return; }
     payload.target_nodes = [one];
   } else if (scope === 'multi_node') {
     var raw = (document.getElementById('rescope-multi-input').value || '').trim();
     var list = raw.split(',').map(function(s){return s.trim();}).filter(Boolean);
-    if (!list.length) { alert('Multi-Node scope 需要至少一个 target node id'); return; }
+    if (!list.length) { alert('Multi-Node scope needs at least one target node id'); return; }
     payload.target_nodes = list;
   }
   try {
@@ -12681,7 +13195,7 @@ async function saveMCP() {
       var raw = (document.getElementById('mcp-scope-nodes-input').value || '').trim();
       targetNodes = raw.split(',').map(function(s){return s.trim();}).filter(Boolean);
       if (!targetNodes.length) {
-        alert('Multi-Node scope 需要至少一个目标 node id');
+        alert('Multi-Node scope needs at least one target node id');
         return;
       }
     }
@@ -12697,7 +13211,7 @@ async function saveMCP() {
         });
       } else {
         const name = (document.getElementById('mcp-name').value||'').trim();
-        if (!name) { alert('请填写 MCP Name'); return; }
+        if (!name) { alert('Please fill MCP Name'); return; }
         result = await api('POST', '/api/portal/mcp/manage', {
           action: 'add_global_mcp',
           config: {
@@ -12719,7 +13233,7 @@ async function saveMCP() {
     } else {
       // ── Node-scope custom config ──
       const name = (document.getElementById('mcp-name').value||'').trim();
-      if (!name) { alert('请填写 MCP Name'); return; }
+      if (!name) { alert('Please fill MCP Name'); return; }
       result = await api('POST', '/api/portal/mcp/manage', {
         action: 'add_mcp',
         config: {
@@ -12749,7 +13263,7 @@ async function saveMCP() {
       }
     }
     if (result === null) {
-      alert('添加 MCP 失败，请查看浏览器控制台或服务器日志');
+      alert('Add MCP failed, see browser console or server log');
       return;
     }
     if (result && !result.ok && result.message) {
@@ -12757,7 +13271,7 @@ async function saveMCP() {
       return;
     }
     if (result && result.error) {
-      alert('添加 MCP 失败: ' + result.error);
+      alert('Add MCP failed: ' + result.error);
       return;
     }
 
@@ -12773,7 +13287,7 @@ async function saveMCP() {
     renderMCPConfig();
   } catch (e) {
     console.error('saveMCP failed', e);
-    alert('添加 MCP 出错: ' + (e && e.message ? e.message : e));
+    alert('Add MCP error: ' + (e && e.message ? e.message : e));
   }
 }
 
@@ -12815,7 +13329,7 @@ async function retryMCPInstall(nodeId, mcpId) {
   if (result && result.task_id) {
     _showInstallProgress(result.task_id, result.message || '重新安装中...');
   } else {
-    alert(result && result.message ? result.message : '重试失败');
+    alert(result && result.message ? result.message : 'Retry failed');
   }
 }
 
@@ -12964,11 +13478,11 @@ async function syncGlobalToNode(nodeId) {
       if (result.errors && result.errors.length) msg += '\n部分错误: ' + result.errors.join(', ');
       alert(msg);
     } else {
-      alert('同步完成');
+      alert('Sync complete');
     }
     renderMCPConfig();
   } catch(e) {
-    alert('同步失败: ' + (e.message||e));
+    alert('Sync failed:' + (e.message||e));
   }
 }
 
@@ -13096,8 +13610,8 @@ async function showEnhancementPanel(agentId) {
   const ag = agents.find(a => a.id === agentId) || {};
 
   let html = '<div style="padding:20px;max-height:80vh;overflow-y:auto">';
-  html += '<h3 style="margin-bottom:4px;font-family:\'Plus Jakarta Sans\',sans-serif">专业领域</h3>';
-  html += '<p style="color:var(--text2);font-size:12px;margin-bottom:16px">' + esc(ag.name || agentId) + ' — 为 Agent 装载专业领域，让它在特定场景变得更专业</p>';
+  html += '<h3 style="margin-bottom:4px;font-family:\'Plus Jakarta Sans\',sans-serif">Domain Specialties</h3>';
+  html += '<p style="color:var(--text2);font-size:12px;margin-bottom:16px">' + esc(ag.name || agentId) + ' — load domain templates so this agent becomes a specialist in those areas.</p>';
 
   if (!enh) {
     // Not enabled — show preset multi-selection (up to 8)
@@ -13119,13 +13633,13 @@ async function showEnhancementPanel(agentId) {
     html += '<div style="background:var(--surface3);border-radius:10px;padding:14px;cursor:pointer;border:1px dashed var(--border-light)" ' +
       'onclick="enableCustomEnhancement(\'' + agentId + '\')">' +
       '<div style="font-size:20px;margin-bottom:6px">✏️</div>' +
-      '<div style="font-weight:700;font-size:13px">自定义技能</div>' +
-      '<div style="font-size:11px;color:var(--text3);margin-top:4px">创建空白技能，手动添加知识和思维模式</div>' +
+      '<div style="font-weight:700;font-size:13px">Custom Skill</div>' +
+      '<div style="font-size:11px;color:var(--text3);margin-top:4px">Create a blank skill; manually add knowledge and patterns</div>' +
     '</div>';
     html += '</div>';
     html += '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">' +
       '<button class="btn btn-sm" onclick="closeModal()">Cancel</button>' +
-      '<button class="btn btn-primary btn-sm" id="enh-apply-btn" disabled onclick="applySelectedEnhancements(\'' + agentId + '\')">装载选中技能</button>' +
+      '<button class="btn btn-primary btn-sm" id="enh-apply-btn" disabled onclick="applySelectedEnhancements(\'' + agentId + '\')">Install selected skills</button>' +
       '</div>';
     html += '</div>';
   } else {
@@ -13212,7 +13726,7 @@ function toggleEnhPreset(agentId, presetId, el) {
     el.style.borderColor = 'var(--border-light)';
     el.style.background = 'var(--surface3)';
   } else {
-    if (list.length >= 8) { alert('最多只能选择 8 个技能'); return; }
+    if (list.length >= 8) { alert('Up to 8 skills only'); return; }
     list.push(presetId);
     el.style.borderColor = 'var(--primary)';
     el.style.background = 'var(--primary-tint-8)';
@@ -13234,12 +13748,12 @@ async function applySelectedEnhancements(agentId) {
 }
 
 async function enableCustomEnhancement(agentId) {
-  const domain = await askInline('输入自定义技能名称:', { placeholder: '如: blockchain, game_dev' });
+  const domain = await askInline('Enter custom skill name:', { placeholder: 'e.g. blockchain, game_dev' });
   if (domain) enableEnhancement(agentId, domain.trim());
 }
 
 async function disableEnhancement(agentId) {
-  if (!await confirm('确定要卸载所有技能吗？学习记忆将丢失。')) return;
+  if (!await confirm('Uninstall all skills? Learning memory will be lost.')) return;
   await api('POST', '/api/portal/agent/' + agentId + '/enhancement', {action:'disable'});
   closeModal();
   refresh();
@@ -13357,7 +13871,7 @@ async function showSkillPanel(agentId) {
 
   var html = '<div style="padding:20px;max-width:900px;min-width:600px">';
   html += '<h3 style="margin-bottom:4px"><span class="material-symbols-outlined" style="vertical-align:middle;color:#a78bfa">build_circle</span> 能力扩展 Capabilities</h3>';
-  html += '<p style="font-size:11px;color:var(--text3);margin-bottom:16px">此 Agent 可调用的真实能力：已授权的 skill 包、MCP 服务，以及提示词增强 Prompt Packs。</p>';
+  html += '<p style="font-size:11px;color:var(--text3);margin-bottom:16px">Real capabilities this Agent can use: granted skill packs, MCP services, and Prompt Packs.</p>';
 
   // ── MCP Services overview ──
   if (mcpList.length) {
@@ -13373,11 +13887,11 @@ async function showSkillPanel(agentId) {
   // ── Section 1: Granted Skill Packages (primary) ──
   html += '<div style="margin-bottom:18px">';
   html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">';
-  html += '<div style="font-size:13px;font-weight:700;color:var(--text)">已授权技能 Granted Skills <span style="color:var(--text3);font-weight:400">(' + granted.length + ')</span></div>';
-  html += '<button class="btn btn-sm" style="font-size:10px" onclick="showView(\'roles-skills\', document.querySelector(\'[data-view=roles-skills]\'));closeModal();">+ 从技能商店授权更多</button>';
+  html += '<div style="font-size:13px;font-weight:700;color:var(--text)">Granted Skills <span style="color:var(--text3);font-weight:400">(' + granted.length + ')</span></div>';
+  html += '<button class="btn btn-sm" style="font-size:10px" onclick="showView(\'roles-skills\', document.querySelector(\'[data-view=roles-skills]\'));closeModal();">+ Grant more from Store</button>';
   html += '</div>';
   if (!granted.length) {
-    html += '<div style="color:var(--text3);font-size:12px;padding:20px;text-align:center;border:1px dashed var(--border);border-radius:8px">此 Agent 暂未授权任何可执行技能。<br>去 <a href="#" onclick="showView(\'roles-skills\', document.querySelector(\'[data-view=roles-skills]\'));closeModal();return false;" style="color:var(--primary)">技能商店</a> 授权可执行技能包。</div>';
+    html += '<div style="color:var(--text3);font-size:12px;padding:20px;text-align:center;border:1px dashed var(--border);border-radius:8px">No executable skills granted to this Agent yet.<br>Go to the <a href="#" onclick="showView(\'roles-skills\', document.querySelector(\'[data-view=roles-skills]\'));closeModal();return false;" style="color:var(--primary)">Skill Store</a> to grant executable skill packs.</div>';
   } else {
     granted.forEach(function(s) {
       var manifest = s.manifest || {};
@@ -13406,7 +13920,7 @@ async function showSkillPanel(agentId) {
       }
       html += '</div>';
       html += '</div>';
-      html += '<button class="btn btn-sm btn-ghost" style="font-size:10px;color:var(--error);white-space:nowrap" onclick="revokeGrantedSkill(\'' + agentId + '\',\'' + esc(s.id) + '\')">撤销授权</button>';
+      html += '<button class="btn btn-sm btn-ghost" style="font-size:10px;color:var(--error);white-space:nowrap" onclick="revokeGrantedSkill(\'' + agentId + '\',\'' + esc(s.id) + '\')">Revoke</button>';
       html += '</div></div>';
     });
   }
@@ -13434,14 +13948,14 @@ async function showSkillPanel(agentId) {
       html += '<span style="font-size:12px;font-weight:600">' + esc(s.name||'') + '</span>';
       html += '<div style="font-size:10px;color:var(--text3);margin-top:2px">' + esc(s.description||'') + '</div>';
       html += '</div>';
-      html += '<button class="btn btn-sm btn-ghost" style="font-size:10px;margin-left:10px;white-space:nowrap" onclick="unbindSkill(\'' + agentId + '\',\'' + esc(s.skill_id||'') + '\')">解除</button>';
+      html += '<button class="btn btn-sm btn-ghost" style="font-size:10px;margin-left:10px;white-space:nowrap" onclick="unbindSkill(\'' + agentId + '\',\'' + esc(s.skill_id||'') + '\')">Unbind</button>';
       html += '</div></div>';
     });
   }
 
   // Hint
   html += '<div style="margin-top:8px;font-size:10px;color:var(--text3);text-align:center">'
-    + '技能包（可执行）请前往 <a href="#" onclick="event.preventDefault();closeModal();switchTab(\'skill-store\')" style="color:var(--primary);text-decoration:underline">技能商店</a> 管理'
+    + 'Manage executable skill packs at the <a href="#" onclick="event.preventDefault();closeModal();switchTab(\'skill-store\')" style="color:var(--primary);text-decoration:underline">Skill Store</a>'
     + '</div>';
 
   html += '</div></details>';
@@ -13457,12 +13971,12 @@ async function showSkillPanel(agentId) {
 // Revoke a granted skill package from an agent (uses the existing skill-pkgs
 // revoke endpoint, which clears both registry grant and agent.granted_skills).
 async function revokeGrantedSkill(agentId, skillInstallId) {
-  if (!await confirm('确认撤销对该 agent 的技能授权？')) return;
+  if (!await confirm('Revoke skill grant from this agent?')) return;
   try {
     await api('POST', '/api/portal/skill-pkgs/' + encodeURIComponent(skillInstallId) + '/revoke', {agent_id: agentId});
     showSkillPanel(agentId);
   } catch(e) {
-    alert('撤销失败: ' + (e.message || e));
+    alert('Undo failed:' + (e.message || e));
   }
 }
 
@@ -13618,11 +14132,11 @@ async function importFromCatalog(agentId, skillIds) {
     var r = await api('POST', '/api/portal/agent/' + agentId + '/prompt-packs', {action: 'import_from_catalog', skill_ids: skillIds});
     console.log('[importFromCatalog] response', r);
     if (!r) {
-      alert('导入失败：无响应');
+      alert('Import failed: no response');
       return;
     }
     if (r.error) {
-      alert('导入失败: ' + r.error);
+      alert('Import failed:' + r.error);
       return;
     }
     // Inline success toast inside the marketplace panel
@@ -13630,7 +14144,7 @@ async function importFromCatalog(agentId, skillIds) {
     if (mkt) {
       var banner = document.createElement('div');
       banner.style.cssText = 'padding:10px;background:#10b981;color:white;border-radius:6px;font-size:12px;margin-bottom:10px';
-      banner.textContent = '✅ 已导入 ' + (r.imported || 0) + ' 个技能并绑定到 Agent';
+      banner.textContent = '✅ Imported ' + (r.imported || 0) + ' skill(s) and bound to Agent';
       mkt.parentNode.insertBefore(banner, mkt);
       setTimeout(function(){ banner.remove(); }, 3000);
     }
@@ -13641,7 +14155,7 @@ async function importFromCatalog(agentId, skillIds) {
     }, 50);
   } catch (e) {
     console.error('[importFromCatalog] error', e);
-    alert('导入失败: ' + (e && e.message ? e.message : e));
+    alert('Import failed:' + (e && e.message ? e.message : e));
   }
 }
 
@@ -13683,9 +14197,9 @@ function _ppFlash(agentId, ok, msg) {
 async function ppDiscoverNow(agentId) {
   try {
     var r = await api('POST', '/api/portal/agent/' + agentId + '/prompt-packs', {action: 'discover'});
-    _ppFlash(agentId, true, '✅ 已扫描，新增 ' + (r && r.new_skills || 0) + ' 个 pack（共 ' + (r && r.total || 0) + '）');
+    _ppFlash(agentId, true, '✅ Scanned, added ' + (r && r.new_skills || 0) + ' pack(s) (total ' + (r && r.total || 0) + ')');
     showSkillPanel(agentId);
-  } catch(e) { _ppFlash(agentId, false, '扫描失败: ' + (e.message || e)); }
+  } catch(e) { _ppFlash(agentId, false, 'Scan failed:' + (e.message || e)); }
 }
 
 async function ppImportLocal(agentId) {
@@ -13695,12 +14209,12 @@ async function ppImportLocal(agentId) {
   try {
     var r = await api('POST', '/api/portal/agent/' + agentId + '/prompt-packs', {action: 'import_local', path: path});
     if (r && r.ok) {
-      _ppFlash(agentId, true, '✅ 已从 ' + path + ' 导入 ' + (r.new_skills || 0) + ' 个 pack');
+      _ppFlash(agentId, true, '✅ Imported ' + (r.new_skills || 0) + ' pack(s) from ' + path);
       showSkillPanel(agentId);
     } else {
-      _ppFlash(agentId, false, '导入失败: ' + ((r && r.error) || '未知错误'));
+      _ppFlash(agentId, false, 'Import failed:' + ((r && r.error) || 'Unknown error'));
     }
-  } catch(e) { _ppFlash(agentId, false, '导入失败: ' + (e.message || e)); }
+  } catch(e) { _ppFlash(agentId, false, 'Import failed:' + (e.message || e)); }
 }
 
 async function ppOpenCatalog(agentId) {
@@ -13761,23 +14275,23 @@ async function _ppCatalogReload(agentId) {
     });
     list.innerHTML = html;
   } catch(e) {
-    list.innerHTML = '<div style="color:var(--error);font-size:12px;padding:20px;text-align:center">加载失败: '+esc(e.message||String(e))+'</div>';
+    list.innerHTML = '<div style="color:var(--error);font-size:12px;padding:20px;text-align:center">Load failed:'+esc(e.message||String(e))+'</div>';
   }
 }
 
 async function _ppCatalogImport(agentId, skillId, btn) {
-  if (btn) { btn.disabled = true; btn.textContent = '导入中...'; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
   try {
     var r = await api('POST', '/api/portal/agent/' + agentId + '/prompt-packs', {action: 'import_from_catalog', skill_ids: [skillId]});
     if (r && r.ok) {
       if (btn) { btn.textContent = '✓ 已导入'; btn.style.background = '#10b981'; }
     } else {
       if (btn) { btn.disabled = false; btn.textContent = '导入并绑定'; }
-      alert('导入失败: ' + ((r && r.error) || '未知错误'));
+      alert('Import failed:' + ((r && r.error) || 'Unknown error'));
     }
   } catch(e) {
     if (btn) { btn.disabled = false; btn.textContent = '导入并绑定'; }
-    alert('导入失败: ' + (e.message || e));
+    alert('Import failed:' + (e.message || e));
   }
 }
 
@@ -13823,7 +14337,7 @@ async function ppOpenDiscovered(agentId) {
     list.innerHTML = html2;
   } catch(e) {
     var l = document.getElementById('pp-disc-list');
-    if (l) l.innerHTML = '<div style="color:var(--error);font-size:12px;padding:20px;text-align:center">加载失败: '+esc(e.message||String(e))+'</div>';
+    if (l) l.innerHTML = '<div style="color:var(--error);font-size:12px;padding:20px;text-align:center">Load failed:'+esc(e.message||String(e))+'</div>';
   }
 }
 
@@ -13834,7 +14348,7 @@ async function _ppDiscBind(agentId, skillId, btn) {
     if (btn) { btn.textContent = '✓ 已绑定'; btn.style.background = '#10b981'; }
   } catch(e) {
     if (btn) { btn.disabled = false; btn.textContent = '绑定'; }
-    alert('绑定失败: ' + (e.message || e));
+    alert('Bind failed:' + (e.message || e));
   }
 }
 
@@ -13862,7 +14376,7 @@ function switchImportTab(agentId, tab) {
 async function skillStoreImportLocal(agentId) {
   var inp = document.getElementById('imp-local-path-' + agentId);
   var path = inp ? inp.value.trim() : '';
-  if (!path) { _ppFlash(agentId, false, '请输入本地路径'); return; }
+  if (!path) { _ppFlash(agentId, false, 'Please enter local path'); return; }
   try {
     // Detect if path points at a single skill (has SKILL.md) or a directory of skills
     var r = await api('POST', '/api/portal/skill-store', {action: 'import', src_path: path, auto_install: true});
@@ -13877,18 +14391,18 @@ async function skillStoreImportLocal(agentId) {
         _ppFlash(agentId, true, '批量导入: ' + names.join(', '));
         showSkillPanel(agentId);
       } else {
-        _ppFlash(agentId, false, '导入失败: ' + ((rb && rb.error) || '目录中未找到 SKILL.md'));
+        _ppFlash(agentId, false, 'Import failed:' + ((rb && rb.error) || 'No SKILL.md found in directory'));
       }
     } else {
-      _ppFlash(agentId, false, '导入失败: ' + ((r && r.error) || '未知错误'));
+      _ppFlash(agentId, false, 'Import failed:' + ((r && r.error) || 'Unknown error'));
     }
-  } catch(e) { _ppFlash(agentId, false, '导入失败: ' + (e.message || e)); }
+  } catch(e) { _ppFlash(agentId, false, 'Import failed:' + (e.message || e)); }
 }
 
 async function skillStoreImportURL(agentId) {
   var inp = document.getElementById('imp-url-input-' + agentId);
   var url = inp ? inp.value.trim() : '';
-  if (!url) { _ppFlash(agentId, false, '请输入 URL'); return; }
+  if (!url) { _ppFlash(agentId, false, 'Please enter URL'); return; }
   _ppFlash(agentId, true, '正在下载...');
   try {
     var r = await api('POST', '/api/portal/skill-store', {action: 'import_from_url', url: url, auto_install: true});
@@ -13896,31 +14410,31 @@ async function skillStoreImportURL(agentId) {
       _ppFlash(agentId, true, '已导入: ' + (r.name || url));
       showSkillPanel(agentId);
     } else {
-      _ppFlash(agentId, false, '导入失败: ' + ((r && r.error) || '未知错误'));
+      _ppFlash(agentId, false, 'Import failed:' + ((r && r.error) || 'Unknown error'));
     }
-  } catch(e) { _ppFlash(agentId, false, '导入失败: ' + (e.message || e)); }
+  } catch(e) { _ppFlash(agentId, false, 'Import failed:' + (e.message || e)); }
 }
 
 async function skillStoreRescan(agentId) {
   try {
     var r = await api('POST', '/api/portal/skill-store', {action: 'rescan'});
-    _ppFlash(agentId, true, '已扫描: ' + (r && r.count || 0) + ' 个技能');
+    _ppFlash(agentId, true, 'Scanned: ' + (r && r.count || 0) + ' skill(s)');
     showSkillPanel(agentId);
-  } catch(e) { _ppFlash(agentId, false, '扫描失败: ' + (e.message || e)); }
+  } catch(e) { _ppFlash(agentId, false, 'Scan failed:' + (e.message || e)); }
 }
 
 async function skillStoreOpenCatalog(agentId) {
   var html = '<div style="padding:20px;max-width:750px;min-width:540px">' +
-    '<h3 style="margin:0 0 6px"><span class="material-symbols-outlined" style="vertical-align:middle">storefront</span> 技能市场 Skill Store</h3>' +
+    '<h3 style="margin:0 0 6px"><span class="material-symbols-outlined" style="vertical-align:middle">storefront</span> Skill Store</h3>' +
     '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">' +
-      '<div style="font-size:11px;color:var(--text3)">浏览已注册的技能。支持可执行技能 (python/shell) 和指引型技能 (markdown/SKILL.md)。</div>' +
-      '<button class="btn btn-sm btn-primary" style="font-size:11px;white-space:nowrap;margin-left:12px" onclick="closeModal();skillCreatorOpen(\''+agentId+'\')">+ 新建技能</button>' +
+      '<div style="font-size:11px;color:var(--text3)">Browse registered skills. Supports executable skills (python/shell) and guide-type skills (markdown/SKILL.md).</div>' +
+      '<button class="btn btn-sm btn-primary" style="font-size:11px;white-space:nowrap;margin-left:12px" onclick="closeModal();skillCreatorOpen(\''+agentId+'\')">+ New Skill</button>' +
     '</div>' +
     '<div style="display:flex;gap:8px;margin-bottom:12px">' +
       '<select id="ss-cat-source" style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-size:12px">' +
         '<option value="">全部来源</option><option value="official">official</option><option value="maintainer">maintainer</option><option value="community">community</option><option value="local">local</option>' +
       '</select>' +
-      '<input id="ss-cat-q" placeholder="搜索技能名或描述..." style="flex:1;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-size:12px">' +
+      '<input id="ss-cat-q" placeholder="Search skill name or description…" style="flex:1;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-size:12px">' +
       '<button class="btn btn-sm" onclick="_ssCatalogReload(\''+agentId+'\')">搜索</button>' +
     '</div>' +
     '<div id="ss-cat-list" style="max-height:55vh;overflow:auto"><div style="color:var(--text3);font-size:12px;padding:20px;text-align:center">加载中...</div></div>' +
@@ -14012,7 +14526,7 @@ async function _ssCatalogReload(agentId) {
     var r = await api('GET', '/api/portal/skill-store' + qs);
     var entries = (r && r.entries) || [];
     if (!entries.length) {
-      list.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:20px;text-align:center">目录为空。把 SKILL.md 或 manifest.yaml 放到 data/skill_catalog/ 下再点"重新扫描"。</div>';
+      list.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:20px;text-align:center">Catalog is empty. Place SKILL.md or manifest.yaml under data/skill_catalog/ and click "Rescan".</div>';
       return;
     }
     // Look up the target agent's role so the match badge can highlight
@@ -14048,13 +14562,13 @@ async function _ssCatalogReload(agentId) {
         h += '<button class="btn btn-sm" style="font-size:10px;white-space:nowrap" onclick="_ssCatalogGrant(\''+agentId+'\',\''+esc(e.installed_id||'')+'\',this)">授权给 Agent</button>';
       }
       if (e.spec === 'agent-skills' || e.runtime === 'markdown') {
-        h += '<button class="btn btn-sm btn-ghost" style="font-size:10px;white-space:nowrap" onclick="closeModal();skillEditorOpen(\''+agentId+'\',\''+esc(e.id||'')+'\')">编辑</button>';
+        h += '<button class="btn btn-sm btn-ghost" style="font-size:10px;white-space:nowrap" onclick="closeModal();skillEditorOpen(\''+agentId+'\',\''+esc(e.id||'')+'\')">Edit</button>';
       }
       h += '</div></div>';
     });
     list.innerHTML = h;
   } catch(e) {
-    list.innerHTML = '<div style="color:var(--error);font-size:12px;padding:20px;text-align:center">加载失败: '+esc(e.message||String(e))+'</div>';
+    list.innerHTML = '<div style="color:var(--error);font-size:12px;padding:20px;text-align:center">Load failed:'+esc(e.message||String(e))+'</div>';
   }
 }
 
@@ -14067,12 +14581,12 @@ async function _ssCatalogInstall(agentId, entryId, btn) {
       // Refresh list after short delay
       setTimeout(function(){ _ssCatalogReload(agentId); }, 500);
     } else {
-      if (btn) { btn.disabled = false; btn.textContent = '安装'; }
-      alert('安装失败: ' + ((r && r.error) || ''));
+      if (btn) { btn.disabled = false; btn.textContent = 'Install'; }
+      alert('Install failed:' + ((r && r.error) || ''));
     }
   } catch(e) {
-    if (btn) { btn.disabled = false; btn.textContent = '安装'; }
-    alert('安装失败: ' + (e.message || e));
+    if (btn) { btn.disabled = false; btn.textContent = 'Install'; }
+    alert('Install failed:' + (e.message || e));
   }
 }
 
@@ -14083,7 +14597,7 @@ async function _ssCatalogGrant(agentId, installedId, btn) {
     if (btn) { btn.textContent = '已授权'; btn.style.background = '#10b981'; }
   } catch(e) {
     if (btn) { btn.disabled = false; btn.textContent = '授权给 Agent'; }
-    alert('授权失败: ' + (e.message || e));
+    alert('Authorize failed:' + (e.message || e));
   }
 }
 
@@ -14099,12 +14613,12 @@ async function skillEditorOpen(agentId, entryId) {
     var r = await api('POST', '/api/portal/skill-store', {action: 'preview', entry_id: entryId});
     if (!r || !r.ok) { alert('读取失败'); return; }
     _skillEditorModal(agentId, entryId, r.content || '', false, r.files || []);
-  } catch(e) { alert('读取失败: ' + (e.message || e)); }
+  } catch(e) { alert('Read failed:' + (e.message || e)); }
 }
 
 function _skillEditorModal(agentId, entryId, content, isNew, files) {
-  var title = isNew ? '新建技能' : '编辑技能';
-  var saveLabel = isNew ? '创建并安装' : '保存';
+  var title = isNew ? 'New Skill' : 'Edit Skill';
+  var saveLabel = isNew ? '创建并安装' : 'Save';
   var filesHtml = '';
   if (files && files.length) {
     filesHtml = '<div style="margin-bottom:10px;font-size:11px;color:var(--text3)">附属文件: ';
@@ -14113,16 +14627,16 @@ function _skillEditorModal(agentId, entryId, content, isNew, files) {
   }
   var html = '<div style="padding:20px;max-width:800px;min-width:600px">' +
     '<h3 style="margin:0 0 8px">'+title+'</h3>' +
-    '<div style="font-size:11px;color:var(--text3);margin-bottom:10px">SKILL.md 格式：YAML frontmatter (name, description 必填) + Markdown 正文。</div>' +
+    '<div style="font-size:11px;color:var(--text3);margin-bottom:10px">SKILL.md format: YAML frontmatter (name, description required) + Markdown body.</div>' +
     filesHtml +
     '<div style="position:relative">' +
       '<textarea id="skill-editor-content" style="width:100%;height:45vh;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;color:var(--text);font-family:monospace;font-size:12px;resize:vertical;tab-size:2">' + esc(content) + '</textarea>' +
     '</div>' +
     '<div id="skill-editor-issues" style="margin-top:8px"></div>' +
     '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px">' +
-      '<button class="btn btn-sm" style="font-size:11px" onclick="_skillEditorValidate()">检查 SKILL.md</button>' +
+      '<button class="btn btn-sm" style="font-size:11px" onclick="_skillEditorValidate()">Validate SKILL.md</button>' +
       '<div style="display:flex;gap:8px">' +
-        '<button class="btn" onclick="closeModal()">取消</button>' +
+        '<button class="btn" onclick="closeModal()">Cancel</button>' +
         '<button class="btn btn-primary" onclick="_skillEditorSave(\''+agentId+'\',\''+esc(entryId||'')+'\','+(isNew?'true':'false')+')">' + saveLabel + '</button>' +
       '</div>' +
     '</div>' +
@@ -14137,7 +14651,7 @@ async function _skillEditorValidate() {
   try {
     var r = await api('POST', '/api/portal/skill-store', {action: 'validate', content: ta.value});
     if (r && r.ok) {
-      box.innerHTML = '<div style="padding:8px;background:#10b981;color:white;border-radius:6px;font-size:11px">SKILL.md 格式正确 (name: '+esc(r.parsed_meta.name||'')+', body: '+r.body_length+' chars)</div>';
+      box.innerHTML = '<div style="padding:8px;background:#10b981;color:white;border-radius:6px;font-size:11px">SKILL.md is valid (name: '+esc(r.parsed_meta.name||'')+', body: '+r.body_length+' chars)</div>';
     } else {
       var issues = (r && r.issues) || ['unknown error'];
       box.innerHTML = '<div style="padding:8px;background:#ef4444;color:white;border-radius:6px;font-size:11px">问题: ' + issues.map(esc).join('; ') + '</div>';
@@ -14151,19 +14665,19 @@ async function _skillEditorSave(agentId, entryId, isNew) {
   var ta = document.getElementById('skill-editor-content');
   if (!ta) return;
   var content = ta.value;
-  if (!content.trim()) { alert('内容不能为空'); return; }
+  if (!content.trim()) { alert('Content cannot be empty'); return; }
   try {
     var action = isNew ? 'create_new' : 'save_edit';
     var payload = {action: action, content: content};
     if (!isNew) payload.entry_id = entryId;
     var r = await api('POST', '/api/portal/skill-store', payload);
     if (r && r.ok) {
-      alert((isNew ? '创建' : '保存') + '成功: ' + (r.name || ''));
+      alert((isNew ? 'Create' : 'Save') + '成功: ' + (r.name || ''));
       closeModal();
       // Refresh catalog if open
       setTimeout(function(){ skillStoreOpenCatalog(agentId); }, 200);
     } else {
-      alert('失败: ' + ((r && r.error) || '未知错误'));
+      alert('失败: ' + ((r && r.error) || 'Unknown error'));
     }
   } catch(e) { alert('失败: ' + (e.message || e)); }
 }
@@ -14245,7 +14759,7 @@ async function showGrowthPathPanel(agentId) {
     html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">';
     html += '<div style="'+cellStyle+'"><div style="'+labelStyle+'">📚 经验库</div><div style="'+valueStyle+'">' + stats.experience_count + '</div><div style="'+hintStyle+'">role=' + esc(stats.role||'') + '</div></div>';
     html += '<div style="'+cellStyle+'"><div style="'+labelStyle+'">🧠 长期记忆</div><div style="'+valueStyle+'">' + stats.memory_facts + '</div><div style="'+hintStyle+'">L3 facts</div></div>';
-    html += '<div style="'+cellStyle+'"><div style="'+labelStyle+'">🛠 授予技能</div><div style="'+valueStyle+'">' + stats.granted_skills + '</div><div style="'+hintStyle+'">+' + stats.bound_prompt_packs + ' prompt packs</div></div>';
+    html += '<div style="'+cellStyle+'"><div style="'+labelStyle+'">🛠 Granted Skills</div><div style="'+valueStyle+'">' + stats.granted_skills + '</div><div style="'+hintStyle+'">+' + stats.bound_prompt_packs + ' prompt packs</div></div>';
     html += '<div style="'+cellStyle+'"><div style="'+labelStyle+'">📖 知识库</div><div style="'+valueStyle+'">' + (stats.domain_kbs||[]).length + '</div><div style="'+hintStyle+'" title="' + esc(kbList) + '">' + stats.domain_kb_chunks_total + ' chunks</div></div>';
     html += '<div style="'+cellStyle+'"><div style="'+labelStyle+'">🎓 共享贡献</div><div style="'+valueStyle+'">' + stats.shared_knowledge_contributions + '</div><div style="'+hintStyle+'">Knowledge Wiki</div></div>';
     html += '<div style="'+cellStyle+'"><div style="'+labelStyle+'">✨ 最近总结</div><div style="font-weight:700;font-size:13px;color:var(--text);margin-top:6px">' + fmtAgo(stats.last_self_summary_at) + '</div><div style="'+hintStyle+'" title="' + esc(stats.last_self_summary_preview||'') + '">' + (stats.last_self_summary_preview ? esc(stats.last_self_summary_preview.slice(0,40)) + '…' : '点 Think 按钮') + '</div></div>';
@@ -14638,7 +15152,7 @@ const CA_SKILL_CATEGORY_LABELS = {
   'sales': '🤝 销售', 'design': '🎨 设计', 'product': '📋 产品', 'strategy': '🧭 战略',
   'support': '🎧 客户支持', 'testing': '🧪 测试', 'academic': '🎓 学术研究',
   'finance': '💰 财务', 'legal': '⚖️ 法务', 'hr': '👥 人力', 'paid-media': '📊 投放',
-  'project-management': '📅 项目管理', 'specialized': '✨ 特殊场景',
+  'project-management': '📅 Project Management', 'specialized': '✨ Specialized',
   'spatial-computing': '🥽 空间计算', 'game-development': '🎮 游戏', 'supply-chain': '🏭 供应链',
   'community': '📦 社区'
 };
@@ -14675,44 +15189,93 @@ function renderSkillPickerModal(filter) {
   });
   const selected = window._caSelectedSkills || [];
 
-  let html = '<div style="padding:18px;max-height:80vh;display:flex;flex-direction:column;min-width:680px">';
-  html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">';
-  html += '<h3 style="font-family:\'Plus Jakarta Sans\',sans-serif;margin:0">选择专业领域 <span style="font-size:12px;color:var(--text3);font-weight:400">(最多 8 个，已选 <span id="sp-count">' + selected.length + '</span>/8)</span></h3>';
-  html += '<input id="sp-search" type="text" placeholder="🔍 搜索专业领域..." style="padding:6px 10px;background:var(--surface3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;width:240px" oninput="renderSkillPickerModal(this.value)" value="' + esc(filter) + '">';
-  html += '</div>';
-  html += '<div style="overflow-y:auto;flex:1;max-height:60vh;padding-right:4px">';
+  // Tech-mode detection — bigger modal, glass cards, mono labels.
+  let _techSp = false;
+  try { _techSp = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
 
-  let total = 0;
-  sorted_cats.forEach(function(cat) {
-    const items = groups[cat] || [];
-    if (!items.length) return;
-    total += items.length;
-    const label = CA_SKILL_CATEGORY_LABELS[cat] || cat;
-    html += '<div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin:12px 0 6px">' + esc(label) + ' <span style="color:var(--text3);font-weight:400;text-transform:none">(' + items.length + ')</span></div>';
-    html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">';
-    items.forEach(function(p) {
-      const isSelected = selected.indexOf(p.id) >= 0;
-      html += '<div data-skill-id="' + esc(p.id) + '" onclick="toggleCaSkill(\'' + esc(p.id) + '\',this)" ' +
-        'style="background:' + (isSelected?'var(--primary-tint-12)':'var(--surface3)') + ';border-radius:8px;padding:10px;cursor:pointer;border:1px solid ' + (isSelected?'var(--primary)':'var(--border-light)') + ';transition:all 0.15s">' +
-        '<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">' +
-        '<span style="font-size:15px">' + (p.icon||'📦') + '</span>' +
-        '<div style="font-weight:600;font-size:12px;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(p.name) + '</div>' +
-        '</div>' +
-        '<div style="font-size:10px;color:var(--text3);line-height:1.4;max-height:28px;overflow:hidden">' + esc(p.description||'') + '</div>' +
-      '</div>';
+  // ── Cards-only HTML builder (factored out so search re-render
+  // doesn't rebuild the input element + lose focus). ──
+  function buildCardsHtml(filterStr) {
+    const f = (filterStr || '').toLowerCase();
+    let totalC = 0;
+    let h = '';
+    sorted_cats.forEach(function(cat) {
+      const items = (groups[cat] || []).filter(function(p) {
+        if (!f) return true;
+        const hay = ((p.name||'') + ' ' + (p.description||'') + ' ' + (p.id||'')).toLowerCase();
+        return hay.indexOf(f) >= 0;
+      });
+      if (!items.length) return;
+      totalC += items.length;
+      const label = CA_SKILL_CATEGORY_LABELS[cat] || cat;
+      const headerCls = _techSp ? 'tc-mono-label' : '';
+      h += '<div class="' + headerCls + '" style="font-size:11px;font-weight:700;color:var(--' + (_techSp ? 'primary' : 'text3') + ');text-transform:uppercase;letter-spacing:0.08em;margin:14px 0 8px">' + esc(label) + ' <span style="color:var(--text3);font-weight:400;text-transform:none">(' + items.length + ')</span></div>';
+      const cols = _techSp ? 'repeat(auto-fill,minmax(220px,1fr))' : 'repeat(3,1fr)';
+      h += '<div style="display:grid;grid-template-columns:' + cols + ';gap:10px">';
+      items.forEach(function(p) {
+        const isSelected = selected.indexOf(p.id) >= 0;
+        const baseCls = _techSp ? 'tc-card-glass' : '';
+        const baseBg = _techSp
+          ? (isSelected ? 'background:rgba(192,193,255,0.16);' : '')
+          : ('background:' + (isSelected ? 'var(--primary-tint-12)' : 'var(--surface3)') + ';');
+        const baseBorder = _techSp
+          ? (isSelected ? 'border:1px solid rgba(192,193,255,0.55);box-shadow:0 0 12px -3px rgba(192,193,255,0.30);' : 'border:1px solid rgba(255,255,255,0.08);')
+          : ('border:1px solid ' + (isSelected ? 'var(--primary)' : 'var(--border-light)') + ';');
+        h += '<div class="' + baseCls + '" data-skill-id="' + esc(p.id) + '" onclick="toggleCaSkill(\'' + esc(p.id) + '\',this)" ' +
+          'style="' + baseBg + baseBorder + 'border-radius:10px;padding:12px;cursor:pointer;transition:all 0.15s">' +
+          '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
+          '<span style="font-size:18px">' + (p.icon||'📦') + '</span>' +
+          '<div style="font-weight:600;font-size:13px;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--on-surface,var(--text))">' + esc(p.name) + '</div>' +
+          '</div>' +
+          '<div style="font-size:11px;color:var(--text3);line-height:1.45;max-height:46px;overflow:hidden">' + esc(p.description||'') + '</div>' +
+        '</div>';
+      });
+      h += '</div>';
     });
-    html += '</div>';
-  });
-  if (total === 0) {
-    html += '<div style="text-align:center;color:var(--text3);padding:40px 0">未找到匹配的技能</div>';
+    if (totalC === 0) {
+      h += '<div style="text-align:center;color:var(--text3);padding:40px 0;font-size:13px">No matching domains found</div>';
+    }
+    return h;
   }
+
+  // Stash the filter handler so the input can re-use it without
+  // rebuilding the whole modal (preserves focus + caret position).
+  window._spOnSearchInput = function(val) {
+    const cardsEl = document.getElementById('sp-cards');
+    if (cardsEl) cardsEl.innerHTML = buildCardsHtml(val);
+  };
+
+  const shellStyle = _techSp
+    ? 'padding:24px;display:flex;flex-direction:column;width:min(1100px,90vw);max-height:84vh'
+    : 'padding:18px;max-height:80vh;display:flex;flex-direction:column;min-width:680px';
+  let html = '<div style="' + shellStyle + '">';
+  // Header row
+  html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;gap:12px;flex-wrap:wrap">';
+  if (_techSp) {
+    html += '<div>' +
+      '<div class="tc-mono-label" style="color:var(--primary);letter-spacing:0.18em;display:flex;align-items:center;gap:8px"><span>DOMAIN PALETTE</span><span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span></div>' +
+      '<h3 style="font-family:var(--font-display,\'Plus Jakarta Sans\');font-size:22px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:6px 0 0">Select Domains</h3>' +
+      '<p class="tc-text-dim" style="font-size:12px;margin:4px 0 0">Up to 8 · selected <b id="sp-count" style="color:var(--primary)">' + selected.length + '</b> / 8</p>' +
+    '</div>';
+  } else {
+    html += '<h3 style="font-family:\'Plus Jakarta Sans\',sans-serif;margin:0">Select Domains <span style="font-size:12px;color:var(--text3);font-weight:400">(up to 8 · selected <span id="sp-count">' + selected.length + '</span>/8)</span></h3>';
+  }
+  html += '<input id="sp-search" type="text" placeholder="🔍 Search domains..." style="padding:8px 12px;background:var(--surface3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;width:280px" oninput="window._spOnSearchInput(this.value)" value="' + esc(filter) + '">';
   html += '</div>';
-  html += '<div style="display:flex;justify-content:flex-end;gap:8px;padding-top:14px;border-top:1px solid var(--border-light);margin-top:12px">';
-  html += '<button class="btn btn-sm" onclick="closeModal()">取消</button>';
-  html += '<button class="btn btn-primary btn-sm" onclick="confirmCaSkillSelection()">确认 (<span id="sp-btn-count">' + selected.length + '</span>)</button>';
+  // Cards container — search will re-render only this
+  html += '<div id="sp-cards" style="overflow-y:auto;flex:1;max-height:62vh;padding-right:6px">' + buildCardsHtml(filter) + '</div>';
+  // Footer
+  html += '<div style="display:flex;justify-content:flex-end;gap:8px;padding-top:14px;border-top:1px solid var(--border-light);margin-top:14px">';
+  html += '<button class="btn btn-sm" onclick="closeModal()">Cancel</button>';
+  html += '<button class="btn btn-primary btn-sm" onclick="confirmCaSkillSelection()">Confirm (<span id="sp-btn-count">' + selected.length + '</span>)</button>';
   html += '</div>';
   html += '</div>';
   showModalHTML(html);
+  // Focus the search input on mount so users can start typing immediately.
+  setTimeout(function() {
+    const s = document.getElementById('sp-search');
+    if (s && !filter) s.focus();
+  }, 50);
 }
 
 function toggleCaSkill(presetId, el) {
@@ -14723,7 +15286,7 @@ function toggleCaSkill(presetId, el) {
     el.style.borderColor = 'var(--border-light)';
     el.style.background = 'var(--surface3)';
   } else {
-    if (list.length >= 8) { alert('最多只能选择 8 个技能'); return; }
+    if (list.length >= 8) { alert('Up to 8 skills only'); return; }
     list.push(presetId);
     el.style.borderColor = 'var(--primary)';
     el.style.background = 'var(--primary-tint-12)';
@@ -15012,12 +15575,62 @@ function eaRenderExtraLlms() {
 // fallbacks, then "general" as the closing default. Mirrors robots.json
 // — when adding a new icon, also append the role id here so it shows
 // up in the create / edit modal's avatar grid.
+// Picker shows ONE entry per unique aether portrait. Archetype +
+// role + blurb mirror stitch_33's persona grid. Legacy role names
+// that alias to one of these (architect → cto, product_architect →
+// pm, media → marketing, specialist / tech_expert → researcher) are
+// intentionally NOT listed here so the picker grid never shows two
+// visually-identical thumbnails. Existing agent records using those
+// legacy names still resolve correctly via _AETHER_ALIASES.
+// Stitch_34's 20 persona archetypes (legacy role names like devops /
+// meeting are also kept for backwards compatibility but absent from
+// the picker grid since they share faces with archetypes above).
+// 9 of the 20 stitch_34 archetypes have unique portraits (1-9 in
+// stitch_34's grid); the remaining 11 share an existing portrait
+// until real assets arrive — sharing is documented per row below.
+// 20 picker entries — matches stitch_34's 20-archetype grid 1:1.
+// Tier 1 (9 archetypes) + Tier 2 (5 specialists) get unique portraits;
+// Tier 3 (6 archetypes) share portraits semantically (until real
+// images for LINGUIST / OPTIMIZER / etc. land).
 var _AVATAR_ROLES = [
-  'ceo','cto','coder','tech_expert','reviewer','researcher','architect','devops',
-  'product_architect','marketing','media','meeting','specialist',
-  'pm','designer','tester','data',
-  'general'
+  // Tier 1 — 9 stitch_34 archetypes with own portraits
+  'ceo','cto','coder','reviewer','tester','pm','marketing','developer','data',
+  // Tier 2 — 5 specialist roles with own portrait
+  'security','researcher','designer','support','general',
+  // Tier 3 — 6 stitch_34 archetypes that share an existing portrait
+  'linguist','optimizer','observer','legal','memory','forecaster',
 ];
+
+// Archetype + headline + blurb per role. Mirrors stitch_34's grid.
+var _AVATAR_PERSONAS = {
+  ceo:        { archetype: 'STRATEGIST',  title: 'The CEO',         blurb: 'High-level goal decomposition and strategic resource allocation across distributed clusters.' },
+  cto:        { archetype: 'ARCHITECT',   title: 'The CTO',         blurb: 'Technical scalability, complex system integration, dependency management protocols.' },
+  coder:      { archetype: 'EXECUTOR',    title: 'The Coder',       blurb: 'Rapid script generation, autonomous debugging, iterative refinement cycles.' },
+  reviewer:   { archetype: 'AUDITOR',     title: 'The Reviewer',    blurb: 'Security validation, strict linting compliance, system performance benchmarks.' },
+  tester:     { archetype: 'VALIDATOR',   title: 'The Guardian',    blurb: 'Rigorous quality assurance, stress testing, proactive edge-case detection.' },
+  pm:         { archetype: 'ORCHESTRATOR',title: 'The Conductor',   blurb: 'Cross-agent communication, task arbitration, workflow synchronization.' },
+  marketing:  { archetype: 'EVANGELIST',  title: 'The Communicator',blurb: 'Translating technical outputs into actionable business insights for stakeholders.' },
+  developer:  { archetype: 'BUILDER',     title: 'The Maker',       blurb: 'Infrastructure setup, rapid prototyping, automated deployment pipelines.' },
+  data:       { archetype: 'ANALYST',     title: 'The Insight Miner', blurb: 'Big data synthesis, pattern recognition, predictive trend detection.' },
+  // Tier 2 base portraits
+  security:   { archetype: 'SECURITY',    title: 'The Guard',       blurb: 'Hardened defense protocols, real-time intrusion detection, encryption audits.' },
+  researcher: { archetype: 'RESEARCHER',  title: 'The Scholar',     blurb: 'Deep web analysis, academic paper synthesis, state-of-the-art literature review.' },
+  designer:   { archetype: 'DESIGNER',    title: 'The Creative',    blurb: 'UI/UX consistency enforcement, brand alignment, asset generation orchestration.' },
+  support:    { archetype: 'CONCIERGE',   title: 'The Helper',      blurb: 'Friendly cross-team translator and onboarding companion.' },
+  general:    { archetype: 'GENERALIST',  title: 'The Adapter',     blurb: 'Versatile baseline unit; adapts to varied tasks.' },
+  // Tier 3 — share existing portraits until real images land
+  linguist:   { archetype: 'LINGUIST',    title: 'The Translator',  blurb: 'Multilingual tokenization, semantic mapping, NLP cross-optimization.' },
+  optimizer:  { archetype: 'OPTIMIZER',   title: 'The Refiner',     blurb: 'Inference efficiency tuning, cost reduction strategies, latency minimization.' },
+  observer:   { archetype: 'OBSERVER',    title: 'The Monitor',     blurb: 'Real-time telemetry tracking, system health monitoring, anomaly detection.' },
+  memory:     { archetype: 'MEMORY',      title: 'The Historian',   blurb: 'Long-term context preservation, RAG management, vector knowledge retrieval.' },
+  forecaster: { archetype: 'FORECASTER',  title: 'The Prophet',     blurb: 'Predictive modeling, future state simulations, probability-based decision support.' },
+  legal:      { archetype: 'LEGAL',       title: 'The Compliance',  blurb: 'Policy alignment, ethical framework auditing, regulatory risk mitigation.' },
+  network:    { archetype: 'NETWORK',     title: 'The Connector',   blurb: 'External API orchestration and Model Context Protocol (MCP) integration.' },
+  trainer:    { archetype: 'TRAINER',     title: 'The Coach',       blurb: 'Continuous fine-tuning, RLHF feedback processing, model performance coaching.' },
+  // Legacy aliases (not in picker grid but used by old agent records)
+  devops:     { archetype: 'REGULATOR',   title: 'The Sysop',       blurb: 'Keeps infrastructure healthy across environments.' },
+  meeting:    { archetype: 'SCRIBE',      title: 'The Note-Taker',  blurb: 'Captures context across rooms; renders crisp summaries.' },
+};
 window._caSelectedAvatar = '';
 window._eaSelectedAvatar = '';
 
@@ -15026,16 +15639,42 @@ function _renderAvatarGrid(containerId, selectedVar, clickFunc) {
   if (!c) return;
   var _techAv = false;
   try { _techAv = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+
+  if (_techAv) {
+    // Stitch_33-style persona grid scaled down for the modal: 4-5
+    // columns, smaller avatar (~80px), tighter typography, blurb
+    // limited to 1 line.
+    c.style.display = 'grid';
+    c.style.gridTemplateColumns = 'repeat(auto-fill,minmax(140px,1fr))';
+    c.style.gap = '8px';
+    c.innerHTML = _AVATAR_ROLES.map(function(r) {
+      var id = 'robot_' + r;
+      var p = _AVATAR_PERSONAS[r] || { archetype: r.toUpperCase(), title: r, blurb: '' };
+      var isSel = (window[selectedVar] === id);
+      var border = isSel ? 'border:1px solid var(--primary)' : 'border:1px solid rgba(255,255,255,0.08)';
+      var glow = isSel ? 'box-shadow:0 0 12px -2px rgba(192,193,255,0.40)' : '';
+      return '<div onclick="' + clickFunc + '(\'' + id + '\')" class="tc-card-glass" style="' +
+        'padding:8px;cursor:pointer;display:flex;flex-direction:column;gap:6px;' +
+        'border-top:1px solid rgba(255,255,255,0.15);' + border + ';' + glow + ';' +
+        'transition:all 0.15s">' +
+          '<div style="position:relative;width:100%;aspect-ratio:1/1;border-radius:var(--r-sm);overflow:hidden;border:1px solid rgba(255,255,255,0.05)">' +
+            '<img src="' + _aetherAvatarUrl(r) + '" alt="" style="width:100%;height:100%;object-fit:cover;filter:' + (isSel ? 'grayscale(0)' : 'grayscale(0.85)') + ';transition:filter 0.3s" onmouseover="this.style.filter=\'grayscale(0)\'" onmouseout="this.style.filter=\'' + (isSel ? 'grayscale(0)' : 'grayscale(0.85)') + '\'" onerror="this.outerHTML=\'<div style=&quot;display:flex;align-items:center;justify-content:center;width:100%;height:100%;background:rgba(255,255,255,0.04)&quot;><span class=material-symbols-outlined style=&quot;font-size:36px;color:var(--outline)&quot;>smart_toy</span></div>\'">' +
+            (isSel ? '<div style="position:absolute;top:4px;right:4px;background:var(--primary);color:var(--on-primary);width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:0 0 8px var(--primary)"><span class="material-symbols-outlined" style="font-size:12px">check</span></div>' : '') +
+          '</div>' +
+          '<div>' +
+            '<div class="tc-mono-label" style="color:' + (isSel ? 'var(--primary)' : 'var(--outline)') + ';font-size:8px;letter-spacing:0.10em;line-height:1.2">' + esc(p.archetype) + '</div>' +
+            '<div style="font-family:var(--font-display);font-size:12px;font-weight:600;color:var(--on-surface);margin-top:1px;line-height:1.2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(p.title) + '</div>' +
+          '</div>' +
+        '</div>';
+    }).join('');
+    return;
+  }
+
+  // Legacy theme — original compact thumbnail grid.
   c.innerHTML = _AVATAR_ROLES.map(function(r) {
     var id = 'robot_' + r;
     var sel = (window[selectedVar] === id) ? 'border:2px solid var(--primary);box-shadow:0 0 6px var(--primary)' : 'border:2px solid transparent';
-    // Tech mode: render aether portraits in a circular crop so the
-    // grid matches the rest of the tech chrome (Agent Directory cards
-    // / Memory hub avatars / Agent Chat header all use these). The
-    // saved id is still robot_<role> so backend behavior is unchanged.
-    var imgHtml = _techAv && typeof _aetherAvatarUrl === 'function'
-      ? '<div style="width:48px;height:48px;border-radius:9999px;overflow:hidden;border:1px solid var(--outline-variant, rgba(255,255,255,0.10));margin:0 auto"><img src="' + _aetherAvatarUrl(r) + '" style="width:100%;height:100%;object-fit:cover" onerror="this.outerHTML=\'<span class=material-symbols-outlined style=font-size:36px;color:var(--outline)>smart_toy</span>\'"></div>'
-      : '<img src="' + _robotIconUrl(id) + '" style="width:40px;height:40px" onerror="this.outerHTML=\'<span class=material-symbols-outlined style=font-size:36px;color:var(--text3)>smart_toy</span>\'">';
+    var imgHtml = '<img src="' + _robotIconUrl(id) + '" style="width:40px;height:40px" onerror="this.outerHTML=\'<span class=material-symbols-outlined style=font-size:36px;color:var(--text3)>smart_toy</span>\'">';
     return '<div onclick="'+clickFunc+'(\''+id+'\')" style="cursor:pointer;border-radius:8px;padding:4px;text-align:center;'+sel+';transition:all .15s">'
       + imgHtml
       + '<div style="font-size:10px;color:var(--text2);margin-top:4px">'+r+'</div></div>';
@@ -15261,7 +15900,7 @@ async function eaRefreshPreprocessorModels() {
   if ((document.getElementById('ea-preprocessor-mode-optimize')||{}).checked) modes.push('optimize_prompt');
   if ((document.getElementById('ea-preprocessor-mode-understanding')||{}).checked) modes.push('task_understanding');
   await eaPopulatePreprocessor(current, modes);
-  if (window._toast) window._toast('Ollama 模型列表已刷新', 'success');
+  if (window._toast) window._toast('Ollama model list refreshed', 'success');
 }
 
 // (Older eaCollectPreprocessor removed 2026-04-28 — the version above
@@ -15596,7 +16235,7 @@ async function wakeAgent(agentId) {
   try {
     var data = await api('POST', '/api/portal/agent/' + agentId + '/wake', {max_tasks: 5});
     if (!data || !data.ok) {
-      alert('唤醒失败: ' + ((data&&data.error)||'unknown'));
+      alert('Wake failed:' + ((data&&data.error)||'unknown'));
       return;
     }
     var triggered = data.triggered || [];
@@ -15604,16 +16243,16 @@ async function wakeAgent(agentId) {
     var msg = '已唤醒，触发 ' + triggered.length + ' 个任务';
     if (triggered.length === 0) {
       msg = '没有待处理任务';
-      if (skipped.length) msg += '（' + skipped.length + ' 个项目被暂停，已跳过）';
+      if (skipped.length) msg += ' (' + skipped.length + ' paused projects skipped)';
     } else {
       msg += '\n\n' + triggered.map(function(t){ return '• ' + t.title + ' (' + t.project_name + ')'; }).join('\n');
-      if (skipped.length) msg += '\n\n跳过的暂停项目: ' + skipped.join(', ');
+      if (skipped.length) msg += '\n\nSkipped paused projects: ' + skipped.join(', ');
     }
     alert(msg);
     // 触发后稍等几秒刷新事件日志
     setTimeout(function(){ if (typeof loadAgentEventLog === 'function') loadAgentEventLog(agentId); }, 2000);
   } catch(e) {
-    alert('唤醒失败: ' + e.message);
+    alert('Wake failed:' + e.message);
   }
 }
 
@@ -15931,23 +16570,25 @@ async function _saveSoul(agentId) {
 // distill any rules worth saving (via save_experience), and insert
 // the summary as an assistant bubble.
 async function showThinkingPanel(agentId) {
+  // Despite the legacy name, this triggers a SUMMARIZE pass over the
+  // recent N turns and inserts the summary as an assistant message.
+  // Real-time reasoning streaming lives behind the "Thinking" input
+  // toggle (see _toggleShowThinking).
   var btn = event && event.target ? event.target.closest('button') : null;
   var origHtml = btn ? btn.innerHTML : '';
   if (btn) {
     btn.disabled = true;
-    btn.innerHTML = '<span class="material-symbols-outlined" style="font-size:14px;animation:spin 1s linear infinite">progress_activity</span> 总结中';
+    btn.innerHTML = '<span class="material-symbols-outlined" style="font-size:14px;animation:spin 1s linear infinite">progress_activity</span> Summarizing…';
   }
   try {
     var resp = await api('POST', '/api/portal/agent/' + agentId + '/think-now', {});
     if (!resp || !resp.ok) {
-      alert('自我总结失败：' + ((resp && resp.error) || '未知错误'));
+      alert('Summarize failed: ' + ((resp && resp.error) || 'unknown error'));
       return;
     }
-    // The backend already appended the summary into the agent's event
-    // stream as an assistant message — reload to show it.
     loadAgentChat(agentId);
   } catch (e) {
-    alert('自我总结失败：' + (e && e.message ? e.message : e));
+    alert('Summarize failed: ' + (e && e.message ? e.message : e));
   } finally {
     if (btn) {
       btn.disabled = false;
@@ -16011,7 +16652,7 @@ async function _eaRenderDomainKbCheckboxes(selectedIds) {
         + '</label>';
     }).join('');
   } catch(e) {
-    box.innerHTML = '<div style="color:var(--error);font-size:12px;padding:4px">加载失败: ' + e + '</div>';
+    box.innerHTML = '<div style="color:var(--error);font-size:12px;padding:4px">Load failed:' + e + '</div>';
   }
 }
 
@@ -16378,7 +17019,7 @@ async function saveAgentProfile() {
     var _pv = providerEl ? (providerEl.value || '').trim() : '';
     var _mv = modelEl ? (modelEl.value || '').trim() : '';
     if ((_pv && !_mv) || (!_pv && _mv)) {
-      alert('请同时选择 Provider 和 Model(或都留空清除绑定)。');
+      alert('Please select both Provider and Model (or leave both empty to clear binding).');
       return;
     }
 
@@ -16503,7 +17144,7 @@ async function saveAgentProfile() {
     // Success feedback — without this the user sees only "modal disappears"
     // and can't tell whether the save actually went through. (Reported
     // 2026-05-03 as "桌面悬浮打开不好使 / 无任何反应".)
-    if (typeof _toast === 'function') _toast('已保存', 'success');
+    if (typeof _toast === 'function') _toast('Saved', 'success');
     hideModal('edit-agent');
     refresh();
   } catch(e) {
@@ -16523,7 +17164,7 @@ async function deleteAgent(agentId) {
 async function clearAgent(agentId) {
   if(!await confirm('Clear all messages and conversation history for this agent?')) return;
   var r = await api('POST', '/api/portal/agent/' + agentId + '/clear');
-  if (r && r.error) { _toast && _toast('清空失败: ' + r.error, 'error'); return; }
+  if (r && r.error) { _toast && _toast('Clear failed:' + r.error, 'error'); return; }
   // Force-reset the chat DOM immediately. Without this, the polling
   // path in loadAgentChat sees "0 events but DOM has messages" → takes
   // the "preserve existing" branch (meant for transient empty
@@ -16544,7 +17185,7 @@ async function clearAgent(agentId) {
     renderAgentChat(agentId);
   }
   refresh();
-  _toast && _toast('已清空对话', 'success');
+  _toast && _toast('Conversation cleared', 'success');
 }
 
 async function delegateTask() {
@@ -16943,7 +17584,7 @@ async function renderProjects() {
     : ''
       + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">'
       + '  <div><h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:22px;font-weight:800;margin:0">Projects</h2>'
-      + '    <p style="font-size:12px;color:var(--text3);margin-top:4px">' + t('project.subtitle', '组织多 agent 协作项目与任务') + '</p></div>'
+      + '    <p style="font-size:12px;color:var(--text3);margin-top:4px">' + t('project.subtitle', 'Organize multi-agent collaboration projects and tasks') + '</p></div>'
       + '  <button class="btn btn-primary btn-sm" onclick="showCreateProjectModal()"><span class="material-symbols-outlined" style="font-size:14px">add</span> ' + t('project.new', 'New Project') + '</button>'
       + '</div>';
   try {
@@ -16963,12 +17604,12 @@ async function renderProjects() {
     });
     // Status metadata — label / color / bg per lifecycle state
     var STATUS_META = {
-      planning:  { label: '未开始', zh: '未开始', color: '#9ca3af', bg: 'rgba(156,163,175,0.12)' },
-      active:    { label: '进行中', zh: '进行中', color: 'var(--primary)', bg: 'var(--primary-tint-12)' },
-      suspended: { label: '挂起',   zh: '挂起',   color: '#f59e0b', bg: 'rgba(245,158,11,0.12)' },
-      cancelled: { label: '停止',   zh: '停止',   color: '#ef4444', bg: 'rgba(239,68,68,0.12)' },
-      completed: { label: '结束',   zh: '结束',   color: '#22c55e', bg: 'rgba(34,197,94,0.12)' },
-      archived:  { label: '归档',   zh: '归档',   color: '#6b7280', bg: 'rgba(107,114,128,0.12)' },
+      planning:  { label: 'Not Started', zh: 'Not Started', color: '#9ca3af', bg: 'rgba(156,163,175,0.12)' },
+      active:    { label: 'In Progress', zh: 'In Progress', color: 'var(--primary)', bg: 'var(--primary-tint-12)' },
+      suspended: { label: 'On Hold',   zh: 'On Hold',   color: '#f59e0b', bg: 'rgba(245,158,11,0.12)' },
+      cancelled: { label: 'Stop',   zh: 'Stop',   color: '#ef4444', bg: 'rgba(239,68,68,0.12)' },
+      completed: { label: 'End',   zh: 'End',   color: '#22c55e', bg: 'rgba(34,197,94,0.12)' },
+      archived:  { label: 'Archive',   zh: 'Archive',   color: '#6b7280', bg: 'rgba(107,114,128,0.12)' },
     };
     function _statusMeta(s){
       return STATUS_META[s] || { label: s || 'unknown', color: 'var(--text3)', bg: 'var(--overlay-5)' };
@@ -17002,13 +17643,13 @@ async function renderProjects() {
         }
         return '<button class="btn btn-ghost btn-sm" style="flex:none;color:'+col+'" onclick="event.stopPropagation();changeProjectStatus(\''+p.id+'\',\''+target+'\')"><span class="material-symbols-outlined" style="font-size:14px">'+icon+'</span> '+label+'</button>';
       }
-      var resumeLabel = _techPj ? 'Resume' : '恢复';
-      var pauseLabel  = _techPj ? 'Suspend' : '挂起';
+      var resumeLabel = _techPj ? 'Resume' : 'Resume';
+      var pauseLabel  = _techPj ? 'Suspend' : 'On Hold';
       var startLabel  = _techPj ? 'Start' : '启动';
-      var stopLabel   = _techPj ? 'Cancel' : '停止';
-      var doneLabel   = _techPj ? 'Complete' : '结束';
+      var stopLabel   = _techPj ? 'Cancel' : 'Stop';
+      var doneLabel   = _techPj ? 'Complete' : 'End';
       var reactLabel  = _techPj ? 'Reactivate' : '重新激活';
-      var archLabel   = _techPj ? 'Archive' : '归档';
+      var archLabel   = _techPj ? 'Archive' : 'Archive';
       var unarchLabel = _techPj ? 'Unarchive' : '取消归档';
       if (p.status === 'planning') {
         statusBtns += _btn('play_arrow', startLabel, 'active', 'var(--primary)');
@@ -17148,6 +17789,8 @@ async function renderProjectDetail(projId) {
     var titleEl = document.getElementById('view-title');
     titleEl.textContent = proj.name;
     var actionsEl = document.getElementById('topbar-actions');
+    var _isTechPd = false;
+    try { _isTechPd = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
     var pauseBtn = proj.paused
       ? '<button class="btn btn-primary btn-sm" onclick="resumeProject(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">play_arrow</span> Resume'+(proj.paused_queue_count?' ('+proj.paused_queue_count+')':'')+'</button>'
       : '<button class="btn btn-ghost btn-sm" style="color:var(--warning,#ff9800)" onclick="pauseProject(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">pause</span> Pause</button>';
@@ -17155,24 +17798,32 @@ async function renderProjectDetail(projId) {
     var closeBtn = '';
     if (proj.status !== 'completed' && proj.status !== 'cancelled' && proj.status !== 'archived') {
       closeBtn =
-        '<button class="btn btn-ghost btn-sm" style="color:#22c55e" onclick="changeProjectStatus(\''+projId+'\',\'completed\')"><span class="material-symbols-outlined" style="font-size:16px">check_circle</span> 结束</button>' +
-        '<button class="btn btn-ghost btn-sm" style="color:#ef4444" onclick="changeProjectStatus(\''+projId+'\',\'cancelled\')"><span class="material-symbols-outlined" style="font-size:16px">cancel</span> 停止</button>';
+        '<button class="btn btn-ghost btn-sm" style="color:#22c55e" onclick="changeProjectStatus(\''+projId+'\',\'completed\')"><span class="material-symbols-outlined" style="font-size:16px">check_circle</span> Close</button>' +
+        '<button class="btn btn-ghost btn-sm" style="color:#ef4444" onclick="changeProjectStatus(\''+projId+'\',\'cancelled\')"><span class="material-symbols-outlined" style="font-size:16px">cancel</span> Cancel</button>';
     } else {
       closeBtn =
-        '<button class="btn btn-ghost btn-sm" style="color:var(--primary)" onclick="changeProjectStatus(\''+projId+'\',\'active\')"><span class="material-symbols-outlined" style="font-size:16px">restart_alt</span> 重新激活</button>';
+        '<button class="btn btn-ghost btn-sm" style="color:var(--primary)" onclick="changeProjectStatus(\''+projId+'\',\'active\')"><span class="material-symbols-outlined" style="font-size:16px">restart_alt</span> Reactivate</button>';
     }
     // 强制终止按钮 — 只在项目还活跃时显示
     var abortBtn = '';
     if (proj.status !== 'completed' && proj.status !== 'cancelled' && proj.status !== 'archived') {
-      abortBtn = '<button class="btn btn-ghost btn-sm" style="color:var(--error)" onclick="projectAbort(\''+projId+'\')" title="停止任何正在运行的 Agent + kill 子进程"><span class="material-symbols-outlined" style="font-size:16px">stop_circle</span> 终止</button>';
+      abortBtn = '<button class="btn btn-ghost btn-sm" style="color:var(--error)" onclick="projectAbort(\''+projId+'\')" title="Stop any running agents and kill their subprocesses"><span class="material-symbols-outlined" style="font-size:16px">stop_circle</span> Abort</button>';
     }
     var wakeBtn = '';
     if (proj.status !== 'completed' && proj.status !== 'cancelled' && proj.status !== 'archived') {
-      wakeBtn = '<button class="btn btn-ghost btn-sm" style="color:var(--success,#22c55e)" onclick="wakeProjectAgents(\''+projId+'\')" title="唤醒卡住或中断的 Agent (有未完成任务/里程碑的)"><span class="material-symbols-outlined" style="font-size:16px">notifications_active</span> 唤醒</button>';
+      wakeBtn = '<button class="btn btn-ghost btn-sm" style="color:var(--success,#22c55e)" onclick="wakeProjectAgents(\''+projId+'\')" title="Wake stuck or paused agents (with open tasks / milestones)"><span class="material-symbols-outlined" style="font-size:16px">notifications_active</span> Wake</button>';
     }
-    actionsEl.innerHTML = pauseBtn + closeBtn + abortBtn + wakeBtn + '<button class="btn btn-ghost btn-sm" onclick="showProjectMemberModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">group_add</span> Members</button><button class="btn btn-ghost btn-sm" onclick="showProjectTaskModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">add_task</span> Task</button><button class="btn btn-ghost btn-sm" onclick="editProject(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">edit</span> Edit</button><button class="btn btn-ghost btn-sm" style="color:var(--warning,#ff9800)" onclick="clearProjectChat(\''+projId+'\')" title="清空团队对话记录(项目元数据/任务/里程碑保留)"><span class="material-symbols-outlined" style="font-size:16px">forum</span> 清空对话</button><button class="btn btn-ghost btn-sm" style="color:var(--error)" onclick="deleteProject(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">delete</span> Delete</button><button class="btn btn-ghost btn-sm" onclick="currentView=\'projects\';renderCurrentView()"><span class="material-symbols-outlined" style="font-size:16px">arrow_back</span> Back</button>';
+    var actionsHtml = pauseBtn + closeBtn + abortBtn + wakeBtn + '<button class="btn btn-ghost btn-sm" onclick="showProjectMemberModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">group_add</span> Members</button><button class="btn btn-ghost btn-sm" onclick="showProjectTaskModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">add_task</span> Task</button><button class="btn btn-ghost btn-sm" onclick="editProject(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">edit</span> Edit</button><button class="btn btn-ghost btn-sm" style="color:var(--warning,#ff9800)" onclick="clearProjectChat(\''+projId+'\')" title="Clear team chat history (project metadata / tasks / milestones preserved)"><span class="material-symbols-outlined" style="font-size:16px">forum</span> Clear Chat</button><button class="btn btn-ghost btn-sm" style="color:var(--error)" onclick="deleteProject(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">delete</span> Delete</button><button class="btn btn-ghost btn-sm" onclick="currentView=\'projects\';renderCurrentView()"><span class="material-symbols-outlined" style="font-size:16px">arrow_back</span> Back</button>';
+    // Tech mode: topbar is display:none, so the action buttons must
+    // live in the page hero (built below alongside the tab bar). Skip
+    // the topbar injection so we don't pay the DOM cost twice.
+    if (_isTechPd) {
+      actionsEl.innerHTML = '';
+    } else {
+      actionsEl.innerHTML = actionsHtml;
+    }
     if (proj.paused) {
-      var pausedBanner = '<div style="background:rgba(255,152,0,0.15);border-bottom:1px solid var(--warning,#ff9800);padding:8px 16px;color:var(--warning,#ff9800);font-size:12px">⏸️ 项目已暂停 — 暂停人: '+esc(proj.paused_by||'-')+(proj.paused_reason?'，原因: '+esc(proj.paused_reason):'')+(proj.paused_queue_count?'  ·  排队消息: '+proj.paused_queue_count:'')+'</div>';
+      var pausedBanner = '<div style="background:rgba(255,152,0,0.15);border-bottom:1px solid var(--warning,#ff9800);padding:8px 16px;color:var(--warning,#ff9800);font-size:12px">⏸️ Project paused — by: '+esc(proj.paused_by||'-')+(proj.paused_reason?', reason: '+esc(proj.paused_reason):'')+(proj.paused_queue_count?'  ·  queued messages: '+proj.paused_queue_count:'')+'</div>';
       // banner inserted via wrapper below
       c.dataset.pausedBanner = pausedBanner;
     }
@@ -17191,19 +17842,50 @@ async function renderProjectDetail(projId) {
       var active = (_activeTab === key);
       return '<button onclick="switchProjectTab(\''+projId+'\',\''+key+'\')" class="btn btn-ghost btn-sm" style="border-radius:0;border-bottom:2px solid '+(active?'var(--primary)':'transparent')+';color:'+(active?'var(--primary)':'var(--text2)')+';font-weight:'+(active?'700':'500')+';padding:10px 16px"><span class="material-symbols-outlined" style="font-size:16px;margin-right:4px">'+icon+'</span>'+label+'</button>';
     };
-    var _isTechPd = false;
-    try { _isTechPd = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
     var tabBar = '<div style="display:flex;gap:2px;border-bottom:1px solid var(--overlay-5);background:var(--bg);flex-shrink:0">' +
       _tabBtn('overview',     _isTechPd ? 'Overview'     : 'Overview',     'dashboard') +
-      _tabBtn('goals',        _isTechPd ? 'Goals'        : '目标',         'flag') +
-      _tabBtn('milestones',   _isTechPd ? 'Milestones'   : '里程碑',       'timeline') +
-      _tabBtn('deliverables', _isTechPd ? 'Deliverables' : '交付件',       'description') +
-      _tabBtn('issues',       _isTechPd ? 'Issues'       : '问题',         'bug_report') +
+      _tabBtn('goals',        _isTechPd ? 'Goals'        : 'Goal',         'flag') +
+      _tabBtn('milestones',   _isTechPd ? 'Milestones'   : 'Milestone',       'timeline') +
+      _tabBtn('deliverables', _isTechPd ? 'Deliverables' : 'Deliverable',       'description') +
+      _tabBtn('issues',       _isTechPd ? 'Issues'       : 'Issue',         'bug_report') +
       _tabBtn('chat',         _isTechPd ? 'Team Chat'    : '团队协作',     'forum') +
     '</div>';
+    // Tech mode: page hero with project name + status pill + action
+    // buttons. Topbar is display:none in tech, so this is the only
+    // place users see Pause/End/Members/Edit/etc.
+    var heroHtml = '';
+    if (_isTechPd) {
+      var _stKey = (proj.paused ? 'paused' : (proj.status || 'active')).toLowerCase();
+      var _stMap = {
+        active:    { color: 'var(--secondary)',         label: 'ACTIVE',    pulse: true  },
+        completed: { color: '#22c55e',                  label: 'COMPLETED', pulse: false },
+        cancelled: { color: 'var(--error)',             label: 'CANCELLED', pulse: false },
+        archived:  { color: 'var(--outline)',           label: 'ARCHIVED',  pulse: false },
+        paused:    { color: 'var(--warning,#ff9800)',   label: 'PAUSED',    pulse: true  },
+      };
+      var _st = _stMap[_stKey] || _stMap.active;
+      var _desc = (proj.description || '').trim();
+      var _descShort = _desc.length > 200 ? _desc.slice(0, 198) + '…' : _desc;
+      heroHtml =
+        '<section style="padding:18px 24px 14px;border-bottom:1px solid var(--outline-variant);background:var(--surface-container-low);flex-shrink:0">' +
+          '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:var(--s-md);flex-wrap:wrap">' +
+            '<div style="flex:1;min-width:240px">' +
+              '<div class="tc-mono-label" style="display:flex;align-items:center;gap:8px;color:var(--primary);letter-spacing:0.18em;font-size:11px">' +
+                '<span style="width:8px;height:8px;border-radius:50%;background:' + _st.color + ';' + (_st.pulse ? 'animation:pulse-dot 2s infinite ease-in-out;box-shadow:0 0 8px ' + _st.color + ';' : '') + '"></span>' +
+                'PROJECT · <span style="color:' + _st.color + '">' + _st.label + '</span>' +
+              '</div>' +
+              '<h2 style="font-family:var(--font-display);font-size:24px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:6px 0 0;overflow:hidden;text-overflow:ellipsis">' + esc(proj.name || '') + '</h2>' +
+              (_descShort ? '<p class="tc-text-dim" style="font-size:12px;line-height:1.5;margin:6px 0 0;max-width:760px">' + esc(_descShort) + '</p>' : '') +
+            '</div>' +
+            '<div class="tc-row-sm" style="flex-wrap:wrap;gap:6px;justify-content:flex-end;max-width:60%">' +
+              actionsHtml +
+            '</div>' +
+          '</div>' +
+        '</section>';
+    }
     // Panes: one pane per tab; only the chat pane keeps the legacy grid+sidebar.
     var paneVis = function(key){ return _activeTab === key ? '' : 'display:none;'; };
-    c.innerHTML = tabBar +
+    c.innerHTML = heroHtml + tabBar +
       '<div id="proj-pane-overview-'+projId+'" style="flex:1;overflow:auto;padding:20px;'+paneVis('overview')+'"></div>' +
       '<div id="proj-pane-goals-'+projId+'" style="flex:1;overflow:auto;padding:20px;'+paneVis('goals')+'"></div>' +
       '<div id="proj-pane-milestones-'+projId+'" style="flex:1;overflow:auto;padding:20px;'+paneVis('milestones')+'"></div>' +
@@ -17265,10 +17947,12 @@ async function renderProjectDetail(projId) {
       var _techPm = false;
       try { _techPm = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
       var _memberAvatar = function(ag, role) {
-        // Tech mode: aether portrait keyed by role.
-        if (_techPm && typeof _aetherAvatarUrl === 'function') {
-          var roleKey = (ag && ag.role) || role || 'general';
-          return _aetherAvatarUrl(roleKey);
+        // Tech mode: prefer the operator-picked robot_avatar (so a
+        // custom face the user set in the edit modal flows through to
+        // every project surface), fall back to inferred role.
+        if (_techPm && typeof _aetherAvatarFor === 'function') {
+          if (ag) return _aetherAvatarFor(ag);
+          return _aetherAvatarUrl(role || 'general');
         }
         if (ag && ag.robot_avatar) return _robotIconUrl(ag.robot_avatar);
         if (ag) return _robotIconUrl('robot_' + (ag.role || 'general'));
@@ -17331,8 +18015,14 @@ async function renderProjectDetail(projId) {
           var agentName = ag ? ag.name : (agentId || '—');
           var barColor = isDone ? 'var(--success, #4caf50)' : isInProgress ? 'var(--warning, #ff9800)' : 'var(--overlay-10)';
           var toggleBtn = isDone ?
-            '<span class="material-symbols-outlined" style="font-size:14px;cursor:pointer;color:var(--success,#4caf50)" onclick="toggleWfStep(\''+projId+'\',\''+t.id+'\',\'todo\')" title="标记为未完成">check_circle</span>' :
-            '<span class="material-symbols-outlined" style="font-size:14px;cursor:pointer;color:var(--text3);opacity:0.5" onclick="toggleWfStep(\''+projId+'\',\''+t.id+'\',\'done\')" title="标记为完成">radio_button_unchecked</span>';
+            '<span class="material-symbols-outlined" style="font-size:14px;cursor:pointer;color:var(--success,#4caf50)" onclick="toggleWfStep(\''+projId+'\',\''+t.id+'\',\'todo\')" title="Mark as not done (UI flag only)">check_circle</span>' :
+            '<span class="material-symbols-outlined" style="font-size:14px;cursor:pointer;color:var(--text3);opacity:0.5" onclick="toggleWfStep(\''+projId+'\',\''+t.id+'\',\'done\')" title="Mark as done (UI flag only)">radio_button_unchecked</span>';
+          // Reopen button — only on DONE steps. Calls the proper backend
+          // path that resets metadata + re-triggers the owner agent
+          // (more than the toggle, which only flips status).
+          var reopenBtn = isDone
+            ? '<span class="material-symbols-outlined" style="font-size:14px;cursor:pointer;color:var(--primary);opacity:0.85" onclick="event.stopPropagation();reopenWfStep(\''+projId+'\',\''+t.id+'\')" title="Reopen this step — agent will re-run">refresh</span>'
+            : '';
           var md = t.metadata || {};
           var pendingApproval = !!md.pending_approval;
           var approvalBar = pendingApproval
@@ -17346,6 +18036,7 @@ async function renderProjectDetail(projId) {
             '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px">' +
               toggleBtn +
               '<span style="flex:1;font-weight:600;color:'+(isDone?'var(--text3)':'var(--text)')+';'+(isDone?'text-decoration:line-through':'')+'">' +esc(stepName)+'</span>' +
+              reopenBtn +
               '<span style="font-size:10px;color:var(--primary);white-space:nowrap">'+esc(agentName)+'</span>' +
             '</div>' +
             (t.description ? '<div style="color:var(--text3);font-size:10px;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(t.description.split('\\n')[0])+'</div>' : '') +
@@ -17376,8 +18067,8 @@ async function renderProjectDetail(projId) {
           if (m.status === 'completed') {
             // Agent 已声明完成，等待 admin 确认
             actions = '<div style="display:flex;gap:4px;margin-top:6px" onclick="event.stopPropagation()">' +
-              '<button class="btn btn-primary btn-xs" onclick="confirmMilestone(\''+projId+'\',\''+m.id+'\')" style="font-size:10px;padding:2px 8px">确认</button>' +
-              '<button class="btn btn-ghost btn-xs" style="color:var(--error);font-size:10px;padding:2px 8px" onclick="rejectMilestone(\''+projId+'\',\''+m.id+'\')">驳回</button>' +
+              '<button class="btn btn-primary btn-xs" onclick="confirmMilestone(\''+projId+'\',\''+m.id+'\')" style="font-size:10px;padding:2px 8px">Confirm</button>' +
+              '<button class="btn btn-ghost btn-xs" style="color:var(--error);font-size:10px;padding:2px 8px" onclick="rejectMilestone(\''+projId+'\',\''+m.id+'\')">Reject</button>' +
               '</div>';
           }
           var reasonLine = m.status==='rejected' && m.rejected_reason
@@ -17502,20 +18193,20 @@ function _renderProjectOverview(projId, d) {
   var goals = d.goals || []; var deliverables = d.deliverables || []; var issues = d.issues || [];
   var recentGoals = goals.slice(0,5).map(function(g){
     return '<div style="background:var(--surface);border-radius:8px;padding:10px 12px;border:1px solid var(--overlay-5);margin-bottom:8px">' +
-      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><span style="font-weight:600;font-size:13px">'+esc(g.name||'(未命名目标)')+'</span><span style="font-size:11px;color:var(--text3)">'+(g.progress||0).toFixed(1)+'%</span></div>' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><span style="font-weight:600;font-size:13px">'+esc(g.name||'(unnamed)')+'</span><span style="font-size:11px;color:var(--text3)">'+(g.progress||0).toFixed(1)+'%</span></div>' +
       _pctBar(g.progress||0) +
     '</div>';
-  }).join('') || '<div style="color:var(--text3);font-size:12px">暂无目标，点击 Goals 标签创建</div>';
+  }).join('') || '<div style="color:var(--text3);font-size:12px">No goals yet — open the Goals tab to create one</div>';
   var pending = deliverables.filter(function(x){return x.status==='submitted';});
   var pendingHtml = pending.slice(0,5).map(function(x){
     return '<div style="background:var(--surface);border-radius:8px;padding:8px 12px;border:1px solid var(--overlay-5);margin-bottom:6px;display:flex;justify-content:space-between;align-items:center">' +
       '<div><div style="font-weight:600;font-size:13px">'+esc(x.title)+'</div><div style="font-size:10px;color:var(--text3)">v'+x.version+' · '+esc(x.kind)+'</div></div>' +
       '<div style="display:flex;gap:4px">' +
-        '<button class="btn btn-primary btn-xs" onclick="reviewDeliverable(\''+projId+'\',\''+x.id+'\',true)">通过</button>' +
-        '<button class="btn btn-ghost btn-xs" style="color:var(--error)" onclick="reviewDeliverable(\''+projId+'\',\''+x.id+'\',false)">驳回</button>' +
+        '<button class="btn btn-primary btn-xs" onclick="reviewDeliverable(\''+projId+'\',\''+x.id+'\',true)">Approve</button>' +
+        '<button class="btn btn-ghost btn-xs" style="color:var(--error)" onclick="reviewDeliverable(\''+projId+'\',\''+x.id+'\',false)">Reject</button>' +
       '</div>' +
     '</div>';
-  }).join('') || '<div style="color:var(--text3);font-size:12px">没有等待审阅的交付件</div>';
+  }).join('') || '<div style="color:var(--text3);font-size:12px">No deliverables awaiting review</div>';
   var openIssues = issues.filter(function(x){return x.status==='open'||x.status==='investigating';});
   var issuesHtml = openIssues.slice(0,5).map(function(x){
     var sevColor = x.severity==='critical'?'#ef4444':x.severity==='high'?'#f59e0b':x.severity==='medium'?'var(--primary)':'var(--text3)';
@@ -17523,7 +18214,7 @@ function _renderProjectOverview(projId, d) {
       '<div style="font-weight:600;font-size:13px">'+esc(x.title)+'</div>' +
       '<div style="font-size:10px;color:var(--text3);margin-top:2px">'+esc(x.severity)+' · '+esc(x.status)+(x.assigned_to?' · → '+esc(x.assigned_to):'')+'</div>' +
     '</div>';
-  }).join('') || '<div style="color:var(--text3);font-size:12px">目前没有未解决的问题</div>';
+  }).join('') || '<div style="color:var(--text3);font-size:12px">No unresolved issues right now</div>';
   var statCard = function(label, val, sub){
     return '<div style="background:var(--surface);border-radius:8px;padding:14px 16px;border:1px solid var(--overlay-5)">' +
       '<div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.6px">'+label+'</div>' +
@@ -17537,9 +18228,9 @@ function _renderProjectOverview(projId, d) {
     ? { goalsDone:'GOALS DONE', delPending:'DELIVERABLES PENDING', issuesOpen:'OPEN ISSUES', tasksRun:'TASKS IN PROGRESS',
         avg:'AVG ', total:'TOTAL ',
         secGoals:'GOAL OVERVIEW (TOP 5)', secDeliv:'PENDING DELIVERABLE REVIEW', secIssues:'UNRESOLVED ISSUES' }
-    : { goalsDone:'目标完成', delPending:'交付件等待审阅', issuesOpen:'未解决问题', tasksRun:'进行中任务',
-        avg:'均值 ', total:'总 ',
-        secGoals:'目标概览 (Top 5)', secDeliv:'待审阅交付件', secIssues:'未解决问题' };
+    : { goalsDone:'Goals Done', delPending:'Pending Reviews', issuesOpen:'Open Issues', tasksRun:'Tasks In Progress',
+        avg:'Avg ', total:'Total ',
+        secGoals:'Goal Overview (Top 5)', secDeliv:'Pending Deliverable Review', secIssues:'Unresolved Issues' };
   return '<div style="max-width:1100px">' +
     '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px">' +
       statCard(L.goalsDone, (gs.done||0)+'/'+(gs.total||0), L.avg+(gs.avg_progress||0)+'%') +
@@ -17560,19 +18251,19 @@ function _renderProjectGoals(projId, goals) {
     var pct = g.progress||0;
     var metricLabel = g.metric==='count' ? (g.current_value+' / '+g.target_value) :
                       g.metric==='percent' ? (g.current_value+' / '+g.target_value+'%') :
-                      g.metric==='boolean' ? (g.done?'✅ 已达成':'⬜ 未达成') :
+                      g.metric==='boolean' ? (g.done?'✅ achieved':'⬜ not yet') :
                       esc(g.target_text||'');
     return '<div style="background:var(--surface);border-radius:10px;padding:14px 16px;border:1px solid var(--overlay-6);margin-bottom:10px">' +
       '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">' +
         '<div style="flex:1;min-width:0">' +
-          '<div style="font-weight:700;font-size:14px;color:var(--text)">'+esc(g.name||'(未命名)')+'</div>' +
+          '<div style="font-weight:700;font-size:14px;color:var(--text)">'+esc(g.name||'(unnamed)')+'</div>' +
           (g.description?'<div style="color:var(--text3);font-size:12px;margin-top:3px">'+esc(g.description)+'</div>':'') +
-          '<div style="font-size:11px;color:var(--text2);margin-top:6px">指标: '+esc(g.metric)+' · '+metricLabel+(g.owner_agent_id?' · 负责: '+esc(g.owner_agent_id):'')+'</div>' +
+          '<div style="font-size:11px;color:var(--text2);margin-top:6px">Metric: '+esc(g.metric)+' · '+metricLabel+(g.owner_agent_id?' · Owner: '+esc(g.owner_agent_id):'')+'</div>' +
         '</div>' +
         '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">' +
           '<span style="font-size:18px;font-weight:700;color:'+(pct>=100?'#22c55e':'var(--primary)')+'">'+pct.toFixed(0)+'%</span>' +
-          '<button class="btn btn-ghost btn-xs" onclick="updateGoalProgressPrompt(\''+projId+'\',\''+g.id+'\',\''+g.metric+'\')">更新进度</button>' +
-          '<button class="btn btn-ghost btn-xs" style="color:var(--error)" onclick="deleteGoal(\''+projId+'\',\''+g.id+'\')">删除</button>' +
+          '<button class="btn btn-ghost btn-xs" onclick="updateGoalProgressPrompt(\''+projId+'\',\''+g.id+'\',\''+g.metric+'\')">Update Progress</button>' +
+          '<button class="btn btn-ghost btn-xs" style="color:var(--error)" onclick="deleteGoal(\''+projId+'\',\''+g.id+'\')">Delete</button>' +
         '</div>' +
       '</div>' +
       '<div style="margin-top:10px">'+_pctBar(pct)+'</div>' +
@@ -17582,12 +18273,12 @@ function _renderProjectGoals(projId, goals) {
   try { _techGoals = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
   var emptyMsg = _techGoals
     ? '<div class="tc-text-dim" style="font-size:13px;padding:20px;text-align:center">No goals yet. Click NEW GOAL to set a measurable target for this project.</div>'
-    : '<div style="color:var(--text3);font-size:13px;padding:20px;text-align:center">暂无目标。点击"新建目标"来为本项目设立可度量目标。</div>';
+    : '<div style="color:var(--text3);font-size:13px;padding:20px;text-align:center">No goals yet. Click NEW GOAL to set a measurable target for this project.</div>';
   rows = rows.join('') || emptyMsg;
   return '<div style="max-width:900px">' +
     '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">' +
-      '<div style="font-size:16px;font-weight:700">' + (_techGoals ? 'Project Goals' : '项目目标') + '</div>' +
-      '<button class="btn btn-primary btn-sm" onclick="showAddGoalModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> ' + (_techGoals ? 'NEW GOAL' : '新建目标') + '</button>' +
+      '<div style="font-size:16px;font-weight:700">' + (_techGoals ? 'Project Goals' : 'Project Goals') + '</div>' +
+      '<button class="btn btn-primary btn-sm" onclick="showAddGoalModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> ' + (_techGoals ? 'NEW GOAL' : 'NEW GOAL') + '</button>' +
     '</div>' + rows +
   '</div>';
 }
@@ -17598,14 +18289,14 @@ function _renderProjectMilestonesTab(projId, milestones) {
     var actions = '';
     if (m.status === 'completed') {
       actions = '<div style="display:flex;gap:6px;margin-top:8px">' +
-        '<button class="btn btn-primary btn-xs" onclick="confirmMilestone(\''+projId+'\',\''+m.id+'\')">确认</button>' +
-        '<button class="btn btn-ghost btn-xs" style="color:var(--error)" onclick="rejectMilestone(\''+projId+'\',\''+m.id+'\')">驳回</button>' +
+        '<button class="btn btn-primary btn-xs" onclick="confirmMilestone(\''+projId+'\',\''+m.id+'\')">Confirm</button>' +
+        '<button class="btn btn-ghost btn-xs" style="color:var(--error)" onclick="rejectMilestone(\''+projId+'\',\''+m.id+'\')">Reject</button>' +
       '</div>';
     }
     return '<div style="background:var(--surface);border-radius:10px;padding:14px 16px;border:1px solid var(--overlay-6);margin-bottom:10px">' +
       '<div style="font-weight:700;font-size:14px">'+statusIcon+' '+esc(m.name||'')+'</div>' +
-      '<div style="font-size:11px;color:var(--text3);margin-top:4px">负责: '+esc(m.responsible_agent_id||'—')+' · 到期: '+esc(m.due_date||'—')+' · 状态: '+esc(m.status||'pending')+'</div>' +
-      (m.rejected_reason?'<div style="color:var(--error);font-size:11px;margin-top:4px">驳回原因: '+esc(m.rejected_reason)+'</div>':'') +
+      '<div style="font-size:11px;color:var(--text3);margin-top:4px">Owner: '+esc(m.responsible_agent_id||'—')+' · Due: '+esc(m.due_date||'—')+' · Status: '+esc(m.status||'pending')+'</div>' +
+      (m.rejected_reason?'<div style="color:var(--error);font-size:11px;margin-top:4px">Reject reason: '+esc(m.rejected_reason)+'</div>':'') +
       actions +
     '</div>';
   });
@@ -17617,8 +18308,8 @@ function _renderProjectMilestonesTab(projId, milestones) {
   rows = rows.join('') || emptyMs;
   return '<div style="max-width:900px">' +
     '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">' +
-      '<div style="font-size:16px;font-weight:700">' + (_techMs ? 'Milestones' : '里程碑') + '</div>' +
-      '<button class="btn btn-primary btn-sm" onclick="showProjectMilestoneModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> ' + (_techMs ? 'NEW MILESTONE' : '新建里程碑') + '</button>' +
+      '<div style="font-size:16px;font-weight:700">' + (_techMs ? 'Milestones' : 'Milestone') + '</div>' +
+      '<button class="btn btn-primary btn-sm" onclick="showProjectMilestoneModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> ' + (_techMs ? 'NEW MILESTONE' : 'NEW MILESTONE') + '</button>' +
     '</div>' + rows +
   '</div>';
 }
@@ -17628,7 +18319,7 @@ function _renderProjectDeliverables(projId, data) {
   var agents = data.agents || [];
   var unassigned = data.unassigned_deliverables || [];
   var statusBadge = function(s){
-    var map = {draft:['草稿','var(--text3)'], submitted:['待审阅','#f59e0b'], approved:['已通过','#22c55e'], rejected:['已驳回','#ef4444'], archived:['归档','var(--text3)']};
+    var map = {draft:['Draft','var(--text3)'], submitted:['Pending Review','#f59e0b'], approved:['Approved','#22c55e'], rejected:['Rejected','#ef4444'], archived:['Archived','var(--text3)']};
     var x = map[s]||[s,'var(--text3)'];
     return '<span style="font-size:10px;background:var(--overlay-8);color:'+x[1]+';padding:2px 8px;border-radius:10px;font-weight:600">'+x[0]+'</span>';
   };
@@ -17646,14 +18337,14 @@ function _renderProjectDeliverables(projId, data) {
   var renderDeliverableCard = function(dv){
     var actions = '';
     if (dv.status === 'submitted') {
-      actions = '<button class="btn btn-primary btn-xs" onclick="reviewDeliverable(\''+projId+'\',\''+dv.id+'\',true)">通过</button>' +
-                '<button class="btn btn-ghost btn-xs" style="color:var(--error)" onclick="reviewDeliverable(\''+projId+'\',\''+dv.id+'\',false)">驳回</button>';
+      actions = '<button class="btn btn-primary btn-xs" onclick="reviewDeliverable(\''+projId+'\',\''+dv.id+'\',true)">Approve</button>' +
+                '<button class="btn btn-ghost btn-xs" style="color:var(--error)" onclick="reviewDeliverable(\''+projId+'\',\''+dv.id+'\',false)">Reject</button>';
     } else if (dv.status === 'draft') {
-      actions = '<button class="btn btn-primary btn-xs" onclick="submitDeliverable(\''+projId+'\',\''+dv.id+'\')">提交审阅</button>';
+      actions = '<button class="btn btn-primary btn-xs" onclick="submitDeliverable(\''+projId+'\',\''+dv.id+'\')">Submit for review</button>';
     }
     var preview = dv.content_text ? '<div style="font-size:12px;color:var(--text2);margin-top:6px;max-height:72px;overflow:hidden;line-height:1.5">'+esc(dv.content_text.slice(0,300))+(dv.content_text.length>300?'…':'')+'</div>' : '';
     var link = dv.url ? '<a href="'+esc(dv.url)+'" target="_blank" style="font-size:11px;color:var(--primary)">'+esc(dv.url)+'</a>' : (dv.file_path?'<span style="font-size:11px;color:var(--text3)">📎 '+esc(dv.file_path)+'</span>':'');
-    var reviewComment = dv.review_comment ? '<div style="margin-top:6px;font-size:11px;color:var(--text3);padding:6px 8px;background:color-mix(in srgb, var(--text) 3%, transparent);border-left:2px solid '+(dv.status==='approved'?'#22c55e':'#ef4444')+';border-radius:3px">审阅意见: '+esc(dv.review_comment)+'</div>' : '';
+    var reviewComment = dv.review_comment ? '<div style="margin-top:6px;font-size:11px;color:var(--text3);padding:6px 8px;background:color-mix(in srgb, var(--text) 3%, transparent);border-left:2px solid '+(dv.status==='approved'?'#22c55e':'#ef4444')+';border-radius:3px">Reviewer note: '+esc(dv.review_comment)+'</div>' : '';
     return '<div style="background:var(--surface);border-radius:10px;padding:12px 14px;border:1px solid var(--overlay-6);margin-bottom:8px">' +
       '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">' +
         '<div style="flex:1;min-width:0">' +
@@ -17662,7 +18353,7 @@ function _renderProjectDeliverables(projId, data) {
           preview + (link?'<div style="margin-top:6px">'+link+'</div>':'') + reviewComment +
         '</div>' +
         '<div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">'+actions+
-          '<button class="btn btn-ghost btn-xs" style="color:var(--error)" onclick="deleteDeliverable(\''+projId+'\',\''+dv.id+'\')">删除</button>' +
+          '<button class="btn btn-ghost btn-xs" style="color:var(--error)" onclick="deleteDeliverable(\''+projId+'\',\''+dv.id+'\')">Delete</button>' +
         '</div>' +
       '</div>' +
     '</div>';
@@ -17684,11 +18375,19 @@ function _renderProjectDeliverables(projId, data) {
       name = '<span style="font-size:13px;font-weight:600">'+esc(displayName)+'</span>';
     }
     var rel = f.rel_path && f.rel_path !== f.name ? '<div style="font-size:10px;color:var(--text3);margin-top:2px">'+esc(f.rel_path)+'</div>' : '';
+    // Delete button — files only, must have a rel_path. Skipped for
+    // dirs and remote-only entries (no local file to remove).
+    var deleteBtn = '';
+    if (!f.is_dir && !f.is_remote && f.rel_path) {
+      var safePath = esc(f.rel_path).replace(/'/g, "\\'");
+      deleteBtn = '<button onclick="deleteProjectFile(\''+projId+'\',\''+safePath+'\')" title="Delete this file from project workspace" style="background:none;border:none;color:var(--text3);cursor:pointer;padding:2px 6px;font-size:14px;opacity:0.5;transition:opacity 0.15s" onmouseenter="this.style.opacity=\'1\';this.style.color=\'var(--error)\'" onmouseleave="this.style.opacity=\'0.5\';this.style.color=\'var(--text3)\'">🗑</button>';
+    }
     return '<div style="display:flex;align-items:flex-start;gap:10px;padding:8px 12px;border-bottom:1px solid var(--overlay-4)">' +
       '<div style="font-size:14px;line-height:1">'+icon+'</div>' +
       '<div style="flex:1;min-width:0">'+name+rel+
         (meta.length?'<div style="font-size:10px;color:var(--text3);margin-top:2px">'+meta.join(' · ')+'</div>':'') +
       '</div>' +
+      deleteBtn +
     '</div>';
   };
   // Per-agent grouping section — REMOVED 2026-04-28. All project
@@ -17713,7 +18412,7 @@ function _renderProjectDeliverables(projId, data) {
   var unassignedSection = '';
   if (unassigned && unassigned.length) {
     unassignedSection = '<div style="background:var(--overlay-2);border:1px solid var(--overlay-6);border-radius:12px;padding:14px;margin-bottom:14px">' +
-      '<div style="font-size:14px;font-weight:700;margin-bottom:10px">❓ 未指派作者</div>' +
+      '<div style="font-size:14px;font-weight:700;margin-bottom:10px">❓ No author assigned</div>' +
       unassigned.map(renderDeliverableCard).join('') +
     '</div>';
   }
@@ -17744,7 +18443,7 @@ function _renderProjectDeliverables(projId, data) {
         label = '🎯 ' + firstSeg + (t ? ' — ' + (t.title || '') : '');
       } else {
         key = '__root__';
-        label = '📁 项目根目录(未关联任务)';
+        label = '📁 Project root (unlinked to any task)';
       }
       if (!groups[key]) groups[key] = { label: label, files: [], isTask: isTask };
       groups[key].files.push(f);
@@ -17769,11 +18468,11 @@ function _renderProjectDeliverables(projId, data) {
         '<div>' + rows + '</div>' +
       '</details>';
     }).join('') ||
-      '<div style="color:var(--text3);font-size:12px;padding:14px;text-align:center">共享目录为空</div>';
+      '<div style="color:var(--text3);font-size:12px;padding:14px;text-align:center">Shared directory is empty</div>';
     sharedSection = '<div style="background:var(--overlay-2);border:1px solid var(--overlay-6);border-radius:12px;padding:14px;margin-bottom:14px">' +
       '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;gap:10px">' +
         '<div style="flex:1;min-width:0">' +
-          '<div style="font-size:14px;font-weight:700">📁 项目共享目录</div>' +
+          '<div style="font-size:14px;font-weight:700">📁 Project Shared Workspace</div>' +
           (sharedDir?'<div style="font-size:10px;color:var(--text3);margin-top:2px;font-family:monospace">'+esc(sharedDir)+'</div>':'') +
         '</div>' +
         '<div style="font-size:10px;color:var(--text3);white-space:nowrap">📄 '+sharedFiles.length+'</div>' +
@@ -17785,14 +18484,14 @@ function _renderProjectDeliverables(projId, data) {
   try { _techDel = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
   var emptyDel = _techDel
     ? '<div class="tc-text-dim" style="font-size:13px;padding:20px;text-align:center">No deliverables yet</div>'
-    : '<div style="color:var(--text3);font-size:13px;padding:20px;text-align:center">暂无交付件</div>';
+    : '<div style="color:var(--text3);font-size:13px;padding:20px;text-align:center">No deliverables yet</div>';
   var body = (sharedSection || agentSections || unassignedSection)
     ? (sharedSection + agentSections + unassignedSection)
     : emptyDel;
   return '<div style="max-width:900px">' +
     '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">' +
-      '<div style="font-size:16px;font-weight:700">' + (_techDel ? 'Deliverables' : '交付件') + '</div>' +
-      '<button class="btn btn-primary btn-sm" onclick="showAddDeliverableModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> ' + (_techDel ? 'NEW DELIVERABLE' : '新建交付件') + '</button>' +
+      '<div style="font-size:16px;font-weight:700">' + (_techDel ? 'Deliverables' : 'Deliverable') + '</div>' +
+      '<button class="btn btn-primary btn-sm" onclick="showAddDeliverableModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> ' + (_techDel ? 'NEW DELIVERABLE' : 'NEW DELIVERABLE') + '</button>' +
     '</div>' + body +
   '</div>';
 }
@@ -17802,18 +18501,18 @@ function _renderProjectIssues(projId, items) {
   var rows = (items||[]).map(function(iss){
     var resolved = (iss.status==='resolved'||iss.status==='wontfix');
     var actions = resolved ? '' :
-      '<button class="btn btn-primary btn-xs" onclick="resolveIssuePrompt(\''+projId+'\',\''+iss.id+'\')">标记解决</button>';
+      '<button class="btn btn-primary btn-xs" onclick="resolveIssuePrompt(\''+projId+'\',\''+iss.id+'\')">Mark Resolved</button>';
     var resLine = iss.resolution ? '<div style="margin-top:6px;font-size:11px;color:#22c55e;padding:6px 8px;background:rgba(34,197,94,0.08);border-radius:3px">✓ '+esc(iss.resolution)+'</div>' : '';
     return '<div style="background:var(--surface);border-radius:10px;padding:14px 16px;border:1px solid var(--overlay-6);margin-bottom:10px;border-left:3px solid '+sevColor(iss.severity)+'">' +
       '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">' +
         '<div style="flex:1;min-width:0">' +
           '<div style="font-weight:700;font-size:14px">'+esc(iss.title)+(resolved?' <span style="font-size:10px;color:var(--text3)">['+esc(iss.status)+']</span>':'')+'</div>' +
           (iss.description?'<div style="font-size:12px;color:var(--text2);margin-top:4px">'+esc(iss.description)+'</div>':'') +
-          '<div style="font-size:11px;color:var(--text3);margin-top:6px">严重度: '+esc(iss.severity)+' · 状态: '+esc(iss.status)+(iss.assigned_to?' · → '+esc(iss.assigned_to):'')+'</div>' +
+          '<div style="font-size:11px;color:var(--text3);margin-top:6px">Severity: '+esc(iss.severity)+' · Status: '+esc(iss.status)+(iss.assigned_to?' · → '+esc(iss.assigned_to):'')+'</div>' +
           resLine +
         '</div>' +
         '<div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">'+actions+
-          '<button class="btn btn-ghost btn-xs" style="color:var(--error)" onclick="deleteIssue(\''+projId+'\',\''+iss.id+'\')">删除</button>' +
+          '<button class="btn btn-ghost btn-xs" style="color:var(--error)" onclick="deleteIssue(\''+projId+'\',\''+iss.id+'\')">Delete</button>' +
         '</div>' +
       '</div>' +
     '</div>';
@@ -17885,8 +18584,8 @@ async function showAddGoalModal(projId) {
     + '<select id="goal-owner" style="'+_modalInputStyle+'">'+_memberOptions(members,'__user__')+'</select></div>'
     + '</div>'
     + '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">'
-    + '<button class="btn btn-sm" onclick="this.closest(\'div[style*=fixed]\').remove()">取消</button>'
-    + '<button class="btn btn-primary btn-sm" onclick="_submitGoal(\''+projId+'\',this)">创建</button>'
+    + '<button class="btn btn-sm" onclick="this.closest(\'div[style*=fixed]\').remove()">Cancel</button>'
+    + '<button class="btn btn-primary btn-sm" onclick="_lockBtn(this,\'Creating…\',_submitGoal,\''+projId+'\',this)">Create</button>'
     + '</div></div>';
   document.body.appendChild(modal);
   setTimeout(function(){ var el = document.getElementById('goal-name'); if (el) el.focus(); }, 0);
@@ -17904,7 +18603,7 @@ function _goalMetricChanged() {
 }
 async function _submitGoal(projId, btn) {
   var name = (document.getElementById('goal-name').value||'').trim();
-  if (!name) { alert('请输入目标名称'); return; }
+  if (!name) { alert('Please enter goal name'); return; }
   var metric = document.getElementById('goal-metric').value;
   var targetV = 0, targetT = '';
   if (metric === 'count' || metric === 'percent') {
@@ -17950,10 +18649,10 @@ async function showAddDeliverableModal(projId) {
   var modal = document.createElement('div');
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center';
   modal.innerHTML = '<div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:20px;max-width:520px;width:94%">'
-    + '<h3 style="margin:0 0 14px">新建交付件</h3>'
+    + '<h3 style="margin:0 0 14px">New Deliverable</h3>'
     + '<div style="display:flex;flex-direction:column;gap:10px">'
     + '<div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">标题 *</label>'
-    + '<input id="dv-title" style="'+_modalInputStyle+'" placeholder="交付件标题"></div>'
+    + '<input id="dv-title" style="'+_modalInputStyle+'" placeholder="Deliverable title"></div>'
     + '<div style="display:flex;gap:10px">'
     + '<div style="flex:1"><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">类型</label>'
     + '<select id="dv-kind" style="'+_modalInputStyle+'">'
@@ -17964,21 +18663,21 @@ async function showAddDeliverableModal(projId) {
     + '<select id="dv-author" style="'+_modalInputStyle+'">'+_memberOptions(members,'')+'</select></div>'
     + '</div>'
     + '<div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">内容摘要</label>'
-    + '<textarea id="dv-content" rows="3" style="'+_modalInputStyle+'" placeholder="交付件摘要或说明"></textarea></div>'
+    + '<textarea id="dv-content" rows="3" style="'+_modalInputStyle+'" placeholder="Deliverable summary or notes"></textarea></div>'
     + '<div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">URL / 文件路径</label>'
     + '<input id="dv-url" style="'+_modalInputStyle+'" placeholder="可选：链接地址或文件路径"></div>'
     + '</div>'
-    + '<div style="font-size:11px;color:var(--text3);margin-top:8px">交付件创建后为"草稿"状态。由作者 Agent 提交后进入"待审阅"，用户审核通过/驳回。</div>'
+    + '<div style="font-size:11px;color:var(--text3);margin-top:8px">New deliverables start as "Draft". Once the author Agent submits, status moves to "Pending Review" for user approval/rejection.</div>'
     + '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px">'
-    + '<button class="btn btn-sm" onclick="this.closest(\'div[style*=fixed]\').remove()">取消</button>'
-    + '<button class="btn btn-primary btn-sm" onclick="_submitDeliverable(\''+projId+'\',this)">创建</button>'
+    + '<button class="btn btn-sm" onclick="this.closest(\'div[style*=fixed]\').remove()">Cancel</button>'
+    + '<button class="btn btn-primary btn-sm" onclick="_lockBtn(this,\'Creating…\',_submitDeliverable,\''+projId+'\',this)">Create</button>'
     + '</div></div>';
   document.body.appendChild(modal);
   setTimeout(function(){ var el = document.getElementById('dv-title'); if (el) el.focus(); }, 0);
 }
 async function _submitDeliverable(projId, btn) {
   var title = (document.getElementById('dv-title').value||'').trim();
-  if (!title) { alert('请输入标题'); return; }
+  if (!title) { alert('Please enter title'); return; }
   var author = document.getElementById('dv-author').value;
   if (author === '__user__') author = '';
   var urlVal = (document.getElementById('dv-url').value||'').trim();
@@ -17999,16 +18698,16 @@ function submitDeliverable(projId, dvId) {
     .then(function(){ loadProjectTabContent(projId, 'deliverables'); });
 }
 function reviewDeliverable(projId, dvId, approved) {
-  var label = approved ? '通过' : '驳回';
+  var label = approved ? 'Approve' : 'Reject';
   var color = approved ? '#22c55e' : '#ef4444';
   var modal = document.createElement('div');
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center';
   modal.innerHTML = '<div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:20px;max-width:480px;width:94%">'
-    + '<h3 style="margin:0 0 12px;color:'+color+'">审阅: '+label+'交付件</h3>'
+    + '<h3 style="margin:0 0 12px;color:'+color+'">Review: '+label+' deliverable</h3>'
     + '<div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">审阅意见</label>'
     + '<textarea id="review-comment" rows="3" style="'+_modalInputStyle+'" placeholder="'+(approved?'可选：通过意见':'请说明驳回原因，Agent 将收到通知并修订')+'"></textarea></div>'
     + '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px">'
-    + '<button class="btn btn-sm" onclick="this.closest(\'div[style*=fixed]\').remove()">取消</button>'
+    + '<button class="btn btn-sm" onclick="this.closest(\'div[style*=fixed]\').remove()">Cancel</button>'
     + '<button class="btn btn-primary btn-sm" style="background:'+color+'" onclick="_submitReview(\''+projId+'\',\''+dvId+'\','+approved+',this)">确认'+label+'</button>'
     + '</div></div>';
   document.body.appendChild(modal);
@@ -18023,8 +18722,26 @@ async function _submitReview(projId, dvId, approved, btn) {
   var active = (window._projectDetailTab && window._projectDetailTab[projId]) || 'deliverables';
   loadProjectTabContent(projId, active);
 }
+async function deleteProjectFile(projId, relPath) {
+  if (!await confirm('Delete file "' + relPath + '" from project workspace?\nAgents will no longer be able to read it.')) return;
+  try {
+    var r = await api('POST', '/api/portal/projects/'+projId+'/files/delete', {rel_path: relPath});
+    if (r && r.ok) {
+      var note = '🗑️ Deleted "' + relPath + '"';
+      if ((r.deliverable_records_removed || []).length > 0) {
+        note += ' (+ ' + r.deliverable_records_removed.length + ' deliverable record(s))';
+      }
+      if (window._toast) window._toast(note, 'success');
+      renderProjectDetail(projId);
+    } else {
+      alert('Delete failed: ' + ((r && r.error) || 'unknown'));
+    }
+  } catch(e) { alert('Delete failed: ' + (e.message || e)); }
+}
+window.deleteProjectFile = deleteProjectFile;
+
 async function deleteDeliverable(projId, dvId) {
-  if (!await confirm('删除此交付件？')) return;
+  if (!await confirm('Delete this deliverable?')) return;
   api('POST', '/api/portal/projects/'+projId+'/deliverables/'+dvId+'/delete', {})
     .then(function(){ loadProjectTabContent(projId, 'deliverables'); });
 }
@@ -18057,15 +18774,15 @@ async function showAddIssueModal(projId) {
     + '<div style="font-size:10px;color:var(--text3);margin-top:2px">指派后该 Agent 将负责修复此问题</div></div>'
     + '</div>'
     + '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px">'
-    + '<button class="btn btn-sm" onclick="this.closest(\'div[style*=fixed]\').remove()">取消</button>'
-    + '<button class="btn btn-primary btn-sm" onclick="_submitIssue(\''+projId+'\',this)">创建</button>'
+    + '<button class="btn btn-sm" onclick="this.closest(\'div[style*=fixed]\').remove()">Cancel</button>'
+    + '<button class="btn btn-primary btn-sm" onclick="_lockBtn(this,\'Creating…\',_submitIssue,\''+projId+'\',this)">Create</button>'
     + '</div></div>';
   document.body.appendChild(modal);
   setTimeout(function(){ var el = document.getElementById('iss-title'); if (el) el.focus(); }, 0);
 }
 async function _submitIssue(projId, btn) {
   var title = (document.getElementById('iss-title').value||'').trim();
-  if (!title) { alert('请输入问题标题'); return; }
+  if (!title) { alert('Please enter issue title'); return; }
   var reporter = document.getElementById('iss-reporter').value;
   if (reporter === '__user__') reporter = 'user';
   var assigned = document.getElementById('iss-assigned').value;
@@ -18093,8 +18810,8 @@ function resolveIssuePrompt(projId, issId) {
     + '<select id="resolve-status" style="'+_modalInputStyle+'">'
     + '<option value="resolved">已解决 (resolved)</option><option value="wontfix">不修复 (wontfix)</option></select></div></div>'
     + '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px">'
-    + '<button class="btn btn-sm" onclick="this.closest(\'div[style*=fixed]\').remove()">取消</button>'
-    + '<button class="btn btn-primary btn-sm" onclick="_submitResolve(\''+projId+'\',\''+issId+'\',this)">确认</button>'
+    + '<button class="btn btn-sm" onclick="this.closest(\'div[style*=fixed]\').remove()">Cancel</button>'
+    + '<button class="btn btn-primary btn-sm" onclick="_submitResolve(\''+projId+'\',\''+issId+'\',this)">Confirm</button>'
     + '</div></div>';
   document.body.appendChild(modal);
 }
@@ -18457,6 +19174,26 @@ async function sendProjectMsg(projId) {
   var text = input.value.trim();
   var attachments = _projAttachList(projId).slice();
   if (!text && attachments.length === 0) return;
+  // ── Queue + merge: agents in this project are still typing ──
+  // Push onto the per-project pending queue and let the polling tick
+  // auto-flush when all pending typers post their reply. Skip the
+  // queue for slash commands (immediate-execution semantics) — but
+  // project chat doesn't have slash commands, so plain text only.
+  // The flush re-enters this fn with _projSkipQueueOnce[projId]=true.
+  window._projSkipQueueOnce = window._projSkipQueueOnce || {};
+  if (!window._projSkipQueueOnce[projId]
+      && _isScopeBusy('project', projId)
+      && text) {
+    var ok = _pendingQueueEnqueue('project', projId, text, attachments);
+    if (ok) {
+      input.value = '';
+      _projAttachments[projId] = [];
+      _renderProjAttachPreview(projId);
+      try { _autoGrowChatInput(input); } catch(_){}
+    }
+    return;
+  }
+  delete window._projSkipQueueOnce[projId];
   input.value = '';
   // Clear pending attachments immediately (we captured a snapshot above)
   _projAttachments[projId] = [];
@@ -18528,7 +19265,14 @@ async function sendProjectMsg(projId) {
       pollCount++;
       var st = (window._projectTyping || {})[projId];
       var pendingCount = st && st.pending ? Object.keys(st.pending).length : 0;
-      if (pendingCount === 0 && pollCount > 2) { clearInterval(_projectChatPoll); return; }
+      if (pendingCount === 0 && pollCount > 2) {
+        clearInterval(_projectChatPoll);
+        // All agents finished — flush any messages the user queued
+        // while waiting. The flush triggers a fresh sendProjectMsg
+        // with skip-queue, which in turn starts a new poll loop.
+        try { _pendingQueueFlush('project', projId); } catch(_){}
+        return;
+      }
       if (pollCount > 600) clearInterval(_projectChatPoll);  // 20min safety
     }, 2000);
   } catch(e) { alert('Send failed: '+e.message); }
@@ -18558,16 +19302,16 @@ async function editProject(projId, currentName, currentDesc) {
   var box = document.createElement('div');
   box.style.cssText = 'background:var(--bg);border:1px solid var(--overlay-10);border-radius:12px;padding:24px;width:520px;max-height:80vh;overflow-y:auto;color:var(--text)';
   box.innerHTML =
-    '<div style="font-size:16px;font-weight:700;margin-bottom:16px">编辑项目</div>' +
-    '<label style="font-size:12px;color:var(--text3)">项目名称</label>' +
+    '<div style="font-size:16px;font-weight:700;margin-bottom:16px">Edit Project</div>' +
+    '<label style="font-size:12px;color:var(--text3)">Project name</label>' +
     '<input id="ep-name" type="text" value="'+esc(proj.name).replace(/"/g,'&quot;')+'" style="width:100%;background:var(--surface);border:1px solid var(--overlay-10);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;margin:4px 0 12px">' +
-    '<label style="font-size:12px;color:var(--text3)">项目描述</label>' +
+    '<label style="font-size:12px;color:var(--text3)">Project description</label>' +
     '<textarea id="ep-desc" rows="2" style="width:100%;background:var(--surface);border:1px solid var(--overlay-10);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;margin:4px 0 12px;resize:vertical">'+esc(proj.description||'')+'</textarea>' +
     '<label style="font-size:12px;color:var(--text3)">绑定 Workflow</label>' +
     '<select id="ep-workflow" style="width:100%;background:var(--surface);border:1px solid var(--overlay-10);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;margin:4px 0 12px">'+wfOptions+'</select>' +
     '<div id="ep-step-assignments" style="margin-bottom:16px"></div>' +
     '<div style="display:flex;justify-content:flex-end;gap:8px">' +
-      '<button class="btn btn-ghost btn-sm" onclick="this.closest(\'div[style*=fixed]\').remove()">取消</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="this.closest(\'div[style*=fixed]\').remove()">Cancel</button>' +
       '<button class="btn btn-primary btn-sm" id="ep-save-btn">保存</button>' +
     '</div>';
 
@@ -18585,7 +19329,7 @@ async function editProject(projId, currentName, currentDesc) {
     var steps = tmpl.steps || [];
     var agentOpts = '<option value="">— 未分配 —</option>' +
       agents.map(function(a){ return '<option value="'+a.id+'">'+esc(a.name)+'</option>'; }).join('');
-    container.innerHTML = '<div style="font-size:12px;color:var(--text3);margin-bottom:6px">步骤 → Agent 分配（☑ = 该步骤启动前需人工批准）</div>' +
+    container.innerHTML = '<div style="font-size:12px;color:var(--text3);margin-bottom:6px">Step → Agent assignment (☑ = manual approval required before this step starts)</div>' +
       steps.map(function(s, i) {
         // 尝试回填当前分配
         var curAgent = '';
@@ -18598,7 +19342,7 @@ async function editProject(projId, currentName, currentDesc) {
         return '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
           '<span style="font-size:11px;color:var(--text);min-width:120px;font-weight:600">Step '+(i+1)+': '+esc(s.name||'')+'</span>' +
           '<select class="ep-agent-sel" data-step="'+i+'" style="flex:1;background:var(--surface);border:1px solid var(--overlay-10);border-radius:6px;padding:6px 8px;color:var(--text);font-size:12px">'+opts+'</select>' +
-          '<label title="启动前需人工批准" style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text3);cursor:pointer;white-space:nowrap">' +
+          '<label title="Manual approval required before start" style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text3);cursor:pointer;white-space:nowrap">' +
             '<input type="checkbox" class="ep-approval-chk" data-step="'+i+'"'+(curApproval?' checked':'')+' style="cursor:pointer">审核' +
           '</label>' +
         '</div>';
@@ -18641,19 +19385,40 @@ async function toggleWfStep(projId, taskId, newStatus) {
   try {
     await api('POST', '/api/portal/projects/'+projId+'/task-update', {task_id: taskId, status: newStatus});
     renderProjectDetail(projId);
-  } catch(e) { alert('更新失败: '+e.message); }
+  } catch(e) { alert('Update failed:'+e.message); }
 }
 
 async function approveWfStep(projId, taskId) {
-  if (!await confirm('确认批准该步骤启动？\n批准后将立即唤醒负责 Agent 开始执行。')) return;
+  if (!await confirm('Approve this step to start?\nThe owner Agent will be woken immediately to execute.')) return;
   try {
     await api('POST', '/api/portal/projects/'+projId+'/tasks/'+taskId+'/approve-step', {});
     renderProjectDetail(projId);
-  } catch(e) { alert('批准失败: '+e.message); }
+  } catch(e) { alert('Approve failed:'+e.message); }
 }
 
+async function reopenWfStep(projId, taskId) {
+  // Open a small inline prompt: reason + cascade option.
+  var reason = await askInline('Why reopen this step? (optional, will be shown to the agent)', {
+    multiline: false,
+    placeholder: 'e.g. requirements changed; need to redo with new constraints'
+  });
+  if (reason === null) return;  // user cancelled
+  var cascade = await confirm('Also reopen all DOWNSTREAM completed steps?\n(useful when this step\'s output invalidates later work)');
+  try {
+    var r = await api('POST', '/api/portal/projects/'+projId+'/tasks/'+taskId+'/reopen-step', {
+      reason: reason || '',
+      cascade: !!cascade,
+    });
+    if (window._toast) {
+      window._toast('🔄 Reopened ' + (r.reopened_count || 1) + ' step(s); agent re-triggered', 'success');
+    }
+    renderProjectDetail(projId);
+  } catch(e) { alert('Reopen failed: ' + (e.message || e)); }
+}
+window.reopenWfStep = reopenWfStep;
+
 async function deleteProject(projId) {
-  if (!await confirm('确定要删除这个项目吗？所有聊天记录和任务将丢失。')) return;
+  if (!await confirm('Delete this project? All chat history and tasks will be lost.')) return;
   await api('POST', '/api/portal/projects', {action:'delete', project_id:projId});
   currentView = 'projects';
   renderCurrentView();
@@ -18702,7 +19467,7 @@ async function editTaskSteps(projId, taskId) {
     '</div>' +
     '<button id="add-step-btn" style="background:transparent;color:var(--primary);border:1px dashed var(--primary);border-radius:6px;padding:6px 12px;cursor:pointer;font-size:12px;margin-bottom:12px">+ 添加步骤</button>' +
     '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">' +
-      '<button id="cancel-step-btn" class="btn btn-ghost" style="font-size:12px">取消</button>' +
+      '<button id="cancel-step-btn" class="btn btn-ghost" style="font-size:12px">Cancel</button>' +
       '<button id="save-step-btn" class="btn btn-primary" style="font-size:12px">保存</button>' +
     '</div>';
   modal.innerHTML = html;
@@ -18738,7 +19503,7 @@ async function editTaskSteps(projId, taskId) {
       });
       document.body.removeChild(overlay);
       renderProjectDetail(projId);
-    } catch(e) { alert('保存失败: '+e.message); }
+    } catch(e) { alert('Save failed:'+e.message); }
   };
 }
 
@@ -18762,7 +19527,7 @@ async function reviewStep(projId, taskId, stepId, action) {
     } else {
       renderProjectDetail(projId);
     }
-  } catch(e) { alert('审核失败: '+e.message); }
+  } catch(e) { alert('Review failed:'+e.message); }
 }
 
 async function pauseProject(projId) {
@@ -18782,8 +19547,8 @@ async function resumeProject(projId) {
 async function changeProjectStatus(projId, newStatus) {
   console.log('[changeProjectStatus]', projId, '->', newStatus);
   var labelMap = {
-    planning: '未开始', active: '进行中', suspended: '挂起',
-    cancelled: '停止', completed: '结束', archived: '归档',
+    planning: 'Not Started', active: 'In Progress', suspended: 'On Hold',
+    cancelled: 'Stop', completed: 'End', archived: 'Archive',
   };
   var label = labelMap[newStatus] || newStatus;
   var needReason = (newStatus === 'cancelled' || newStatus === 'suspended' || newStatus === 'completed');
@@ -18793,17 +19558,17 @@ async function changeProjectStatus(projId, newStatus) {
     if (r1 === null) return;  // user cancelled
     reason = r1;
   } else {
-    if (!await confirm('确认将项目状态变更为『' + label + '』?')) return;
+    if (!await confirm('Change project status to "' + label + '"?')) return;
   }
   try {
     var r = await api('POST', '/api/portal/projects/'+projId+'/status', {status:newStatus, reason:reason});
     console.log('[changeProjectStatus] response', r);
     if (!r) {
-      alert('变更失败: 空响应，请检查服务器日志');
+      alert('Change failed:空响应，请检查服务器日志');
       return;
     }
     if (r.error) {
-      alert('变更失败: ' + r.error);
+      alert('Change failed:' + r.error);
       return;
     }
     if (currentView === 'project_detail') {
@@ -18813,7 +19578,7 @@ async function changeProjectStatus(projId, newStatus) {
     }
   } catch(e) {
     console.error('[changeProjectStatus] error', e);
-    alert('变更失败: ' + e);
+    alert('Change failed:' + e);
   }
 }
 
@@ -18860,76 +19625,215 @@ async function renderWorkflows() {
     } else {
       html += '<div style="margin-bottom:20px">';
       html += '<h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:24px;font-weight:800;margin:0">Workflows</h2>';
-      html += '<p style="font-size:12px;color:var(--text3);margin-top:4px">选择模板快速创建，或自定义工作流流程</p>';
+      html += '<p style="font-size:12px;color:var(--text3);margin-top:4px">Pick a template for quick creation or design your own workflow</p>';
       html += '</div>';
     }
+
+    // ── Section header builder (shared between sections) ──
+    var _techSectionHeader = function(label, icon, count, accent) {
+      if (!_techWf) {
+        return '<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px">' +
+          '<span class="material-symbols-outlined" style="font-size:20px;color:' + accent + '">' + icon + '</span>' +
+          '<span style="font-size:16px;font-weight:700">' + label + '</span>' +
+          (count != null ? '<span style="font-size:11px;color:var(--text3);background:var(--surface3);padding:2px 8px;border-radius:10px">' + count + '</span>' : '') +
+        '</div>';
+      }
+      return '<div class="tc-mono-label" style="display:flex;align-items:center;gap:8px;margin-bottom:14px;color:var(--on-surface-variant);letter-spacing:0.18em">' +
+        '<span style="width:6px;height:6px;border-radius:50%;background:' + accent + ';box-shadow:0 0 6px ' + accent + ';animation:pulse-dot 2s infinite ease-in-out"></span>' +
+        '<span style="color:' + accent + '">' + label.toUpperCase() + '</span>' +
+        (count != null ? '<span style="color:var(--outline);font-family:var(--font-mono);font-size:11px">' + count + '</span>' : '') +
+      '</div>';
+    };
+
+    // ── Bento card builder (shared between My Workflows + Catalog) ──
+    // Mirrors the RAG / Wiki / Canvas Workflows recipe so all the
+    // workflow-grid pages read as one family.
+    var _techWfCard = function(opts) {
+      var accent = opts.accent || 'var(--primary)';
+      var accentRGB = opts.accentRGB || '192,193,255';
+      var statHtml = (opts.stats || []).map(function(s) {
+        return '<div>' +
+          '<p class="tc-mono-label" style="font-size:10px;color:var(--outline);margin:0 0 4px">' + esc(s.label) + '</p>' +
+          '<p style="font-family:var(--font-mono);font-size:' + (s.big ? '18' : '14') + 'px;font-weight:' + (s.big ? '600' : '400') + ';color:' + (s.color || 'var(--on-surface)') + ';margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + s.value + '</p>' +
+        '</div>';
+      }).join('');
+      return '<div class="tc-card-glass"' + (opts.onclick ? ' onclick="' + opts.onclick + '"' : '') + ' style="' +
+               'padding:var(--s-lg);display:flex;flex-direction:column;gap:14px;' +
+               (opts.onclick ? 'cursor:pointer;' : '') +
+               'position:relative;overflow:hidden;border-top:1px solid rgba(255,255,255,0.15);' +
+               'box-shadow:0 0 12px -3px rgba(' + accentRGB + ',0.10);transition:transform 0.15s,box-shadow 0.15s" ' +
+               (opts.onclick ? 'onmouseover="this.style.transform=\'translateY(-2px)\';this.style.boxShadow=\'0 8px 24px -4px rgba(' + accentRGB + ',0.30)\'" onmouseout="this.style.transform=\'\';this.style.boxShadow=\'0 0 12px -3px rgba(' + accentRGB + ',0.10)\'"' : '') + '>' +
+               '<div style="position:absolute;top:0;right:0;padding:14px;pointer-events:none">' +
+                 '<span class="material-symbols-outlined" style="font-size:64px;color:rgba(' + accentRGB + ',0.18);margin:-12px -12px 0 0">' + esc(opts.ghostIcon) + '</span>' +
+               '</div>' +
+               '<div style="display:flex;justify-content:space-between;align-items:flex-start;position:relative">' +
+                 '<div style="padding:8px;background:rgba(' + accentRGB + ',0.10);border:1px solid rgba(' + accentRGB + ',0.20);border-radius:var(--r-md);display:inline-flex">' +
+                   '<span class="material-symbols-outlined" style="font-size:22px;color:' + accent + ';font-variation-settings:\'FILL\' 1">' + esc(opts.icon) + '</span>' +
+                 '</div>' +
+                 '<div style="display:flex;align-items:center;gap:6px;background:var(--surface-container-high);padding:4px 10px;border-radius:9999px;border:1px solid rgba(255,255,255,0.05)">' +
+                   '<span style="width:6px;height:6px;border-radius:50%;background:' + accent + '"></span>' +
+                   '<span class="tc-mono-label" style="font-size:10px;color:var(--on-surface);letter-spacing:0.05em">' + esc(opts.statusLabel) + '</span>' +
+                 '</div>' +
+               '</div>' +
+               '<div style="position:relative">' +
+                 '<h3 style="font-family:var(--font-display);font-size:18px;font-weight:600;color:var(--on-surface);margin:0;letter-spacing:-0.01em;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(opts.title) + '</h3>' +
+                 (opts.description
+                   ? '<p class="tc-text-dim" style="font-size:12px;line-height:1.5;margin:6px 0 0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">' + esc(opts.description) + '</p>'
+                   : '') +
+               '</div>' +
+               (statHtml
+                 ? '<div style="display:grid;grid-template-columns:repeat(' + (opts.stats.length) + ',1fr);gap:14px;padding:12px 0;border-top:1px solid rgba(255,255,255,0.05);border-bottom:1px solid rgba(255,255,255,0.05)">' + statHtml + '</div>'
+                 : '') +
+               (opts.tags && opts.tags.length
+                 ? '<div style="display:flex;flex-wrap:wrap;gap:4px">' +
+                     opts.tags.slice(0, 6).map(function(t) {
+                       return '<span class="tc-mono-label" style="padding:2px 8px;background:rgba(' + accentRGB + ',0.10);color:' + accent + ';border:1px solid rgba(' + accentRGB + ',0.20);border-radius:9999px;font-size:9px;letter-spacing:0.05em">' + esc(t) + '</span>';
+                     }).join('') +
+                   '</div>'
+                 : '') +
+               (opts.actions
+                 ? '<div style="display:flex;gap:8px;margin-top:auto">' + opts.actions + '</div>'
+                 : '') +
+             '</div>';
+    };
 
     // ── My Workflows (已创建的) ──
     if (wfs.length) {
       html += '<div style="margin-bottom:28px">';
-      html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px"><span class="material-symbols-outlined" style="font-size:20px;color:var(--primary)">account_tree</span><span style="font-size:16px;font-weight:700">' + (_techWf ? 'My Workflows' : '我的工作流') + '</span><span style="font-size:11px;color:var(--text3);background:var(--surface3);padding:2px 8px;border-radius:10px">' + wfs.length + '</span></div>';
-      html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px">';
-      wfs.forEach(function(wf) {
-        var stepsArr = wf.steps || [];
-        var stepsPreview = stepsArr.slice(0,5).map(function(s, i) {
-          return '<span style="padding:2px 8px;border-radius:4px;background:var(--surface3);font-size:10px;color:var(--text2);white-space:nowrap">' + (i+1) + '. ' + esc(s.name||'Step '+(i+1)) + '</span>';
-        }).join('<span style="color:var(--text3);font-size:10px;margin:0 2px">&rarr;</span>');
-        if (stepsArr.length > 5) stepsPreview += '<span style="font-size:10px;color:var(--text3);margin-left:4px">+' + (stepsArr.length - 5) + ' more</span>';
-
-        html += '<div class="card" style="background:var(--surface);border-radius:12px;padding:18px;border:1px solid var(--overlay-6)">' +
-          '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">' +
-            '<div style="display:flex;align-items:center;gap:8px"><span class="material-symbols-outlined" style="font-size:18px;color:var(--primary)">account_tree</span><span style="font-size:15px;font-weight:700">' + esc(wf.name) + '</span></div>' +
-            '<span style="font-size:10px;padding:2px 8px;border-radius:4px;background:var(--primary-tint-10);color:var(--primary);font-weight:700">TEMPLATE</span>' +
-          '</div>' +
-          '<div style="font-size:12px;color:var(--text3);margin-bottom:10px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">' + esc(wf.description||'No description') + '</div>' +
-          '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin-bottom:12px">' + (stepsPreview || '<span style="font-size:11px;color:var(--text3)">No steps</span>') + '</div>' +
-          '<div style="display:flex;align-items:center;justify-content:space-between">' +
-            '<span style="font-size:11px;color:var(--text3)">' + stepsArr.length + ' steps</span>' +
-            '<div style="display:flex;gap:6px">' +
-              '<button class="btn btn-sm" style="font-size:10px" onclick="editWorkflow(\'' + wf.id + '\')"><span class="material-symbols-outlined" style="font-size:12px">edit</span></button>' +
-              '<button class="btn btn-sm" style="font-size:10px;color:var(--error)" onclick="deleteWorkflow(\'' + wf.id + '\')"><span class="material-symbols-outlined" style="font-size:12px">delete</span></button>' +
+      html += _techSectionHeader(_techWf ? 'My Workflows' : '我的工作流', 'account_tree', wfs.length, 'var(--primary)');
+      if (_techWf) {
+        html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:var(--s-lg)">';
+        wfs.forEach(function(wf) {
+          var stepsArr = wf.steps || [];
+          var firstSteps = stepsArr.slice(0, 3).map(function(s, i) { return (i+1) + '. ' + (s.name || 'Step ' + (i+1)); }).join(' → ');
+          if (stepsArr.length > 3) firstSteps += ' …';
+          html += _techWfCard({
+            icon: 'account_tree',
+            ghostIcon: 'schema',
+            accent: 'var(--primary)',
+            accentRGB: '192,193,255',
+            statusLabel: 'TEMPLATE',
+            title: wf.name || '(unnamed)',
+            description: wf.description || firstSteps || 'No description',
+            stats: [
+              { label: 'STEPS', value: stepsArr.length, big: true, color: 'var(--primary)' },
+              { label: 'TYPE',  value: '<span style="font-size:11px">CUSTOM</span>', color: 'var(--on-surface)' },
+            ],
+            actions:
+              '<button onclick="event.stopPropagation();editWorkflow(\'' + wf.id + '\')" class="tc-mono-label" style="flex:1;padding:8px 0;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:var(--r-md);color:var(--on-surface);font-size:10px;cursor:pointer;letter-spacing:0.05em;display:inline-flex;align-items:center;justify-content:center;gap:6px;transition:all 0.15s" onmouseover="this.style.background=\'rgba(255,255,255,0.08)\'" onmouseout="this.style.background=\'rgba(255,255,255,0.04)\'">' +
+                '<span class="material-symbols-outlined" style="font-size:14px">edit</span> EDIT' +
+              '</button>' +
+              '<button onclick="event.stopPropagation();deleteWorkflow(\'' + wf.id + '\')" title="Delete" style="padding:8px 12px;background:rgba(255,180,171,0.06);border:1px solid rgba(255,180,171,0.20);border-radius:var(--r-md);color:var(--error);cursor:pointer;display:inline-flex;align-items:center;transition:all 0.15s" onmouseover="this.style.background=\'rgba(255,180,171,0.14)\'" onmouseout="this.style.background=\'rgba(255,180,171,0.06)\'">' +
+                '<span class="material-symbols-outlined" style="font-size:16px">delete</span>' +
+              '</button>',
+          });
+        });
+        html += '</div>';
+      } else {
+        // Legacy fallback (unchanged)
+        html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px">';
+        wfs.forEach(function(wf) {
+          var stepsArr = wf.steps || [];
+          var stepsPreview = stepsArr.slice(0,5).map(function(s, i) {
+            return '<span style="padding:2px 8px;border-radius:4px;background:var(--surface3);font-size:10px;color:var(--text2);white-space:nowrap">' + (i+1) + '. ' + esc(s.name||'Step '+(i+1)) + '</span>';
+          }).join('<span style="color:var(--text3);font-size:10px;margin:0 2px">&rarr;</span>');
+          if (stepsArr.length > 5) stepsPreview += '<span style="font-size:10px;color:var(--text3);margin-left:4px">+' + (stepsArr.length - 5) + ' more</span>';
+          html += '<div class="card" style="background:var(--surface);border-radius:12px;padding:18px;border:1px solid var(--overlay-6)">' +
+            '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">' +
+              '<div style="display:flex;align-items:center;gap:8px"><span class="material-symbols-outlined" style="font-size:18px;color:var(--primary)">account_tree</span><span style="font-size:15px;font-weight:700">' + esc(wf.name) + '</span></div>' +
+              '<span style="font-size:10px;padding:2px 8px;border-radius:4px;background:var(--primary-tint-10);color:var(--primary);font-weight:700">TEMPLATE</span>' +
             '</div>' +
-          '</div>' +
-        '</div>';
-      });
-      html += '</div></div>';
+            '<div style="font-size:12px;color:var(--text3);margin-bottom:10px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">' + esc(wf.description||'No description') + '</div>' +
+            '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin-bottom:12px">' + (stepsPreview || '<span style="font-size:11px;color:var(--text3)">No steps</span>') + '</div>' +
+            '<div style="display:flex;align-items:center;justify-content:space-between">' +
+              '<span style="font-size:11px;color:var(--text3)">' + stepsArr.length + ' steps</span>' +
+              '<div style="display:flex;gap:6px">' +
+                '<button class="btn btn-sm" style="font-size:10px" onclick="editWorkflow(\'' + wf.id + '\')"><span class="material-symbols-outlined" style="font-size:12px">edit</span></button>' +
+                '<button class="btn btn-sm" style="font-size:10px;color:var(--error)" onclick="deleteWorkflow(\'' + wf.id + '\')"><span class="material-symbols-outlined" style="font-size:12px">delete</span></button>' +
+              '</div>' +
+            '</div>' +
+          '</div>';
+        });
+        html += '</div>';
+      }
+      html += '</div>';
     }
 
     // ── Catalog Section ──
     if (catalog.length) {
       html += '<div style="margin-bottom:20px">';
-      html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">';
-      html += '<div style="display:flex;align-items:center;gap:8px"><span class="material-symbols-outlined" style="font-size:20px;color:#FF9800">auto_awesome</span><span style="font-size:16px;font-weight:700">' + (_techWf ? 'Template Catalog' : '模板市场') + '</span>' + (_techWf ? '' : '<span style="font-size:11px;color:var(--text3)">Template Catalog</span>') + '</div>';
-      html += '</div>';
+      html += _techSectionHeader(_techWf ? 'Template Catalog' : 'Template Marketplace', 'auto_awesome', catalog.length, 'var(--tertiary, #ffb783)');
 
-      // Category filter tabs
+      // Category filter chips — tech-styled when tech mode
       var catNames = Object.keys(categories);
-      html += '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px">';
-      html += '<button class="btn btn-sm" id="wf-cat-all" style="font-size:11px;' + (!_wfCatalogFilter ? 'background:var(--primary);color:#282572;font-weight:700' : '') + '" onclick="filterWfCatalog(\'\')">全部 (' + catalog.length + ')</button>';
-      catNames.forEach(function(cat) {
-        var cnt = categories[cat].length;
-        var active = _wfCatalogFilter === cat;
-        html += '<button class="btn btn-sm" style="font-size:11px;' + (active ? 'background:var(--primary);color:#282572;font-weight:700' : '') + '" onclick="filterWfCatalog(\'' + esc(cat) + '\')">' + esc(cat) + ' (' + cnt + ')</button>';
-      });
-      html += '</div>';
+      if (_techWf) {
+        html += '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px">';
+        var chipStyle = function(active) {
+          return 'padding:6px 14px;border-radius:9999px;font-family:var(--font-mono);font-size:10px;letter-spacing:0.05em;cursor:pointer;transition:all 0.15s;border:1px solid ' +
+            (active ? 'rgba(192,193,255,0.40)' : 'rgba(255,255,255,0.08)') +
+            ';background:' + (active ? 'rgba(192,193,255,0.12)' : 'rgba(255,255,255,0.03)') +
+            ';color:' + (active ? 'var(--primary)' : 'var(--on-surface-variant)');
+        };
+        html += '<button id="wf-cat-all" onclick="filterWfCatalog(\'\')" style="' + chipStyle(!_wfCatalogFilter) + '">ALL (' + catalog.length + ')</button>';
+        catNames.forEach(function(cat) {
+          var cnt = categories[cat].length;
+          var active = _wfCatalogFilter === cat;
+          html += '<button onclick="filterWfCatalog(\'' + esc(cat) + '\')" style="' + chipStyle(active) + '">' + esc(cat) + ' (' + cnt + ')</button>';
+        });
+        html += '</div>';
+      } else {
+        html += '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px">';
+        html += '<button class="btn btn-sm" id="wf-cat-all" style="font-size:11px;' + (!_wfCatalogFilter ? 'background:var(--primary);color:#282572;font-weight:700' : '') + '" onclick="filterWfCatalog(\'\')">全部 (' + catalog.length + ')</button>';
+        catNames.forEach(function(cat) {
+          var cnt = categories[cat].length;
+          var active = _wfCatalogFilter === cat;
+          html += '<button class="btn btn-sm" style="font-size:11px;' + (active ? 'background:var(--primary);color:#282572;font-weight:700' : '') + '" onclick="filterWfCatalog(\'' + esc(cat) + '\')">' + esc(cat) + ' (' + cnt + ')</button>';
+        });
+        html += '</div>';
+      }
 
-      // Catalog cards
-      html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px" id="wf-catalog-grid">';
-      catalog.forEach(function(t) {
-        var hidden = _wfCatalogFilter && t.category !== _wfCatalogFilter;
-        var tags = (t.tags || []).map(function(tag) {
-          return '<span style="font-size:9px;padding:2px 6px;border-radius:4px;background:rgba(255,152,0,0.1);color:#FF9800">' + esc(tag) + '</span>';
-        }).join('');
-        html += '<div class="card wf-catalog-card" data-category="' + esc(t.category||'') + '" style="background:var(--surface);border-radius:12px;padding:18px;border:1px solid var(--overlay-6);cursor:pointer;transition:border-color 0.15s,transform 0.15s;' + (hidden ? 'display:none' : '') + '" onmouseenter="this.style.borderColor=\'#FF9800\';this.style.transform=\'translateY(-2px)\'" onmouseleave="this.style.borderColor=\'var(--overlay-6)\';this.style.transform=\'none\'" onclick="useWfCatalog(\'' + t.id + '\')">';
-        html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">';
-        html += '<div style="display:flex;align-items:center;gap:8px"><span style="font-size:20px">' + (t.icon||'📋') + '</span><span style="font-size:14px;font-weight:700">' + esc(t.name) + '</span></div>';
-        html += '<span style="font-size:10px;padding:2px 8px;border-radius:4px;background:rgba(255,152,0,0.1);color:#FF9800;font-weight:600">' + t.step_count + ' 步</span>';
+      if (_techWf) {
+        html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:var(--s-lg)" id="wf-catalog-grid">';
+        catalog.forEach(function(t) {
+          var hidden = _wfCatalogFilter && t.category !== _wfCatalogFilter;
+          html += '<div class="wf-catalog-card" data-category="' + esc(t.category||'') + '" style="' + (hidden ? 'display:none' : '') + '">' +
+            _techWfCard({
+              icon: 'auto_awesome',
+              ghostIcon: 'auto_awesome',
+              accent: 'var(--tertiary, #ffb783)',
+              accentRGB: '255,183,131',
+              statusLabel: t.category ? esc(t.category).toUpperCase() : 'CATALOG',
+              title: t.name || '(unnamed)',
+              description: t.description || '',
+              stats: [
+                { label: 'STEPS',    value: t.step_count || 0, big: true, color: 'var(--tertiary, #ffb783)' },
+                { label: 'CATEGORY', value: '<span style="font-size:11px">' + esc(t.category || '—') + '</span>', color: 'var(--on-surface)' },
+              ],
+              tags: t.tags || [],
+              onclick: 'useWfCatalog(\'' + t.id + '\')',
+            }) +
+          '</div>';
+        });
         html += '</div>';
-        html += '<div style="font-size:12px;color:var(--text3);margin-bottom:10px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">' + esc(t.description) + '</div>';
-        html += '<div style="display:flex;flex-wrap:wrap;gap:4px">' + tags + '</div>';
+      } else {
+        html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px" id="wf-catalog-grid">';
+        catalog.forEach(function(t) {
+          var hidden = _wfCatalogFilter && t.category !== _wfCatalogFilter;
+          var tags = (t.tags || []).map(function(tag) {
+            return '<span style="font-size:9px;padding:2px 6px;border-radius:4px;background:rgba(255,152,0,0.1);color:#FF9800">' + esc(tag) + '</span>';
+          }).join('');
+          html += '<div class="card wf-catalog-card" data-category="' + esc(t.category||'') + '" style="background:var(--surface);border-radius:12px;padding:18px;border:1px solid var(--overlay-6);cursor:pointer;transition:border-color 0.15s,transform 0.15s;' + (hidden ? 'display:none' : '') + '" onmouseenter="this.style.borderColor=\'#FF9800\';this.style.transform=\'translateY(-2px)\'" onmouseleave="this.style.borderColor=\'var(--overlay-6)\';this.style.transform=\'none\'" onclick="useWfCatalog(\'' + t.id + '\')">';
+          html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">';
+          html += '<div style="display:flex;align-items:center;gap:8px"><span style="font-size:20px">' + (t.icon||'📋') + '</span><span style="font-size:14px;font-weight:700">' + esc(t.name) + '</span></div>';
+          html += '<span style="font-size:10px;padding:2px 8px;border-radius:4px;background:rgba(255,152,0,0.1);color:#FF9800;font-weight:600">' + t.step_count + ' 步</span>';
+          html += '</div>';
+          html += '<div style="font-size:12px;color:var(--text3);margin-bottom:10px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">' + esc(t.description) + '</div>';
+          html += '<div style="display:flex;flex-wrap:wrap;gap:4px">' + tags + '</div>';
+          html += '</div>';
+        });
         html += '</div>';
-      });
-      html += '</div></div>';
+      }
+      html += '</div>';
     }
 
     html += '</div>';
@@ -18954,7 +19858,7 @@ function filterWfCatalog(cat) {
 }
 
 async function useWfCatalog(catalogId) {
-  if (!await confirm('从模板市场创建工作流？')) return;
+  if (!await confirm('Create workflow from template marketplace?')) return;
   try {
     var data = await api('POST', '/api/portal/workflows', {
       action: 'create_from_catalog',
@@ -19046,54 +19950,115 @@ function renderSelfImprovement() {
   html += '<span>' + (_techMode ? 'ROLES WITH XP' : '有经验的角色') + ': <b id="si-metric-roles" style="color:var(--text1)">-</b></span>';
   html += '</div>';
 
+  // Tech-mode panel wrapper helper. Section title sits as a mono
+  // kicker + h3 above a glass-card body; legacy mode keeps the old
+  // `<div class="card">` shape so the bridge can still skin it.
+  var _siPanel = function(opts) {
+    if (_techMode) {
+      var rightHtml = opts.right || '';
+      return '<div style="display:flex;align-items:center;justify-content:space-between;margin:0 0 10px;flex-wrap:wrap;gap:8px">' +
+               '<div>' +
+                 '<div class="tc-mono-label" style="color:var(--primary);letter-spacing:0.18em;display:flex;align-items:center;gap:8px;font-size:10px">' +
+                   '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);box-shadow:0 0 6px var(--secondary)"></span>' +
+                   esc(opts.kicker) +
+                 '</div>' +
+                 '<h3 style="font-family:var(--font-display);font-size:18px;font-weight:600;color:var(--on-surface);margin:4px 0 0;letter-spacing:-0.01em">' + esc(opts.title) + '</h3>' +
+                 (opts.subtitle ? '<p class="tc-text-dim" style="font-size:11px;margin:4px 0 0">' + esc(opts.subtitle) + '</p>' : '') +
+               '</div>' +
+               (rightHtml ? '<div>' + rightHtml + '</div>' : '') +
+             '</div>' +
+             '<div class="tc-card-glass" style="padding:var(--s-lg);border-top:1px solid rgba(255,255,255,0.10);margin-bottom:var(--s-lg)">' +
+               opts.body +
+             '</div>';
+    }
+    // Legacy fallback — original `<div class="card">` shape preserved
+    return '<div class="card" style="padding:16px;margin-bottom:18px">' +
+             '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">' +
+               '<div style="display:flex;align-items:center;gap:6px">' +
+                 '<span class="material-symbols-outlined" style="font-size:18px;color:' + (opts.legacyIconColor || 'var(--primary)') + '">' + (opts.legacyIcon || 'category') + '</span>' +
+                 '<span style="font-weight:700;font-size:14px">' + esc(opts.legacyTitle || opts.title) + '</span>' +
+                 (opts.subtitle ? '<span style="font-size:11px;color:var(--text3)">' + esc(opts.subtitle) + '</span>' : '') +
+               '</div>' +
+               (opts.right || '') +
+             '</div>' +
+             opts.body +
+           '</div>';
+  };
+
   // ── Row 2: Learning Plan Board ──
-  html += '<div class="card" style="padding:16px;margin-bottom:18px">';
-  html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px"><span class="material-symbols-outlined" style="font-size:18px;color:#4CAF50">task_alt</span><span style="font-weight:700;font-size:14px">' + (_techMode ? 'Learning Plan Board' : '学习计划看板') + '</span>' + (_techMode ? '' : '<span style="font-size:11px;color:var(--text3)">Learning Plan Board</span>') + '</div>';
-  html += '<div id="si-plan-board" style="max-height:600px;overflow-y:auto"><div style="color:var(--text3);font-size:12px;text-align:center;padding:20px">Loading...</div></div>';
-  html += '</div>';
+  html += _siPanel({
+    kicker: 'CLOSED-LOOP TRACKING',
+    title: 'Learning Plan Board',
+    subtitle: 'Goal → plan → completion → conversion',
+    legacyIcon: 'task_alt',
+    legacyIconColor: '#4CAF50',
+    legacyTitle: '学习计划看板',
+    body: '<div id="si-plan-board" style="max-height:600px;overflow-y:auto"><div style="color:var(--text3);font-size:12px;text-align:center;padding:20px">Loading...</div></div>',
+  });
 
   // ── Row 3: Retrospective Insights ──
-  html += '<div class="card" style="padding:16px;margin-bottom:18px">';
-  html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px"><span class="material-symbols-outlined" style="font-size:18px;color:#FF9800">lightbulb</span><span style="font-weight:700;font-size:14px">' + (_techMode ? 'Retrospective Insights' : '复盘洞察') + '</span>' + (_techMode ? '<span style="font-size:11px;color:var(--text3)">Latest wins on conflict</span>' : '<span style="font-size:11px;color:var(--text3)">Retrospective Insights — 最新为准，冲突时覆盖历史</span>') + '</div>';
-  html += '<div id="si-insights" style="max-height:280px;overflow-y:auto"><div style="color:var(--text3);font-size:12px;text-align:center;padding:20px">Loading...</div></div>';
-  html += '</div>';
+  html += _siPanel({
+    kicker: 'PATTERN MEMORY',
+    title: 'Retrospective Insights',
+    subtitle: 'Latest wins on conflict — supersedes history.',
+    legacyIcon: 'lightbulb',
+    legacyIconColor: '#FF9800',
+    legacyTitle: '复盘洞察',
+    body: '<div id="si-insights" style="max-height:280px;overflow-y:auto"><div style="color:var(--text3);font-size:12px;text-align:center;padding:20px">Loading...</div></div>',
+  });
 
   // ── Row 4: Retrospective + Active Learning triggers (2 columns) ──
-  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px">';
+  // Build the form bodies once and then wrap each in the panel helper
+  // so tech / legacy share the same form widgets.
+  var _retroFormBody = ''
+    + '<div style="display:flex;flex-direction:column;gap:10px">'
+    +   '<div><label style="font-size:11px;color:var(--on-surface-variant);margin-bottom:4px;display:block">Agent</label>'
+    +     '<select id="si-retro-agent" style="width:100%;padding:8px 10px;font-size:12px;border:1px solid var(--outline-variant);border-radius:var(--r-md);background:var(--surface-container-low);color:var(--on-surface)" onchange="siLoadAgentStatus(\'retro\')">'
+    +     '<option value="">-- Select --</option>'
+    +     agents.map(function(a){return '<option value="'+a.id+'">'+esc(a.name)+' ('+a.role+')</option>';}).join('')
+    +     '</select></div>'
+    +   '<div><label style="font-size:11px;color:var(--on-surface-variant);margin-bottom:4px;display:block">Task Summary <span style="color:var(--outline)">(optional)</span></label>'
+    +     '<textarea id="si-retro-summary" rows="2" style="width:100%;padding:8px 10px;font-size:12px;border:1px solid var(--outline-variant);border-radius:var(--r-md);background:var(--surface-container-low);color:var(--on-surface);resize:vertical;box-sizing:border-box" placeholder="Describe the task to retrospect on..."></textarea></div>'
+    +   '<div id="si-retro-status" style="font-size:11px;color:var(--text3);min-height:16px"></div>'
+    +   '<button class="btn btn-primary" id="si-retro-btn" style="width:100%;padding:10px;font-size:12px;margin-top:auto" onclick="siTriggerRetro()"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">replay</span> RUN RETROSPECTIVE</button>'
+    + '</div>';
 
-  // Col 1: Retrospective
-  html += '<div class="card" style="padding:16px;display:flex;flex-direction:column">';
-  html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:10px"><span class="material-symbols-outlined" style="font-size:18px;color:#FF9800">replay</span><span style="font-weight:700;font-size:14px">自我复盘</span></div>';
-  html += '<div class="form-group" style="margin-bottom:8px"><label style="font-size:11px;margin-bottom:2px">Agent</label>';
-  html += '<select id="si-retro-agent" style="width:100%;padding:6px 8px;font-size:12px;border:1px solid var(--border-light);border-radius:6px;background:var(--bg);color:var(--text1)" onchange="siLoadAgentStatus(\'retro\')">';
-  html += '<option value="">-- Select --</option>';
-  agents.forEach(function(a) { html += '<option value="'+a.id+'">'+esc(a.name)+' ('+a.role+')</option>'; });
-  html += '</select></div>';
-  html += '<div class="form-group" style="margin-bottom:8px"><label style="font-size:11px;margin-bottom:2px">Task Summary (可选)</label>';
-  html += '<textarea id="si-retro-summary" rows="2" style="width:100%;padding:6px 8px;font-size:12px;border:1px solid var(--border-light);border-radius:6px;background:var(--bg);color:var(--text1);resize:vertical;box-sizing:border-box" placeholder="描述要复盘的任务..."></textarea></div>';
-  html += '<div id="si-retro-status" style="font-size:11px;color:var(--text3);margin-bottom:6px;min-height:16px"></div>';
-  html += '<button class="btn btn-primary" id="si-retro-btn" style="width:100%;padding:8px;font-size:13px;margin-top:auto" onclick="siTriggerRetro()"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">replay</span> Run Retrospective</button>';
-  html += '</div>';
+  var _learnFormBody = ''
+    + '<div style="display:flex;flex-direction:column;gap:10px">'
+    +   '<div><label style="font-size:11px;color:var(--on-surface-variant);margin-bottom:4px;display:block">Agent</label>'
+    +     '<select id="si-learn-agent" style="width:100%;padding:8px 10px;font-size:12px;border:1px solid var(--outline-variant);border-radius:var(--r-md);background:var(--surface-container-low);color:var(--on-surface)" onchange="siLoadAgentStatus(\'learn\')">'
+    +     '<option value="">-- Select --</option>'
+    +     agents.map(function(a){return '<option value="'+a.id+'">'+esc(a.name)+' ('+a.role+')</option>';}).join('')
+    +     '</select></div>'
+    +   '<div><label style="font-size:11px;color:var(--on-surface-variant);margin-bottom:4px;display:block">Learning Goal</label>'
+    +     '<input id="si-learn-goal" style="width:100%;padding:8px 10px;font-size:12px;border:1px solid var(--outline-variant);border-radius:var(--r-md);background:var(--surface-container-low);color:var(--on-surface);box-sizing:border-box" placeholder="e.g. master pytest fixtures"></div>'
+    +   '<div><label style="font-size:11px;color:var(--on-surface-variant);margin-bottom:4px;display:block">Knowledge Gap <span style="color:var(--outline)">(optional)</span></label>'
+    +     '<input id="si-learn-gap" style="width:100%;padding:8px 10px;font-size:12px;border:1px solid var(--outline-variant);border-radius:var(--r-md);background:var(--surface-container-low);color:var(--on-surface);box-sizing:border-box" placeholder="e.g. unfamiliar with parametrize"></div>'
+    +   '<div id="si-learn-status" style="font-size:11px;color:var(--text3);min-height:16px"></div>'
+    +   '<button class="btn btn-primary" id="si-learn-btn" style="width:100%;padding:10px;font-size:12px;margin-top:auto" onclick="siTriggerLearn()"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">school</span> RUN ACTIVE LEARNING</button>'
+    + '</div>';
 
-  // Col 2: Active Learning
-  html += '<div class="card" style="padding:16px;display:flex;flex-direction:column">';
-  html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:10px"><span class="material-symbols-outlined" style="font-size:18px;color:#4CAF50">school</span><span style="font-weight:700;font-size:14px">主动学习</span></div>';
-  html += '<div class="form-group" style="margin-bottom:8px"><label style="font-size:11px;margin-bottom:2px">Agent</label>';
-  html += '<select id="si-learn-agent" style="width:100%;padding:6px 8px;font-size:12px;border:1px solid var(--border-light);border-radius:6px;background:var(--bg);color:var(--text1)" onchange="siLoadAgentStatus(\'learn\')">';
-  html += '<option value="">-- Select --</option>';
-  agents.forEach(function(a) { html += '<option value="'+a.id+'">'+esc(a.name)+' ('+a.role+')</option>'; });
-  html += '</select></div>';
-  html += '<div class="form-group" style="margin-bottom:8px"><label style="font-size:11px;margin-bottom:2px">Learning Goal (学习目标)</label>';
-  html += '<input id="si-learn-goal" style="width:100%;padding:6px 8px;font-size:12px;border:1px solid var(--border-light);border-radius:6px;background:var(--bg);color:var(--text1);box-sizing:border-box" placeholder="e.g. 学习自动化测试最佳实践"></div>';
-  html += '<div class="form-group" style="margin-bottom:8px"><label style="font-size:11px;margin-bottom:2px">Knowledge Gap (可选)</label>';
-  html += '<input id="si-learn-gap" style="width:100%;padding:6px 8px;font-size:12px;border:1px solid var(--border-light);border-radius:6px;background:var(--bg);color:var(--text1);box-sizing:border-box" placeholder="e.g. 不了解pytest fixture用法"></div>';
-  html += '<div id="si-learn-status" style="font-size:11px;color:var(--text3);margin-bottom:6px;min-height:16px"></div>';
-  html += '<button class="btn btn-primary" id="si-learn-btn" style="width:100%;padding:8px;font-size:13px;margin-top:auto" onclick="siTriggerLearn()"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">school</span> Run Active Learning</button>';
-  html += '</div>';
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--s-lg);margin-bottom:var(--s-lg)">';
+  html += '<div>' + _siPanel({
+    kicker: 'TRIGGER · POSTMORTEM',
+    title: 'Self-Retrospective',
+    legacyIcon: 'replay',
+    legacyIconColor: '#FF9800',
+    legacyTitle: '自我复盘',
+    body: _retroFormBody,
+  }) + '</div>';
+  html += '<div>' + _siPanel({
+    kicker: 'TRIGGER · DISCOVERY',
+    title: 'Active Learning',
+    legacyIcon: 'school',
+    legacyIconColor: '#4CAF50',
+    legacyTitle: '主动学习',
+    body: _learnFormBody,
+  }) + '</div>';
   html += '</div>';
 
   // ── Result display (hidden until triggered) ──
-  html += '<div id="si-result" class="card" style="padding:16px;display:none;margin-bottom:18px">';
+  html += '<div id="si-result" ' + (_techMode ? 'class="tc-card-glass"' : 'class="card"') + ' style="padding:16px;display:none;margin-bottom:18px">';
   html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">';
   html += '<span style="font-weight:700;font-size:14px" id="si-result-title">Result</span>';
   html += '<button class="btn btn-sm btn-ghost" style="padding:2px 6px" onclick="document.getElementById(\'si-result\').style.display=\'none\'"><span class="material-symbols-outlined" style="font-size:14px">close</span></button>';
@@ -19102,21 +20067,22 @@ function renderSelfImprovement() {
   html += '</div>';
 
   // ── Row 5: Experience Library Browser ──
-  html += '<div class="card" style="padding:16px;margin-bottom:18px">';
-  html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">';
-  html += '<div style="display:flex;align-items:center;gap:6px"><span class="material-symbols-outlined" style="font-size:18px;color:#2196F3">library_books</span><span style="font-weight:700;font-size:14px">Global Experience Library</span><span style="font-size:11px;color:var(--text3)">全局经验库</span></div>';
-  html += '<div style="display:flex;gap:6px;align-items:center">';
-  html += '<select id="si-lib-role" style="padding:5px 8px;font-size:11px;border:1px solid var(--border-light);border-radius:6px;background:var(--bg);color:var(--text1)" onchange="siLoadExperiences()">';
-  html += '<option value="">-- Select Role --</option>';
   var knownRoles = ["ceo","cto","coder","reviewer","researcher","architect","devops","designer","pm","tester","data","general"];
-  knownRoles.forEach(function(r) { html += '<option value="'+r+'">'+r.toUpperCase()+'</option>'; });
-  html += '</select>';
-  html += '<button class="btn btn-sm" style="padding:4px 8px" onclick="siLoadExperiences()"><span class="material-symbols-outlined" style="font-size:14px">refresh</span></button>';
-  html += '</div></div>';
-  html += '<div id="si-exp-list" style="max-height:400px;overflow-y:auto">';
-  html += '<div style="color:var(--text3);font-size:12px;text-align:center;padding:30px">Select a role to browse experiences</div>';
-  html += '</div>';
-  html += '</div>';
+  var _libRight = '<select id="si-lib-role" style="padding:6px 10px;font-size:11px;border:1px solid var(--outline-variant, var(--border-light));border-radius:var(--r-md);background:var(--surface-container-low, var(--bg));color:var(--on-surface, var(--text1));font-family:var(--font-mono);letter-spacing:0.05em" onchange="siLoadExperiences()">' +
+    '<option value="">-- SELECT ROLE --</option>' +
+    knownRoles.map(function(r){return '<option value="'+r+'">'+r.toUpperCase()+'</option>';}).join('') +
+    '</select>' +
+    '<button class="btn btn-sm" style="padding:4px 8px;margin-left:6px" onclick="siLoadExperiences()"><span class="material-symbols-outlined" style="font-size:14px">refresh</span></button>';
+  html += _siPanel({
+    kicker: 'KNOWLEDGE VAULT',
+    title: 'Global Experience Library',
+    subtitle: 'Cross-agent skill nuggets, indexed by role.',
+    legacyIcon: 'library_books',
+    legacyIconColor: '#2196F3',
+    legacyTitle: 'Global Experience Library',
+    right: _libRight,
+    body: '<div id="si-exp-list" style="max-height:400px;overflow-y:auto"><div style="color:var(--text3);font-size:12px;text-align:center;padding:30px">Select a role to browse experiences</div></div>',
+  });
 
   html += '</div>';
   c.innerHTML = html;
@@ -19316,9 +20282,9 @@ function siSetPlanFilter(state) {
 }
 
 function _siStateMeta(state) {
-  if (state === 'queued')    return { label: '⏳ 待启动',  color: '#9E9E9E', bg: 'rgba(158,158,158,0.15)' };
-  if (state === 'running')   return { label: '● 进行中',   color: '#FF9800', bg: 'rgba(255,152,0,0.15)' };
-  if (state === 'completed') return { label: '✓ 已完成',  color: 'var(--success)', bg: 'rgba(76,175,80,0.15)' };
+  if (state === 'queued')    return { label: '⏳ QUEUED',    color: '#9E9E9E', bg: 'rgba(158,158,158,0.15)' };
+  if (state === 'running')   return { label: '● RUNNING',   color: '#FF9800', bg: 'rgba(255,152,0,0.15)' };
+  if (state === 'completed') return { label: '✓ COMPLETED', color: 'var(--success)', bg: 'rgba(76,175,80,0.15)' };
   return { label: state || '-', color: 'var(--text3)', bg: 'rgba(0,0,0,0)' };
 }
 
@@ -19342,12 +20308,12 @@ async function siLoadPlanBoard() {
     // Filter tab bar
     var tabBar = ''
       + '<div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap">'
-      + _siTab('all',       '全部',    summary.total || 0)
-      + _siTab('queued',    '待启动',  summary.queued || 0)
-      + _siTab('running',   '进行中',  summary.running || 0)
-      + _siTab('completed', '已完成',  summary.completed || 0)
+      + _siTab('all',       'ALL',       summary.total || 0)
+      + _siTab('queued',    'QUEUED',    summary.queued || 0)
+      + _siTab('running',   'RUNNING',   summary.running || 0)
+      + _siTab('completed', 'COMPLETED', summary.completed || 0)
       + '<div style="flex:1"></div>'
-      + '<div style="font-size:11px;color:var(--text3);align-self:center">完成率 '+cr+' · 经验转化率 '+kr+' · 已沉淀 <b style="color:var(--text1)">'+(summary.experiences_produced||0)+'</b> 条</div>'
+      + '<div style="font-size:11px;color:var(--text3);align-self:center;font-family:var(--font-mono);letter-spacing:0.05em">COMPLETION ' + cr + ' · CONVERSION ' + kr + ' · ' + (summary.experiences_produced || 0) + ' EXPERIENCES STORED</div>'
       + '</div>';
 
     var visible = plans.filter(function(p){
@@ -19357,8 +20323,8 @@ async function siLoadPlanBoard() {
     if (!visible.length) {
       el.innerHTML = tabBar + '<div style="color:var(--text3);font-size:12px;text-align:center;padding:30px">'
         + (plans.length === 0
-            ? '暂无学习计划。使用下方「主动学习」面板设定一个学习目标开始第一个闭环。'
-            : '当前过滤条件下没有计划。')
+            ? 'No learning plans yet. Use the Active Learning panel below to set a goal and start the first closed loop.'
+            : 'No plans match the current filter.')
         + '</div>';
       return;
     }
@@ -19377,12 +20343,12 @@ async function siLoadPlanBoard() {
       html += '<span style="background:'+meta.bg+';color:'+meta.color+';padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;white-space:nowrap">'+meta.label+'</span>';
       html += '<span style="font-weight:700;font-size:12px;color:var(--primary);white-space:nowrap">'+esc(p.agent_name || '-')+'</span>';
       html += '<span style="font-size:11px;color:var(--text3);white-space:nowrap">'+esc(p.role || '-')+'</span>';
-      html += '<span style="color:var(--text2);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">'+esc(p.learning_goal || '(未设定目标)')+'</span>';
+      html += '<span style="color:var(--text2);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">'+esc(p.learning_goal || '(no goal)')+'</span>';
       html += '</div>';
       html += '<div style="display:flex;align-items:center;gap:10px;flex-shrink:0">';
       if (p.state === 'completed') {
         var convColor = expCount > 0 ? 'var(--success)' : 'var(--text3)';
-        html += '<span style="font-size:11px;color:'+convColor+'">经验 '+expCount+' 条</span>';
+        html += '<span style="font-size:11px;color:'+convColor+'">'+expCount+' experiences</span>';
       }
       html += '<span style="font-size:11px;color:var(--text3)">'+tsStr+'</span>';
       html += '<span class="material-symbols-outlined" style="font-size:16px;color:var(--text3)">expand_more</span>';
@@ -19392,37 +20358,37 @@ async function siLoadPlanBoard() {
       html += '<div class="si-plan-detail" style="display:none;margin-top:12px;padding-top:12px;border-top:1px solid var(--border-light)">';
 
       // Goal block — always shown
-      html += '<div style="margin-bottom:10px"><div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:4px">🎯 学习目标 (Goal)</div>';
-      html += '<div style="font-size:12px;background:var(--surface2);padding:8px 12px;border-radius:6px">'+esc(p.learning_goal||'(未设定)')+'</div></div>';
+      html += '<div style="margin-bottom:10px"><div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:4px">🎯 Learning Goal</div>';
+      html += '<div style="font-size:12px;background:var(--surface2);padding:8px 12px;border-radius:6px">'+esc(p.learning_goal||'(none)')+'</div></div>';
 
       if (p.knowledge_gap) {
-        html += '<div style="margin-bottom:10px"><div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:4px">❓ 知识缺口 (Gap)</div>';
+        html += '<div style="margin-bottom:10px"><div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:4px">❓ Knowledge Gap</div>';
         html += '<div style="font-size:12px;color:var(--text2)">'+esc(p.knowledge_gap)+'</div></div>';
       }
 
       if (p.state === 'queued') {
-        html += '<div style="font-size:12px;color:var(--text3);padding:8px 0">等待 agent 空闲后自动启动。当前排在队列中。</div>';
+        html += '<div style="font-size:12px;color:var(--text3);padding:8px 0">Waiting for the agent to free up — currently in queue.</div>';
       } else if (p.state === 'running') {
-        html += '<div style="font-size:12px;color:#FF9800;padding:8px 0">● agent 正在执行学习任务…</div>';
+        html += '<div style="font-size:12px;color:#FF9800;padding:8px 0">● Agent is running this learning task…</div>';
       } else {
         // Completed — show closed-loop full body
         if (p.source_type || p.source_detail) {
-          html += '<div style="margin-bottom:10px"><div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:4px">📚 学习来源 (Source)</div>';
+          html += '<div style="margin-bottom:10px"><div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:4px">📚 Source</div>';
           html += '<div style="font-size:12px;color:var(--text2)">'+esc(p.source_type||'-')+(p.source_detail ? ' · '+esc(p.source_detail) : '')+'</div></div>';
         }
         if (p.key_findings) {
-          html += '<div style="margin-bottom:10px"><div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:4px">📋 关键发现 (Findings)</div>';
+          html += '<div style="margin-bottom:10px"><div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:4px">📋 Key Findings</div>';
           html += '<div style="font-size:12px;background:var(--surface2);padding:8px 12px;border-radius:6px;white-space:pre-wrap;line-height:1.6">'+esc(p.key_findings)+'</div></div>';
         }
         if (p.applicable_scenes) {
-          html += '<div style="margin-bottom:10px"><div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:4px">🎯 适用场景 (Scenes)</div>';
+          html += '<div style="margin-bottom:10px"><div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:4px">🎯 Applicable Scenes</div>';
           html += '<div style="font-size:12px;color:var(--text2)">'+esc(p.applicable_scenes)+'</div></div>';
         }
 
         // Closed-loop: new experiences + conversion outcome
         html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">';
         html += '<div style="background:rgba(76,175,80,0.05);border:1px solid rgba(76,175,80,0.2);border-radius:8px;padding:10px">';
-        html += '<div style="font-size:11px;font-weight:600;color:var(--success);margin-bottom:6px">✨ 转化为经验 ('+expCount+' 条)</div>';
+        html += '<div style="font-size:11px;font-weight:600;color:var(--success);margin-bottom:6px">✨ Converted to experiences ('+expCount+')</div>';
         if (expCount > 0) {
           (p.new_experiences || []).forEach(function(e) {
             html += '<div style="font-size:11px;margin-bottom:4px;display:flex;gap:4px">';
@@ -19431,17 +20397,17 @@ async function siLoadPlanBoard() {
             html += '</div>';
           });
         } else {
-          html += '<div style="font-size:11px;color:var(--text3)">本次学习未产出可沉淀经验（目标过宽或来源不足），建议细化目标后重试。</div>';
+          html += '<div style="font-size:11px;color:var(--text3)">No reusable experience produced this round (goal too broad or sources too thin) — refine the goal and retry.</div>';
         }
         html += '</div>';
 
         html += '<div style="background:rgba(33,150,243,0.05);border:1px solid rgba(33,150,243,0.2);border-radius:8px;padding:10px">';
-        html += '<div style="font-size:11px;font-weight:600;color:#2196F3;margin-bottom:6px">📦 经验固化去向</div>';
+        html += '<div style="font-size:11px;font-weight:600;color:#2196F3;margin-bottom:6px">📦 Where the experience is stored</div>';
         html += '<div style="font-size:11px;color:var(--text2);line-height:1.8">';
-        html += '• <b>角色经验库:</b> ~/.tudou_claw/experience/'+esc(p.role||'general')+'<br>';
-        html += '• <b>System Prompt:</b> 下次对话自动注入<br>';
-        html += '• <b>语义记忆 (L3):</b> 检索时命中<br>';
-        html += '• <b>复用范围:</b> 同角色其他 agent 可检索';
+        html += '• <b>Role library:</b> ~/.tudou_claw/experience/'+esc(p.role||'general')+'<br>';
+        html += '• <b>System prompt:</b> auto-injected next conversation<br>';
+        html += '• <b>Semantic memory (L3):</b> retrieved on relevant queries<br>';
+        html += '• <b>Reuse scope:</b> any agent of the same role';
         html += '</div></div>';
         html += '</div>';
       }
@@ -19470,7 +20436,7 @@ async function siLoadInsights() {
   try {
     var data = await api('GET', '/api/portal/experience/insights');
     if (!data || !data.insights || data.insights.length === 0) {
-      el.innerHTML = '<div style="color:var(--text3);font-size:12px;text-align:center;padding:20px">暂无复盘洞察。使用「自我复盘」提炼经验。</div>';
+      el.innerHTML = '<div style="color:var(--text3);font-size:12px;text-align:center;padding:20px">No retrospective insights yet. Use the Self-Retrospective panel to mine some.</div>';
       return;
     }
     var html = '';
@@ -19592,7 +20558,7 @@ function showCreateWorkflowModal() {
   html += '<div id="wf-nodes-container" style="position:relative;min-height:80px;margin-bottom:12px"></div>';
   html += '<div style="display:flex;justify-content:center;margin-bottom:16px"><div onclick="addWfStep()" style="width:48px;height:48px;border-radius:50%;background:var(--primary);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:transform 0.15s;box-shadow:0 2px 12px var(--primary-tint-30)" onmouseenter="this.style.transform=\'scale(1.1)\'" onmouseleave="this.style.transform=\'scale(1)\'"><span class="material-symbols-outlined" style="font-size:28px;color:#282572">add</span></div></div>';
   html += '<div class="form-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button>';
-  html += '<button class="btn btn-primary" onclick="createWorkflowFromDesigner()">Create</button></div>';
+  html += '<button class="btn btn-primary" onclick="_lockBtn(this,\'Creating…\',createWorkflowFromDesigner)">Create</button></div>';
   html += '</div>';
   showCustomModal(html);
   renderWfNodes();
@@ -19604,6 +20570,8 @@ function addWfStep() {
     description: '',
     input_desc: '',
     output_desc: '',
+    input_files: [],
+    output_files: [],
     depends_on: _wfSteps.length > 0 ? [_wfSteps.length - 1] : []
   });
   renderWfNodes();
@@ -19653,6 +20621,16 @@ function renderWfNodes() {
     html += '<div><div style="font-size:9px;text-transform:uppercase;color:var(--text3);letter-spacing:0.5px;margin-bottom:4px">Output</div>';
     html += '<input value="'+esc(step.output_desc)+'" onchange="_wfSteps['+idx+'].output_desc=this.value" placeholder="What comes out..." style="width:100%;padding:6px;font-size:11px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);box-sizing:border-box"></div>';
     html += '</div>';
+    // Pinned input files + expected output files (2026-05-05)
+    // Comma-separated; agent reads these directly instead of glob_files.
+    var inFilesStr = (step.input_files || []).join(', ');
+    var outFilesStr = (step.output_files || []).join(', ');
+    html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">';
+    html += '<div><div style="font-size:9px;text-transform:uppercase;color:var(--text3);letter-spacing:0.5px;margin-bottom:4px">📂 Input files <span style="text-transform:none;opacity:0.7">(comma-sep, relative)</span></div>';
+    html += '<input value="'+esc(inFilesStr)+'" oninput="_wfSteps['+idx+'].input_files=this.value.split(\',\').map(function(s){return s.trim()}).filter(Boolean)" placeholder="e.g. PRD.md, api_spec.yaml" style="width:100%;padding:6px;font-size:11px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);box-sizing:border-box;font-family:monospace"></div>';
+    html += '<div><div style="font-size:9px;text-transform:uppercase;color:var(--text3);letter-spacing:0.5px;margin-bottom:4px">📤 Output files <span style="text-transform:none;opacity:0.7">(agent will write)</span></div>';
+    html += '<input value="'+esc(outFilesStr)+'" oninput="_wfSteps['+idx+'].output_files=this.value.split(\',\').map(function(s){return s.trim()}).filter(Boolean)" placeholder="e.g. architecture.md" style="width:100%;padding:6px;font-size:11px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);box-sizing:border-box;font-family:monospace"></div>';
+    html += '</div>';
     // Prompt template (collapsible advanced)
     html += '<details style="margin-top:8px"><summary style="font-size:9px;text-transform:uppercase;color:var(--text3);letter-spacing:0.5px;cursor:pointer;user-select:none">Prompt Template / Role</summary>';
     html += '<div style="display:grid;grid-template-columns:1fr auto;gap:8px;margin-top:6px">';
@@ -19676,6 +20654,8 @@ async function createWorkflowFromDesigner() {
       description: s.description || '',
       input_desc: s.input_desc || '',
       output_desc: s.output_desc || '',
+      input_files: s.input_files || [],
+      output_files: s.output_files || [],
       task: (s.input_desc ? 'Input: '+s.input_desc+'. ' : '') + (s.output_desc ? 'Expected output: '+s.output_desc : ''),
       depends_on: s.depends_on || []
     };
@@ -19717,6 +20697,8 @@ async function editWorkflow(wfId) {
       description: s.description || '',
       input_desc: s.input_spec || s.input_desc || '',
       output_desc: s.output_spec || s.output_desc || '',
+      input_files: Array.isArray(s.input_files) ? s.input_files : [],
+      output_files: Array.isArray(s.output_files) ? s.output_files : [],
       prompt_template: s.prompt_template || '',
       suggested_role: s.suggested_role || '',
       depends_on: s.depends_on || []
@@ -19761,6 +20743,8 @@ async function saveEditedWorkflow() {
       description: s.description || '',
       input_spec: s.input_desc || '',
       output_spec: s.output_desc || '',
+      input_files: s.input_files || [],
+      output_files: s.output_files || [],
       prompt_template: s.prompt_template || '',
       suggested_role: s.suggested_role || '',
       input_desc: s.input_desc || '',
@@ -19807,7 +20791,7 @@ function _getProjectMembers(projId) {
   // actual members of this project. Falls back to empty list if project data
   // hasn't been cached yet (renderProjectDetail caches into window._projectData).
   var out = [
-    { id: '__ALL__', name: '所有人', role: '全员集体思考', display: '所有人' }
+    { id: '__ALL__', name: 'Everyone', role: '全员集体思考', display: 'Everyone' }
   ];
   var proj = (window._projectData || {})[projId];
   if (!proj || !Array.isArray(proj.members)) return out;
@@ -19974,9 +20958,9 @@ async function showCreateProjectModal() {
     // members share it. The actual <project_id> is only known after create,
     // so we show the template here and let the backend fill it in.
     '<div style="background:var(--surface);border:1px solid var(--overlay-8);border-left:3px solid var(--primary);border-radius:8px;padding:10px 12px;margin-bottom:10px;font-size:12px;color:var(--text2);line-height:1.5">' +
-      '<div style="font-weight:700;color:var(--text);margin-bottom:4px">📁 项目共享目录 (自动创建)</div>' +
-      '<div style="font-family:monospace;font-size:11px;color:var(--text3);word-break:break-all">~/.tudou_claw/workspaces/shared/&lt;项目ID&gt;/</div>' +
-      '<div style="font-size:11px;color:var(--text3);margin-top:4px">所有成员的交付件统一存放在这里。项目创建后可在详情页查看完整路径。</div>' +
+      '<div style="font-weight:700;color:var(--text);margin-bottom:4px">📁 Project shared directory (auto-created)</div>' +
+      '<div style="font-family:monospace;font-size:11px;color:var(--text3);word-break:break-all">~/.tudou_claw/workspaces/shared/&lt;project-id&gt;/</div>' +
+      '<div style="font-size:11px;color:var(--text3);margin-top:4px">All members\' deliverables live here. After creating the project, view the full path in its detail page.</div>' +
     '</div>' +
     '<select id="new-proj-node" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px;box-sizing:border-box">' +
       '<option value="local">Local Node</option>' +
@@ -19999,7 +20983,7 @@ async function showCreateProjectModal() {
 
     '<div style="display:flex;gap:8px;justify-content:flex-end">' +
       '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>' +
-      '<button class="btn btn-primary" onclick="createProject()">Create</button>' +
+      '<button class="btn btn-primary" onclick="_lockBtn(this,\'Creating…\',createProject)">Create</button>' +
     '</div></div>';
   showModalHTML(html);
 }
@@ -20037,7 +21021,7 @@ function _onProjWorkflowChange() {
     if (step.description) html += '<div style="font-size:10px;color:var(--text3);margin-top:1px">'+esc(step.description)+'</div>';
     html += '</div>';
     html += '<select class="wf-step-agent" data-step-idx="'+idx+'" style="padding:6px 8px;font-size:11px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);min-width:140px">' + agentOpts + '</select>';
-    html += '<label title="启动前需人工批准" style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text3);cursor:pointer;white-space:nowrap"><input type="checkbox" class="wf-step-approval" data-step-idx="'+idx+'" style="cursor:pointer">审核</label>';
+    html += '<label title="Manual approval required before start" style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text3);cursor:pointer;white-space:nowrap"><input type="checkbox" class="wf-step-approval" data-step-idx="'+idx+'" style="cursor:pointer">审核</label>';
     html += '</div>';
   });
   html += '</div>';
@@ -20144,7 +21128,7 @@ function showProjectTaskModal(projId) {
     '</select>' +
     '<div style="display:flex;gap:8px;justify-content:flex-end">' +
       '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>' +
-      '<button class="btn btn-primary" onclick="createProjectTask(\''+projId+'\')">Assign</button>' +
+      '<button class="btn btn-primary" onclick="_lockBtn(this,\'Assigning…\',createProjectTask,\''+projId+'\')">Assign</button>' +
     '</div></div>';
   showModalHTML(html);
 }
@@ -20187,7 +21171,7 @@ function showProjectMilestoneModal(projId) {
     '<input id="new-milestone-duedate" type="date" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px">' +
     '<div style="display:flex;gap:8px;justify-content:flex-end">' +
       '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>' +
-      '<button class="btn btn-primary" onclick="createProjectMilestone(\''+projId+'\')">Create</button>' +
+      '<button class="btn btn-primary" onclick="_lockBtn(this,\'Creating…\',createProjectMilestone,\''+projId+'\')">Create</button>' +
     '</div></div>';
   showModalHTML(html);
 }
@@ -20499,7 +21483,7 @@ function _speakBubble(btnEl) {
   if (!text.trim()) return;
 
   var icon = btnEl.querySelector('.material-symbols-outlined');
-  if (!window.speechSynthesis) { alert('您的浏览器不支持语音合成 (TTS)'); return; }
+  if (!window.speechSynthesis) { alert('Your browser does not support speech synthesis (TTS)'); return; }
 
   // If already speaking, stop
   if (speechSynthesis.speaking) {
@@ -20540,7 +21524,7 @@ function _toggleSTT(agentId) {
   }
   // Start recording
   var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SpeechRecognition) { alert('您的浏览器不支持语音识别 (Speech Recognition)'); return; }
+  if (!SpeechRecognition) { alert('Your browser does not support speech recognition'); return; }
   var recognition = new SpeechRecognition();
   recognition.lang = 'zh-CN';
   recognition.continuous = true;
@@ -20615,7 +21599,7 @@ function _handleTTS(evt) {
   var bubble = document.getElementById('robot-bubble-' + evt.agent_id);
   if (bubble) { bubble.textContent = '🔊 Speaking...'; bubble.style.background = '#E91E63'; }
   utterance.onend = function() {
-    if (bubble) { bubble.textContent = '工作中...'; bubble.style.background = 'var(--primary)'; }
+    if (bubble) { bubble.textContent = 'Working…'; bubble.style.background = 'var(--primary)'; }
   };
   speechSynthesis.speak(utterance);
 }
@@ -20714,10 +21698,10 @@ function _renderProjectsHubLegacy() {
     { id: 'task_center',   label: 'Task Center',        icon: 'checklist' },
     { id: 'workflows',     label: 'Workflow Templates', icon: 'account_tree' },
   ] : [
-    { id: 'projects',      label: t('tab.projectList',    '项目列表'),    icon: 'folder_special' },
-    { id: 'meetings',      label: t('tab.meetings',       '群聊会议'),    icon: 'groups' },
+    { id: 'projects',      label: t('tab.projectList',    'Project List'),    icon: 'folder_special' },
+    { id: 'meetings',      label: t('tab.meetings',       'Meetings'),    icon: 'groups' },
     { id: 'task_center',   label: t('tab.taskCenter',     '任务中心'),    icon: 'checklist' },
-    { id: 'workflows',     label: t('tab.workflowTemplates', 'Workflow 模板'), icon: 'account_tree' },
+    { id: 'workflows',     label: t('tab.workflowTemplates', 'Workflow Templates'), icon: 'account_tree' },
   ];
   var r = _renderHubTabs('projects', tabs);
   c.innerHTML = r.html;
@@ -20744,24 +21728,58 @@ function _renderProjectsHubLegacy() {
 // ---------- Meeting list ----------
 async function renderMeetingsTab() {
   var c = document.getElementById('content');
-  c.innerHTML =
-    '<div style="padding:18px">' +
-      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">' +
-        '<div><h2 style="margin:0;font-size:22px;font-weight:800">群聊 / 会议</h2>' +
-        '<p style="font-size:12px;color:var(--text3);margin-top:4px">多 Agent 临时协作会议 · 讨论 · 任务分派</p></div>' +
-        '<div style="display:flex;gap:8px">' +
-          '<select id="meetings-filter-status" onchange="renderMeetingsTab()" style="background:var(--surface);border:1px solid var(--overlay-10);border-radius:6px;color:var(--text);font-size:12px;padding:6px 10px">' +
-            '<option value="">全部状态</option>' +
-            '<option value="active">进行中</option>' +
-            '<option value="scheduled">已安排</option>' +
-            '<option value="closed">已结束</option>' +
-            '<option value="cancelled">已取消</option>' +
-          '</select>' +
-          '<button class="btn btn-primary btn-sm" onclick="showCreateMeetingModal()"><span class="material-symbols-outlined" style="font-size:16px">add</span> 新建会议</button>' +
+  var _techMt = false;
+  try { _techMt = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+
+  if (_techMt) {
+    c.innerHTML =
+      '<div style="padding:var(--s-lg)">' +
+        '<section style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:var(--s-xl);gap:var(--s-md);flex-wrap:wrap">' +
+          '<div style="flex:1;min-width:240px">' +
+            '<div class="tc-mono-label" style="color:var(--primary);letter-spacing:0.20em;display:flex;align-items:center;gap:8px">' +
+              '<span style="width:8px;height:8px;border-radius:50%;background:var(--primary);box-shadow:0 0 8px var(--primary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
+              'COLLABORATION FABRIC' +
+            '</div>' +
+            '<h2 style="font-family:var(--font-display);font-size:30px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:6px 0 0">Meetings</h2>' +
+            '<p class="tc-text-dim" style="font-size:14px;line-height:1.55;margin-top:8px;max-width:640px">' +
+              'Multi-agent ad-hoc collaboration sessions — discussion, task assignment, async follow-through.' +
+            '</p>' +
+          '</div>' +
+          '<div style="display:flex;gap:10px;align-items:center">' +
+            '<select id="meetings-filter-status" onchange="renderMeetingsTab()" style="background:var(--surface-container-low);border:1px solid var(--outline-variant);border-radius:var(--r-md);color:var(--on-surface);font-family:var(--font-mono);font-size:11px;padding:8px 12px;letter-spacing:0.05em">' +
+              '<option value="">ALL STATUS</option>' +
+              '<option value="active">ACTIVE</option>' +
+              '<option value="scheduled">SCHEDULED</option>' +
+              '<option value="closed">CLOSED</option>' +
+              '<option value="cancelled">CANCELLED</option>' +
+            '</select>' +
+            '<button onclick="showCreateMeetingModal()" style="background:var(--primary-fixed);color:var(--on-primary-fixed);padding:10px 20px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:8px;box-shadow:0 4px 14px rgba(192,193,255,0.20)">' +
+              '<span class="material-symbols-outlined" style="font-size:16px">add</span> NEW MEETING' +
+            '</button>' +
+          '</div>' +
+        '</section>' +
+        '<div id="meetings-list-area" style="min-height:100px"><div class="tc-text-dim" style="padding:40px;text-align:center;font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em">LOADING…</div></div>' +
+      '</div>';
+  } else {
+    c.innerHTML =
+      '<div style="padding:18px">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">' +
+          '<div><h2 style="margin:0;font-size:22px;font-weight:800">Meetings &amp; Chats</h2>' +
+          '<p style="font-size:12px;color:var(--text3);margin-top:4px">Multi-agent collaboration · discussion · task dispatch</p></div>' +
+          '<div style="display:flex;gap:8px">' +
+            '<select id="meetings-filter-status" onchange="renderMeetingsTab()" style="background:var(--surface);border:1px solid var(--overlay-10);border-radius:6px;color:var(--text);font-size:12px;padding:6px 10px">' +
+              '<option value="">All Status</option>' +
+              '<option value="active">In Progress</option>' +
+              '<option value="scheduled">Scheduled</option>' +
+              '<option value="closed">Closed</option>' +
+              '<option value="cancelled">Cancelled</option>' +
+            '</select>' +
+            '<button class="btn btn-primary btn-sm" onclick="showCreateMeetingModal()"><span class="material-symbols-outlined" style="font-size:16px">add</span> New Meeting</button>' +
+          '</div>' +
         '</div>' +
-      '</div>' +
-      '<div id="meetings-list-area" style="min-height:100px"><div style="color:var(--text3);font-size:12px">Loading…</div></div>' +
-    '</div>';
+        '<div id="meetings-list-area" style="min-height:100px"><div style="color:var(--text3);font-size:12px">Loading…</div></div>' +
+      '</div>';
+  }
   try {
     var filter = '';
     var fEl = document.getElementById('meetings-filter-status');
@@ -20771,12 +21789,89 @@ async function renderMeetingsTab() {
     var list = r.meetings || [];
     var listEl = document.getElementById('meetings-list-area');
     if (!list.length) {
-      listEl.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text3);font-size:13px">暂无会议。点击"新建会议"拉起一场跨 Agent 协作。</div>';
+      listEl.innerHTML = _techMt
+        ? '<div class="tc-card-glass" style="text-align:center;padding:60px 20px;border-style:dashed;border:2px dashed rgba(192,193,255,0.20)">' +
+            '<span class="material-symbols-outlined" style="font-size:48px;color:var(--outline)">groups</span>' +
+            '<div class="tc-text-dim" style="margin-top:14px;font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em">NO MEETINGS YET</div>' +
+            '<div class="tc-text-dim" style="margin-top:6px;font-size:12px">Click NEW MEETING to spin up a cross-agent session</div>' +
+          '</div>'
+        : '<div style="text-align:center;padding:40px;color:var(--text3);font-size:13px">No meetings yet. Click "New Meeting" to spin up a cross-agent session.</div>';
+      return;
+    }
+    if (_techMt) {
+      // Stitch_26-style bento cards. Each meeting = glass card + ghost
+      // forum icon + status pill (ACTIVE/SCHEDULED/…) + h3 title +
+      // 2-col stats grid (MESSAGES / OPEN TASKS) + participant avatars
+      // footer + OPEN button.
+      listEl.innerHTML =
+        '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:var(--s-lg)">' +
+        list.map(function(m) {
+          var isActive = m.status === 'active';
+          var accent = isActive ? 'var(--secondary)'
+                     : m.status === 'scheduled' ? 'var(--primary)'
+                     : m.status === 'cancelled' ? 'var(--error)'
+                     : 'var(--outline)';
+          var accentRGB = isActive ? '137,206,255'
+                        : m.status === 'scheduled' ? '192,193,255'
+                        : m.status === 'cancelled' ? '255,180,171'
+                        : '144,143,160';
+          var statusLabel = isActive ? 'ACTIVE'
+                          : m.status === 'scheduled' ? 'SCHEDULED'
+                          : m.status === 'closed' ? 'CLOSED'
+                          : 'CANCELLED';
+          var ts = m.created_at ? _formatTs(m.created_at) : '';
+          var partAvatars = (m.participants || []).slice(0, 5).map(function(pid) {
+            var ag = (window._cachedAgents || agents || []).find(function(a) { return a.id === pid; });
+            var nm = ag ? (ag.name || '?')[0] : '?';
+            return '<div style="width:26px;height:26px;border-radius:50%;background:rgba(' + accentRGB + ',0.20);border:1px solid rgba(' + accentRGB + ',0.40);color:' + accent + ';display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;margin-left:-6px;font-family:var(--font-mono)" title="' + (ag ? esc(ag.name) : pid) + '">' + esc(nm) + '</div>';
+          }).join('');
+          var moreCount = Math.max(0, (m.participants || []).length - 5);
+          if (moreCount > 0) partAvatars += '<div style="width:26px;height:26px;border-radius:50%;background:rgba(255,255,255,0.06);color:var(--outline);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;margin-left:-6px;font-family:var(--font-mono)">+' + moreCount + '</div>';
+          return '<div onclick="openMeetingDetail(\'' + m.id + '\')" class="tc-card-glass" style="' +
+                   'padding:var(--s-lg);display:flex;flex-direction:column;gap:14px;cursor:pointer;' +
+                   'position:relative;overflow:hidden;border-top:1px solid rgba(255,255,255,0.15);' +
+                   (isActive ? 'box-shadow:0 0 15px -3px rgba(' + accentRGB + ',0.30);' : '') +
+                   'transition:transform 0.15s,box-shadow 0.15s" ' +
+                   'onmouseover="this.style.transform=\'translateY(-2px)\';this.style.boxShadow=\'0 8px 24px -4px rgba(' + accentRGB + ',0.40)\'" ' +
+                   'onmouseout="this.style.transform=\'\';this.style.boxShadow=\'\'">' +
+                   '<div style="position:absolute;top:0;right:0;padding:14px;pointer-events:none">' +
+                     '<span class="material-symbols-outlined" style="font-size:64px;color:rgba(' + accentRGB + ',0.18);margin:-12px -12px 0 0">forum</span>' +
+                   '</div>' +
+                   '<div style="display:flex;justify-content:space-between;align-items:flex-start;position:relative">' +
+                     '<div style="padding:8px;background:rgba(' + accentRGB + ',0.10);border:1px solid rgba(' + accentRGB + ',0.20);border-radius:var(--r-md);display:inline-flex">' +
+                       '<span class="material-symbols-outlined" style="font-size:22px;color:' + accent + ';font-variation-settings:\'FILL\' 1">groups</span>' +
+                     '</div>' +
+                     '<div style="display:flex;align-items:center;gap:6px;background:var(--surface-container-high);padding:4px 10px;border-radius:9999px;border:1px solid rgba(255,255,255,0.05)">' +
+                       '<span style="width:6px;height:6px;border-radius:50%;background:' + accent + ';' + (isActive ? 'animation:pulse-dot 2s infinite ease-in-out;box-shadow:0 0 6px ' + accent + ';' : '') + '"></span>' +
+                       '<span class="tc-mono-label" style="font-size:10px;color:var(--on-surface);letter-spacing:0.05em">' + statusLabel + '</span>' +
+                     '</div>' +
+                   '</div>' +
+                   '<div style="position:relative">' +
+                     '<h3 style="font-family:var(--font-display);font-size:18px;font-weight:600;color:var(--on-surface);margin:0;letter-spacing:-0.01em;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(m.title || '(untitled)') + '</h3>' +
+                     '<p class="tc-mono-label" style="font-size:10px;color:var(--on-surface-variant);margin:4px 0 0;font-family:var(--font-mono)">' + esc(ts) + '</p>' +
+                   '</div>' +
+                   '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:12px 0;border-top:1px solid rgba(255,255,255,0.05);border-bottom:1px solid rgba(255,255,255,0.05)">' +
+                     '<div>' +
+                       '<p class="tc-mono-label" style="font-size:10px;color:var(--outline);margin:0 0 4px">MESSAGES</p>' +
+                       '<p style="font-family:var(--font-mono);font-size:18px;font-weight:600;color:' + accent + ';margin:0">' + (m.message_count || 0) + '</p>' +
+                     '</div>' +
+                     '<div>' +
+                       '<p class="tc-mono-label" style="font-size:10px;color:var(--outline);margin:0 0 4px">OPEN TASKS</p>' +
+                       '<p style="font-family:var(--font-mono);font-size:18px;color:var(--on-surface);margin:0">' + (m.open_assignments || 0) + '<span style="font-size:12px;color:var(--outline)"> / ' + (m.assignment_count || 0) + '</span></p>' +
+                     '</div>' +
+                   '</div>' +
+                   '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:auto">' +
+                     '<div style="display:flex;align-items:center;padding-left:6px">' + partAvatars + '</div>' +
+                     '<span class="tc-mono-label" style="color:var(--primary);font-size:10px;letter-spacing:0.05em;display:inline-flex;align-items:center;gap:4px">OPEN <span class="material-symbols-outlined" style="font-size:14px">arrow_forward</span></span>' +
+                   '</div>' +
+                 '</div>';
+        }).join('') +
+        '</div>';
       return;
     }
     listEl.innerHTML = list.map(function(m){
       var statusColor = m.status==='active'?'#22c55e':m.status==='scheduled'?'var(--primary)':m.status==='closed'?'var(--text3)':'#ef4444';
-      var statusLabel = m.status==='active'?'进行中':m.status==='scheduled'?'待开始':m.status==='closed'?'已结束':'已取消';
+      var statusLabel = m.status==='active'?'In Progress':m.status==='scheduled'?'Pending Start':m.status==='closed'?'已结束':'Cancelled';
       var ts = m.created_at ? _formatTs(m.created_at) : '';
       var partAvatars = (m.participants||[]).slice(0,5).map(function(pid){
         var ag = (window._cachedAgents||agents||[]).find(function(a){return a.id===pid;});
@@ -20815,24 +21910,24 @@ function showCreateMeetingModal() {
       '<div style="width:24px;height:24px;border-radius:50%;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700">'+(a.name||'?')[0]+'</div>' +
       '<span>'+esc((a.role?a.role+' · ':'')+a.name)+'</span></label>';
   }).join('');
-  var html = '<div style="padding:24px;max-width:500px"><h3 style="margin:0 0 16px">新建会议</h3>' +
-    '<input id="mtg-title" placeholder="会议标题" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px">' +
-    '<textarea id="mtg-agenda" placeholder="议程 / 背景（可选）" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px;min-height:60px;resize:vertical"></textarea>' +
+  var html = '<div style="padding:24px;max-width:500px"><h3 style="margin:0 0 16px">New Meeting</h3>' +
+    '<input id="mtg-title" placeholder="Meeting title" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px">' +
+    '<textarea id="mtg-agenda" placeholder="Agenda / background (optional)" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px;min-height:60px;resize:vertical"></textarea>' +
     '<select id="mtg-project" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px">' +
-      '<option value="">不关联项目 (非项目型)</option>'+projOpts +
+      '<option value="">No project (standalone)</option>'+projOpts +
     '</select>' +
     '<div style="font-size:12px;font-weight:600;color:var(--text2);margin:10px 0 6px">选择参会 Agent</div>' +
     '<div style="max-height:200px;overflow-y:auto;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;padding:4px;margin-bottom:14px">'+(agentOpts||'<div style="color:var(--text3);font-size:12px;padding:12px">No agents</div>')+'</div>' +
     '<div style="display:flex;gap:8px;justify-content:flex-end">' +
-      '<button class="btn btn-ghost" onclick="closeModal()">取消</button>' +
-      '<button class="btn btn-primary" onclick="createMeeting()">创建</button>' +
+      '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-primary" onclick="_lockBtn(this,\'Creating…\',createMeeting)">Create</button>' +
     '</div></div>';
   showModalHTML(html);
 }
 
 async function createMeeting() {
   var title = document.getElementById('mtg-title').value.trim();
-  if (!title) { alert('标题不能为空'); return; }
+  if (!title) { alert('Title cannot be empty'); return; }
   var agenda = document.getElementById('mtg-agenda').value.trim();
   var projId = document.getElementById('mtg-project').value;
   var parts = Array.prototype.slice.call(document.querySelectorAll('input[name="mtg-part"]:checked')).map(function(i){return i.value;});
@@ -20872,7 +21967,7 @@ function _mtgBuildMessagesHtml(m, mid) {
     var isUser = (x.role === 'user');
     var isSystem = (x.role === 'system');
     var ag = (window._cachedAgents || agents || []).find(function(a){ return a.id === x.sender; });
-    var senderName = isUser ? '主持人' : (ag ? ag.name : (x.sender_name || x.sender || '?'));
+    var senderName = isUser ? 'Host' : (ag ? ag.name : (x.sender_name || x.sender || '?'));
     if (!isUser && ag && x.sender_name && x.sender_name.indexOf('-') > 0) senderName = ag.name;
     if (isSystem) {
       return '<div style="text-align:center;padding:4px 0;margin:4px 0">' +
@@ -20896,7 +21991,7 @@ function _mtgBuildMessagesHtml(m, mid) {
     '</div>';
   }).join('');
   if (!html) {
-    html = '<div style="color:var(--text3);font-size:12px;text-align:center;padding:40px 0">会议尚未开始讨论<br><span style="font-size:11px">点击「开始会议」后发送第一条消息</span></div>';
+    html = '<div style="color:var(--text3);font-size:12px;text-align:center;padding:40px 0">Meeting has not started yet<br><span style="font-size:11px">Click "Start Meeting" then send the first message</span></div>';
   }
   return { html: html, refs: refs };
 }
@@ -20906,7 +22001,7 @@ function _mtgBuildAssignmentsHtml(m, mid) {
     var ag = (window._cachedAgents || agents || []).find(function(ag){ return ag.id === a.assignee_agent_id; });
     var agName = ag ? ag.name : (a.assignee_agent_id || '待分配');
     var stColor = a.status === 'done' ? '#22c55e' : a.status === 'in_progress' ? '#f59e0b' : a.status === 'cancelled' ? 'var(--text3)' : 'var(--primary)';
-    var stLabel = a.status === 'done' ? '已完成' : a.status === 'in_progress' ? '进行中' : a.status === 'cancelled' ? '已取消' : '待处理';
+    var stLabel = a.status === 'done' ? 'Completed' : a.status === 'in_progress' ? 'In Progress' : a.status === 'cancelled' ? 'Cancelled' : 'Pending';
     // Retry count badge (from MeetingAssignment.reexecute_count)
     var retryBadge = '';
     if (a.reexecute_count && a.reexecute_count > 0) {
@@ -20921,7 +22016,7 @@ function _mtgBuildAssignmentsHtml(m, mid) {
         '<div style="font-size:10px;color:var(--text3)">→ ' + esc(agName) + (a.due_hint ? ' · ' + esc(a.due_hint) : '') + '</div>' +
         '<select onchange="updateMeetingAssignment(\'' + mid + '\',\'' + a.id + '\',this.value)" style="background:var(--bg);border:1px solid var(--overlay-10);border-radius:4px;color:var(--text);font-size:10px;padding:2px 4px">' +
           ['open','in_progress','done','cancelled'].map(function(s){
-            var sl = s === 'done' ? '已完成' : s === 'in_progress' ? '进行中' : s === 'cancelled' ? '已取消' : '待处理';
+            var sl = s === 'done' ? 'Completed' : s === 'in_progress' ? 'In Progress' : s === 'cancelled' ? 'Cancelled' : 'Pending';
             return '<option value="' + s + '"' + (a.status === s ? ' selected' : '') + '>' + sl + '</option>';
           }).join('') +
         '</select>' +
@@ -21091,14 +22186,14 @@ async function openMeetingDetail(mid) {
 
     // -- Status bar buttons --
     var statusBtns = '';
-    if (m.status === 'scheduled') statusBtns += '<button class="btn btn-primary btn-sm" onclick="meetingAction(\''+mid+'\',\'start\')" style="gap:4px"><span class="material-symbols-outlined" style="font-size:16px">play_arrow</span> 开始会议</button>';
-    if (m.status === 'active') statusBtns += '<button class="btn btn-ghost btn-sm" onclick="meetingInterrupt(\''+mid+'\')" style="gap:4px;color:#f59e0b" title="停止当前 Agent 发言轮，等待下一指令"><span class="material-symbols-outlined" style="font-size:16px">pause_circle</span> 暂停发言</button>';
-    if (m.status === 'active') statusBtns += '<button class="btn btn-ghost btn-sm" onclick="meetingAbort(\''+mid+'\')" style="gap:4px;color:var(--error)" title="强制终止：停止讨论 + SIGTERM 任何正在运行的子进程（python 脚本、bash 循环等）"><span class="material-symbols-outlined" style="font-size:16px">stop_circle</span> 终止</button>';
-    if (m.status === 'active') statusBtns += '<button class="btn btn-ghost btn-sm" onclick="meetingCloseWithSummary(\''+mid+'\')" style="gap:4px"><span class="material-symbols-outlined" style="font-size:16px">stop</span> 结束</button>';
-    if (m.status !== 'cancelled' && m.status !== 'closed') statusBtns += '<button class="btn btn-ghost btn-sm" style="color:var(--error);gap:4px" onclick="meetingAction(\''+mid+'\',\'cancel\')"><span class="material-symbols-outlined" style="font-size:16px">close</span> 取消</button>';
+    if (m.status === 'scheduled') statusBtns += '<button class="btn btn-primary btn-sm" onclick="meetingAction(\''+mid+'\',\'start\')" style="gap:4px"><span class="material-symbols-outlined" style="font-size:16px">play_arrow</span> Start Meeting</button>';
+    if (m.status === 'active') statusBtns += '<button class="btn btn-ghost btn-sm" onclick="meetingInterrupt(\''+mid+'\')" style="gap:4px;color:#f59e0b" title="Stop current Agent\'s turn, wait for next instruction"><span class="material-symbols-outlined" style="font-size:16px">pause_circle</span> Pause</button>';
+    if (m.status === 'active') statusBtns += '<button class="btn btn-ghost btn-sm" onclick="meetingAbort(\''+mid+'\')" style="gap:4px;color:var(--error)" title="Force abort: stop discussion + SIGTERM any running subprocess (python scripts, bash loops, etc.)"><span class="material-symbols-outlined" style="font-size:16px">stop_circle</span> Abort</button>';
+    if (m.status === 'active') statusBtns += '<button class="btn btn-ghost btn-sm" onclick="meetingCloseWithSummary(\''+mid+'\')" style="gap:4px"><span class="material-symbols-outlined" style="font-size:16px">stop</span> End</button>';
+    if (m.status !== 'cancelled' && m.status !== 'closed') statusBtns += '<button class="btn btn-ghost btn-sm" style="color:var(--error);gap:4px" onclick="meetingAction(\''+mid+'\',\'cancel\')"><span class="material-symbols-outlined" style="font-size:16px">close</span> Cancel</button>';
 
     var statusColor = m.status==='active'?'#22c55e':m.status==='scheduled'?'var(--primary)':m.status==='closed'?'var(--text3)':'#ef4444';
-    var statusLabel = m.status==='active'?'进行中':m.status==='scheduled'?'待开始':m.status==='closed'?'已结束':'已取消';
+    var statusLabel = m.status==='active'?'In Progress':m.status==='scheduled'?'Pending Start':m.status==='closed'?'已结束':'Cancelled';
     var statusDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:'+statusColor+';margin-right:6px'+(m.status==='active'?';animation:pulse 1.5s infinite':'')+'"></span>';
 
     // -- Participants panel --
@@ -21114,7 +22209,7 @@ async function openMeetingDetail(mid) {
       var ci = (m.participants||[]).indexOf(pid) % colors.length;
       var bgColor = colors[ci];
       var removeBtn = _canEditParticipants
-        ? '<span onclick="event.stopPropagation();meetingRemoveParticipant(\''+mid+'\',\''+pid+'\',\''+esc(name).replace(/\'/g,"\\'")+'\')" class="material-symbols-outlined mtg-rm-btn" title="移出会议" style="font-size:14px;color:var(--text3);cursor:pointer;opacity:0;transition:opacity 0.15s;flex-shrink:0">close</span>'
+        ? '<span onclick="event.stopPropagation();meetingRemoveParticipant(\''+mid+'\',\''+pid+'\',\''+esc(name).replace(/\'/g,"\\'")+'\')" class="material-symbols-outlined mtg-rm-btn" title="Remove from meeting" style="font-size:14px;color:var(--text3);cursor:pointer;opacity:0;transition:opacity 0.15s;flex-shrink:0">close</span>'
         : '';
       return '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;transition:background 0.15s" onmouseover="this.style.background=\'var(--overlay-4)\';var x=this.querySelector(\'.mtg-rm-btn\');if(x)x.style.opacity=1" onmouseout="this.style.background=\'transparent\';var x=this.querySelector(\'.mtg-rm-btn\');if(x)x.style.opacity=0">' +
         '<div style="width:32px;height:32px;border-radius:50%;background:'+bgColor+';color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0">'+esc(initial)+'</div>' +
@@ -21125,7 +22220,7 @@ async function openMeetingDetail(mid) {
         '</div>';
     }).join('');
     // Add host as first entry
-    var hostDisplay = '主持人';
+    var hostDisplay = 'Host';
     partHtml = '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;background:rgba(99,102,241,0.08)">' +
       '<div style="width:32px;height:32px;border-radius:50%;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0">主</div>' +
       '<div style="min-width:0"><div style="font-size:12px;font-weight:600;color:var(--text)">'+hostDisplay+'</div>' +
@@ -21145,7 +22240,7 @@ async function openMeetingDetail(mid) {
     if (m.file_count > 0 || m.workspace_dir) {
       filesHtml = '<div style="margin-top:12px">' +
         '<div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;margin-bottom:6px">共享文件</div>' +
-        '<div id="mtg-files-area-'+mid+'"><div style="font-size:10px;color:var(--text3)">加载中...</div></div>' +
+        '<div id="mtg-files-area-'+mid+'"><div style="font-size:10px;color:var(--text3)">Loading…</div></div>' +
       '</div>';
     }
 
@@ -21166,7 +22261,7 @@ async function openMeetingDetail(mid) {
               '<button class="btn btn-ghost btn-sm" onclick="renderMeetingsTab()" style="padding:4px"><span class="material-symbols-outlined" style="font-size:18px">arrow_back</span></button>' +
               '<div>' +
                 '<h2 style="margin:0;font-size:18px;font-weight:800;display:flex;align-items:center;gap:6px">'+statusDot+esc(m.title)+'</h2>' +
-                '<div style="font-size:11px;color:var(--text3);margin-top:2px">'+statusLabel+(m.project_id?' · 项目: '+esc(m.project_id):'')+(m.agenda?' · '+esc(m.agenda):'')+'</div>' +
+                '<div style="font-size:11px;color:var(--text3);margin-top:2px">'+statusLabel+(m.project_id?' · Project: '+esc(m.project_id):'')+(m.agenda?' · '+esc(m.agenda):'')+'</div>' +
               '</div>' +
             '</div>' +
             '<div style="display:flex;gap:6px">'+statusBtns+'</div>' +
@@ -21174,7 +22269,7 @@ async function openMeetingDetail(mid) {
         '</div>' +
 
         // ---- Summary banner (if closed) ----
-        (m.summary ? '<div style="padding:10px 18px;background:rgba(34,197,94,0.06);border-bottom:1px solid rgba(34,197,94,0.15);flex-shrink:0"><span style="font-size:11px;font-weight:700;color:#22c55e">会议纪要:</span> <span style="font-size:12px;color:var(--text2)">'+esc(m.summary)+'</span></div>' : '') +
+        (m.summary ? '<div style="padding:10px 18px;background:rgba(34,197,94,0.06);border-bottom:1px solid rgba(34,197,94,0.15);flex-shrink:0"><span style="font-size:11px;font-weight:700;color:#22c55e">Summary:</span> <span style="font-size:12px;color:var(--text2)">'+esc(m.summary)+'</span></div>' : '') +
 
         // ---- Three-column body ----
         '<div style="display:flex;flex:1;min-height:0;overflow:hidden">' +
@@ -21182,7 +22277,7 @@ async function openMeetingDetail(mid) {
           '<div style="width:180px;flex-shrink:0;border-right:1px solid var(--overlay-6);overflow-y:auto;padding:12px 8px">' +
             '<div style="display:flex;justify-content:space-between;align-items:center;padding:0 10px 8px">' +
               '<div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase">参会者 ('+(m.participants||[]).length+')</div>' +
-              (_canEditParticipants ? '<button class="btn btn-ghost btn-xs" onclick="meetingInviteParticipant(\''+mid+'\')" title="邀请 Agent 加入会议" style="padding:2px 6px;font-size:11px">+ 邀请</button>' : '') +
+              (_canEditParticipants ? '<button class="btn btn-ghost btn-xs" onclick="meetingInviteParticipant(\''+mid+'\')" title="Invite Agent to meeting" style="padding:2px 6px;font-size:11px">+ Invite</button>' : '') +
             '</div>' +
             (_canEditParticipants ? '<div id="mtg-invite-picker-'+mid+'" style="display:none;padding:6px 10px;margin-bottom:6px;background:rgba(167,139,250,0.08);border:1px solid rgba(167,139,250,0.2);border-radius:6px"></div>' : '') +
             partHtml +
@@ -21210,7 +22305,7 @@ async function openMeetingDetail(mid) {
                   scope: 'meeting',
                   placeholder: (m.status==='active'
                     ? '发送消息 · @ 选择参会者（@所有人 = 全员回复；无 @ = 只发言不回复）'
-                    : '会议未开始，请先点击「开始会议」'),
+                    : 'Meeting not started; click "Start Meeting" first'),
                   disabled: m.status !== 'active',
                   sendFnName: 'meetingPostMessage',
                   attachFnName: 'handleMtgAttach',
@@ -21225,8 +22320,8 @@ async function openMeetingDetail(mid) {
           // == Right: Assignments / Tasks ==
           '<div style="width:260px;flex-shrink:0;border-left:1px solid var(--overlay-6);overflow-y:auto;padding:12px">' +
             '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
-              '<div id="mtg-assignments-count" style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase">任务 ('+(m.assignments||[]).length+')</div>' +
-              (m.status === 'active' ? '<button class="btn btn-ghost btn-xs" onclick="showMeetingAssignmentModal(\''+mid+'\')" style="font-size:11px">+ 新增</button>' : '') +
+              '<div id="mtg-assignments-count" style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase">Tasks ('+(m.assignments||[]).length+')</div>' +
+              (m.status === 'active' ? '<button class="btn btn-ghost btn-xs" onclick="showMeetingAssignmentModal(\''+mid+'\')" style="font-size:11px">+ Add</button>' : '') +
             '</div>' +
             '<div id="mtg-assignments-body">' + asgHtml + '</div>' +
           '</div>' +
@@ -21417,7 +22512,7 @@ async function _loadMeetingFiles(mid) {
     }
     area.innerHTML = files.map(function(f){
       var sizeStr = f.size < 1024 ? f.size+'B' : f.size < 1048576 ? Math.round(f.size/1024)+'KB' : (f.size/1048576).toFixed(1)+'MB';
-      return '<div style="display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:4px;font-size:10px;cursor:pointer;transition:background 0.15s" onmouseover="this.style.background=\'var(--overlay-4)\'" onmouseout="this.style.background=\'transparent\'" onclick="window.open(\'/api/portal/meetings/'+mid+'/files/'+encodeURIComponent(f.name)+'\')" title="点击下载">' +
+      return '<div style="display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:4px;font-size:10px;cursor:pointer;transition:background 0.15s" onmouseover="this.style.background=\'var(--overlay-4)\'" onmouseout="this.style.background=\'transparent\'" onclick="window.open(\'/api/portal/meetings/'+mid+'/files/'+encodeURIComponent(f.name)+'\')" title="Click to download">' +
         '<span class="material-symbols-outlined" style="font-size:14px;color:var(--primary)">description</span>' +
         '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)">'+esc(f.name)+'</span>' +
         '<span style="color:var(--text3)">'+sizeStr+'</span>' +
@@ -21448,11 +22543,11 @@ async function meetingAbort(mid) {
   // subprocesses spawned by agents in this meeting (python scripts,
   // bash loops, etc.).
   var ok = await _destructiveConfirm({
-    title: window.t('abort.meetingTitle', '终止会议讨论？'),
+    title: window.t('abort.meetingTitle', 'Abort meeting discussion?'),
     message: window.t('abort.meetingMessage',
       '会停止讨论循环并 kill 任何正在运行的子进程。'),
-    confirmLabel: '⏹ ' + window.t('abort.confirm', '终止'),
-    cancelLabel: window.t('action.cancel', '取消'),
+    confirmLabel: '⏹ ' + window.t('abort.confirm', 'Terminate'),
+    cancelLabel: window.t('action.cancel', 'Cancel'),
     tone: 'danger',
     icon: 'stop_circle',
   });
@@ -21465,16 +22560,16 @@ async function meetingAbort(mid) {
       console.log('[meeting abort] killed ' + killed + ' subprocess(es)');
     }
     openMeetingDetail(mid);
-  } catch(e) { alert('终止失败: '+(e.message||e)); }
+  } catch(e) { alert('Terminate failed:'+(e.message||e)); }
 }
 
 async function projectAbort(projId) {
   var ok = await _destructiveConfirm({
-    title: window.t('abort.projectTitle', '终止项目中的 Agent 运行？'),
+    title: window.t('abort.projectTitle', 'Abort Agents running in this project?'),
     message: window.t('abort.projectMessage',
       '会停止响应循环并 kill 任何正在运行的子进程。'),
-    confirmLabel: '⏹ ' + window.t('abort.confirm', '终止'),
-    cancelLabel: window.t('action.cancel', '取消'),
+    confirmLabel: '⏹ ' + window.t('abort.confirm', 'Terminate'),
+    cancelLabel: window.t('action.cancel', 'Cancel'),
     tone: 'danger',
     icon: 'stop_circle',
   });
@@ -21489,7 +22584,7 @@ async function projectAbort(projId) {
     if (typeof renderProjectDetail === 'function') {
       renderProjectDetail(projId);
     }
-  } catch(e) { alert('终止失败: '+(e.message||e)); }
+  } catch(e) { alert('Terminate failed:'+(e.message||e)); }
 }
 
 // 唤醒项目里有未完成任务/里程碑的 agent。中途被 abort / hard-cap kill /
@@ -21503,7 +22598,7 @@ async function wakeProjectAgents(projId) {
     var r = await api('POST', '/api/portal/projects/'+projId+'/wake',
       { reason: reason || '' });
     if (r && r.error) {
-      _toast && _toast('唤醒失败: '+r.error, 'error');
+      _toast && _toast('Wake failed:'+r.error, 'error');
       return;
     }
     var n = (r && r.woken) || 0;
@@ -21514,7 +22609,7 @@ async function wakeProjectAgents(projId) {
     if (typeof renderProjectDetail === 'function') {
       renderProjectDetail(projId);
     }
-  } catch(e) { _toast && _toast('唤醒失败: '+(e.message||e), 'error'); }
+  } catch(e) { _toast && _toast('Wake failed:'+(e.message||e), 'error'); }
 }
 
 // 清空项目对话:删除项目 chat_history + 每个 member agent 的
@@ -21522,12 +22617,12 @@ async function wakeProjectAgents(projId) {
 // 走 DELETE /api/portal/projects/{id}/chat。
 async function clearProjectChat(projId) {
   var ok = await _destructiveConfirm({
-    title: '清空项目对话?',
-    message: '会清掉团队群聊里所有消息,以及每个 member agent 在该项目下的'
-           + '对话历史(其他 project / meeting / 单聊不动)。'
-           + '任务 / 里程碑 / 成员 / 交付件不会被删。此操作不可撤销。',
+    title: 'Clear project chat?',
+    message: 'This clears all team chat messages plus each member agent\'s'
+           + 'conversation history (other projects / meetings / solo chats untouched).'
+           + 'Tasks / milestones / members / deliverables stay. Not undoable.',
     confirmLabel: '🧹 清空',
-    cancelLabel: '取消',
+    cancelLabel: 'Cancel',
     tone: 'danger',
     icon: 'forum',
   });
@@ -21535,7 +22630,7 @@ async function clearProjectChat(projId) {
   try {
     var r = await api('DELETE', '/api/portal/projects/'+projId+'/chat');
     if (r && r.error) {
-      _toast && _toast('清空失败: '+r.error, 'error');
+      _toast && _toast('Clear failed:'+r.error, 'error');
       return;
     }
     var ui_n = (r && r.ui_messages_cleared) || 0;
@@ -21548,7 +22643,7 @@ async function clearProjectChat(projId) {
     if (typeof renderProjectDetail === 'function') {
       renderProjectDetail(projId);
     }
-  } catch(e) { _toast && _toast('清空失败: '+(e.message||e), 'error'); }
+  } catch(e) { _toast && _toast('Clear failed:'+(e.message||e), 'error'); }
 }
 
 // Append a system-style card into the chat stream so users get a
@@ -21602,8 +22697,8 @@ function _destructiveConfirm(opts) {
       + '</div>'
       + '<div style="font-size:13px;color:var(--text2);margin-bottom:20px;line-height:1.5">' + esc(opts.message || '') + '</div>'
       + '<div style="display:flex;gap:8px;justify-content:flex-end">'
-      +   '<button id="_dc_cancel" class="btn btn-ghost btn-sm" style="padding:8px 16px">' + esc(opts.cancelLabel || '取消') + '</button>'
-      +   '<button id="_dc_confirm" class="btn btn-sm" style="padding:8px 16px;background:' + (opts.tone === 'danger' ? 'var(--error)' : 'var(--primary)') + ';color:' + (opts.tone === 'danger' ? '#fff' : 'var(--primary-text)') + ';border:none;font-weight:600">' + esc(opts.confirmLabel || '确定') + '</button>'
+      +   '<button id="_dc_cancel" class="btn btn-ghost btn-sm" style="padding:8px 16px">' + esc(opts.cancelLabel || 'Cancel') + '</button>'
+      +   '<button id="_dc_confirm" class="btn btn-sm" style="padding:8px 16px;background:' + (opts.tone === 'danger' ? 'var(--error)' : 'var(--primary)') + ';color:' + (opts.tone === 'danger' ? '#fff' : 'var(--primary-text)') + ';border:none;font-weight:600">' + esc(opts.confirmLabel || 'OK') + '</button>'
       + '</div>';
     overlay.appendChild(box);
     document.body.appendChild(overlay);
@@ -21636,8 +22731,8 @@ async function agentAbort(agentId) {
     title: window.t('abort.title', '终止当前对话？'),
     message: window.t('abort.message',
       '会停止 LLM 循环并 kill 任何正在运行的子进程。当前对话不会保存进度。'),
-    confirmLabel: '⏹ ' + window.t('abort.confirm', '终止'),
-    cancelLabel: window.t('action.cancel', '取消'),
+    confirmLabel: '⏹ ' + window.t('abort.confirm', 'Terminate'),
+    cancelLabel: window.t('action.cancel', 'Cancel'),
     tone: 'danger',
     icon: 'stop_circle',
   });
@@ -21714,13 +22809,13 @@ async function meetingInviteParticipant(mid) {
     box.innerHTML =
       '<select id="mtg-invite-sel-'+mid+'" style="width:100%;font-size:11px;padding:3px;margin-bottom:4px">'+opts+'</select>' +
       '<div style="display:flex;gap:4px">' +
-        '<button class="btn btn-primary btn-xs" style="flex:1;font-size:11px;padding:3px" onclick="_meetingInviteConfirm(\''+mid+'\')">确认</button>' +
-        '<button class="btn btn-ghost btn-xs" style="flex:1;font-size:11px;padding:3px" onclick="_meetingInviteCancel(\''+mid+'\')">取消</button>' +
+        '<button class="btn btn-primary btn-xs" style="flex:1;font-size:11px;padding:3px" onclick="_meetingInviteConfirm(\''+mid+'\')">Confirm</button>' +
+        '<button class="btn btn-ghost btn-xs" style="flex:1;font-size:11px;padding:3px" onclick="_meetingInviteCancel(\''+mid+'\')">Cancel</button>' +
       '</div>';
     box.style.display = 'block';
   } catch(e) {
     box.style.display = 'block';
-    box.innerHTML = '<div style="font-size:11px;color:#ef4444">加载失败: '+esc(String(e && e.message || e))+'</div>';
+    box.innerHTML = '<div style="font-size:11px;color:#ef4444">Load failed:'+esc(String(e && e.message || e))+'</div>';
   }
 }
 
@@ -21744,7 +22839,7 @@ function _meetingInviteCancel(mid) {
 }
 
 async function meetingRemoveParticipant(mid, agentId, agentName) {
-  if (!await confirm('确定将 '+(agentName||agentId)+' 移出会议？')) return;
+  if (!await confirm('Remove '+(agentName||agentId)+' from this meeting?')) return;
   try {
     await api('DELETE', '/api/portal/meetings/'+mid+'/participants/'+encodeURIComponent(agentId));
     openMeetingDetail(mid);
@@ -21752,7 +22847,7 @@ async function meetingRemoveParticipant(mid, agentId, agentName) {
 }
 
 async function meetingCloseWithSummary(mid) {
-  var s = await askInline('会议纪要 / 结论（可留空）:', { multiline: true, placeholder: '总结此次会议的结论…' }) || '';
+  var s = await askInline('Meeting summary / conclusion (optional):', { multiline: true, placeholder: 'Summarize the conclusions of this meeting…' }) || '';
   try {
     await api('POST', '/api/portal/meetings/'+mid+'/close', {summary: s});
     openMeetingDetail(mid);
@@ -21854,7 +22949,7 @@ async function meetingPostMessage(mid) {
     }
   }
   if (unknownMentions.length && window._toast) {
-    window._toast('未找到 @' + unknownMentions.join(', @'), 'warning');
+    window._toast('@ not found' + unknownMentions.join(', @'), 'warning');
   }
 
   var targetAgents;  // undefined → omit
@@ -21924,15 +23019,15 @@ function showMeetingAssignmentModal(mid) {
     '<select id="asg-assignee" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px">'+agentOpts+'</select>' +
     '<input id="asg-due" placeholder="截止提示 (e.g. 明天 17:00)" style="width:100%;padding:10px;margin-bottom:14px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px">' +
     '<div style="display:flex;gap:8px;justify-content:flex-end">' +
-      '<button class="btn btn-ghost" onclick="closeModal()">取消</button>' +
-      '<button class="btn btn-primary" onclick="createMeetingAssignment(\''+mid+'\')">创建</button>' +
+      '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-primary" onclick="_lockBtn(this,\'Creating…\',createMeetingAssignment,\''+mid+'\')">Create</button>' +
     '</div></div>';
   showModalHTML(html);
 }
 
 async function createMeetingAssignment(mid) {
   var title = document.getElementById('asg-title').value.trim();
-  if (!title) { alert('标题不能为空'); return; }
+  if (!title) { alert('Title cannot be empty'); return; }
   try {
     await api('POST', '/api/portal/meetings/'+mid+'/assignments', {
       title: title,
@@ -21963,9 +23058,9 @@ async function _reexecuteAssignment(mid, aid) {
       // Refresh so the user sees status → 进行中 + 重试 ×N badge
       openMeetingDetail(mid);
     } else {
-      alert('重新执行失败: ' + ((r && r.error) || 'unknown'));
+      alert('Re-execute failed:' + ((r && r.error) || 'unknown'));
     }
-  } catch(e) { alert('重新执行失败: ' + (e.message || e)); }
+  } catch(e) { alert('Re-execute failed:' + (e.message || e)); }
 }
 
 // ============ @mention autocomplete for meetings ============
@@ -21976,7 +23071,7 @@ function _getMeetingParticipants(mid) {
   var m = window._currentMeeting;
   var agList = window._cachedAgents || (typeof agents !== 'undefined' ? agents : []);
   var out = [
-    { id: '__ALL__', name: '所有人', role: '全员集体思考', display: '所有人' }
+    { id: '__ALL__', name: 'Everyone', role: '全员集体思考', display: 'Everyone' }
   ];
   if (m && m.participants) {
     m.participants.forEach(function(pid) {
@@ -22187,9 +23282,9 @@ async function loadTaskCenter() {
         '<div style="font-size:10px;color:var(--text3);margin-top:2px">下次: '+esc(nextRun)+' · 上次: '+esc(lastRun)+' · 执行 '+(job.run_count||0)+' 次</div>' +
         '<div style="display:flex;gap:6px;margin-top:8px;border-top:1px solid var(--overlay-5);padding-top:8px">' +
           '<button class="btn btn-primary btn-xs" onclick="triggerJob(\''+job.id+'\')">▶ 立即运行</button>' +
-          '<button class="btn btn-ghost btn-xs" onclick="toggleJob(\''+job.id+'\','+(!enabled)+')">'+(enabled?'暂停':'恢复')+'</button>' +
+          '<button class="btn btn-ghost btn-xs" onclick="toggleJob(\''+job.id+'\','+(!enabled)+')">'+(enabled?'暂停':'Resume')+'</button>' +
           '<button class="btn btn-ghost btn-xs" onclick="viewJobHistory(\''+job.id+'\')">历史</button>' +
-          '<button class="btn btn-ghost btn-xs" style="margin-left:auto;color:var(--error)" onclick="deleteJob(\''+job.id+'\')">删除</button>' +
+          '<button class="btn btn-ghost btn-xs" style="margin-left:auto;color:var(--error)" onclick="deleteJob(\''+job.id+'\')">Delete</button>' +
         '</div>' +
       '</div>';
     };
@@ -22206,10 +23301,10 @@ async function loadTaskCenter() {
       '</select>';
       var mtgBadge = '';
       if (t.source_meeting_id) {
-        var mtgName = meetingNameById[t.source_meeting_id] || ('会议 '+t.source_meeting_id.substring(0,6));
+        var mtgName = meetingNameById[t.source_meeting_id] || ('Meeting '+t.source_meeting_id.substring(0,6));
         mtgBadge = '<span onclick="event.stopPropagation();openMeetingDetail(\''+t.source_meeting_id+'\')" ' +
           'style="display:inline-block;margin-top:4px;padding:2px 8px;border-radius:10px;background:rgba(34,197,94,0.12);color:#22c55e;font-size:10px;font-weight:600;cursor:pointer" ' +
-          'title="点击打开会议">💬 '+esc(mtgName)+'</span>';
+          'title="Click to open meeting">💬 '+esc(mtgName)+'</span>';
       }
       var assigneeName = t.assigned_to ? (agentNameById[t.assigned_to] || t.assigned_to) : '—';
       return '<div style="background:var(--surface);border-radius:8px;padding:10px 12px;border:1px solid var(--overlay-5);margin-bottom:6px">' +
@@ -22220,7 +23315,7 @@ async function loadTaskCenter() {
           mtgBadge +
           '</div>' +
           '<div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end">'+statusSelect+
-            '<button class="btn btn-ghost btn-xs" style="color:var(--error)" onclick="deleteStandaloneTask(\''+t.id+'\')">删除</button>' +
+            '<button class="btn btn-ghost btn-xs" style="color:var(--error)" onclick="deleteStandaloneTask(\''+t.id+'\')">Delete</button>' +
           '</div>' +
         '</div>' +
       '</div>';
@@ -22232,12 +23327,12 @@ async function loadTaskCenter() {
     if (v2On && v2Tasks.length) {
       var statusChip = function(status) {
         var cfg = {
-          running:   ['#22c55e', '运行中'],
+          running:   ['#22c55e', 'Running'],
           queued:    ['var(--primary)', '排队中'],
-          succeeded: ['#22c55e', '已完成'],
-          failed:    ['#ef4444', '失败'],
+          succeeded: ['#22c55e', 'Completed'],
+          failed:    ['#ef4444', 'Failed'],
           paused:    ['#f59e0b', '暂停'],
-          abandoned: ['var(--text3)', '已取消'],
+          abandoned: ['var(--text3)', 'Cancelled'],
         };
         var v = cfg[status] || ['var(--text3)', status];
         return '<span style="display:inline-block;padding:2px 8px;border-radius:10px;' +
@@ -22332,14 +23427,14 @@ function showCreateStandaloneTaskModal() {
     '</select>' +
     '<input id="st-due" placeholder="截止提示 (e.g. \"明天下班前\")" style="width:100%;padding:10px;margin-bottom:14px;background:var(--surface);border:1px solid var(--overlay-10);border-radius:8px;color:var(--text);font-size:13px">' +
     '<div style="display:flex;gap:8px;justify-content:flex-end">' +
-      '<button class="btn btn-ghost" onclick="closeModal()">取消</button>' +
-      '<button class="btn btn-primary" onclick="createStandaloneTask()">创建</button>' +
+      '<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>' +
+      '<button class="btn btn-primary" onclick="_lockBtn(this,\'Creating…\',createStandaloneTask)">Create</button>' +
     '</div></div>';
   showModalHTML(html);
 }
 async function createStandaloneTask() {
   var title = document.getElementById('st-title').value.trim();
-  if (!title) { alert('标题不能为空'); return; }
+  if (!title) { alert('Title cannot be empty'); return; }
   try {
     await api('POST', '/api/portal/standalone-tasks', {
       title: title,
@@ -22368,15 +23463,15 @@ function renderOrchestration() {
   c.innerHTML =
     '<div style="padding:18px">'
     + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">'
-    + '<div><h2 style="margin:0;font-family:\'Plus Jakarta Sans\',sans-serif;font-size:22px;font-weight:800">编排可视化</h2>'
-    + '<p style="font-size:12px;color:var(--text3);margin-top:4px">Orchestration · 项目 / Agent / 任务关系图</p></div>'
+    + '<div><h2 style="margin:0;font-family:\'Plus Jakarta Sans\',sans-serif;font-size:22px;font-weight:800">Orchestration Map</h2>'
+    + '<p style="font-size:12px;color:var(--text3);margin-top:4px">Project · Agent · Task relationship graph</p></div>'
     + '<div style="display:flex;align-items:center;gap:12px"><div id="orch-stats" style="font-size:12px;color:var(--text3)"></div>'
-    + '<button class="btn btn-sm" onclick="renderOrchestration()"><span class="material-symbols-outlined" style="font-size:14px">refresh</span> 刷新</button></div></div>'
+    + '<button class="btn btn-sm" onclick="renderOrchestration()"><span class="material-symbols-outlined" style="font-size:14px">refresh</span> Refresh</button></div></div>'
     + '<div id="orch-legend" style="font-size:11px;color:var(--text3);margin-bottom:8px">'
-    + '<span style="display:inline-block;width:10px;height:10px;background:#5b8def;border-radius:2px;margin:0 4px 0 0;vertical-align:middle"></span>项目'
+    + '<span style="display:inline-block;width:10px;height:10px;background:#5b8def;border-radius:2px;margin:0 4px 0 0;vertical-align:middle"></span>Project'
     + '<span style="display:inline-block;width:10px;height:10px;background:#22c55e;border-radius:50%;margin:0 4px 0 12px;vertical-align:middle"></span>Agent'
-    + '<span style="display:inline-block;width:10px;height:10px;background:#a855f7;border-radius:50%;margin:0 4px 0 12px;vertical-align:middle"></span>子 Agent'
-    + '<span style="display:inline-block;width:10px;height:10px;background:#f59e0b;border-radius:2px;margin:0 4px 0 12px;vertical-align:middle"></span>任务</div>'
+    + '<span style="display:inline-block;width:10px;height:10px;background:#a855f7;border-radius:50%;margin:0 4px 0 12px;vertical-align:middle"></span>Sub-agent'
+    + '<span style="display:inline-block;width:10px;height:10px;background:#f59e0b;border-radius:2px;margin:0 4px 0 12px;vertical-align:middle"></span>Task</div>'
     + '<div id="orch-svg-wrap" style="border:1px solid var(--border);border-radius:8px;background:var(--surface);overflow:auto">'
     + '<svg id="orch-svg" width="100%" height="640" style="display:block"></svg></div>'
     + '<div id="orch-detail" style="margin-top:12px;font-size:12px;color:var(--text2)"></div></div>';
@@ -22384,12 +23479,12 @@ function renderOrchestration() {
   fetch('/api/portal/orchestration').then(function(r){return r.json();}).then(function(g){
     var stats = g.stats || {};
     document.getElementById('orch-stats').textContent =
-      '项目 ' + (stats.projects||0) + ' · Agent ' + (stats.agents||0)
+      'Projects ' + (stats.projects||0) + ' · Agents ' + (stats.agents||0)
       + ' · 子 Agent ' + (stats.subagents||0) + ' · 任务 ' + (stats.tasks||0);
     _drawOrchestrationGraph(g);
   }).catch(function(e){
     document.getElementById('orch-svg-wrap').innerHTML =
-      '<div style="padding:20px;color:var(--error)">加载失败: '+esc(String(e))+'</div>';
+      '<div style="padding:20px;color:var(--error)">Load failed:'+esc(String(e))+'</div>';
   });
 }
 
@@ -22484,10 +23579,10 @@ function _orchSelect(nid) {
     realId = nid.replace(/^proj:/, '');
     navBtns =
       '<button class="btn btn-primary btn-sm" onclick="_orchOpenProject(\''+esc(realId)+'\')">'
-      + '<span class="material-symbols-outlined" style="font-size:14px">open_in_new</span> 打开项目</button>'
-      + '<button class="btn btn-ghost btn-sm" onclick="_orchOpenProjectTab(\''+esc(realId)+'\',\'goals\')">目标</button>'
-      + '<button class="btn btn-ghost btn-sm" onclick="_orchOpenProjectTab(\''+esc(realId)+'\',\'milestones\')">里程碑</button>'
-      + '<button class="btn btn-ghost btn-sm" onclick="_orchOpenProjectTab(\''+esc(realId)+'\',\'chat\')">协作</button>';
+      + '<span class="material-symbols-outlined" style="font-size:14px">open_in_new</span> Open Project</button>'
+      + '<button class="btn btn-ghost btn-sm" onclick="_orchOpenProjectTab(\''+esc(realId)+'\',\'goals\')">Goals</button>'
+      + '<button class="btn btn-ghost btn-sm" onclick="_orchOpenProjectTab(\''+esc(realId)+'\',\'milestones\')">Milestones</button>'
+      + '<button class="btn btn-ghost btn-sm" onclick="_orchOpenProjectTab(\''+esc(realId)+'\',\'chat\')">Chat</button>';
   } else if (n.type === 'agent' || n.type === 'subagent') {
     realId = nid.replace(/^agent:/, '');
     navBtns =
@@ -22504,7 +23599,7 @@ function _orchSelect(nid) {
     navBtns =
       '<button class="btn btn-primary btn-sm" onclick="_orchOpenTask(\''+esc(projId)+'\',\''+esc(taskId)+'\')">'
       + '<span class="material-symbols-outlined" style="font-size:14px">task</span> 打开任务</button>'
-      + '<button class="btn btn-ghost btn-sm" onclick="_orchOpenProject(\''+esc(projId)+'\')">所属项目</button>';
+      + '<button class="btn btn-ghost btn-sm" onclick="_orchOpenProject(\''+esc(projId)+'\')">Parent Project</button>';
     if (n.assigned_to) {
       navBtns += '<button class="btn btn-ghost btn-sm" onclick="_orchOpenAgent(\''+esc(n.assigned_to)+'\')">执行 Agent</button>';
     }
@@ -22586,8 +23681,8 @@ function _renderOrchestrationPageLegacy() {
     c.innerHTML =
       '<div style="padding:18px;display:flex;flex-direction:column;height:calc(100vh - 80px)">'
       + '<div style="margin-bottom:14px">'
-      + '<h2 style="margin:0;font-family:\'Plus Jakarta Sans\',sans-serif;font-size:22px;font-weight:800">编排总览</h2>'
-      + '<p style="font-size:12px;color:var(--text3);margin-top:4px">画布工作流 · 长任务流水线 · Agent 表现 · 系统健康</p>'
+      + '<h2 style="margin:0;font-family:\'Plus Jakarta Sans\',sans-serif;font-size:22px;font-weight:800">Orchestration</h2>'
+      + '<p style="font-size:12px;color:var(--text3);margin-top:4px">Visual canvas workflows · long-task pipelines · agent performance · system health.</p>'
       + '</div>'
       + '<div id="orch-tabbar" style="display:flex;gap:2px;border-bottom:1px solid var(--border);margin-bottom:16px;flex-wrap:wrap"></div>'
       + '<div id="orch-tab-content" style="flex:1;min-height:0;overflow:auto"></div>'
@@ -22611,7 +23706,7 @@ function _renderOrchTabBar() {
         {key: 'overview',  label: 'System Overview',   icon: 'insights'},
       ]
     : [
-        {key: 'canvas',    label: '画布工作流',     icon: 'account_tree'},
+        {key: 'canvas',    label: 'Canvas Workflow',     icon: 'account_tree'},
         {key: 'pipelines', label: '长任务流水线',   icon: 'timeline'},
         {key: 'agents',    label: 'Agent 排行',     icon: 'leaderboard'},
         {key: 'preproc',   label: '预处理 metrics', icon: 'bolt'},
@@ -22651,7 +23746,7 @@ function _renderOrchTabContent() {
   var tab = _orchActiveTab;
 
   if (tab === 'canvas') {
-    c.innerHTML = '<div id="orch-canvas-section">' + _orchSkelBlock('画布工作流') + '</div>';
+    c.innerHTML = '<div id="orch-canvas-section">' + _orchSkelBlock('Canvas Workflow') + '</div>';
     fetch('/api/portal/canvas-workflows').then(function(r){return r.json();}).catch(function(e){return {_err: String(e)};})
       .then(_renderOrchCanvasWorkflows);
   } else if (tab === 'pipelines') {
@@ -22678,7 +23773,7 @@ function _renderOrchCanvasWorkflows(d) {
   var el = document.getElementById('orch-canvas-section');
   if (!el) return;
   if (d && d._err) {
-    el.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px;color:var(--error);font-size:12px">画布工作流加载失败: '+esc(d._err)+'</div>';
+    el.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px;color:var(--error);font-size:12px">画布工作流Load failed: '+esc(d._err)+'</div>';
     return;
   }
   var workflows = (d && d.workflows) || [];
@@ -22690,7 +23785,7 @@ function _renderOrchCanvasWorkflows(d) {
   // card that lives inside the workflow grid (visually consistent
   // with the workflow cards), so the section header drops the action.
   var headerHtml = _ui.sectionHeader(
-    _techCv ? 'Canvas Workflows' : '画布工作流',
+    _techCv ? 'Canvas Workflows' : 'Canvas Workflow',
     {
       icon: 'view_kanban',
       count: _techCv ? workflows.length : (workflows.length + ' 个'),
@@ -22717,66 +23812,125 @@ function _renderOrchCanvasWorkflows(d) {
         + _ui.icon('add', {size:14}) + ' 创建第一个</button>',
     });
   } else {
-    bodyHtml = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px">'
+    bodyHtml = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px">'
       + workflows.map(function(w) {
           var st = String(w.executable_status || 'draft');
-          var stripe = stripeColor(st);
-          var statusBadge = _canvasStatusBadge(st);
           var ageHint = '';
           if (w.updated_at) {
             var ageS = (Date.now()/1000) - w.updated_at;
-            if (ageS < 60) ageHint = '刚刚';
-            else if (ageS < 3600) ageHint = Math.floor(ageS/60) + '分钟前';
-            else if (ageS < 86400) ageHint = Math.floor(ageS/3600) + '小时前';
-            else ageHint = Math.floor(ageS/86400) + '天前';
+            if (ageS < 60) ageHint = (_techCv ? 'JUST NOW' : '刚刚');
+            else if (ageS < 3600) ageHint = Math.floor(ageS/60) + (_techCv ? 'M AGO' : '分钟前');
+            else if (ageS < 86400) ageHint = Math.floor(ageS/3600) + (_techCv ? 'H AGO' : '小时前');
+            else ageHint = Math.floor(ageS/86400) + (_techCv ? 'D AGO' : '天前');
           }
           var runState = window._orchRunStates ? window._orchRunStates[w.id] : null;
           var isRunning = runState && runState.status === 'running';
-          var runStatusPill = _orchRunStatusPill(runState);
-          var runBtn;
-          if (st !== 'ready') {
-            runBtn = '';
-          } else if (isRunning) {
-            runBtn = '<button class="btn btn-sm" disabled title="已有 run 在执行中,等它完成再点" style="padding:5px 10px;font-size:11px;color:#9ca3af;cursor:not-allowed;opacity:0.6;font-weight:600;border-radius:6px"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:-2px;animation:spin 1.2s linear infinite">progress_activity</span> 运行中…</button>';
-          } else {
-            runBtn = '<button class="btn btn-sm" onclick="event.stopPropagation();_orchRunCanvasFromOverview(\'' + esc(w.id).replace(/'/g, "\\'") + '\')" title="启动一次执行" style="padding:5px 10px;font-size:11px;background:#16a34a22;color:#16a34a;border:1px solid #16a34a44;font-weight:600;border-radius:6px"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:-2px">play_arrow</span> 运行</button>';
+
+          if (_techCv) {
+            // Stitch_26-style bento. Status pill in upper-right (READY
+            // glows green, DRAFT muted, DISABLED warning), title in body
+            // with id mono subtitle, stats grid (NODES/EDGES/UPDATED),
+            // EDIT + RUN footer.
+            var stColor = st === 'ready' ? 'var(--secondary)'
+                        : st === 'disabled' ? 'var(--warning, #ff9800)'
+                        : 'var(--outline)';
+            var stRGB = st === 'ready' ? '137,206,255'
+                      : st === 'disabled' ? '255,152,0'
+                      : '144,143,160';
+            var stLabel = st === 'ready' ? 'READY'
+                        : st === 'disabled' ? 'DISABLED'
+                        : 'DRAFT';
+            var runBtn = '';
+            if (st === 'ready') {
+              runBtn = isRunning
+                ? '<button disabled class="tc-mono-label" style="padding:8px 14px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:var(--r-md);color:var(--outline);font-size:10px;cursor:not-allowed;opacity:0.6;letter-spacing:0.05em;display:inline-flex;align-items:center;gap:6px"><span class="material-symbols-outlined" style="font-size:13px;animation:spin 1.2s linear infinite">progress_activity</span>RUNNING…</button>'
+                : '<button onclick="event.stopPropagation();_orchRunCanvasFromOverview(\'' + esc(w.id).replace(/\\'/g, "\\\\'") + '\')" class="tc-mono-label" style="padding:8px 14px;background:rgba(34,197,94,0.10);border:1px solid rgba(34,197,94,0.30);border-radius:var(--r-md);color:#22c55e;font-size:10px;cursor:pointer;letter-spacing:0.05em;display:inline-flex;align-items:center;gap:6px;transition:all 0.15s" onmouseover="this.style.background=\'rgba(34,197,94,0.18)\'" onmouseout="this.style.background=\'rgba(34,197,94,0.10)\'"><span class="material-symbols-outlined" style="font-size:13px">play_arrow</span>RUN</button>';
+            }
+            var openInline = '_canvasOpenEditor(\'' + esc(w.id).replace(/\\'/g, "\\\\'") + '\')';
+            return '<div onclick="' + openInline + '" class="tc-card-glass" style="' +
+                     'padding:var(--s-lg);display:flex;flex-direction:column;gap:14px;cursor:pointer;' +
+                     'position:relative;overflow:hidden;border-top:1px solid rgba(255,255,255,0.15);' +
+                     (st === 'ready' ? 'box-shadow:0 0 15px -3px rgba(' + stRGB + ',0.25);' : '') +
+                     'transition:transform 0.15s,box-shadow 0.15s" ' +
+                     'onmouseover="this.style.transform=\'translateY(-2px)\';this.style.boxShadow=\'0 8px 24px -4px rgba(' + stRGB + ',0.40)\'" ' +
+                     'onmouseout="this.style.transform=\'\';this.style.boxShadow=\'\'">' +
+                     // Ghost icon
+                     '<div style="position:absolute;top:0;right:0;padding:14px;pointer-events:none">' +
+                       '<span class="material-symbols-outlined" style="font-size:64px;color:rgba(' + stRGB + ',0.18);margin:-12px -12px 0 0">account_tree</span>' +
+                     '</div>' +
+                     // Icon-square + status pill
+                     '<div style="display:flex;justify-content:space-between;align-items:flex-start;position:relative">' +
+                       '<div style="padding:8px;background:rgba(' + stRGB + ',0.10);border:1px solid rgba(' + stRGB + ',0.20);border-radius:var(--r-md);display:inline-flex">' +
+                         '<span class="material-symbols-outlined" style="font-size:22px;color:' + stColor + ';font-variation-settings:\'FILL\' 1">account_tree</span>' +
+                       '</div>' +
+                       '<div style="display:flex;align-items:center;gap:6px;background:var(--surface-container-high);padding:4px 10px;border-radius:9999px;border:1px solid rgba(255,255,255,0.05)">' +
+                         '<span style="width:6px;height:6px;border-radius:50%;background:' + stColor + ';' + (st === 'ready' ? 'animation:pulse-dot 2s infinite ease-in-out;box-shadow:0 0 6px ' + stColor + ';' : '') + '"></span>' +
+                         '<span class="tc-mono-label" style="font-size:10px;color:var(--on-surface);letter-spacing:0.05em">' + stLabel + '</span>' +
+                       '</div>' +
+                     '</div>' +
+                     // Title + id subtitle
+                     '<div style="position:relative">' +
+                       '<h3 style="font-family:var(--font-display);font-size:18px;font-weight:600;color:var(--on-surface);margin:0;letter-spacing:-0.01em;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(w.name || '(unnamed)') + '</h3>' +
+                       '<p class="tc-mono-label" style="font-size:10px;color:var(--on-surface-variant);margin:4px 0 0;font-family:var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(w.id) + '</p>' +
+                     '</div>' +
+                     // Stats grid: NODES / EDGES / UPDATED
+                     '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;padding:12px 0;border-top:1px solid rgba(255,255,255,0.05);border-bottom:1px solid rgba(255,255,255,0.05)">' +
+                       '<div>' +
+                         '<p class="tc-mono-label" style="font-size:9px;color:var(--outline);margin:0 0 4px">NODES</p>' +
+                         '<p style="font-family:var(--font-mono);font-size:16px;font-weight:600;color:' + stColor + ';margin:0">' + (w.node_count || 0) + '</p>' +
+                       '</div>' +
+                       '<div>' +
+                         '<p class="tc-mono-label" style="font-size:9px;color:var(--outline);margin:0 0 4px">EDGES</p>' +
+                         '<p style="font-family:var(--font-mono);font-size:16px;color:var(--on-surface);margin:0">' + (w.edge_count || 0) + '</p>' +
+                       '</div>' +
+                       '<div>' +
+                         '<p class="tc-mono-label" style="font-size:9px;color:var(--outline);margin:0 0 4px">UPDATED</p>' +
+                         '<p style="font-family:var(--font-mono);font-size:11px;color:var(--on-surface);margin:0">' + esc(ageHint || '—') + '</p>' +
+                       '</div>' +
+                     '</div>' +
+                     // Footer actions
+                     '<div style="display:flex;gap:8px;margin-top:auto;justify-content:flex-end">' +
+                       '<button onclick="event.stopPropagation();' + openInline + '" class="tc-mono-label" style="padding:8px 14px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:var(--r-md);color:var(--on-surface);font-size:10px;cursor:pointer;letter-spacing:0.05em;display:inline-flex;align-items:center;gap:6px;transition:all 0.15s" onmouseover="this.style.background=\'rgba(255,255,255,0.08)\'" onmouseout="this.style.background=\'rgba(255,255,255,0.04)\'">' +
+                         '<span class="material-symbols-outlined" style="font-size:13px">edit</span>EDIT' +
+                       '</button>' +
+                       runBtn +
+                     '</div>' +
+                   '</div>';
           }
-          var openInline = '_canvasOpenEditor(\'' + esc(w.id).replace(/'/g, "\\'") + '\').then(function(){renderCanvasPage();})';
-          return '<div onclick="' + openInline + '" '
+
+          // Legacy fallback
+          var stripe = stripeColor(st);
+          var statusBadge = _canvasStatusBadge(st);
+          var runStatusPill = _orchRunStatusPill(runState);
+          var runBtnLegacy;
+          if (st !== 'ready') {
+            runBtnLegacy = '';
+          } else if (isRunning) {
+            runBtnLegacy = '<button class="btn btn-sm" disabled title="已有 run 在执行中,等它完成再点" style="padding:5px 10px;font-size:11px;color:#9ca3af;cursor:not-allowed;opacity:0.6;font-weight:600;border-radius:6px"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:-2px;animation:spin 1.2s linear infinite">progress_activity</span> 运行中…</button>';
+          } else {
+            runBtnLegacy = '<button class="btn btn-sm" onclick="event.stopPropagation();_orchRunCanvasFromOverview(\'' + esc(w.id).replace(/'/g, "\\'") + '\')" title="启动一次执行" style="padding:5px 10px;font-size:11px;background:#16a34a22;color:#16a34a;border:1px solid #16a34a44;font-weight:600;border-radius:6px"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:-2px">play_arrow</span> 运行</button>';
+          }
+          var openInlineLegacy = '_canvasOpenEditor(\'' + esc(w.id).replace(/'/g, "\\'") + '\')';
+          return '<div onclick="' + openInlineLegacy + '" '
             + 'onmouseenter="this.style.transform=\'translateY(-2px)\';this.style.boxShadow=\'0 6px 16px rgba(0,0,0,0.08)\'" '
             + 'onmouseleave="this.style.transform=\'\';this.style.boxShadow=\'\'" '
             + 'style="position:relative;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px 12px 18px;cursor:pointer;transition:transform 0.15s ease, box-shadow 0.15s ease;overflow:hidden">'
-            // Left-edge color stripe — status at-a-glance
             + '<div style="position:absolute;top:0;bottom:0;left:0;width:4px;background:' + stripe + '"></div>'
-            // Header row: title + status badge
             + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:10px">'
             +   '<div style="flex:1;min-width:0">'
-            +     '<div style="font-size:14px;font-weight:700;color:var(--text);line-height:1.3;margin-bottom:3px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">' + esc(w.name || '(未命名)') + '</div>'
+            +     '<div style="font-size:14px;font-weight:700;color:var(--text);line-height:1.3;margin-bottom:3px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">' + esc(w.name || '(unnamed)') + '</div>'
             +     '<div style="font-size:10px;color:var(--text3);font-family:ui-monospace,SFMono-Regular,Menlo,monospace">' + esc(w.id) + '</div>'
             +   '</div>'
-            +   '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">'
-            +     statusBadge
-            +     runStatusPill
-            +   '</div>'
+            +   '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">' + statusBadge + runStatusPill + '</div>'
             + '</div>'
-            // Metadata pills row
             + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;font-size:10px">'
-            +   '<span style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;background:var(--surface2,rgba(0,0,0,0.04));border-radius:10px;color:var(--text2);font-weight:500">'
-            +     '<span class="material-symbols-outlined" style="font-size:11px">circle</span>'
-            +     (w.node_count || 0) + ' 节点'
-            +   '</span>'
-            +   '<span style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;background:var(--surface2,rgba(0,0,0,0.04));border-radius:10px;color:var(--text2);font-weight:500">'
-            +     '<span class="material-symbols-outlined" style="font-size:11px">trending_flat</span>'
-            +     (w.edge_count || 0) + ' 边'
-            +   '</span>'
-            +   (ageHint ? '<span style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;background:var(--surface2,rgba(0,0,0,0.04));border-radius:10px;color:var(--text3)">'
-            +     '<span class="material-symbols-outlined" style="font-size:11px">schedule</span>'
-            +     ageHint + '</span>' : '')
+            +   '<span style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;background:var(--surface2,rgba(0,0,0,0.04));border-radius:10px;color:var(--text2);font-weight:500"><span class="material-symbols-outlined" style="font-size:11px">circle</span>' + (w.node_count || 0) + ' 节点</span>'
+            +   '<span style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;background:var(--surface2,rgba(0,0,0,0.04));border-radius:10px;color:var(--text2);font-weight:500"><span class="material-symbols-outlined" style="font-size:11px">trending_flat</span>' + (w.edge_count || 0) + ' 边</span>'
+            +   (ageHint ? '<span style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;background:var(--surface2,rgba(0,0,0,0.04));border-radius:10px;color:var(--text3)"><span class="material-symbols-outlined" style="font-size:11px">schedule</span>' + ageHint + '</span>' : '')
             + '</div>'
-            // Action row
             + '<div style="display:flex;gap:6px;justify-content:flex-end;border-top:1px solid var(--border-light);padding-top:10px;margin-top:auto">'
-            +   '<button class="btn btn-sm btn-ghost" onclick="event.stopPropagation();_canvasOpenEditor(\'' + esc(w.id).replace(/'/g, "\\'") + '\').then(function(){renderCanvasPage();})" style="padding:5px 10px;font-size:11px"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:-2px">edit</span> 编辑</button>'
-            +   runBtn
+            +   '<button class="btn btn-sm btn-ghost" onclick="event.stopPropagation();_canvasOpenEditor(\'' + esc(w.id).replace(/'/g, "\\'") + '\')" style="padding:5px 10px;font-size:11px"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:-2px">edit</span> 编辑</button>'
+            +   runBtnLegacy
             + '</div>'
             + '</div>';
         }).join('')
@@ -22812,9 +23966,9 @@ window._orchRunStates = window._orchRunStates || {};
 function _orchRunStatusPill(rs) {
   if (!rs) return '';
   var palette = {
-    running:   { bg: 'rgba(202,138,4,0.18)',  fg: '#ca8a04', icon: 'progress_activity', label: '运行中', spin: true },
-    succeeded: { bg: 'rgba(34,197,94,0.18)',  fg: '#16a34a', icon: 'check_circle',      label: '成功' },
-    failed:    { bg: 'rgba(239,68,68,0.18)',  fg: '#ef4444', icon: 'error',              label: '失败' },
+    running:   { bg: 'rgba(202,138,4,0.18)',  fg: '#ca8a04', icon: 'progress_activity', label: 'Running', spin: true },
+    succeeded: { bg: 'rgba(34,197,94,0.18)',  fg: '#16a34a', icon: 'check_circle',      label: 'Success' },
+    failed:    { bg: 'rgba(239,68,68,0.18)',  fg: '#ef4444', icon: 'error',              label: 'Failed' },
     aborted:   { bg: 'rgba(100,116,139,0.18)',fg: '#64748b', icon: 'stop_circle',        label: '已中止' },
   };
   var p = palette[rs.status]; if (!p) return '';
@@ -22830,7 +23984,7 @@ window._orchRunCanvasFromOverview = async function(wfId) {
   // overview surface in isolation.
   var existing = window._orchRunStates[wfId];
   if (existing && existing.status === 'running') {
-    _toast('已有 run 在执行中,请等它完成', 'info');
+    _toast('A run is already in progress, please wait', 'info');
     return;
   }
   try {
@@ -22840,7 +23994,7 @@ window._orchRunCanvasFromOverview = async function(wfId) {
     _toast('▶ 已启动 (run ' + (run.id || '').slice(-8) + ')', 'success');
     _orchAttachOverviewRunStream(wfId, run.id);
   } catch (e) {
-    _toast('启动失败: ' + e, 'error');
+    _toast('Start failed:' + e, 'error');
   }
 };
 
@@ -22900,7 +24054,7 @@ function _renderOrchOverview(d) {
   var el = document.getElementById('orch-overview-cards');
   if (!el) return;
   if (d && d._err) {
-    el.innerHTML = '<div style="grid-column:1/-1;color:var(--error);font-size:12px">加载失败: '+esc(d._err)+'</div>';
+    el.innerHTML = '<div style="grid-column:1/-1;color:var(--error);font-size:12px">Load failed: '+esc(d._err)+'</div>';
     return;
   }
   d = d || {};
@@ -22908,10 +24062,10 @@ function _renderOrchOverview(d) {
   var tk = d.tokens || {};
   var pj = d.projects || {};
   var cards = [
-    {label: 'Agents',       big: String(d.agent_count || 0),     sub: '空闲 '+(st.idle||0)+' · 忙 '+(st.busy||0)+' · 错 '+(st.error||0), color:'#5b8def', icon:'smart_toy'},
-    {label: '事件总数',     big: _formatNum(d.total_events || 0), sub: '所有 agent 累计', color:'#22c55e', icon:'bolt'},
-    {label: 'Token 使用',   big: _formatNum(tk.total || 0),       sub: '入 '+_formatNum(tk.in||0)+' · 出 '+_formatNum(tk.out||0), color:'#f59e0b', icon:'data_usage'},
-    {label: '长任务流水线', big: String(pj.parent_tasks || 0),    sub: '在执行 '+(pj.in_flight_subtasks||0)+' · 已聚合 '+(pj.aggregated||0), color:'#a855f7', icon:'account_tree'},
+    {label: 'Agents',       big: String(d.agent_count || 0),     sub: 'Idle '+(st.idle||0)+' · Busy '+(st.busy||0)+' · Error '+(st.error||0), color:'#5b8def', icon:'smart_toy'},
+    {label: 'Total Events', big: _formatNum(d.total_events || 0), sub: 'Cumulative across all agents', color:'#22c55e', icon:'bolt'},
+    {label: 'Token Usage',  big: _formatNum(tk.total || 0),       sub: 'In '+_formatNum(tk.in||0)+' · Out '+_formatNum(tk.out||0), color:'#f59e0b', icon:'data_usage'},
+    {label: 'Long-Task Pipelines', big: String(pj.parent_tasks || 0), sub: 'In flight '+(pj.in_flight_subtasks||0)+' · Aggregated '+(pj.aggregated||0), color:'#a855f7', icon:'account_tree'},
   ];
   el.innerHTML = cards.map(function(c) {
     return '<div style="background:var(--surface);border:1px solid var(--border);border-left:3px solid '+c.color+';border-radius:10px;padding:14px 16px">'
@@ -22929,14 +24083,14 @@ function _renderOrchAgents(d) {
   var el = document.getElementById('orch-agents-section');
   if (!el) return;
   if (d && d._err) {
-    el.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;color:var(--error);font-size:12px">Agent 排行加载失败: '+esc(d._err)+'</div>';
+    el.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;color:var(--error);font-size:12px">Agent 排行Load failed: '+esc(d._err)+'</div>';
     return;
   }
   var rows = (d && d.agents) || [];
   window._orchAgentRows = rows;   // cache for the Context Preview modal
   var roles = {};
   rows.forEach(function(r){ if (r.role) roles[r.role] = true; });
-  var roleOptions = '<option value="">所有角色</option>'
+  var roleOptions = '<option value="">All roles</option>'
     + Object.keys(roles).map(function(r){
         return '<option value="'+esc(r)+'"'+(_orchPageRoleFilter===r?' selected':'')+'>'+esc(r)+'</option>';
       }).join('');
@@ -22948,7 +24102,7 @@ function _renderOrchAgents(d) {
     var rate = hasData ? ((r.success_rate * 100).toFixed(1) + '%') : '—';
     var rateColor = !hasData ? 'var(--text3)' :
       (r.success_rate >= 0.7 ? '#22c55e' : (r.success_rate >= 0.4 ? '#f59e0b' : '#ef4444'));
-    var rateTitle = hasData ? '' : ' title="尚无任务完成记录，无法计算成功率"';
+    var rateTitle = hasData ? '' : ' title="No completed tasks yet — cannot compute success rate"';
     var stColor = r.status === 'idle' ? '#22c55e' : (r.status === 'busy' ? '#f59e0b' : (r.status === 'error' ? '#ef4444' : '#94a3b8'));
     var medal = (hasData && i === 0) ? 'workspace_premium' :
                 (hasData && i === 1) ? 'military_tech' :
@@ -22961,20 +24115,20 @@ function _renderOrchAgents(d) {
       + '<td style="padding:8px 6px;text-align:right;font-size:11px;color:var(--text3)">'+counts+'</td>'
       + '<td style="padding:8px 6px;text-align:right"><span style="font-size:10px;padding:2px 6px;background:'+stColor+'22;color:'+stColor+';border-radius:4px;font-weight:600">'+esc(r.status||'?')+'</span></td>'
       + '</tr>';
-  }).join('') : '<tr><td colspan="4" style="padding:40px;text-align:center;color:var(--text3);font-size:12px">暂无 Agent 数据</td></tr>';
+  }).join('') : '<tr><td colspan="4" style="padding:40px;text-align:center;color:var(--text3);font-size:12px">No agent data yet</td></tr>';
   // onChange re-renders just THIS tab's content (not the whole page —
   // that would reset _orchActiveTab back to default).
   el.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px">'
     + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">'
-    + '<div style="font-size:13px;font-weight:700"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle;margin-right:4px">leaderboard</span>Agent 排行</div>'
+    + '<div style="font-size:13px;font-weight:700"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle;margin-right:4px">leaderboard</span>Agent Leaderboard</div>'
     + '<select onchange="_orchPageRoleFilter=this.value;_renderOrchTabContent()" style="font-size:11px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface)">'+roleOptions+'</select>'
     + '</div>'
-    + '<div style="font-size:10px;color:var(--text3);margin-bottom:6px">按平滑后成功率排序 · (s+1)/(s+f+2)</div>'
+    + '<div style="font-size:10px;color:var(--text3);margin-bottom:6px">Sorted by smoothed success rate · (s+1)/(s+f+2)</div>'
     + '<div style="overflow:auto;max-height:520px"><table style="width:100%;border-collapse:collapse">'
-    + '<thead><tr style="border-bottom:1px solid var(--border)"><th style="padding:6px;text-align:left;font-size:10px;color:var(--text3);font-weight:600">名称 / 角色</th>'
-    + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">成功率</th>'
-    + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">成功 / 失败</th>'
-    + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">状态</th></tr></thead>'
+    + '<thead><tr style="border-bottom:1px solid var(--border)"><th style="padding:6px;text-align:left;font-size:10px;color:var(--text3);font-weight:600">Name / Role</th>'
+    + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">Success Rate</th>'
+    + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">Wins / Losses</th>'
+    + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">Status</th></tr></thead>'
     + '<tbody>'+tableRows+'</tbody></table></div></div>';
 }
 
@@ -22982,7 +24136,7 @@ function _renderOrchPreprocessor(d) {
   var el = document.getElementById('orch-preprocessor-section');
   if (!el) return;
   if (d && d._err) {
-    el.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;color:var(--error);font-size:12px">⚡ 预处理 metrics 加载失败: '+esc(d._err)+'</div>';
+    el.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;color:var(--error);font-size:12px">⚡ 预处理 metrics Load failed: '+esc(d._err)+'</div>';
     return;
   }
   d = d || {};
@@ -22992,24 +24146,24 @@ function _renderOrchPreprocessor(d) {
   var pausedCount = d.breaker_paused_count || 0;
   var cache = d.cache || {};
   var headerHtml = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">'
-    + '<div style="font-size:13px;font-weight:700">⚡ 预处理 metrics</div>'
+    + '<div style="font-size:13px;font-weight:700">⚡ Preprocessor Metrics</div>'
     + '<div style="font-size:11px;color:var(--text3)">'
-    +   enabledAgents.length + ' agent 启用 · cache ' + (cache.size||0) + '/' + (cache.capacity||256)
+    +   enabledAgents.length + ' agents enabled · cache ' + (cache.size||0) + '/' + (cache.capacity||256)
     +   ' · hits ' + (cache.hits||0) + ' / misses ' + (cache.misses||0)
-    +   (pausedCount > 0 ? ' · <span style="color:#f59e0b;font-weight:600">⏸ ' + pausedCount + ' phase 熔断中</span>' : '')
+    +   (pausedCount > 0 ? ' · <span style="color:#f59e0b;font-weight:600">⏸ ' + pausedCount + ' phase(s) tripped</span>' : '')
     + '</div></div>';
   var phasesHtml = '';
   if (!phases.length) {
-    phasesHtml = '<div style="padding:30px;text-align:center;color:var(--text3);font-size:12px">尚无预处理调用 — 启用 agent 的 preprocessor 后这里会出现 phase 数据</div>';
+    phasesHtml = '<div style="padding:30px;text-align:center;color:var(--text3);font-size:12px">No preprocessor calls yet — phase data will appear once agents enable preprocessing.</div>';
   } else {
     phasesHtml = '<div style="overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:11px">'
       + '<thead><tr style="border-bottom:1px solid var(--border)">'
       + '<th style="padding:6px;text-align:left;font-size:10px;color:var(--text3);font-weight:600">PHASE</th>'
       + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">CALLS</th>'
-      + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">CACHE 命中率</th>'
+      + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">CACHE HIT RATE</th>'
       + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">FALLBACK</th>'
       + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">TOKENS in/out</th>'
-      + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">平均延迟</th>'
+      + '<th style="padding:6px;text-align:right;font-size:10px;color:var(--text3);font-weight:600">AVG LATENCY</th>'
       + '</tr></thead><tbody>';
     phases.forEach(function(p) {
       var hitPct = (p.cache_hit_rate * 100).toFixed(0) + '%';
@@ -23030,11 +24184,11 @@ function _renderOrchPreprocessor(d) {
   var pausedBreakers = breaker.filter(function(b){ return b.paused; });
   if (pausedBreakers.length) {
     breakerHtml = '<div style="margin-top:12px;padding:10px;background:#f59e0b11;border-left:3px solid #f59e0b;border-radius:4px">'
-      + '<div style="font-size:11px;font-weight:600;color:#f59e0b;margin-bottom:6px">⏸ 熔断中（失败率超阈值，自动暂停 60s）</div>';
+      + '<div style="font-size:11px;font-weight:600;color:#f59e0b;margin-bottom:6px">⏸ Tripped (failure rate above threshold, auto-paused 60s)</div>';
     pausedBreakers.forEach(function(b) {
       breakerHtml += '<div style="font-size:11px;margin-bottom:3px">'
         + '<code>'+esc(b.kind)+'</code> on agent <code>'+esc(b.agent_id.slice(0,12))+'</code>'
-        + ' · 失败 '+b.fail_count+'/'+b.history_size+'  · 剩余 '+b.paused_remaining_s+'s'
+        + ' · failures '+b.fail_count+'/'+b.history_size+'  · resumes in '+b.paused_remaining_s+'s'
         + '</div>';
     });
     breakerHtml += '</div>';
@@ -23042,11 +24196,11 @@ function _renderOrchPreprocessor(d) {
   var agentsHtml = '';
   if (enabledAgents.length) {
     agentsHtml = '<div style="margin-top:12px;font-size:11px;color:var(--text3)">'
-      + '<div style="font-weight:600;margin-bottom:6px">已启用 agent</div>';
+      + '<div style="font-weight:600;margin-bottom:6px">Enabled agents</div>';
     enabledAgents.forEach(function(a) {
       var modeLabel = (a.modes||[]).map(function(m){
-        return m === 'optimize_prompt' ? 'prompt' : (m === 'task_understanding' ? '理解' : m);
-      }).join('+') || '默认';
+        return m === 'optimize_prompt' ? 'prompt' : (m === 'task_understanding' ? 'understand' : m);
+      }).join('+') || 'default';
       agentsHtml += '<div style="margin-bottom:3px"><b>'+esc(a.name)+'</b>: '
         + '<code style="font-size:10px">'+esc(a.model.split(':')[0])+'</code>'
         + ' @ <code style="font-size:10px">'+esc(a.endpoint || 'default')+'</code>'
@@ -23062,7 +24216,7 @@ function _renderOrchPipelines(d) {
   var el = document.getElementById('orch-pipelines-section');
   if (!el) return;
   if (d && d._err) {
-    el.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;color:var(--error);font-size:12px">流水线加载失败: '+esc(d._err)+'</div>';
+    el.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;color:var(--error);font-size:12px">Pipeline load failed: '+esc(d._err)+'</div>';
     return;
   }
   var pipes = (d && d.pipelines) || [];
@@ -23077,31 +24231,31 @@ function _renderOrchPipelines(d) {
       return '<span style="display:inline-block;font-size:10px;padding:2px 6px;background:'+color+'22;color:'+color+';border-radius:4px;margin-right:4px">'+k+' '+n+'</span>';
     }).join('');
     var aggBadge = p.aggregated
-      ? '<span style="font-size:10px;padding:2px 6px;background:#22c55e22;color:#22c55e;border-radius:4px;font-weight:600">已聚合 · '+esc(p.aggregator_mode||'')+'</span>'
-      : '<span style="font-size:10px;padding:2px 6px;background:#f59e0b22;color:#f59e0b;border-radius:4px;font-weight:600">进行中</span>';
+      ? '<span style="font-size:10px;padding:2px 6px;background:#22c55e22;color:#22c55e;border-radius:4px;font-weight:600">Aggregated · '+esc(p.aggregator_mode||'')+'</span>'
+      : '<span style="font-size:10px;padding:2px 6px;background:#f59e0b22;color:#f59e0b;border-radius:4px;font-weight:600">In progress</span>';
     var preview = p.result_preview ? '<div style="font-size:11px;color:var(--text3);margin-top:6px;padding:6px 8px;background:var(--surface2);border-radius:4px;max-height:50px;overflow:hidden">'+esc(p.result_preview)+'</div>' : '';
-    return '<div onclick="_orchOpenDAGModal(\''+esc(p.parent_task_id)+'\')" title="点击查看 DAG" '
+    return '<div onclick="_orchOpenDAGModal(\''+esc(p.parent_task_id)+'\')" title="Click to view DAG" '
       + 'onmouseenter="this.style.transform=\'translateY(-2px)\';this.style.boxShadow=\'0 6px 16px rgba(0,0,0,0.08)\'" '
       + 'onmouseleave="this.style.transform=\'\';this.style.boxShadow=\'\'" '
       + 'style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;cursor:pointer;transition:transform 0.15s ease, box-shadow 0.15s ease">'
       + '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">'
       + '<div style="font-size:14px;font-weight:700;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)" title="'+esc(p.parent_title||'')+'">'+esc(p.parent_title||'(untitled)')+'</div>'
       + aggBadge + '</div>'
-      + '<div style="font-size:11px;color:var(--text3);margin-bottom:8px">'+esc(p.project_name||'')+' · '+p.child_count+' 子任务 · <span style="color:var(--primary)">点击看 DAG</span></div>'
+      + '<div style="font-size:11px;color:var(--text3);margin-bottom:8px">'+esc(p.project_name||'')+' · '+p.child_count+' subtasks · <span style="color:var(--primary)">click for DAG</span></div>'
       + '<div style="display:flex;flex-wrap:wrap;gap:4px">'+statusBar+'</div>'
       + preview + '</div>';
   }).join('')
    : _ui.emptyState({
        icon: 'travel_explore',
-       title: '暂无长任务流水线',
-       hint: '长任务由 agent 自动拆分子任务并并行执行 — 给 agent 一个复杂指令试试',
+       title: 'No long-task pipelines yet',
+       hint: 'Agents auto-decompose complex prompts into parallel subtasks — try giving one a multi-step request.',
      });
 
   // Section header — uses _ui.sectionHeader helper for consistency
   // with the canvas-workflow section above.
-  var headerHtml = _ui.sectionHeader('长任务流水线', {
+  var headerHtml = _ui.sectionHeader('Long-Task Pipelines', {
     icon: 'account_tree',
-    count: pipes.length + ' 条 · 进行中优先',
+    count: pipes.length + ' · in-flight first',
   });
 
   el.innerHTML = headerHtml
@@ -23129,12 +24283,12 @@ function _orchOpenSharedContextViz() {
   modal.innerHTML =
     '<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;width:min(1100px,100%);max-height:90vh;display:flex;flex-direction:column;overflow:hidden">'
     + '<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border-light)">'
-    + '<div><div style="font-size:14px;font-weight:700"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">database</span> 项目共享上下文</div>'
+    + '<div><div style="font-size:14px;font-weight:700"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">database</span> Project Shared Context</div>'
     + '<div style="font-size:11px;color:var(--text3)">artifacts / decisions / milestones / handoffs / pending_qs — 跨 agent 协作的状态全貌</div></div>'
     + '<button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'orch-sc-modal\').remove()"><span class="material-symbols-outlined" style="font-size:16px">close</span></button></div>'
     + '<div style="padding:14px 18px;border-bottom:1px solid var(--border-light);display:flex;align-items:center;gap:12px">'
     + '<label style="font-size:11px;color:var(--text3);font-weight:600;text-transform:uppercase">PROJECT</label>'
-    + '<select id="sc-proj-select" style="flex:1;font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface)" onchange="_orchSCLoad(this.value)"><option value="">加载中…</option></select>'
+    + '<select id="sc-proj-select" style="flex:1;font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface)" onchange="_orchSCLoad(this.value)"><option value="">Loading…</option></select>'
     + '<button class="btn btn-ghost btn-sm" onclick="_orchSCLoad(document.getElementById(\'sc-proj-select\').value)"><span class="material-symbols-outlined" style="font-size:14px">refresh</span></button></div>'
     + '<div id="sc-content" style="flex:1;overflow:auto;padding:14px 18px"><div style="color:var(--text3);font-size:12px;text-align:center;padding:30px">选择 project 查看共享状态</div></div></div>';
   modal.addEventListener('click', function(e){ if (e.target === modal) modal.remove(); });
@@ -23181,7 +24335,7 @@ async function _orchSCLoad(project_id) {
     }
     _orchSCRender(d, el);
   } catch (e) {
-    el.innerHTML = '<div style="color:var(--error);font-size:12px;padding:20px">加载失败: '+esc(String(e))+'</div>';
+    el.innerHTML = '<div style="color:var(--error);font-size:12px;padding:20px">Load failed:'+esc(String(e))+'</div>';
   }
 }
 
@@ -23396,7 +24550,7 @@ function _orchOpenDAGModal(parentId) {
   var pipes = window._orchPipesCache || [];
   var p = pipes.find(function(x){ return x.parent_task_id === parentId; });
   if (!p) {
-    alert('流水线数据未加载');
+    alert('Pipeline data not loaded');
     return;
   }
   // Build modal scaffolding (with one-time style block for responsive layout)
@@ -23425,7 +24579,7 @@ function _orchOpenDAGModal(parentId) {
     + '<div style="flex:1;min-width:0">'
     + '<div style="font-size:14px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(p.parent_title||'')+'</div>'
     + '<div style="font-size:10px;color:var(--text3)">'+esc(p.project_name||'')+' · '+p.child_count+' 子任务 · '
-    + (p.aggregated ? '已聚合 · '+esc(p.aggregator_mode||'') : '进行中')+'</div></div></div>'
+    + (p.aggregated ? 'Aggregated · '+esc(p.aggregator_mode||'') : 'In Progress')+'</div></div></div>'
     + '<button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'orch-dag-modal\').remove()" style="flex-shrink:0">'
     + '<span class="material-symbols-outlined" style="font-size:16px">close</span></button></div>'
     + '<div class="orch-dag-body">'
@@ -23525,7 +24679,7 @@ function _drawOrchDAG(p) {
     var p2 = pos[c.id];
     var color = STATUS_COLOR[c.status] || '#94a3b8';
     var titleShort = esc((c.title || '').substring(0, 22));
-    var agentLabel = c.assigned_to_name ? esc(c.assigned_to_name) : (c.role_hint ? esc(c.role_hint) : '未分配');
+    var agentLabel = c.assigned_to_name ? esc(c.assigned_to_name) : (c.role_hint ? esc(c.role_hint) : 'Unassigned');
     return '<g style="cursor:pointer" onclick="_orchSelectDAGNode(window._orchActivePipe, &quot;'+esc(c.id)+'&quot;)">'
       + '<rect x="'+p2.x+'" y="'+p2.y+'" width="'+NODE_W+'" height="'+NODE_H+'" rx="8" fill="var(--surface)" stroke="'+color+'" stroke-width="2"/>'
       + '<rect x="'+p2.x+'" y="'+p2.y+'" width="4" height="'+NODE_H+'" rx="2" fill="'+color+'"/>'
@@ -23547,7 +24701,7 @@ function _orchSelectDAGNode(p, childId) {
     if (p.aggregator_mode === 'concat_markdown') modeNote = '所有子结果按顺序拼接为单个 Markdown';
     else if (p.aggregator_mode === 'merge_code') modeNote = '合并所有代码块（按文件路径分组）';
     else if (p.aggregator_mode === 'llm_summarize') modeNote = '用 LLM 综合所有子结果';
-    else if (p.aggregator_mode === 'skill') modeNote = '调用自定义 skill 聚合';
+    else if (p.aggregator_mode === 'skill') modeNote = 'Calls custom aggregator skill';
     detail.innerHTML = '<div style="font-size:11px;color:var(--text3);margin-bottom:8px;font-weight:600;letter-spacing:0.4px;text-transform:uppercase">流水线概览</div>'
       + '<div style="font-size:12px;line-height:1.7">'
       + '<div><b>父任务</b>：'+esc(p.parent_title||'')+'</div>'
@@ -23555,7 +24709,7 @@ function _orchSelectDAGNode(p, childId) {
       + '<div><b>子任务</b>：'+p.child_count+'</div>'
       + '<div><b>聚合模式</b>：'+esc(p.aggregator_mode||'concat_markdown')+'</div>'
       + (modeNote ? '<div style="color:var(--text3);font-size:11px;margin-top:4px">' + esc(modeNote) + '</div>' : '')
-      + (p.aggregated ? '<div style="margin-top:6px"><span style="font-size:10px;padding:2px 6px;background:#22c55e22;color:#22c55e;border-radius:4px;font-weight:600">已聚合</span></div>' : '')
+      + (p.aggregated ? '<div style="margin-top:6px"><span style="font-size:10px;padding:2px 6px;background:#22c55e22;color:#22c55e;border-radius:4px;font-weight:600">Aggregated</span></div>' : '')
       + '</div>'
       + '<div style="margin-top:14px;font-size:10px;color:var(--text3)">点击任意节点查看详情</div>';
     return;
@@ -23651,24 +24805,82 @@ async function _renderKmShared() {
     else if (data && data.entries) entries = data.entries;
     else entries = [];
 
+    var _techShared = false;
+    try { _techShared = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+
+    // Tech mode: stitch_26-style bento card (matches RAG Providers).
+    // Glass panel + ghost icon top-right + small icon square header +
+    // status pill + h3 title + 2-col stats + action row.
     var cardsHtml = entries.map(function(e) {
-      var tags = (e.tags||[]).map(function(t){return '<span style="padding:1px 6px;border-radius:4px;font-size:10px;background:var(--primary-tint-10);color:var(--primary)">'+esc(t)+'</span>';}).join(' ');
-      var preview = (e.content||'').substring(0,120).replace(/\n/g,' ');
+      var tagsList = e.tags || [];
+      var preview = (e.content || '').substring(0, 140).replace(/\n/g, ' ');
+      var wordCount = (e.content || '').length;
+      if (_techShared) {
+        var tagPills = tagsList.slice(0, 4).map(function(t) {
+          return '<span class="tc-mono-label" style="padding:2px 8px;background:rgba(192,193,255,0.10);color:var(--primary);border:1px solid rgba(192,193,255,0.20);border-radius:9999px;font-size:9px;letter-spacing:0.05em">' + esc(t) + '</span>';
+        }).join('');
+        var moreTags = tagsList.length > 4
+          ? '<span class="tc-mono-label" style="font-size:9px;color:var(--outline);padding:2px 6px">+' + (tagsList.length - 4) + '</span>'
+          : '';
+        return '' +
+          '<div class="tc-card-glass" style="padding:var(--s-lg);display:flex;flex-direction:column;gap:14px;position:relative;overflow:hidden;border-top:1px solid rgba(255,255,255,0.15);box-shadow:0 0 12px -3px rgba(192,193,255,0.10)">' +
+            // Ghost icon top-right
+            '<div style="position:absolute;top:0;right:0;padding:14px;pointer-events:none">' +
+              '<span class="material-symbols-outlined" style="font-size:64px;color:rgba(192,193,255,0.18);margin:-12px -12px 0 0">menu_book</span>' +
+            '</div>' +
+            // Header: icon-square + status pill
+            '<div style="display:flex;justify-content:space-between;align-items:flex-start;position:relative">' +
+              '<div style="padding:8px;background:rgba(192,193,255,0.10);border:1px solid rgba(192,193,255,0.20);border-radius:var(--r-md);display:inline-flex">' +
+                '<span class="material-symbols-outlined" style="font-size:22px;color:var(--primary);font-variation-settings:\'FILL\' 1">article</span>' +
+              '</div>' +
+              '<div style="display:flex;align-items:center;gap:6px;background:var(--surface-container-high);padding:4px 10px;border-radius:9999px;border:1px solid rgba(255,255,255,0.05)">' +
+                '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out;box-shadow:0 0 6px var(--secondary)"></span>' +
+                '<span class="tc-mono-label" style="font-size:10px;color:var(--on-surface);letter-spacing:0.05em">INDEXED</span>' +
+              '</div>' +
+            '</div>' +
+            // Title + preview line
+            '<div style="position:relative">' +
+              '<h3 style="font-family:var(--font-display);font-size:18px;font-weight:600;color:var(--on-surface);margin:0;letter-spacing:-0.01em;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(e.title || '') + '</h3>' +
+              '<p class="tc-text-dim" style="font-size:12px;line-height:1.5;margin:6px 0 0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">' + esc(preview) + (preview.length >= 140 ? '…' : '') + '</p>' +
+            '</div>' +
+            // Stats grid: TAGS + WORDS
+            '<div style="display:grid;grid-template-columns:1fr auto;gap:14px;padding:12px 0;border-top:1px solid rgba(255,255,255,0.05);border-bottom:1px solid rgba(255,255,255,0.05);align-items:center">' +
+              '<div>' +
+                '<p class="tc-mono-label" style="font-size:10px;color:var(--outline);margin:0 0 4px">TAGS (' + tagsList.length + ')</p>' +
+                (tagsList.length
+                  ? '<div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center">' + tagPills + moreTags + '</div>'
+                  : '<span class="tc-text-dim" style="font-size:11px;font-style:italic">— untagged —</span>') +
+              '</div>' +
+              '<div style="text-align:right">' +
+                '<p class="tc-mono-label" style="font-size:10px;color:var(--outline);margin:0 0 4px">WORDS</p>' +
+                '<p style="font-family:var(--font-mono);font-size:14px;color:var(--secondary);margin:0">' + wordCount + '</p>' +
+              '</div>' +
+            '</div>' +
+            // Footer actions
+            '<div style="display:flex;gap:8px;margin-top:auto">' +
+              '<button onclick="_kmEditEntry(\'' + esc(e.id) + '\')" class="tc-mono-label" style="flex:1;padding:8px 0;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:var(--r-md);color:var(--on-surface);font-size:10px;cursor:pointer;letter-spacing:0.05em;display:inline-flex;align-items:center;justify-content:center;gap:6px;transition:all 0.15s" onmouseover="this.style.background=\'rgba(255,255,255,0.08)\'" onmouseout="this.style.background=\'rgba(255,255,255,0.04)\'">' +
+                '<span class="material-symbols-outlined" style="font-size:14px">edit</span> EDIT' +
+              '</button>' +
+              '<button onclick="_kmDeleteEntry(\'' + esc(e.id) + '\')" title="Delete" style="padding:8px 12px;background:rgba(255,180,171,0.06);border:1px solid rgba(255,180,171,0.20);border-radius:var(--r-md);color:var(--error);cursor:pointer;display:inline-flex;align-items:center;transition:all 0.15s" onmouseover="this.style.background=\'rgba(255,180,171,0.14)\'" onmouseout="this.style.background=\'rgba(255,180,171,0.06)\'">' +
+                '<span class="material-symbols-outlined" style="font-size:16px">delete</span>' +
+              '</button>' +
+            '</div>' +
+          '</div>';
+      }
+      // Legacy fallback (unchanged)
+      var tags = tagsList.map(function(t){return '<span style="padding:1px 6px;border-radius:4px;font-size:10px;background:var(--primary-tint-10);color:var(--primary)">'+esc(t)+'</span>';}).join(' ');
       return '<div style="background:var(--surface);border-radius:10px;padding:14px;border:1px solid var(--border-light)">'
         + '<div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:6px">'
           + '<div style="font-weight:600;font-size:13px;color:var(--text)">'+esc(e.title||'')+'</div>'
           + '<div style="display:flex;gap:4px;flex-shrink:0">'
             + '<button onclick="_kmEditEntry(\''+esc(e.id)+'\')" class="btn btn-sm" style="padding:4px 8px;font-size:11px">编辑</button>'
-            + '<button onclick="_kmDeleteEntry(\''+esc(e.id)+'\')" class="btn btn-sm" style="padding:4px 8px;font-size:11px;color:var(--error)">删除</button>'
+            + '<button onclick="_kmDeleteEntry(\''+esc(e.id)+'\')" class="btn btn-sm" style="padding:4px 8px;font-size:11px;color:var(--error)">Delete</button>'
           + '</div>'
         + '</div>'
         + '<div style="font-size:11px;color:var(--text3);margin-bottom:6px;line-height:1.5">'+esc(preview)+(preview.length>=120?'...':'')+'</div>'
         + (tags ? '<div style="display:flex;gap:4px;flex-wrap:wrap">'+tags+'</div>' : '')
         + '</div>';
     }).join('');
-
-    var _techShared = false;
-    try { _techShared = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
     var sharedHeader = _techShared
       ? '<div style="flex:1;min-width:240px">' +
           '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px">' +
@@ -23701,7 +24913,7 @@ async function _renderKmShared() {
       + (entries.length === 0 ? '<div style="color:var(--text3);padding:40px;text-align:center"><span class="material-symbols-outlined" style="font-size:40px;display:block;margin-bottom:8px">library_books</span>暂无知识条目，点击上方按钮添加</div>' : '')
       + '<div id="km-entries-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:10px">'+cardsHtml+'</div>';
   } catch(e) {
-    sc.innerHTML = '<div style="color:var(--error);padding:20px">加载失败: '+e+'</div>';
+    sc.innerHTML = '<div style="color:var(--error);padding:20px">Load failed:'+e+'</div>';
   }
 }
 
@@ -23730,7 +24942,7 @@ function _kmShowAddEntry() {
     + '<div class="form-group"><label>标题 *</label><input id="km-add-title" placeholder="e.g. 公司代码规范"></div>'
     + '<div class="form-group"><label>内容 *</label><textarea id="km-add-content" rows="8" placeholder="知识内容..."></textarea></div>'
     + '<div class="form-group"><label>标签 (逗号分隔)</label><input id="km-add-tags" placeholder="e.g. 规范,编码,Python"></div>'
-    + '<div class="form-actions"><button class="btn btn-ghost" onclick="document.getElementById(\'km-add-modal\').remove()">取消</button>'
+    + '<div class="form-actions"><button class="btn btn-ghost" onclick="document.getElementById(\'km-add-modal\').remove()">Cancel</button>'
     + '<button class="btn btn-primary" onclick="_kmSaveNewEntry()">保存</button></div>'
     + '</div></div>';
   document.body.insertAdjacentHTML('beforeend', html);
@@ -23740,13 +24952,13 @@ async function _kmSaveNewEntry() {
   var title = (document.getElementById('km-add-title')||{}).value||'';
   var content = (document.getElementById('km-add-content')||{}).value||'';
   var tagsRaw = (document.getElementById('km-add-tags')||{}).value||'';
-  if (!title.trim() || !content.trim()) { alert('标题和内容不能为空'); return; }
+  if (!title.trim() || !content.trim()) { alert('Title and content cannot be empty'); return; }
   var tags = tagsRaw.split(',').map(function(t){return t.trim()}).filter(Boolean);
   try {
     await api('POST', '/api/portal/knowledge', {title:title,content:content,tags:tags});
     var m = document.getElementById('km-add-modal'); if(m)m.remove();
     _renderKmShared();
-  } catch(e) { alert('保存失败: '+e); }
+  } catch(e) { alert('Save failed:'+e); }
 }
 
 async function _kmDeleteEntry(id) {
@@ -23754,7 +24966,7 @@ async function _kmDeleteEntry(id) {
   try {
     await api('POST', '/api/portal/knowledge/'+id+'/delete');
     _renderKmShared();
-  } catch(e) { alert('删除失败: '+e); }
+  } catch(e) { alert('Delete failed:'+e); }
 }
 
 async function _kmEditEntry(id) {
@@ -23762,18 +24974,18 @@ async function _kmEditEntry(id) {
     var entries = await api('GET', '/api/portal/knowledge');
     var arr = Array.isArray(entries) ? entries : (entries.entries||[]);
     var entry = arr.find(function(e){return e.id===id;});
-    if (!entry) { alert('未找到条目'); return; }
+    if (!entry) { alert('Entry not found'); return; }
     var html = '<div class="modal-overlay" id="km-edit-modal" onclick="if(event.target===this)this.remove()">'
       + '<div class="modal" style="max-width:560px">'
       + '<h3>编辑知识条目</h3>'
       + '<div class="form-group"><label>标题</label><input id="km-edit-title" value="'+esc(entry.title||'')+'"></div>'
       + '<div class="form-group"><label>内容</label><textarea id="km-edit-content" rows="8">'+esc(entry.content||'')+'</textarea></div>'
       + '<div class="form-group"><label>标签</label><input id="km-edit-tags" value="'+esc((entry.tags||[]).join(', '))+'"></div>'
-      + '<div class="form-actions"><button class="btn btn-ghost" onclick="document.getElementById(\'km-edit-modal\').remove()">取消</button>'
+      + '<div class="form-actions"><button class="btn btn-ghost" onclick="document.getElementById(\'km-edit-modal\').remove()">Cancel</button>'
       + '<button class="btn btn-primary" onclick="_kmSaveEditEntry(\''+esc(id)+'\')">保存</button></div>'
       + '</div></div>';
     document.body.insertAdjacentHTML('beforeend', html);
-  } catch(e) { alert('加载失败: '+e); }
+  } catch(e) { alert('Load failed:'+e); }
 }
 
 async function _kmSaveEditEntry(id) {
@@ -23784,7 +24996,7 @@ async function _kmSaveEditEntry(id) {
     await api('POST', '/api/portal/knowledge/'+id, {title:title,content:content,tags:tags});
     var m = document.getElementById('km-edit-modal'); if(m)m.remove();
     _renderKmShared();
-  } catch(e) { alert('保存失败: '+e); }
+  } catch(e) { alert('Save failed:'+e); }
 }
 
 // ── Batch import modal (shared between shared & private) ──
@@ -23799,8 +25011,8 @@ function _kmShowImport(collection, providerId) {
     + '<div id="km-imp-file-zone" style="border:2px dashed var(--border);border-radius:10px;padding:24px;text-align:center;cursor:pointer;margin-bottom:14px;transition:all 0.2s;background:var(--surface)" onclick="document.getElementById(\'km-imp-file-input\').click()" ondragover="event.preventDefault();this.style.borderColor=\'var(--primary)\';this.style.background=\'var(--primary-tint-6)\'" ondragleave="this.style.borderColor=\'var(--border)\';this.style.background=\'var(--surface)\'" ondrop="event.preventDefault();this.style.borderColor=\'var(--border)\';this.style.background=\'var(--surface)\';_kmHandleFileDrop(event)">'
       + '<input type="file" id="km-imp-file-input" accept=".pdf,.docx,.doc,.html,.htm,.txt,.md,.csv,.tsv,.json,.log" style="display:none" onchange="_kmHandleFileSelect(this)">'
       + '<span class="material-symbols-outlined" style="font-size:36px;color:var(--text3);display:block;margin-bottom:8px">upload_file</span>'
-      + '<div style="font-size:13px;color:var(--text2);font-weight:600">点击或拖拽文件到此处</div>'
-      + '<div style="font-size:11px;color:var(--text3);margin-top:4px">支持 PDF、Word (.docx)、HTML、TXT、Markdown、CSV</div>'
+      + '<div style="font-size:13px;color:var(--text2);font-weight:600">Click or drop a file here</div>'
+      + '<div style="font-size:11px;color:var(--text3);margin-top:4px">Supports PDF, Word (.docx), HTML, TXT, Markdown, CSV</div>'
     + '</div>'
     + '<div id="km-imp-file-info" style="display:none;padding:10px 14px;background:rgba(63,185,80,0.08);border:1px solid rgba(63,185,80,0.2);border-radius:8px;margin-bottom:14px;font-size:12px">'
       + '<div style="display:flex;align-items:center;gap:8px">'
@@ -23820,10 +25032,10 @@ function _kmShowImport(collection, providerId) {
     + '<div class="form-group"><label>文本内容</label><textarea id="km-imp-content" rows="6" placeholder="粘贴文本内容...\n上传文件后此处自动填入解析后的文本"></textarea></div>'
     + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">'
       + '<div class="form-group"><label>标签 (逗号分隔)</label><input id="km-imp-tags" placeholder="法律,劳动法"></div>'
-      + '<div class="form-group"><label>分块大小 (字符)</label><input id="km-imp-chunk" type="number" value="1000" min="200" max="5000"></div>'
+      + '<div class="form-group"><label>Chunk size (chars)</label><input id="km-imp-chunk" type="number" value="1000" min="200" max="5000"></div>'
     + '</div>'
     + '<div id="km-imp-status" style="display:none;padding:8px 12px;margin-bottom:10px;border-radius:6px;font-size:12px"></div>'
-    + '<div class="form-actions"><button class="btn btn-ghost" onclick="document.getElementById(\'km-import-modal\').remove()">取消</button>'
+    + '<div class="form-actions"><button class="btn btn-ghost" onclick="document.getElementById(\'km-import-modal\').remove()">Cancel</button>'
     + '<button class="btn btn-primary" id="km-imp-submit-btn" onclick="_kmDoImport(\''+esc(collection)+'\',\''+esc(providerId)+'\')">导入</button></div>'
     + '</div></div>';
   document.body.insertAdjacentHTML('beforeend', html);
@@ -23941,10 +25153,10 @@ async function _kmDoImport(collection, providerId) {
   var content = (document.getElementById('km-imp-content')||{}).value||'';
   var tags = ((document.getElementById('km-imp-tags')||{}).value||'').split(',').map(function(t){return t.trim()}).filter(Boolean);
   var chunk = parseInt((document.getElementById('km-imp-chunk')||{}).value)||1000;
-  if (!content.trim()) { alert('内容不能为空，请上传文件或粘贴文本'); return; }
+  if (!content.trim()) { alert('Content cannot be empty; please upload a file or paste text'); return; }
   var statusEl = document.getElementById('km-imp-status');
   var submitBtn = document.getElementById('km-imp-submit-btn');
-  if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = '导入中...'; }
+  if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Importing…'; }
   if (statusEl) { statusEl.style.display = 'block'; statusEl.style.background = 'var(--primary-tint-8)'; statusEl.style.color = 'var(--primary)'; statusEl.textContent = '正在导入并分块...'; }
   try {
     var res = await api('POST', '/api/portal/rag/import', {
@@ -23952,14 +25164,14 @@ async function _kmDoImport(collection, providerId) {
       title:title, content:content, tags:tags, chunk_size:chunk
     });
     window._kmFileData = null;
-    alert('导入完成: '+((res&&res.chunks)||0)+' 个分块');
+    alert('Import complete:'+((res&&res.chunks)||0)+' 个分块');
     var m = document.getElementById('km-import-modal'); if(m)m.remove();
     if (_kmTab === 'shared') _renderKmShared();
     else if (_kmTab === 'private') _renderKmPrivate();
   } catch(e) {
-    alert('导入失败: '+e);
-    if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = '导入'; }
-    if (statusEl) { statusEl.style.background = 'rgba(248,81,73,0.08)'; statusEl.style.color = 'var(--error)'; statusEl.textContent = '导入失败: '+e; }
+    alert('Import failed:'+e);
+    if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Import'; }
+    if (statusEl) { statusEl.style.background = 'rgba(248,81,73,0.08)'; statusEl.style.color = 'var(--error)'; statusEl.textContent = 'Import failed:'+e; }
   }
 }
 
@@ -24028,7 +25240,7 @@ async function _renderKmPrivate() {
           + '</div>'
         : '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:12px">'+cardsHtml+'</div>');
   } catch(e) {
-    sc.innerHTML = '<div style="color:var(--error);padding:20px">加载失败: '+e+'</div>';
+    sc.innerHTML = '<div style="color:var(--error);padding:20px">Load failed:'+e+'</div>';
   }
 }
 
@@ -24046,6 +25258,15 @@ async function _renderKmPrivateTech() {
   try {
     var data = await api('POST', '/api/portal/domain-kb/list');
     var kbs = (data && data.knowledge_bases) || [];
+
+    // Health probe — async; KB list still renders immediately, the
+    // health badge is patched in once the response arrives.
+    var healthByKb = {};
+    var healthPromise = api('POST', '/api/portal/domain-kb/health', {})
+      .then(function(h) {
+        ((h && h.items) || []).forEach(function(it) { healthByKb[it.kb_id] = it; });
+      })
+      .catch(function() { /* no-op — badge stays absent */ });
 
     // Map of which agents bind each KB
     var agentsByKb = {};
@@ -24068,7 +25289,7 @@ async function _renderKmPrivateTech() {
       var firstAgent = boundAgents[0];
       var avatarRow;
       if (firstAgent) {
-        var aurl = _aetherAvatarUrl(firstAgent.role || 'general');
+        var aurl = _aetherAvatarFor(firstAgent);
         var moreCount = boundAgents.length - 1;
         avatarRow =
           '<div style="display:flex;align-items:center;gap:10px">' +
@@ -24099,7 +25320,7 @@ async function _renderKmPrivateTech() {
       if ((kb.tags || []).length > 3) tagPills += ' <span class="tc-text-dim" style="font-size:10px">+' + ((kb.tags || []).length - 3) + '</span>';
 
       return '' +
-        '<div class="tc-card-glass" style="padding:18px;display:flex;flex-direction:column;gap:14px;position:relative;border-top:1px solid rgba(255,255,255,0.10);' + (boundAgents.length > 0 ? 'box-shadow:0 0 15px rgba(99,102,241,0.10);' : '') + '">' +
+        '<div class="tc-card-glass" data-kb-id="' + esc(kb.id) + '" style="padding:18px;display:flex;flex-direction:column;gap:14px;position:relative;border-top:1px solid rgba(255,255,255,0.10);' + (boundAgents.length > 0 ? 'box-shadow:0 0 15px rgba(99,102,241,0.10);' : '') + '">' +
           // Top: ID + name | status chip
           '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">' +
             '<div style="flex:1;min-width:0">' +
@@ -24109,7 +25330,10 @@ async function _renderKmPrivateTech() {
                 ? '<div class="tc-text-dim" style="font-size:12px;margin-top:6px;line-height:1.5">' + esc(kb.description) + '</div>'
                 : '') +
             '</div>' +
-            statusChip +
+            '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">' +
+              statusChip +
+              '<span class="kb-health-slot" data-kb-health-id="' + esc(kb.id) + '"></span>' +
+            '</div>' +
           '</div>' +
           // 2-col grid: docs / utilization
           '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">' +
@@ -24138,6 +25362,8 @@ async function _renderKmPrivateTech() {
                 '<span class="material-symbols-outlined" style="font-size:16px">upload_file</span></button>' +
               '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="_kmSearchDomainKb(\'' + esc(kb.id) + '\',\'' + esc(kb.name) + '\')" title="Search test" style="padding:6px;min-width:0">' +
                 '<span class="material-symbols-outlined" style="font-size:16px">search</span></button>' +
+              '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="_kmResetIndexState(\'' + esc(kb.id) + '\',\'' + esc(kb.name) + '\')" title="Reset stale index counters (use after re-importing to fix doc_count)" style="padding:6px;min-width:0">' +
+                '<span class="material-symbols-outlined" style="font-size:16px">restart_alt</span></button>' +
               '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="_kmEditDomainKb(\'' + esc(kb.id) + '\')" title="Edit" style="padding:6px;min-width:0">' +
                 '<span class="material-symbols-outlined" style="font-size:16px">edit</span></button>' +
               '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="_kmDeleteDomainKb(\'' + esc(kb.id) + '\',\'' + esc(kb.name) + '\')" title="Delete" style="padding:6px;min-width:0;color:var(--error)">' +
@@ -24177,77 +25403,149 @@ async function _renderKmPrivateTech() {
       : '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:var(--s-md)">' + cardsHtml + '</div>';
 
     sc.innerHTML = headerHtml + bodyHtml;
+
+    // Patch in health badges once the async health probe resolves.
+    healthPromise.then(function() {
+      Object.keys(healthByKb).forEach(function(kbId) {
+        var slot = sc.querySelector('span.kb-health-slot[data-kb-health-id="' + kbId + '"]');
+        if (!slot) return;
+        var h = healthByKb[kbId];
+        // Healthy → tiny green pulse + "INDEXED N"
+        if (h.healthy && h.chroma_count > 0) {
+          slot.innerHTML = '<span class="tc-mono-label" title="Vector store has ' + h.chroma_count + ' chunks" style="display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border-radius:var(--r-md);background:rgba(137,206,255,0.10);color:var(--secondary);border:1px solid rgba(137,206,255,0.25);font-size:9px">' +
+            '<span style="width:5px;height:5px;border-radius:50%;background:var(--secondary);box-shadow:0 0 5px var(--secondary)"></span>' +
+            'INDEXED ' + h.chroma_count + '</span>';
+          return;
+        }
+        // Empty (registry==chroma==0) → no badge, KB is just empty.
+        if (h.healthy && h.chroma_count === 0 && h.registry_count === 0) {
+          return;
+        }
+        // Unhealthy: registry says X chunks but chroma has Y < X.
+        if (h.mismatch > 0) {
+          var label = '⚠ ' + h.mismatch + ' UNINDEXED';
+          var tip = (h.last_ingest_error || ('Registry remembers ' + h.registry_count +
+            ' chunks but vector store only holds ' + (h.chroma_count >= 0 ? h.chroma_count : 'unknown') +
+            '. Re-import to fix.'));
+          slot.innerHTML = '<span class="tc-mono-label" title="' + esc(tip) + '" style="display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border-radius:var(--r-md);background:rgba(255,180,171,0.10);color:var(--error);border:1px solid rgba(255,180,171,0.30);font-size:9px;cursor:help">' +
+            label + '</span>';
+        }
+      });
+    });
   } catch (e) {
     sc.innerHTML = '<div class="tc-card" style="color:var(--error);padding:var(--s-lg)">' + esc(String(e)) + '</div>';
   }
 }
 window._renderKmPrivateTech = _renderKmPrivateTech;
 
+window._kmResetIndexState = async function(kbId, kbName) {
+  if (!await confirm('Reset stale index counters for "' + kbName + '"?\n\n' +
+                     'This zeros out doc_count and indexed_count so the next ' +
+                     'import reports correct totals. The actual ChromaDB ' +
+                     'collection is NOT touched. Use this when the badge ' +
+                     'shows "UNINDEXED" — typically because Ollama was ' +
+                     'down during the original import.')) return;
+  try {
+    await api('POST', '/api/portal/domain-kb/reset-index-state', { kb_id: kbId });
+    if (typeof _toast === 'function') _toast('Index counters reset', 'success');
+    if (typeof _renderKmPrivateTech === 'function') _renderKmPrivateTech();
+  } catch (e) { alert('Reset failed: ' + e); }
+};
+
 function _kmShowCreateDomainKb() {
+  // Storage: ALWAYS local ChromaDB. Remote-store providers are not
+  // exposed here — the only meaningful customisation is the embedding
+  // source (local model OR an existing LLM Provider). Defaults pick
+  // an Ollama LLM provider when one exists, so the typical user
+  // shipping with Ollama gets a working setup with zero config.
   var html = '<div class="modal-overlay" id="km-dkb-modal" onclick="if(event.target===this)this.remove()">'
     + '<div class="modal" style="max-width:540px">'
-    + '<h3>新建专业领域知识库</h3>'
-    + '<div class="form-group"><label>知识库名称 *</label><input id="km-dkb-name" placeholder="e.g. 法律知识库、财务知识库"></div>'
-    + '<div class="form-group"><label>描述</label><input id="km-dkb-desc" placeholder="e.g. 包含劳动法、合同法等法律文档"></div>'
-    + '<div class="form-group"><label>标签 (逗号分隔)</label><input id="km-dkb-tags" placeholder="法律,劳动法,合同法"></div>'
-    + '<div class="form-group"><label>存储提供方</label><select id="km-dkb-provider"><option value="">本地 ChromaDB (默认)</option></select></div>'
+    + '<h3>New Domain Knowledge Base</h3>'
+    + '<p style="font-size:11px;color:var(--text3);margin:-6px 0 14px;line-height:1.55">Storage is the local ChromaDB shipped with TudouClaw. Pick where embeddings come from below — Ollama (or any LLM provider with <code>/v1/embeddings</code>) gives the best multilingual recall; the local model is the zero-dep fallback.</p>'
+    + '<div class="form-group"><label>Name *</label><input id="km-dkb-name" placeholder="e.g. Legal KB / Finance KB"></div>'
+    + '<div class="form-group"><label>Description</label><input id="km-dkb-desc" placeholder="e.g. Labour law and contract law documents"></div>'
+    + '<div class="form-group"><label>Tags <span style="font-size:11px;color:var(--text3)">(comma separated)</span></label><input id="km-dkb-tags" placeholder="legal, labour-law, contract"></div>'
+    // Storage is fixed — no dropdown, no remote-provider option.
+    + '<input type="hidden" id="km-dkb-provider" value="">'
     // ── Embedding source: 2-way choice (local OR LLM provider) ──
-    // Radio-based — only ONE of the two sub-sections is visible at
-    // a time so the operator never wonders which one applies.
     + '<div class="form-group">'
-    +   '<label>Embedding 来源 <span style="font-size:11px;color:var(--text3);font-weight:400">（创建后不可改）</span></label>'
+    +   '<label>Embedding source <span style="font-size:11px;color:var(--text3);font-weight:400">(immutable after creation)</span></label>'
     +   '<div style="display:flex;gap:18px;margin:6px 0 8px 0;font-size:13px">'
     +     '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">'
-    +       '<input type="radio" name="km-dkb-embed-source" value="local" checked'
-    +         ' onchange="_kmSwitchEmbedSource(\'local\')"> 本地模型'
+    +       '<input type="radio" name="km-dkb-embed-source" value="llm" checked'
+    +         ' onchange="_kmSwitchEmbedSource(\'llm\')"> LLM Provider <span class="tc-text-dim" style="font-size:11px">(Ollama / OpenAI-compat)</span>'
     +     '</label>'
     +     '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">'
-    +       '<input type="radio" name="km-dkb-embed-source" value="llm"'
-    +         ' onchange="_kmSwitchEmbedSource(\'llm\')"> 远程 LLM Provider'
+    +       '<input type="radio" name="km-dkb-embed-source" value="local"'
+    +         ' onchange="_kmSwitchEmbedSource(\'local\')"> Local model'
     +     '</label>'
     +   '</div>'
-    // — Local sub-section (shown by default)
-    +   '<div id="km-dkb-embed-local-section">'
-    +     '<select id="km-dkb-embed-model"><option value="">加载中…</option></select>'
-    +     '<div id="km-dkb-embed-note" style="font-size:11px;color:var(--text3);margin-top:6px;line-height:1.55;white-space:pre-line;background:var(--surface3);border:1px solid var(--overlay-5);border-radius:8px;padding:8px 10px"></div>'
-    +   '</div>'
-    // — LLM provider sub-section (shown when "远程" is picked)
-    +   '<div id="km-dkb-llm-embed-section" style="display:none">'
+    // — LLM provider sub-section (default)
+    +   '<div id="km-dkb-llm-embed-section">'
     +     '<div class="form-group" style="margin-bottom:8px">'
     +       '<label style="font-size:12px">LLM Provider</label>'
-    +       '<select id="km-dkb-llm-embed-provider"><option value="">加载中…</option></select>'
+    +       '<select id="km-dkb-llm-embed-provider" onchange="_kmAutofillEmbedModel()"><option value="">Loading…</option></select>'
     +     '</div>'
     +     '<div class="form-group" style="margin-bottom:0">'
-    +       '<label style="font-size:12px">Embedding Model 名称 <span style="font-size:11px;color:var(--text3)">(该 provider 的模型 ID)</span></label>'
-    +       '<input id="km-dkb-llm-embed-model" placeholder="例如 nomic-embed-text / text-embedding-3-small / embedding-2">'
-    +       '<div style="font-size:11px;color:var(--text3);margin-top:4px;line-height:1.4">'
-    +         '此模型必须是该 LLM Provider <code style="font-size:11px">/v1/embeddings</code> 端点支持的 ID。看该 provider 的官方文档。'
+    +       '<label style="font-size:12px">Embedding model</label>'
+    +       '<input id="km-dkb-llm-embed-model" placeholder="e.g. bge-m3 / nomic-embed-text / text-embedding-3-small">'
+    +       '<div style="font-size:11px;color:var(--text3);margin-top:4px;line-height:1.4" id="km-dkb-embed-model-hint">'
+    +         'Must be a model ID supported by this provider\\\'s <code>/v1/embeddings</code> endpoint.'
     +       '</div>'
     +     '</div>'
+    +   '</div>'
+    // — Local sub-section (hidden by default)
+    +   '<div id="km-dkb-embed-local-section" style="display:none">'
+    +     '<select id="km-dkb-embed-model"><option value="">Loading…</option></select>'
+    +     '<div id="km-dkb-embed-note" style="font-size:11px;color:var(--text3);margin-top:6px;line-height:1.55;white-space:pre-line;background:var(--surface3);border:1px solid var(--overlay-5);border-radius:8px;padding:8px 10px"></div>'
     +   '</div>'
     + '</div>'
     // Cross-encoder reranker — optional. Adds latency, big precision win.
     + '<div class="form-group">'
-    +   '<label>Reranker 精排模型 <span style="font-size:11px;color:var(--text3);font-weight:400">（可选, 创建后可改）</span></label>'
-    +   '<select id="km-dkb-rerank-model"><option value="">加载中…</option></select>'
+    +   '<label>Reranker <span style="font-size:11px;color:var(--text3);font-weight:400">(optional, editable later)</span></label>'
+    +   '<select id="km-dkb-rerank-model"><option value="">Loading…</option></select>'
     +   '<div id="km-dkb-rerank-note" style="font-size:11px;color:var(--text3);margin-top:4px;line-height:1.4"></div>'
     + '</div>'
-    + '<div class="form-actions"><button class="btn btn-ghost" onclick="document.getElementById(\'km-dkb-modal\').remove()">取消</button>'
-    + '<button class="btn btn-primary" onclick="_kmSaveDomainKb()">创建</button></div>'
+    + '<div class="form-actions"><button class="btn btn-ghost" onclick="document.getElementById(\'km-dkb-modal\').remove()">Cancel</button>'
+    + '<button class="btn btn-primary" onclick="_lockBtn(this,\'Creating…\',_kmSaveDomainKb)">Create</button></div>'
     + '</div></div>';
   document.body.insertAdjacentHTML('beforeend', html);
 
-  api('GET', '/api/portal/rag/providers').then(function(data) {
-    var sel = document.getElementById('km-dkb-provider');
-    if (!sel || !data || !data.providers) return;
-    data.providers.forEach(function(p) {
-      if (!p.enabled) return;
-      var opt = document.createElement('option');
-      opt.value = p.id;
-      opt.textContent = p.name + ' (' + p.kind + ')';
-      sel.appendChild(opt);
-    });
-  }).catch(function(){});
+  // Storage stays hardcoded local — no /api/portal/rag/providers fetch.
+
+  // Eagerly populate the LLM provider dropdown since LLM-embedding is
+  // now the default. Auto-select an Ollama provider if one exists,
+  // and auto-fill the model field with a sensible default per kind.
+  api('GET', '/api/portal/providers').then(function(data) {
+    var sel = document.getElementById('km-dkb-llm-embed-provider');
+    if (!sel) return;
+    var providers = (data && data.providers) || [];
+    if (!providers.length) {
+      sel.innerHTML = '<option value="">(no LLM providers configured — add one in Settings → LLM Providers)</option>';
+      return;
+    }
+    sel.innerHTML = '<option value="">— Select provider —</option>'
+      + providers.map(function(p) {
+          var label = (p.name || p.id) + ' (' + (p.kind || '?')
+                    + (p.base_url ? ' · ' + p.base_url.slice(0, 30) : '') + ')';
+          return '<option value="' + esc(p.id || '') + '" data-kind="' + esc((p.kind || '').toLowerCase()) + '" data-name="' + esc((p.name || '').toLowerCase()) + '">' + esc(label) + '</option>';
+        }).join('');
+    // Auto-pick Ollama if present, else the first provider.
+    var pickIdx = 0;
+    for (var i = 0; i < providers.length; i++) {
+      var p = providers[i];
+      var nm = (p.name || '').toLowerCase();
+      var kd = (p.kind || '').toLowerCase();
+      if (nm.indexOf('ollama') >= 0 || kd === 'ollama') { pickIdx = i + 1; break; }
+    }
+    if (pickIdx > 0) {
+      sel.selectedIndex = pickIdx;
+      _kmAutofillEmbedModel();
+    }
+  }).catch(function() {
+    var sel = document.getElementById('km-dkb-llm-embed-provider');
+    if (sel) sel.innerHTML = '<option value="">load failed — check master is running</option>';
+  });
 
   // Load embedding model catalog. Two groups:
   //   1. curated (recommended/safe options)
@@ -24366,27 +25664,51 @@ function _kmSwitchEmbedSource(source) {
   if (source === 'llm') {
     localSec.style.display = 'none';
     llmSec.style.display = '';
-    // Lazy-load LLM provider list on first switch — keeps the dialog
-    // snappy when the operator stays on local.
-    var sel = document.getElementById('km-dkb-llm-embed-provider');
-    if (sel && sel.options.length <= 1) {
-      api('GET', '/api/portal/providers').then(function(data) {
-        var providers = (data && data.providers) || [];
-        sel.innerHTML = '<option value="">— 选择 provider —</option>'
-          + providers.map(function(p) {
-              var label = (p.name || p.id) + ' (' + (p.kind || '?')
-                        + (p.base_url ? ' · ' + p.base_url.slice(0, 30) : '') + ')';
-              return '<option value="' + esc(p.id || '') + '">' + esc(label) + '</option>';
-            }).join('');
-      }).catch(function() {
-        sel.innerHTML = '<option value="">加载失败 — 检查 master 是否在跑</option>';
-      });
-    }
+    // Provider list is now eager-loaded on modal open, so nothing
+    // else to do here.
   } else {
     localSec.style.display = '';
     llmSec.style.display = 'none';
   }
 }
+
+// Pick the most-likely embedding model name for a provider kind.
+// Saves the operator a trip to the provider docs for the common
+// case (Ollama → bge-m3, OpenAI-style → text-embedding-3-small).
+window._kmAutofillEmbedModel = function() {
+  var sel = document.getElementById('km-dkb-llm-embed-provider');
+  var modelInp = document.getElementById('km-dkb-llm-embed-model');
+  var hint = document.getElementById('km-dkb-embed-model-hint');
+  if (!sel || !modelInp) return;
+  var opt = sel.options[sel.selectedIndex];
+  if (!opt || !opt.value) return;
+  var kind = (opt.dataset.kind || '').toLowerCase();
+  var name = (opt.dataset.name || '').toLowerCase();
+  // Don't overwrite a value the user has typed.
+  if (modelInp.value && modelInp.value.trim()) return;
+  var defaultModel = '';
+  var hintText = '';
+  if (kind === 'ollama' || name.indexOf('ollama') >= 0) {
+    defaultModel = 'bge-m3';
+    hintText = 'Ollama default — pull it first: <code>ollama pull bge-m3</code>';
+  } else if (kind === 'openai' || name.indexOf('openai') >= 0 || name.indexOf('gpt') >= 0) {
+    defaultModel = 'text-embedding-3-small';
+    hintText = 'OpenAI default. Use <code>text-embedding-3-large</code> for higher dim.';
+  } else if (name.indexOf('zhipu') >= 0 || name.indexOf('glm') >= 0) {
+    defaultModel = 'embedding-2';
+    hintText = 'Zhipu default — see GLM /v1/embeddings docs for alternatives.';
+  } else if (name.indexOf('qwen') >= 0 || name.indexOf('alibaba') >= 0 || name.indexOf('dashscope') >= 0) {
+    defaultModel = 'text-embedding-v3';
+    hintText = 'DashScope/Qwen default. v2/v3 supported.';
+  } else if (name.indexOf('claude') >= 0 || name.indexOf('anthropic') >= 0) {
+    defaultModel = '';
+    hintText = '⚠ Anthropic does NOT serve embeddings — pick a different provider for this KB.';
+  } else {
+    hintText = 'Must be a model ID supported by this provider\'s <code>/v1/embeddings</code> endpoint.';
+  }
+  if (defaultModel) modelInp.value = defaultModel;
+  if (hint) hint.innerHTML = hintText;
+};
 
 async function _kmSaveDomainKb() {
   var name = (document.getElementById('km-dkb-name')||{}).value||'';
@@ -24405,11 +25727,11 @@ async function _kmSaveDomainKb() {
   if (useLlmEmbed) {
     llmEmbedProvider = (document.getElementById('km-dkb-llm-embed-provider')||{}).value || '';
     var llmEmbedModel = ((document.getElementById('km-dkb-llm-embed-model')||{}).value || '').trim();
-    if (!llmEmbedProvider) { alert('请选择 LLM Provider'); return; }
-    if (!llmEmbedModel)    { alert('请填写 Embedding Model 名称（该 provider 的模型 ID）'); return; }
+    if (!llmEmbedProvider) { alert('Please select LLM Provider'); return; }
+    if (!llmEmbedModel)    { alert('Please fill Embedding Model name (the model ID at this provider)'); return; }
     embedModel = llmEmbedModel;
   }
-  if (!name.trim()) { alert('名称不能为空'); return; }
+  if (!name.trim()) { alert('Name cannot be empty'); return; }
   try {
     await api('POST', '/api/portal/domain-kb/create', {
       name: name,
@@ -24436,11 +25758,11 @@ function _kmEditDomainKb(kbId) {
       + '<div class="form-group"><label>名称</label><input id="km-dkb-edit-name" value="'+esc(kb.name)+'"></div>'
       + '<div class="form-group"><label>描述</label><input id="km-dkb-edit-desc" value="'+esc(kb.description||'')+'"></div>'
       + '<div class="form-group"><label>标签</label><input id="km-dkb-edit-tags" value="'+esc((kb.tags||[]).join(', '))+'"></div>'
-      + '<div class="form-actions"><button class="btn btn-ghost" onclick="document.getElementById(\'km-dkb-edit-modal\').remove()">取消</button>'
+      + '<div class="form-actions"><button class="btn btn-ghost" onclick="document.getElementById(\'km-dkb-edit-modal\').remove()">Cancel</button>'
       + '<button class="btn btn-primary" onclick="_kmSaveEditDomainKb(\''+esc(kbId)+'\')">保存</button></div>'
       + '</div></div>';
     document.body.insertAdjacentHTML('beforeend', html);
-  }).catch(function(e){ alert('加载失败: '+e); });
+  }).catch(function(e){ alert('Load failed:'+e); });
 }
 
 async function _kmSaveEditDomainKb(kbId) {
@@ -24451,7 +25773,7 @@ async function _kmSaveEditDomainKb(kbId) {
     await api('POST', '/api/portal/domain-kb/update', {id:kbId, name:name, description:desc, tags:tags});
     var m = document.getElementById('km-dkb-edit-modal'); if(m) m.remove();
     _renderKmPrivate();
-  } catch(e) { alert('保存失败: '+e); }
+  } catch(e) { alert('Save failed:'+e); }
 }
 
 async function _kmDeleteDomainKb(kbId, name) {
@@ -24459,7 +25781,7 @@ async function _kmDeleteDomainKb(kbId, name) {
   try {
     await api('POST', '/api/portal/domain-kb/delete', {id:kbId});
     _renderKmPrivate();
-  } catch(e) { alert('删除失败: '+e); }
+  } catch(e) { alert('Delete failed:'+e); }
 }
 
 function _kmShowDomainImport(kbId, kbName) {
@@ -24467,20 +25789,20 @@ function _kmShowDomainImport(kbId, kbName) {
   // Two tabs: "单文件/文本" (existing) and "文件夹批量" (new).
   var html = '<div class="modal-overlay" id="km-import-modal" onclick="if(event.target===this)this.remove()">'
     + '<div class="modal" style="max-width:680px">'
-    + '<h3>导入知识到: '+esc(kbName)+'</h3>'
+    + '<h3>Import Knowledge to: '+esc(kbName)+'</h3>'
     // Tab header
     + '<div style="display:flex;gap:4px;border-bottom:1px solid var(--border);margin-bottom:14px">'
-      + '<button class="km-imp-tab" id="km-imp-tab-file" data-tab="file" onclick="_kmSwitchImpTab(\'file\')" style="padding:8px 14px;background:none;border:none;border-bottom:2px solid var(--primary);font-size:13px;font-weight:600;color:var(--primary);cursor:pointer">📄 单文件 / 文本</button>'
-      + '<button class="km-imp-tab" id="km-imp-tab-folder" data-tab="folder" onclick="_kmSwitchImpTab(\'folder\')" style="padding:8px 14px;background:none;border:none;border-bottom:2px solid transparent;font-size:13px;color:var(--text3);cursor:pointer">📁 文件夹批量</button>'
+      + '<button class="km-imp-tab" id="km-imp-tab-file" data-tab="file" onclick="_kmSwitchImpTab(\'file\')" style="padding:8px 14px;background:none;border:none;border-bottom:2px solid var(--primary);font-size:13px;font-weight:600;color:var(--primary);cursor:pointer">📄 Single File / Text</button>'
+      + '<button class="km-imp-tab" id="km-imp-tab-folder" data-tab="folder" onclick="_kmSwitchImpTab(\'folder\')" style="padding:8px 14px;background:none;border:none;border-bottom:2px solid transparent;font-size:13px;color:var(--text3);cursor:pointer">📁 Folder Batch</button>'
     + '</div>'
     // ── TAB 1: File/Text (existing) ──
     + '<div id="km-imp-pane-file">'
-    + '<div style="font-size:12px;color:var(--text3);margin-bottom:14px">上传文件或粘贴文本，系统自动解析并分块导入。</div>'
+    + '<div style="font-size:12px;color:var(--text3);margin-bottom:14px">Upload a file or paste text — server parses and chunks it automatically.</div>'
     + '<div id="km-imp-file-zone" style="border:2px dashed var(--border);border-radius:10px;padding:24px;text-align:center;cursor:pointer;margin-bottom:14px;transition:all 0.2s;background:var(--surface)" onclick="document.getElementById(\'km-imp-file-input\').click()" ondragover="event.preventDefault();this.style.borderColor=\'var(--primary)\';this.style.background=\'var(--primary-tint-6)\'" ondragleave="this.style.borderColor=\'var(--border)\';this.style.background=\'var(--surface)\'" ondrop="event.preventDefault();this.style.borderColor=\'var(--border)\';this.style.background=\'var(--surface)\';_kmHandleFileDrop(event)">'
       + '<input type="file" id="km-imp-file-input" accept=".pdf,.docx,.doc,.html,.htm,.txt,.md,.csv,.tsv,.json,.log" style="display:none" onchange="_kmHandleFileSelect(this)">'
       + '<span class="material-symbols-outlined" style="font-size:36px;color:var(--text3);display:block;margin-bottom:8px">upload_file</span>'
-      + '<div style="font-size:13px;color:var(--text2);font-weight:600">点击或拖拽文件到此处</div>'
-      + '<div style="font-size:11px;color:var(--text3);margin-top:4px">支持 PDF、Word (.docx)、HTML、TXT、Markdown、CSV</div>'
+      + '<div style="font-size:13px;color:var(--text2);font-weight:600">Click or drop a file here</div>'
+      + '<div style="font-size:11px;color:var(--text3);margin-top:4px">Supports PDF, Word (.docx), HTML, TXT, Markdown, CSV</div>'
     + '</div>'
     + '<div id="km-imp-file-info" style="display:none;padding:10px 14px;background:rgba(63,185,80,0.08);border:1px solid rgba(63,185,80,0.2);border-radius:8px;margin-bottom:14px;font-size:12px">'
       + '<div style="display:flex;align-items:center;gap:8px"><span class="material-symbols-outlined" style="font-size:18px;color:#3fb950">description</span>'
@@ -24491,23 +25813,23 @@ function _kmShowDomainImport(kbId, kbName) {
       + '</div>'
       + '<div id="km-imp-file-preview" style="margin-top:6px;font-size:11px;color:var(--text3);max-height:60px;overflow:hidden"></div>'
     + '</div>'
-    + '<div style="display:flex;align-items:center;gap:12px;margin-bottom:14px"><div style="flex:1;height:1px;background:var(--border)"></div><span style="font-size:11px;color:var(--text3)">或直接粘贴文本</span><div style="flex:1;height:1px;background:var(--border)"></div></div>'
-    + '<div class="form-group"><label>文档标题</label><input id="km-imp-title" placeholder="e.g. 劳动法合集"></div>'
-    + '<div class="form-group"><label>文本内容</label><textarea id="km-imp-content" rows="6" placeholder="上传文件后此处自动填入"></textarea></div>'
+    + '<div style="display:flex;align-items:center;gap:12px;margin-bottom:14px"><div style="flex:1;height:1px;background:var(--border)"></div><span style="font-size:11px;color:var(--text3)">or paste text directly</span><div style="flex:1;height:1px;background:var(--border)"></div></div>'
+    + '<div class="form-group"><label>Document title</label><input id="km-imp-title" placeholder="e.g. Labor law compendium"></div>'
+    + '<div class="form-group"><label>Text content</label><textarea id="km-imp-content" rows="6" placeholder="Auto-filled after a file is uploaded"></textarea></div>'
     + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">'
-      + '<div class="form-group"><label>标签</label><input id="km-imp-tags" placeholder="法律,劳动法"></div>'
-      + '<div class="form-group"><label>分块大小</label><input id="km-imp-chunk" type="number" value="1000" min="200" max="5000"></div>'
+      + '<div class="form-group"><label>Tags</label><input id="km-imp-tags" placeholder="law,labor"></div>'
+      + '<div class="form-group"><label>Chunk size</label><input id="km-imp-chunk" type="number" value="1000" min="200" max="5000"></div>'
     + '</div>'
     + '</div>' // end pane-file
     // ── TAB 2: Folder (browser-side picker) ──
     + '<div id="km-imp-pane-folder" style="display:none">'
-    + '<div style="font-size:12px;color:var(--text3);margin-bottom:14px">浏览本地文件夹 → 自动枚举所有支持的文件 → 分批上传并入库。文件夹不必在服务器上。</div>'
+    + '<div style="font-size:12px;color:var(--text3);margin-bottom:14px">Browse a local folder → auto-enumerate all supported files → batch-upload and ingest. Folder doesn\'t need to be on the server.</div>'
     + '<div id="km-imp-folder-zone" style="border:2px dashed var(--border);border-radius:10px;padding:24px;text-align:center;cursor:pointer;margin-bottom:14px;background:var(--surface)" onclick="document.getElementById(\'km-imp-folder-input\').click()">'
       // webkitdirectory makes the file input a folder picker in Chromium/Edge/Safari.
       + '<input type="file" id="km-imp-folder-input" webkitdirectory directory multiple style="display:none" onchange="_kmOnFolderPicked(this)">'
       + '<span class="material-symbols-outlined" style="font-size:36px;color:var(--text3);display:block;margin-bottom:8px">folder_open</span>'
-      + '<div style="font-size:13px;color:var(--text2);font-weight:600">点击选择文件夹</div>'
-      + '<div style="font-size:11px;color:var(--text3);margin-top:4px">浏览器会读取整个文件夹（含子目录）的全部文件</div>'
+      + '<div style="font-size:13px;color:var(--text2);font-weight:600">Click to choose folder</div>'
+      + '<div style="font-size:11px;color:var(--text3);margin-top:4px">Browser will read all files from the folder (including subdirectories)</div>'
     + '</div>'
     + '<div id="km-imp-folder-summary" style="display:none;padding:10px 14px;background:rgba(63,185,80,0.08);border:1px solid rgba(63,185,80,0.2);border-radius:8px;margin-bottom:14px;font-size:12px">'
       + '<div style="display:flex;align-items:center;gap:8px"><span class="material-symbols-outlined" style="font-size:18px;color:#3fb950">folder</span>'
@@ -24519,13 +25841,13 @@ function _kmShowDomainImport(kbId, kbName) {
       + '<div id="km-imp-folder-preview" style="margin-top:6px;font-size:11px;color:var(--text3);max-height:90px;overflow-y:auto;line-height:1.6"></div>'
     + '</div>'
     + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">'
-      + '<div class="form-group"><label>扩展名白名单 (逗号分隔；留空=全部支持的)</label>'
+      + '<div class="form-group"><label>Extension whitelist (comma-separated; blank = all supported)</label>'
         + '<input id="km-imp-folder-exts" placeholder="pdf,docx,md,txt,html" style="font-family:monospace;font-size:12px"></div>'
-      + '<div class="form-group"><label>单文件大小上限 (MB)</label><input id="km-imp-folder-maxsize" type="number" value="20" min="1" max="500"></div>'
+      + '<div class="form-group"><label>Max file size (MB)</label><input id="km-imp-folder-maxsize" type="number" value="20" min="1" max="500"></div>'
     + '</div>'
     + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">'
-      + '<div class="form-group"><label>标签</label><input id="km-imp-folder-tags" placeholder="法律,合规"></div>'
-      + '<div class="form-group"><label>分块大小</label><input id="km-imp-folder-chunk" type="number" value="1000" min="200" max="5000"></div>'
+      + '<div class="form-group"><label>Tags</label><input id="km-imp-folder-tags" placeholder="law,compliance"></div>'
+      + '<div class="form-group"><label>Chunk size</label><input id="km-imp-folder-chunk" type="number" value="1000" min="200" max="5000"></div>'
     + '</div>'
     + '<div id="km-imp-folder-progress" style="display:none;padding:8px 12px;background:var(--primary-tint-8);border-radius:6px;font-size:12px;margin-bottom:10px">'
       + '<div id="km-imp-folder-progress-msg">Uploading…</div>'
@@ -24534,8 +25856,8 @@ function _kmShowDomainImport(kbId, kbName) {
     + '</div>' // end pane-folder
     + '<div id="km-imp-status" style="display:none;padding:8px 12px;margin-bottom:10px;border-radius:6px;font-size:12px"></div>'
     + '<div class="form-actions">'
-      + '<button class="btn btn-ghost" onclick="document.getElementById(\'km-import-modal\').remove()">取消</button>'
-      + '<button class="btn btn-primary" id="km-imp-submit-btn" onclick="_kmDoDomainImport(\''+esc(kbId)+'\')">导入</button>'
+      + '<button class="btn btn-ghost" onclick="document.getElementById(\'km-import-modal\').remove()">Cancel</button>'
+      + '<button class="btn btn-primary" id="km-imp-submit-btn" onclick="_kmDoDomainImport(\''+esc(kbId)+'\')">Import</button>'
     + '</div>'
     + '</div></div>';
   document.body.insertAdjacentHTML('beforeend', html);
@@ -24630,7 +25952,7 @@ function _kmSwitchImpTab(tab) {
     if (tabFile) { tabFile.style.color = 'var(--text3)';
                    tabFile.style.borderBottomColor = 'transparent';
                    tabFile.style.fontWeight = 'normal'; }
-    if (submit) submit.textContent = '导入文件夹';
+    if (submit) submit.textContent = 'Import folder';
   } else {
     paneFile.style.display = '';
     paneFolder.style.display = 'none';
@@ -24640,7 +25962,7 @@ function _kmSwitchImpTab(tab) {
     if (tabFolder) { tabFolder.style.color = 'var(--text3)';
                      tabFolder.style.borderBottomColor = 'transparent';
                      tabFolder.style.fontWeight = 'normal'; }
-    if (submit) submit.textContent = '导入';
+    if (submit) submit.textContent = 'Import';
   }
 }
 
@@ -24651,7 +25973,7 @@ async function _kmDoDomainImport(kbId) {
   if (tab === 'folder') {
     // ── Browser-side folder import path ──
     var files = window._kmFolderFiles || [];
-    if (!files.length) { alert('请先点击"点击选择文件夹"选定本地文件夹'); return; }
+    if (!files.length) { alert('Please click "Click to choose folder" first to pick a local folder'); return; }
 
     var extsRaw = ((document.getElementById('km-imp-folder-exts')||{}).value||'').trim();
     var extsFilter = extsRaw
@@ -24719,7 +26041,7 @@ async function _kmDoDomainImport(kbId) {
       heartbeatTimer = setInterval(function() {
         if (!progMsg) return;
         var sec = Math.floor((Date.now() - batchStartedAt) / 1000);
-        var hint = sec > 30 ? ' (服务端 embedding 中，首次较慢)' : '';
+        var hint = sec > 30 ? ' (server is embedding, first time is slower)' : '';
         progMsg.textContent = heartbeatBase + ' · ' + sec + 's' + hint;
       }, 1000);
     }
@@ -24738,7 +26060,7 @@ async function _kmDoDomainImport(kbId) {
             data_base64: b64,
           };
         }));
-        var batchLabel = '上传 batch ' + (Math.floor(i / BATCH) + 1) +
+        var batchLabel = 'Uploading batch ' + (Math.floor(i / BATCH) + 1) +
           '/' + Math.ceil(accepted.length / BATCH) +
           ' (' + Math.min(i + BATCH, accepted.length) + '/' + accepted.length + ' 文件)';
         if (progBar) progBar.style.width = Math.round((i / accepted.length) * 100) + '%';
@@ -24805,7 +26127,7 @@ async function _kmDoDomainImport(kbId) {
       } else if (/HTTP 5\d\d|Internal Server Error/i.test(msg)) {
         short = '导入失败 — 服务端报错 (看 master 日志)';
       } else {
-        short = '导入失败: ' + msg.slice(0, 120);
+        short = 'Import failed:' + msg.slice(0, 120);
       }
       if (typeof window._toast === 'function') {
         window._toast(short, 'error');
@@ -24813,7 +26135,7 @@ async function _kmDoDomainImport(kbId) {
         alert(short);
       }
       try { console.error('[KB import] error:', e); } catch(_) {}
-      if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = '导入文件夹'; }
+      if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Import folder'; }
       if (progEl) progEl.style.display = 'none';
     }
     return;
@@ -24824,19 +26146,19 @@ async function _kmDoDomainImport(kbId) {
   var content = (document.getElementById('km-imp-content')||{}).value||'';
   var tags = ((document.getElementById('km-imp-tags')||{}).value||'').split(',').map(function(t){return t.trim()}).filter(Boolean);
   var chunk = parseInt((document.getElementById('km-imp-chunk')||{}).value)||1000;
-  if (!content.trim()) { alert('内容不能为空'); return; }
-  if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = '导入中...'; }
+  if (!content.trim()) { alert('Content cannot be empty'); return; }
+  if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Importing…'; }
   try {
     var res = await api('POST', '/api/portal/domain-kb/import', {
       kb_id:kbId, title:title, content:content, tags:tags, chunk_size:chunk
     });
     window._kmFileData = null;
-    alert('导入完成: '+((res&&res.chunks)||0)+' 个分块');
+    alert('Import complete:'+((res&&res.chunks)||0)+' 个分块');
     var m = document.getElementById('km-import-modal'); if(m)m.remove();
     _renderKmPrivate();
   } catch(e) {
-    alert('导入失败: '+e);
-    if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = '导入'; }
+    alert('Import failed:'+e);
+    if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Import'; }
   }
 }
 
@@ -24846,10 +26168,10 @@ async function _kmSearchDomainKb(kbId, kbName) {
   api('POST', '/api/portal/domain-kb/search', {kb_id:kbId, query:q, top_k:5})
     .then(function(data) {
       var results = (data&&data.results)||[];
-      if (!results.length) { alert('未找到匹配结果'); return; }
+      if (!results.length) { alert('No matching results'); return; }
       var msg = results.map(function(r,i){return (i+1)+'. '+(r.title||'untitled')+' (distance: '+(r.distance||0).toFixed(3)+')\n  '+((r.content||'').substring(0,100));}).join('\n\n');
-      alert('检索结果 ('+results.length+' 条):\n\n'+msg);
-    }).catch(function(e){ alert('检索失败: '+e); });
+      alert('Search results ('+results.length+' 条):\n\n'+msg);
+    }).catch(function(e){ alert('Search failed:'+e); });
 }
 
 // ── Tab 3: RAG Providers ──
@@ -24889,26 +26211,94 @@ async function _renderKmRagProviders() {
       + '</div>'
       + listHtml;
   } catch(e) {
-    sc.innerHTML = '<div style="color:var(--error);padding:20px">加载失败: '+e+'</div>';
+    sc.innerHTML = '<div style="color:var(--error);padding:20px">Load failed:'+e+'</div>';
   }
 }
 
 function _kmShowAddProvider() {
   var html = '<div class="modal-overlay" id="km-prov-modal" onclick="if(event.target===this)this.remove()">'
-    + '<div class="modal" style="max-width:480px">'
-    + '<h3>添加 RAG 提供方</h3>'
-    + '<div class="form-group"><label>名称 *</label><input id="km-prov-name" placeholder="e.g. 远程 Node-2 RAG"></div>'
-    + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">'
-      + '<div class="form-group"><label>类型</label><select id="km-prov-kind"><option value="remote">远程 HTTP</option><option value="local">本地</option></select></div>'
-      + '<div class="form-group"><label>API Key (可选)</label><input id="km-prov-key" placeholder="Bearer token"></div>'
+    + '<div class="modal" style="max-width:520px">'
+    + '<h3>Add RAG Provider</h3>'
+    + '<p style="font-size:11px;color:var(--text3);margin:-6px 0 14px;line-height:1.5">'
+    +   'Pick an existing LLM Provider as the source — base URL is auto-filled from its config. '
+    +   'For Ollama / OpenAI-compat backends with no <code>/api/rag/search</code>, the dropdown also lets you set the embedding model so the local Chroma store can use it.'
+    + '</p>'
+    + '<div class="form-group"><label>Provider Source *</label>'
+    +   '<select id="km-prov-source" onchange="_kmOnProviderSourceChange()">'
+    +     '<option value="">Loading existing LLM Providers…</option>'
+    +     '<option value="__manual__">Custom (enter base URL manually)</option>'
+    +   '</select>'
     + '</div>'
-    + '<div class="form-group"><label>Base URL *</label><input id="km-prov-url" placeholder="http://192.168.1.100:8765"></div>'
-    + '<div class="form-group"><label>Node Secret (可选，TudouClaw 节点间认证)</label><input id="km-prov-secret" placeholder="X-Claw-Secret"></div>'
-    + '<div class="form-actions"><button class="btn btn-ghost" onclick="document.getElementById(\'km-prov-modal\').remove()">取消</button>'
-    + '<button class="btn btn-primary" onclick="_kmSaveProvider()">保存</button></div>'
+    + '<div class="form-group"><label>Name *</label><input id="km-prov-name" placeholder="e.g. Office Node RAG"></div>'
+    + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">'
+    +   '<div class="form-group"><label>Kind</label><select id="km-prov-kind"><option value="remote">Remote HTTP</option><option value="local">Local</option></select></div>'
+    +   '<div class="form-group"><label>API Key <span style="font-size:11px;color:var(--text3)">(optional)</span></label><input id="km-prov-key" placeholder="Bearer token"></div>'
+    + '</div>'
+    + '<div class="form-group"><label>Base URL *</label><input id="km-prov-url" placeholder="http://192.168.1.100:8765" readonly style="background:var(--surface-container-low);opacity:0.85"><div style="font-size:11px;color:var(--text3);margin-top:4px" id="km-prov-url-hint">Pick a Provider Source above; switch to Custom to type a URL.</div></div>'
+    + '<div class="form-group"><label>Embedding Model <span style="font-size:11px;color:var(--text3)">(used as Chroma embedding when this provider is the source)</span></label><input id="km-prov-secret" placeholder="e.g. bge-m3 / nomic-embed-text / text-embedding-3-small"></div>'
+    + '<div class="form-actions"><button class="btn btn-ghost" onclick="document.getElementById(\'km-prov-modal\').remove()">Cancel</button>'
+    + '<button class="btn btn-primary" onclick="_kmSaveProvider()">Save</button></div>'
     + '</div></div>';
   document.body.insertAdjacentHTML('beforeend', html);
+
+  // Populate the source dropdown from existing LLM providers.
+  api('GET', '/api/portal/providers').then(function(data) {
+    var sel = document.getElementById('km-prov-source');
+    if (!sel || !data || !data.providers) return;
+    sel.innerHTML = '';
+    var optEmpty = document.createElement('option');
+    optEmpty.value = '';
+    optEmpty.textContent = '— Select an LLM Provider —';
+    sel.appendChild(optEmpty);
+    (data.providers || []).forEach(function(p) {
+      if (!p.base_url) return;
+      var opt = document.createElement('option');
+      opt.value = p.id || p.name;
+      opt.textContent = (p.name || p.id) + '  ·  ' + p.base_url;
+      opt.dataset.url = p.base_url;
+      opt.dataset.name = p.name || '';
+      opt.dataset.key = p.api_key || '';
+      sel.appendChild(opt);
+    });
+    var optManual = document.createElement('option');
+    optManual.value = '__manual__';
+    optManual.textContent = 'Custom (enter base URL manually)';
+    sel.appendChild(optManual);
+  }).catch(function(){});
 }
+
+window._kmOnProviderSourceChange = function() {
+  var sel = document.getElementById('km-prov-source');
+  var urlInp = document.getElementById('km-prov-url');
+  var keyInp = document.getElementById('km-prov-key');
+  var nameInp = document.getElementById('km-prov-name');
+  var hint = document.getElementById('km-prov-url-hint');
+  if (!sel || !urlInp) return;
+  var v = sel.value;
+  if (v === '' ) {
+    urlInp.value = '';
+    urlInp.readOnly = true;
+    urlInp.style.background = 'var(--surface-container-low)';
+    if (hint) hint.textContent = 'Pick a Provider Source above; switch to Custom to type a URL.';
+    return;
+  }
+  if (v === '__manual__') {
+    urlInp.value = '';
+    urlInp.readOnly = false;
+    urlInp.style.background = 'var(--bg)';
+    if (hint) hint.textContent = 'Custom mode: type the remote endpoint manually (it must implement /api/rag/search).';
+    return;
+  }
+  var opt = sel.options[sel.selectedIndex];
+  if (opt && opt.dataset && opt.dataset.url) {
+    urlInp.value = opt.dataset.url;
+    urlInp.readOnly = true;
+    urlInp.style.background = 'var(--surface-container-low)';
+    if (keyInp && opt.dataset.key) keyInp.value = opt.dataset.key;
+    if (nameInp && !nameInp.value) nameInp.value = opt.dataset.name + ' RAG';
+    if (hint) hint.textContent = 'Pulled from LLM Provider "' + (opt.dataset.name || '') + '". Edit only via that provider\'s settings.';
+  }
+};
 
 async function _kmSaveProvider() {
   var name = (document.getElementById('km-prov-name')||{}).value||'';
@@ -24916,15 +26306,16 @@ async function _kmSaveProvider() {
   var url = (document.getElementById('km-prov-url')||{}).value||'';
   var key = (document.getElementById('km-prov-key')||{}).value||'';
   var secret = (document.getElementById('km-prov-secret')||{}).value||'';
-  if (!name.trim()) { alert('名称不能为空'); return; }
+  if (!name.trim()) { alert('Name is required'); return; }
+  if (!url.trim()) { alert('Base URL is required — pick a Provider Source or switch to Custom and enter one'); return; }
   try {
     await api('POST', '/api/portal/rag/providers', {
       name:name, kind:kind, base_url:url, api_key:key,
-      config: secret ? {node_secret:secret} : {}
+      config: secret ? {embedding_model:secret} : {}
     });
     var m = document.getElementById('km-prov-modal'); if(m)m.remove();
     _renderKmRagProviders();
-  } catch(e) { alert('保存失败: '+e); }
+  } catch(e) { alert('Save failed: '+e); }
 }
 
 async function _kmDeleteProvider(id) {
@@ -24932,7 +26323,7 @@ async function _kmDeleteProvider(id) {
   try {
     await api('POST', '/api/portal/rag/providers/'+id+'/delete');
     _renderKmRagProviders();
-  } catch(e) { alert('删除失败: '+e); }
+  } catch(e) { alert('Delete failed:'+e); }
 }
 
 // ============ Tech (Aether) — RAG Providers (stitch_26) ============
@@ -24945,63 +26336,135 @@ async function _renderKmRagProvidersTech() {
     var data = await api('GET', '/api/portal/rag/providers');
     var providers = (data && data.providers) || [];
 
-    var builtinCard =
-      '<div class="tc-card-glass" style="padding:18px;display:flex;align-items:center;gap:14px;border-top:1px solid rgba(255,255,255,0.10);box-shadow:0 0 12px rgba(173,255,47,0.08)">' +
-        '<div style="width:42px;height:42px;border-radius:var(--r-md);background:rgba(173,255,47,0.10);border:1px solid rgba(173,255,47,0.25);display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
-          '<span class="material-symbols-outlined" style="font-size:22px;color:var(--cyber-lime, #adff2f)">storage</span>' +
-        '</div>' +
-        '<div style="flex:1;min-width:0">' +
-          '<div style="display:flex;align-items:center;gap:8px;margin-bottom:2px">' +
-            '<span style="font-size:14px;font-weight:600;color:var(--on-surface)">Local ChromaDB</span>' +
-            '<span class="tc-mono-label" style="padding:2px 7px;border-radius:var(--r-md);background:rgba(173,255,47,0.10);color:var(--cyber-lime, #adff2f);border:1px solid rgba(173,255,47,0.25);font-size:9px">BUILT-IN</span>' +
-          '</div>' +
-          '<div class="tc-text-dim" style="font-size:11px;font-family:var(--font-mono);letter-spacing:0.03em">~/.tudou_claw/chromadb · zero-config vector store</div>' +
-        '</div>' +
-      '</div>';
+    // Stitch_26 bento card. Same recipe shared by built-in + remote
+    // providers, parameterized by status / icon / accent color / stats.
+    // Layout: large ghost icon top-right, header row with small icon
+    // square + status pill, h3 + TYPE kicker, 2-col stats grid, action
+    // row at the bottom.
+    var card = function(opts) {
+      var accent = opts.accent || 'var(--primary)';
+      var accentRGB = opts.accentRGB || '192,193,255';  // for rgba bg
+      var stat = function(label, val, valColor) {
+        return '<div>' +
+          '<p class="tc-mono-label" style="font-size:10px;color:var(--outline);margin:0 0 4px">' + esc(label) + '</p>' +
+          '<p style="font-family:var(--font-body);font-size:14px;color:' + (valColor || 'var(--on-surface)') + ';margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + val + '</p>' +
+        '</div>';
+      };
+      return '<div class="tc-card-glass" style="' +
+               'padding:var(--s-lg);display:flex;flex-direction:column;gap:14px;' +
+               'position:relative;overflow:hidden;border-top:1px solid rgba(255,255,255,0.15);' +
+               (opts.glow ? 'box-shadow:0 0 15px -3px rgba(' + accentRGB + ',0.30);' : '') +
+             '">' +
+               // Ghost icon top-right (decorative)
+               '<div style="position:absolute;top:0;right:0;padding:14px;pointer-events:none">' +
+                 '<span class="material-symbols-outlined" style="font-size:64px;color:rgba(' + accentRGB + ',0.18);margin:-12px -12px 0 0">' + esc(opts.ghostIcon || opts.icon) + '</span>' +
+               '</div>' +
+               // Header: small icon square + status pill
+               '<div style="display:flex;justify-content:space-between;align-items:flex-start;position:relative">' +
+                 '<div style="padding:8px;background:rgba(' + accentRGB + ',0.10);border:1px solid rgba(' + accentRGB + ',0.20);border-radius:var(--r-md);display:inline-flex">' +
+                   '<span class="material-symbols-outlined" style="font-size:22px;color:' + accent + ';font-variation-settings:\'FILL\' 1">' + esc(opts.icon) + '</span>' +
+                 '</div>' +
+                 '<div style="display:flex;align-items:center;gap:6px;background:var(--surface-container-high);padding:4px 10px;border-radius:9999px;border:1px solid rgba(255,255,255,0.05)">' +
+                   '<span style="width:6px;height:6px;border-radius:50%;background:' + opts.statusColor + ';' + (opts.statusPulse ? 'animation:pulse-dot 2s infinite ease-in-out;box-shadow:0 0 6px ' + opts.statusColor + ';' : '') + '"></span>' +
+                   '<span class="tc-mono-label" style="font-size:10px;color:var(--on-surface);letter-spacing:0.05em">' + esc(opts.statusLabel) + '</span>' +
+                 '</div>' +
+               '</div>' +
+               // Title + TYPE kicker
+               '<div style="position:relative">' +
+                 '<h3 style="font-family:var(--font-display);font-size:22px;font-weight:600;color:var(--on-surface);margin:0;letter-spacing:-0.01em;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(opts.title) + '</h3>' +
+                 '<p class="tc-mono-label" style="font-size:10px;color:var(--on-surface-variant);margin:4px 0 0">' + esc(opts.subtitle) + '</p>' +
+               '</div>' +
+               // 2-col stats grid (top + bottom border)
+               '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:12px 0;border-top:1px solid rgba(255,255,255,0.05);border-bottom:1px solid rgba(255,255,255,0.05)">' +
+                 stat(opts.stat1Label, opts.stat1Val, opts.stat1Color) +
+                 stat(opts.stat2Label, opts.stat2Val, opts.stat2Color) +
+               '</div>' +
+               // Footer action row
+               '<div style="display:flex;gap:8px;margin-top:auto">' +
+                 (opts.actions || '') +
+               '</div>' +
+             '</div>';
+    };
+
+    var builtinCard = card({
+      icon: 'storage',
+      ghostIcon: 'database',
+      accent: 'var(--cyber-lime, #adff2f)',
+      accentRGB: '173,255,47',
+      glow: true,
+      statusColor: 'var(--cyber-lime, #adff2f)',
+      statusPulse: true,
+      statusLabel: 'BUILT-IN',
+      title: 'Local ChromaDB',
+      subtitle: 'TYPE: VECTOR STORE (ON-PREM)',
+      stat1Label: 'BACKEND',
+      stat1Val: 'ChromaDB',
+      stat1Color: 'var(--cyber-lime, #adff2f)',
+      stat2Label: 'STORAGE',
+      stat2Val: '~/.tudou_claw/chromadb',
+      actions:
+        '<button class="tc-mono-label" disabled style="flex:1;padding:8px 0;background:rgba(173,255,47,0.08);color:var(--cyber-lime, #adff2f);border:1px solid rgba(173,255,47,0.20);border-radius:var(--r-md);font-size:10px;cursor:default;letter-spacing:0.05em">ZERO-CONFIG · ALWAYS ON</button>',
+    });
 
     var providerCards = providers.map(function(p) {
       var enabled = !!p.enabled;
-      var statusChip = enabled
-        ? '<span class="tc-mono-label" style="padding:2px 7px;border-radius:var(--r-md);background:rgba(192,193,255,0.10);color:var(--primary);border:1px solid rgba(192,193,255,0.25);font-size:9px">ACTIVE</span>'
-        : '<span class="tc-mono-label" style="padding:2px 7px;border-radius:var(--r-md);background:rgba(255,180,171,0.10);color:var(--error);border:1px solid rgba(255,180,171,0.25);font-size:9px">DISABLED</span>';
-      return '' +
-        '<div class="tc-card-glass" style="padding:18px;display:flex;align-items:center;gap:14px;border-top:1px solid rgba(255,255,255,0.10)">' +
-          '<div style="width:42px;height:42px;border-radius:var(--r-md);background:rgba(192,193,255,0.10);border:1px solid rgba(192,193,255,0.25);display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
-            '<span class="material-symbols-outlined" style="font-size:22px;color:var(--primary)">cloud</span>' +
-          '</div>' +
-          '<div style="flex:1;min-width:0">' +
-            '<div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;flex-wrap:wrap">' +
-              '<span style="font-size:14px;font-weight:600;color:var(--on-surface)">' + esc(p.name) + '</span>' +
-              statusChip +
-            '</div>' +
-            '<div class="tc-text-dim" style="font-size:11px;font-family:var(--font-mono);letter-spacing:0.03em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
-              esc(p.kind || 'remote').toUpperCase() + ' · ' + esc(p.base_url || 'N/A') +
-            '</div>' +
-          '</div>' +
-          '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="_kmDeleteProvider(\'' + esc(p.id) + '\')" title="Remove" style="padding:6px;color:var(--error)">' +
-            '<span class="material-symbols-outlined" style="font-size:16px">delete</span></button>' +
-        '</div>';
+      var kind = (p.kind || 'remote').toLowerCase();
+      var iconKind = kind.indexOf('local') >= 0 ? 'storage'
+                   : kind.indexOf('http') >= 0 ? 'cloud_queue'
+                   : 'hub';
+      var ghost = kind.indexOf('local') >= 0 ? 'database' : 'hub';
+      var subtitle = kind.indexOf('local') >= 0
+        ? 'TYPE: LOCAL VECTOR STORE'
+        : 'TYPE: REMOTE NODE (HTTP)';
+      var statusColor = enabled ? 'var(--secondary)' : 'var(--error)';
+      var statusLabel = enabled ? 'CONNECTED' : 'DISABLED';
+      var endpoint = p.base_url || '—';
+      var endpointShort = endpoint.length > 28 ? endpoint.slice(0, 26) + '…' : endpoint;
+      return card({
+        icon: iconKind,
+        ghostIcon: ghost,
+        accent: 'var(--primary)',
+        accentRGB: '192,193,255',
+        glow: enabled,
+        statusColor: statusColor,
+        statusPulse: enabled,
+        statusLabel: statusLabel,
+        title: p.name || p.id || 'Provider',
+        subtitle: subtitle,
+        stat1Label: 'KIND',
+        stat1Val: esc(kind.toUpperCase()),
+        stat1Color: 'var(--primary)',
+        stat2Label: 'ENDPOINT',
+        stat2Val: '<span style="font-family:var(--font-mono);font-size:12px">' + esc(endpointShort) + '</span>',
+        actions:
+          '<button onclick="_kmDeleteProvider(\'' + esc(p.id) + '\')" class="tc-mono-label" ' +
+                  'style="flex:1;padding:8px 0;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:var(--r-md);color:var(--on-surface);font-size:10px;cursor:pointer;letter-spacing:0.05em;transition:all 0.15s" ' +
+                  'onmouseover="this.style.background=\'rgba(255,255,255,0.08)\'" onmouseout="this.style.background=\'rgba(255,255,255,0.04)\'">REMOVE</button>',
+      });
     }).join('');
 
     sc.innerHTML = '' +
-      '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:var(--s-lg);gap:var(--s-md);flex-wrap:wrap">' +
+      // Hero header (stitch_26 style — mono kicker with glow dot, h2, sub, primary pill)
+      '<section style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:var(--s-xl);gap:var(--s-md);flex-wrap:wrap">' +
         '<div style="flex:1;min-width:240px">' +
-          '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px">' +
-            '<span>VECTOR BACKEND</span>' +
-            '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
+          '<div class="tc-mono-label" style="color:var(--primary);letter-spacing:0.20em;display:flex;align-items:center;gap:8px">' +
+            '<span style="width:8px;height:8px;border-radius:50%;background:var(--primary);box-shadow:0 0 8px var(--primary);animation:pulse-dot 2s infinite ease-in-out"></span>' +
+            'KNOWLEDGE &amp; MEMORY' +
           '</div>' +
-          '<div class="tc-text-dim" style="font-size:12px;margin-top:6px;line-height:1.55">' +
-            'RAG provider registry — local ChromaDB ships built-in. Add remote nodes for cross-instance KB sharing.' +
-          '</div>' +
+          '<h2 style="font-family:var(--font-display);font-size:30px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:6px 0 0">RAG Provider Management</h2>' +
+          '<p class="tc-text-dim" style="font-size:14px;line-height:1.55;margin-top:8px;max-width:640px">' +
+            'Configure and orchestrate vector databases for autonomous agent memory. Local ChromaDB ships built-in; add remote nodes for cross-instance KB sharing.' +
+          '</p>' +
         '</div>' +
-        '<button class="tc-btn tc-btn-primary tc-btn-sm" onclick="_kmShowAddProvider()">' +
-          '<span class="material-symbols-outlined" style="font-size:14px">add</span> ADD PROVIDER' +
+        '<button onclick="_kmShowAddProvider()" style="background:var(--primary-fixed);color:var(--on-primary-fixed);padding:10px 20px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:8px;transition:all 0.15s;box-shadow:0 4px 14px rgba(192,193,255,0.20)" onmouseover="this.style.filter=\'brightness(1.08)\';this.style.boxShadow=\'0 6px 22px rgba(192,193,255,0.32)\'" onmouseout="this.style.filter=\'\';this.style.boxShadow=\'0 4px 14px rgba(192,193,255,0.20)\'">' +
+          '<span class="material-symbols-outlined" style="font-size:16px">add</span> ADD PROVIDER' +
         '</button>' +
-      '</div>' +
-      '<div style="display:flex;flex-direction:column;gap:10px">' +
+      '</section>' +
+      // Bento grid
+      '<section style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:var(--s-lg)">' +
         builtinCard +
         providerCards +
-      '</div>';
+      '</section>';
   } catch (e) {
     sc.innerHTML = '<div class="tc-card" style="color:var(--error);padding:var(--s-lg)">' + esc(String(e)) + '</div>';
   }
@@ -25062,9 +26525,9 @@ async function _l3DeleteOne(fid) {
       await api('DELETE', '/api/portal/agent/' + encodeURIComponent(_l3CurrentAgentId)
         + '/memory/fact/' + encodeURIComponent(fid));
       _l3RefreshModal();
-      window._toast('已删除 1 条 L3 记忆', 'success');
+      window._toast('Deleted 1 L3 memory', 'success');
     } catch(e) {
-      window._toast('删除失败: ' + e, 'error');
+      window._toast('Delete failed:' + e, 'error');
     }
   });
 }
@@ -25080,12 +26543,12 @@ async function _l3DeleteSelected() {
       var failed = (resp && resp.failed && resp.failed.length) || 0;
       _l3RefreshModal();
       if (failed > 0) {
-        window._toast('已删除 ' + done + '/' + ids.length + ' 条;失败 ' + failed, 'warning');
+        window._toast('Deleted ' + done + '/' + ids.length + ' 条;失败 ' + failed, 'warning');
       } else {
-        window._toast('已删除 ' + done + ' 条 L3 记忆', 'success');
+        window._toast('Deleted ' + done + ' 条 L3 记忆', 'success');
       }
     } catch(e) {
-      window._toast('批量删除失败: ' + e, 'error');
+      window._toast('批量Delete failed:' + e, 'error');
     }
   });
 }
@@ -25103,9 +26566,9 @@ async function _l3ClearAll() {
             + '/memory/clear-all', {});
           var n = (resp && resp.deleted) || 0;
           _l3RefreshModal();
-          window._toast('已清空 ' + n + ' 条 L3 记忆', 'success');
+          window._toast('Cleared ' + n + ' 条 L3 记忆', 'success');
         } catch(e) {
-          window._toast('清空失败: ' + e, 'error');
+          window._toast('Clear failed:' + e, 'error');
         }
       });
     }
@@ -25141,7 +26604,7 @@ function _renderKmMemory() {
     + '<div style="font-size:12px;color:var(--text3);margin-top:2px">点击任一 agent 查看其记忆层级（L1/L2/L3）、ExecutionPlan、Transcript</div></div>'
     + '<div style="display:flex;gap:8px;align-items:center">'
       + '<button class="btn btn-sm" onclick="_kmShowLastDream()" title="查看最近一次 Dream 报告"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">history</span> 最近 Dream</button>'
-      + '<button class="btn btn-primary btn-sm" id="km-dream-btn" onclick="_kmTriggerDream()" title="立即触发全量记忆维护：归并 intent→outcome、衰减/清理孤立 fact、KB 引用审计"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">nights_stay</span> 🌙 触发 Dream</button>'
+      + '<button class="btn btn-primary btn-sm" id="km-dream-btn" onclick="_kmTriggerDream()" title="Trigger full memory maintenance: merge intent→outcome, decay/clean orphan facts, audit KB references"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">nights_stay</span> 🌙 Trigger Dream</button>'
     + '</div>'
     + '</div>'
     + '<div id="km-dream-report" style="margin-bottom:16px"></div>'
@@ -25154,7 +26617,7 @@ function _renderKmMemory() {
 
 // Trigger a full-sweep memory dream + render the report inline.
 window._kmTriggerDream = async function() {
-  if (!confirm('触发全量记忆维护？\n\n• 每个 agent 跑一次 consolidator（合并相似 fact、归并 intent→outcome）\n• 删除"长期未访问 + 低置信度"的孤立 fact\n• 审计知识库长期未被引用的 entry\n\n建议等当前没人在用 agent 时执行（会短暂占用 CPU）。')) return;
+  if (!confirm('Trigger full memory maintenance?\n\n• Run consolidator for every agent (merge similar facts, merge intent→outcome)\n• Delete orphan facts with low access + low confidence\n• Audit KB entries that have never been referenced\n\nRecommended to run while no agents are in use (briefly uses CPU).')) return;
   var btn = document.getElementById('km-dream-btn');
   if (btn) {
     btn.disabled = true;
@@ -25167,7 +26630,7 @@ window._kmTriggerDream = async function() {
   try {
     var report = await api('POST', '/api/portal/memory/dream');
     _kmRenderDreamReport(report);
-    if (window._toast) window._toast('Dream 完成', 'success');
+    if (window._toast) window._toast('Dream complete', 'success');
   } catch (e) {
     if (reportBox) {
       reportBox.innerHTML = '<div style="padding:14px;background:var(--surface);border:1px solid var(--error);border-radius:10px;color:var(--error);font-size:12px">Dream 失败: ' + esc(String(e)) + '</div>';
@@ -25189,7 +26652,7 @@ window._kmShowLastDream = async function() {
     }
     _kmRenderDreamReport(resp.report);
   } catch (e) {
-    if (window._toast) window._toast('加载历史失败: ' + e, 'error');
+    if (window._toast) window._toast('Load history failed:' + e, 'error');
   }
 };
 
@@ -25348,7 +26811,7 @@ function _renderKmAgentCardsTech(visibleAgents) {
     var st = _agentMemStats[a.id] || {};
     var l1 = st.l1 || 0, l2 = st.l2 || 0, l3 = st.l3 || 0;
     var total = l1 + l2 + l3;
-    var aurl = _aetherAvatarUrl(a.role || 'general');
+    var aurl = _aetherAvatarFor(a);
     var hasMem = total > 0;
 
     return '' +
@@ -25443,7 +26906,7 @@ function showAgentMemoryView(aid) {
       + (l3 > 0 ? '<div style="display:flex;gap:6px;flex-wrap:wrap">'
         + _catBadge('contact', '联系', l3cat.contact||0)
         + _catBadge('preference', '偏好', (l3cat.preference||0) + (l3cat.user_pref||0))
-        + _catBadge('intent', '意图', l3cat.intent||0)
+        + _catBadge('intent', 'Intent', l3cat.intent||0)
         + _catBadge('reasoning', '推理', l3cat.reasoning||0)
         + _catBadge('outcome', '结果', l3cat.outcome||0)
         + _catBadge('rule', '规则', l3cat.rule||0)
@@ -25487,7 +26950,7 @@ function showAgentMemoryView(aid) {
       // per-row delete handlers can hit the right backend route.
       _l3SelectedIds = new Set();
       _l3CurrentAgentId = aid;
-      var CAT_LABELS = {contact:'📇联系',preference:'👤偏好',user_pref:'👤偏好',intent:'意图',reasoning:'推理',outcome:'结果',rule:'规则',reflection:'反思'};
+      var CAT_LABELS = {contact:'📇联系',preference:'👤偏好',user_pref:'👤偏好',intent:'Intent',reasoning:'推理',outcome:'结果',rule:'规则',reflection:'反思'};
       var CAT_COLORS = {contact:'#14b8a6',preference:'#ec4899',user_pref:'#ec4899',intent:'#3b82f6',reasoning:'#f59e0b',outcome:'#10b981',rule:'#ef4444',reflection:'#8b5cf6'};
       var l3rows = l3entries.map(function(f){
         var cat = f.category || 'unknown';
@@ -25610,7 +27073,7 @@ function showAgentMemoryView(aid) {
     }
   }).catch(function(e){
     var body = document.getElementById('agent-mem-body');
-    if (body) body.innerHTML = '<div style="color:var(--error)">加载失败: '+esc(String(e))+'</div>';
+    if (body) body.innerHTML = '<div style="color:var(--error)">Load failed:'+esc(String(e))+'</div>';
   });
 }
 
@@ -25632,11 +27095,11 @@ async function compactAgentMemoryFromModal(aid) {
   if (!await confirm('确定要压缩该 agent 的记忆？L1 将被折叠写入 L2。')) return;
   fetch('/api/portal/agent/'+encodeURIComponent(aid)+'/compact-memory', {method:'POST'})
     .then(function(r){return r.json();}).then(function(d){
-      if (d && d.error) { alert('压缩失败: '+d.error); return; }
+      if (d && d.error) { alert('Compress failed:'+d.error); return; }
       alert('压缩完成');
       document.getElementById('agent-mem-modal').remove();
       showAgentMemoryView(aid);
-    }).catch(function(e){ alert('压缩失败: '+e); });
+    }).catch(function(e){ alert('Compress failed:'+e); });
 }
 
 function renderRolesSkillsHub() {
@@ -25717,11 +27180,11 @@ var _canvasState = {
 // with tool nodes are auto-migrated to agent nodes by
 // canvas_workflows._migrate_tool_nodes_inplace.
 var _NODE_TYPES = {
-  start:    { icon: '▶', label: '开始',     color: '#10b981', shape: 'circle' },
-  agent:    { icon: '🤖', label: 'Agent 节点', color: '#3b82f6', shape: 'rect' },
-  decision: { icon: '◆', label: '条件分支',  color: '#eab308', shape: 'diamond' },
-  parallel: { icon: '⫴', label: '并行执行',  color: '#a855f7', shape: 'rect' },
-  end:      { icon: '■', label: '结束',     color: '#6b7280', shape: 'circle' },
+  start:    { icon: '▶', label: 'Start',    color: '#10b981', shape: 'circle' },
+  agent:    { icon: '🤖', label: 'Agent',    color: '#3b82f6', shape: 'rect' },
+  decision: { icon: '◆', label: 'Branch',   color: '#eab308', shape: 'diamond' },
+  parallel: { icon: '⫴', label: 'Parallel', color: '#a855f7', shape: 'rect' },
+  end:      { icon: '■', label: 'End',      color: '#6b7280', shape: 'circle' },
 };
 
 var _NODE_W = 140, _NODE_H = 60;        // standard rect dims; circle/diamond override
@@ -25804,7 +27267,7 @@ async function _loadCanvasList() {
         }).join('')
       + '</div>';
   } catch (e) {
-    box.innerHTML = '<div style="color:var(--error);padding:20px">加载失败: ' + esc(String(e)) + '</div>';
+    box.innerHTML = '<div style="color:var(--error);padding:20px">Load failed:' + esc(String(e)) + '</div>';
   }
 }
 
@@ -25813,9 +27276,9 @@ async function _loadCanvasList() {
 function _canvasStatusBadge(status) {
   var st = String(status || 'draft');
   var palette = {
-    draft:    { bg: 'rgba(148,163,184,0.18)', fg: '#64748b', icon: 'edit_note',     label: '草稿' },
-    ready:    { bg: 'rgba(34,197,94,0.18)',   fg: '#16a34a', icon: 'check_circle',  label: '可执行' },
-    disabled: { bg: 'rgba(249,115,22,0.18)',  fg: '#ea580c', icon: 'pause_circle',  label: '已停用' },
+    draft:    { bg: 'rgba(148,163,184,0.18)', fg: '#64748b', icon: 'edit_note',     label: 'Draft' },
+    ready:    { bg: 'rgba(34,197,94,0.18)',   fg: '#16a34a', icon: 'check_circle',  label: 'Executable' },
+    disabled: { bg: 'rgba(249,115,22,0.18)',  fg: '#ea580c', icon: 'pause_circle',  label: 'Disabled' },
   };
   var p = palette[st] || palette.draft;
   return '<span style="display:inline-flex;align-items:center;gap:3px;padding:1px 8px;font-size:10px;border-radius:9px;background:' + p.bg + ';color:' + p.fg + ';font-weight:600">'
@@ -25853,17 +27316,17 @@ function _canvasStatusActions(wf) {
 
 window._canvasMarkReady = async function() {
   var wf = _canvasState.current;
-  if (!wf || !wf.id) { _toast('先保存 workflow', 'error'); return; }
+  if (!wf || !wf.id) { _toast('Save workflow first', 'error'); return; }
   // Save unsaved edits first so server validates the latest state
   if (_canvasState.selectedNodeId) _canvasApplyConfig();
   try {
     var saved = await api('POST', '/api/portal/canvas-workflows', wf);
     _canvasState.current = saved;
-  } catch (e) { _toast('保存失败: ' + e, 'error'); return; }
+  } catch (e) { _toast('Save failed:' + e, 'error'); return; }
   try {
     var updated = await api('PUT', '/api/portal/canvas-workflows/' + encodeURIComponent(wf.id) + '/status', { status: 'ready' });
     _canvasState.current = updated;
-    _toast('✓ 校验通过,已标为可执行', 'success');
+    _toast('✓ Validation passed, marked executable', 'success');
     _canvasRenderEditor();
   } catch (e) {
     // Validation failure — message contains issue list
@@ -25878,9 +27341,9 @@ window._canvasMarkDraft = async function() {
   try {
     var updated = await api('PUT', '/api/portal/canvas-workflows/' + encodeURIComponent(wf.id) + '/status', { status: 'draft' });
     _canvasState.current = updated;
-    _toast('已回到草稿态', 'info');
+    _toast('Returned to draft', 'info');
     _canvasRenderEditor();
-  } catch (e) { _toast('切换失败: ' + e, 'error'); }
+  } catch (e) { _toast('Toggle failed:' + e, 'error'); }
 };
 
 window._canvasMarkDisabled = async function() {
@@ -25890,9 +27353,9 @@ window._canvasMarkDisabled = async function() {
   try {
     var updated = await api('PUT', '/api/portal/canvas-workflows/' + encodeURIComponent(wf.id) + '/status', { status: 'disabled' });
     _canvasState.current = updated;
-    _toast('已停用', 'info');
+    _toast('Disabled', 'info');
     _canvasRenderEditor();
-  } catch (e) { _toast('切换失败: ' + e, 'error'); }
+  } catch (e) { _toast('Toggle failed:' + e, 'error'); }
 };
 
 window._canvasNewWorkflow = function() {
@@ -25908,7 +27371,7 @@ window._canvasNewWorkflow = function() {
     name = raw.trim();
   } else if (raw && typeof raw.then === 'function') {
     name = '未命名流程 ' + new Date().toLocaleString();
-    _toast('浏览器拦截了输入框,已用默认名称。可在顶部修改', 'info');
+    _toast('Browser blocked input box; default name used. Edit at top.', 'info');
   } else {
     name = String(raw || '').trim();
   }
@@ -25916,8 +27379,8 @@ window._canvasNewWorkflow = function() {
   _canvasState.current = {
     id: '', name: name, description: '',
     nodes: [
-      { id: 'n_start', type: 'start', x: 80,  y: 200, label: '开始', config: {} },
-      { id: 'n_end',   type: 'end',   x: 700, y: 200, label: '结束', config: {} },
+      { id: 'n_start', type: 'start', x: 80,  y: 200, label: 'Start', config: {} },
+      { id: 'n_end',   type: 'end',   x: 700, y: 200, label: 'End',   config: {} },
     ],
     edges: [],
   };
@@ -25947,7 +27410,7 @@ window._canvasOpenEditor = async function(wfId) {
     _canvasPreloadEntityLists();
     _canvasLoadLatestRunLog(wfId);
   } catch (e) {
-    _toast('打开失败: ' + e, 'error');
+    _toast('Open failed:' + e, 'error');
   }
 };
 
@@ -26037,13 +27500,13 @@ async function _canvasLoadRunLog(wfId, runId, silent) {
       _toast('已加载 run ' + runId.slice(-8) + ' 的日志 (' + events.length + ' 条)', 'info');
     }
   } catch (e) {
-    if (!silent) _toast('加载失败: ' + e, 'error');
+    if (!silent) _toast('Load failed:' + e, 'error');
   }
 }
 
 window._canvasOpenRunHistoryModal = async function() {
   var wf = _canvasState.current;
-  if (!wf || !wf.id) { _toast('先保存 workflow', 'error'); return; }
+  if (!wf || !wf.id) { _toast('Save workflow first', 'error'); return; }
   var existing = document.getElementById('canvas-history-modal');
   if (existing) { existing.remove(); return; }
   var modal = document.createElement('div');
@@ -26100,7 +27563,7 @@ window._canvasOpenRunHistoryModal = async function() {
             + '</div>';
         }).join('');
   } catch (e) {
-    document.getElementById('canvas-history-body').innerHTML = '<div style="color:var(--error)">加载失败: ' + esc(String(e)) + '</div>';
+    document.getElementById('canvas-history-body').innerHTML = '<div style="color:var(--error)">Load failed:' + esc(String(e)) + '</div>';
   }
 };
 
@@ -26161,8 +27624,8 @@ function _canvasMigrateToolNodesInPlace(nodes) {
       retry: oldCfg.retry || 0,
       _migrated_from_tool: oldCfg,
     };
-    if (!n.label || n.label === '工具调用' || n.label === 'Tool') {
-      n.label = oldTool || 'Agent 节点';
+    if (!n.label || n.label === '工具调用' || n.label === 'Tool Call' || n.label === 'Tool') {
+      n.label = oldTool || 'Agent Node';
     }
     migrated++;
   });
@@ -26173,9 +27636,9 @@ window._canvasDelete = async function(wfId, name) {
   if (!confirm('删除 "' + name + '"?')) return;
   try {
     await api('DELETE', '/api/portal/canvas-workflows/' + encodeURIComponent(wfId));
-    _toast('已删除', 'success');
+    _toast('Deleted', 'success');
     await _loadCanvasList();
-  } catch (e) { _toast('删除失败: ' + e, 'error'); }
+  } catch (e) { _toast('Delete failed:' + e, 'error'); }
 };
 
 // ─────────── Editor mode ───────────
@@ -26216,7 +27679,7 @@ function _canvasRenderEditor() {
     +      _canvasStatusBadge(wf.executable_status || 'draft')
     + '    <span id="canvas-run-status-pill" style="display:none"></span>'
     + '    <button id="canvas-artifacts-btn" onclick="_canvasOpenArtifactsModal()" style="display:none;padding:3px 10px;font-size:11px;border-radius:11px;background:var(--chip-info-bg, rgba(137,206,255,0.10));color:var(--chip-info-fg, var(--secondary));border:none;font-weight:600;cursor:pointer;margin-left:6px;align-items:center;gap:4px">'
-    +      _ui.icon('folder_zip', {size: 14, va: '-3px'}) + ' ' + (_techCe ? 'ARTIFACTS' : '交付件') + ' <span id="canvas-artifacts-count">0</span></button>'
+    +      _ui.icon('folder_zip', {size: 14, va: '-3px'}) + ' ' + (_techCe ? 'ARTIFACTS' : 'Deliverable') + ' <span id="canvas-artifacts-count">0</span></button>'
     + (wf.id ? '    <button onclick="_canvasOpenRunHistoryModal()" title="' + (_techCe ? 'View run history' : '查看历史运行') + '" style="padding:5px 10px;font-size:10px;border-radius:var(--r-md);background:rgba(255,255,255,0.04);color:var(--on-surface-variant, var(--text2));border:1px solid ' + paneBorder + ';font-family:' + (_techCe ? 'var(--font-mono)' : 'inherit') + ';' + (_techCe ? 'letter-spacing:0.05em;text-transform:uppercase;' : 'font-weight:600;') + 'cursor:pointer;margin-left:6px;display:inline-flex;align-items:center;gap:4px">'
     +      _ui.icon('history', {size: 14, va: '-3px'}) + ' ' + (_techCe ? 'HISTORY' : '运行历史') + '</button>' : '')
     + '    <span style="font-size:10px;color:var(--outline, var(--text3));font-family:var(--font-mono, monospace);letter-spacing:0.03em">' + esc(wf.id || '(unsaved)') + '</span>'
@@ -26501,7 +27964,7 @@ window._canvasOpenArtifactsModal = function() {
     + '    <div><div style="font-size:14px;font-weight:700"><span class="material-symbols-outlined" style="font-size:18px;vertical-align:-4px;color:#4f46e5">folder_zip</span> 运行交付件</div>'
     + '         <div style="font-size:11px;color:var(--text3);margin-top:2px">★ 标记的交付件靠前;其余为自动检测的中间文件</div></div>'
     + '    <div style="display:flex;gap:6px">'
-    + '      <button class="btn btn-ghost btn-sm" onclick="_canvasOpenArtifactsAuditModal()" title="查看审计日志"><span class="material-symbols-outlined" style="font-size:14px">history</span> 审计</button>'
+    + '      <button class="btn btn-ghost btn-sm" onclick="_canvasOpenArtifactsAuditModal()" title="View audit log"><span class="material-symbols-outlined" style="font-size:14px">history</span> Audit</button>'
     + '      <button class="btn btn-ghost btn-sm" onclick="_canvasRefreshArtifactsList()" title="刷新"><span class="material-symbols-outlined" style="font-size:14px">refresh</span></button>'
     + '      <button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'canvas-artifacts-modal\').remove()"><span class="material-symbols-outlined" style="font-size:16px">close</span></button>'
     + '    </div>'
@@ -26573,25 +28036,25 @@ window._canvasMarkArtifact = async function(artifactId) {
     await api('POST', '/api/portal/canvas-workflows/' + encodeURIComponent(wf.id)
       + '/runs/' + encodeURIComponent(runId) + '/artifacts/' + encodeURIComponent(artifactId) + '/mark',
       {description: desc, tags: tags});
-    _toast('✓ 已标记为交付件', 'success');
+    _toast('✓ Marked as deliverable', 'success');
     await _canvasRefreshArtifactsList();
   } catch (e) {
-    _toast('标记失败: ' + e, 'error');
+    _toast('Mark failed:' + e, 'error');
   }
 };
 
 window._canvasDeleteArtifact = async function(artifactId, name) {
-  if (!confirm('删除 "' + name + '"?\n文件和索引都会移除,审计记录保留。')) return;
+  if (!confirm('Delete "' + name + '"?\nFile and index will be removed; audit record kept.')) return;
   var wf = _canvasState.current;
   var runId = _canvasState._runStatus && _canvasState._runStatus.payload && _canvasState._runStatus.payload.run_id;
   if (!wf || !runId) return;
   try {
     await api('DELETE', '/api/portal/canvas-workflows/' + encodeURIComponent(wf.id)
       + '/runs/' + encodeURIComponent(runId) + '/artifacts/' + encodeURIComponent(artifactId));
-    _toast('已删除', 'info');
+    _toast('Deleted', 'info');
     await _canvasRefreshArtifactsList();
   } catch (e) {
-    _toast('删除失败: ' + e, 'error');
+    _toast('Delete failed:' + e, 'error');
   }
 };
 
@@ -26606,10 +28069,10 @@ window._canvasOpenArtifactsAuditModal = async function() {
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px';
   modal.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;width:min(820px,100%);max-height:84vh;display:flex;flex-direction:column;overflow:hidden">'
     + '<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border-light)">'
-    + '<div style="font-size:14px;font-weight:700"><span class="material-symbols-outlined" style="font-size:18px;vertical-align:-4px">history</span> Artifact 审计日志</div>'
+    + '<div style="font-size:14px;font-weight:700"><span class="material-symbols-outlined" style="font-size:18px;vertical-align:-4px">history</span> Artifact Audit Log</div>'
     + '<button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'canvas-audit-modal\').remove()"><span class="material-symbols-outlined" style="font-size:16px">close</span></button>'
     + '</div>'
-    + '<div id="canvas-audit-body" style="flex:1;overflow:auto;padding:14px 18px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px">加载中…</div>'
+    + '<div id="canvas-audit-body" style="flex:1;overflow:auto;padding:14px 18px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px">Loading…</div>'
     + '</div>';
   modal.addEventListener('click', function(e){ if (e.target === modal) modal.remove(); });
   document.body.appendChild(modal);
@@ -26639,9 +28102,9 @@ window._canvasOpenArtifactsAuditModal = async function() {
             + '</span>'
             + '</div>';
         }).join('')
-      : '<div style="color:var(--text3);text-align:center;padding:30px">暂无审计记录</div>';
+      : '<div style="color:var(--text3);text-align:center;padding:30px">No audit entries yet</div>';
   } catch (e) {
-    document.getElementById('canvas-audit-body').innerHTML = '<div style="color:var(--error)">加载失败: ' + esc(String(e)) + '</div>';
+    document.getElementById('canvas-audit-body').innerHTML = '<div style="color:var(--error)">Load failed:' + esc(String(e)) + '</div>';
   }
 };
 
@@ -26657,7 +28120,7 @@ function _canvasRenderRunStatusPill() {
   // Token-based palette — picks up theme switch automatically (dark
   // ↔ light) instead of being hardcoded to a hex.
   var STYLES = {
-    running:   {kind:'warning', icon:'sync',         label:'运行中',   pulse:true},
+    running:   {kind:'warning', icon:'sync',         label:'Running',   pulse:true},
     succeeded: {kind:'success', icon:'check_circle', label:'运行成功'},
     failed:    {kind:'error',   icon:'error',        label:'运行失败'},
     aborted:   {kind:'warning', icon:'stop_circle',  label:'已中止'},
@@ -26734,8 +28197,11 @@ function _findNode(id) {
 }
 
 function _nodeAnchorPoint(node, anchor) {
-  var w = (node.type === 'start' || node.type === 'end') ? 50 : _NODE_W;
-  var h = (node.type === 'start' || node.type === 'end') ? 50 : _NODE_H;
+  var d = (typeof _canvasNodeDims === 'function')
+    ? _canvasNodeDims(node)
+    : { w: (node.type === 'start' || node.type === 'end') ? 50 : _NODE_W,
+        h: (node.type === 'start' || node.type === 'end') ? 50 : _NODE_H };
+  var w = d.w, h = d.h;
   switch (anchor) {
     case 'top':    return { x: node.x + w/2, y: node.y };
     case 'right':  return { x: node.x + w,   y: node.y + h/2 };
@@ -26797,12 +28263,26 @@ function _canvasRenderNode(n) {
     w = 200;
     h = 90;
   }
+  // Tech mode: scale start/end circles up to stitch_19 spec (80px)
+  // so they read as PEER nodes next to the 200x90 agent cards.
+  if (_techNd && nt.shape === 'circle') {
+    w = h = 80;
+  }
   var shapeSvg = '';
   if (nt.shape === 'circle') {
-    w = h = 50;
     if (_techNd) {
-      shapeSvg = '<circle cx="25" cy="25" r="23" fill="' + nt.color + '" fill-opacity="0.18" stroke="' + stroke + '" stroke-width="' + sw + '" filter="drop-shadow(0 0 8px ' + nt.color + '40)"/>';
+      w = h = 80;
+      // Stitch_19 start/end node: 80px circle, glass-card bg, 2px
+      // tier-color border, soft tier-color glow halo, play_circle (or
+      // flag) Material Symbol centered + small mono label below.
+      var cBgFill = isSel ? 'rgba(31,31,39,0.95)' : 'rgba(31,31,39,0.80)';
+      var cR = 38;
+      shapeSvg =
+        '<circle cx="40" cy="40" r="' + cR + '" fill="' + cBgFill + '" stroke="' + stroke + '" stroke-width="' + sw + '" filter="drop-shadow(0 0 12px ' + nt.color + '70)"/>' +
+        // Tier-color inner ring (matches the agent-card top accent)
+        '<circle cx="40" cy="40" r="' + (cR - 4) + '" fill="none" stroke="' + nt.color + '" stroke-width="1" stroke-opacity="0.40"/>';
     } else {
+      w = h = 50;
       shapeSvg = '<circle cx="25" cy="25" r="23" fill="' + nt.color + '" fill-opacity="0.15" stroke="' + stroke + '" stroke-width="' + sw + '"/>';
     }
   } else if (nt.shape === 'diamond') {
@@ -26823,7 +28303,7 @@ function _canvasRenderNode(n) {
     }
   }
   // Label — for agent nodes, surface the BOUND AGENT'S NAME so the
-  // canvas isn't a sea of identical "Agent 节点" boxes. Falls back to
+  // canvas isn't a sea of identical "Agent Node" boxes. Falls back to
   // user's custom label / generic type label if no agent bound or
   // agent list hasn't loaded yet. "未绑定" is shown in error color so
   // the author catches missing agent_id BEFORE running.
@@ -26836,51 +28316,67 @@ function _canvasRenderNode(n) {
     if (agentId) {
       var agentList = _canvasState._agentsList || [];
       var hit = agentList.find(function(a) { return a.id === agentId; });
-      if (hit) resolvedAgentName = hit.name + (hit.role ? '·' + hit.role : '');
-      else resolvedAgentName = agentId.slice(0, 8);  // cache miss, show prefix
+      if (hit) {
+        resolvedAgentName = hit.name + (hit.role ? '·' + hit.role : '');
+      } else {
+        resolvedAgentName = agentId.slice(0, 8);  // cache miss, show prefix
+      }
     }
     if (customLabel && resolvedAgentName) {
       primaryLabel = customLabel;
-      secondaryLabel = '👤 ' + resolvedAgentName;
+      secondaryLabel = resolvedAgentName;
     } else if (resolvedAgentName) {
       primaryLabel = resolvedAgentName;
-      secondaryLabel = 'Agent';
+      secondaryLabel = '';
     } else if (customLabel) {
       primaryLabel = customLabel;
-      secondaryLabel = '⚠ 未绑定 agent';
+      secondaryLabel = '⚠ No agent bound';
       secondaryColor = 'var(--chip-error-fg)';
     } else {
-      primaryLabel = 'Agent 节点';
-      secondaryLabel = '⚠ 未绑定';
+      primaryLabel = 'Agent Node';
+      secondaryLabel = '⚠ Unbound';
       secondaryColor = 'var(--chip-error-fg)';
     }
   } else {
     primaryLabel = n.label || nt.label;
+    // Older workflow files persisted Chinese labels for start/end
+    // ("开始" / "结束"). Show the canonical English label instead so
+    // the canvas reads consistently in tech mode without forcing a
+    // data migration.
+    if (n.type === 'start' && (primaryLabel === '开始' || primaryLabel === 'End')) primaryLabel = 'Start';
+    if (n.type === 'end' && (primaryLabel === 'End' || primaryLabel === 'End')) primaryLabel = 'End';
+    if (n.type === 'parallel' && primaryLabel === '并行执行') primaryLabel = 'Parallel';
+    if (n.type === 'decision' && primaryLabel === '条件分支') primaryLabel = 'Branch';
   }
-  primaryLabel = _techNd ? primaryLabel.slice(0, 24) : primaryLabel.slice(0, 18);
+  primaryLabel = _techNd ? primaryLabel.slice(0, 22) : primaryLabel.slice(0, 18);
   var labelSvg;
   if (_techNd && nt.shape === 'rect') {
-    // Stitch_19 layout: AGENT: NAME header band on top + meta line
-    // below, with tier-color icon dot at left.
-    var bandY = 14;
-    var headerKicker = (n.type === 'agent' ? 'AGENT' :
-                       n.type === 'parallel' ? 'PARALLEL' :
-                       n.type === 'decision' ? 'BRANCH' :
-                       (n.type || '').toUpperCase()) || 'NODE';
-    var titleY = bandY + 14;
+    // Stitch_19 layout — title centered vertically in the body, role
+    // kicker omitted (no hard-coded role taxonomy). Bottom band shows
+    // the bound agent's name.mono. Title font-size bumped to 16 for
+    // readability per user feedback.
+    var titleY = 36;
     labelSvg =
-      // Tier kicker (mono, color-tinted)
-      '<text x="36" y="' + bandY + '" font-family="\'Space Grotesk\', monospace" font-size="9" font-weight="500" fill="' + nt.color + '" letter-spacing="1.2" pointer-events="none">' + headerKicker + '</text>' +
-      // Primary label (Inter, white, bold)
-      '<text x="36" y="' + titleY + '" font-family="Inter, sans-serif" font-size="13" font-weight="600" fill="#e4e1ed" letter-spacing="-0.2" pointer-events="none">' +
+      // Primary label (Inter, white, bold) — larger so the agent name
+      // reads from across the canvas.
+      '<text x="14" y="' + titleY + '" font-family="Inter, sans-serif" font-size="16" font-weight="600" fill="#e4e1ed" letter-spacing="-0.2" pointer-events="none">' +
         esc(primaryLabel) +
       '</text>' +
       // Bottom divider
       '<line x1="14" y1="' + (h - 26) + '" x2="' + (w - 14) + '" y2="' + (h - 26) + '" stroke="rgba(255,255,255,0.08)" stroke-width="1" pointer-events="none"/>' +
       // Secondary meta line in mono
       (secondaryLabel
-        ? '<text x="14" y="' + (h - 11) + '" font-family="\'Space Grotesk\', monospace" font-size="9" letter-spacing="0.5" fill="' + (secondaryColor === 'var(--chip-error-fg)' ? '#ffb4ab' : '#908fa0') + '" pointer-events="none">' + esc(secondaryLabel.slice(0, 28).replace('👤', '')) + '</text>'
+        ? '<text x="14" y="' + (h - 11) + '" font-family="\'Space Grotesk\', monospace" font-size="10" letter-spacing="0.5" fill="' + (secondaryColor === 'var(--chip-error-fg)' ? '#ffb4ab' : '#908fa0') + '" pointer-events="none">' + esc(secondaryLabel.slice(0, 28)) + '</text>'
         : '');
+  } else if (_techNd && nt.shape === 'circle') {
+    // Stitch_19 start/end node — big play_circle / flag glyph centered
+    // in the upper half of the circle, mono "START" / "END" label
+    // tucked beneath. Glyphs are unicode triangle / square fallbacks
+    // (font-family-agnostic, render reliably via SVG innerHTML).
+    var glyph = (n.type === 'start') ? '▶' : '■';
+    labelSvg =
+      '<text x="' + (w/2) + '" y="' + (h/2 + 2) + '" text-anchor="middle" font-size="22" font-weight="600" fill="' + nt.color + '" pointer-events="none">' + glyph + '</text>' +
+      '<text x="' + (w/2) + '" y="' + (h/2 + 22) + '" text-anchor="middle" font-family="\'Space Grotesk\', monospace" font-size="9" letter-spacing="1.5" fill="rgba(255,255,255,0.65)" pointer-events="none">' + esc(primaryLabel.toUpperCase()) + '</text>';
   } else if (secondaryLabel) {
     labelSvg = '<text x="' + (w/2) + '" y="' + (h/2 - 2) + '" text-anchor="middle" '
       + 'font-size="12" font-weight="600" fill="var(--text)" pointer-events="none">'
@@ -26893,12 +28389,16 @@ function _canvasRenderNode(n) {
       + 'font-size="12" fill="var(--text)" pointer-events="none">'
       + esc(primaryLabel) + '</text>';
   }
-  // Icon — tech rect uses a 18px round colored block on the left of
-  // the header band; legacy / circle / diamond uses the unicode glyph.
+  // Icon — title now anchors the top-left of the body in tech mode,
+  // so the small icon block is dropped (the colored top accent bar
+  // already signals the node tier). Legacy theme keeps the glyph.
   var iconSvg;
   if (_techNd && nt.shape === 'rect') {
-    iconSvg = '<rect x="14" y="6" width="18" height="18" rx="4" ry="4" fill="' + nt.color + '" fill-opacity="0.20" stroke="' + nt.color + '" stroke-width="1" stroke-opacity="0.40"/>' +
-      '<text x="23" y="20" text-anchor="middle" font-size="11" fill="' + nt.color + '" pointer-events="none">' + nt.icon + '</text>';
+    iconSvg = '';
+  } else if (_techNd && nt.shape === 'circle') {
+    // The labelSvg branch above already drew the glyph centred — skip
+    // the legacy small glyph at top-left (would double up).
+    iconSvg = '';
   } else {
     iconSvg = (nt.shape === 'rect')
       ? '<text x="8" y="16" font-size="13" fill="' + nt.color + '" pointer-events="none">' + nt.icon + '</text>'
@@ -26925,15 +28425,26 @@ function _canvasRenderNode(n) {
        + shapeSvg + iconSvg + labelSvg + anchors + badgeSvg + '</g>';
 }
 
+// Returns the actual rendered {w,h} for a node, matching the logic in
+// _canvasRenderNode. Edge math + hit-test must use the same dimensions
+// or edges connect inside the card / drag offsets feel "off".
+function _canvasNodeDims(n) {
+  var nt = _NODE_TYPES[n.type] || _NODE_TYPES.agent;
+  var _isTechCv = false;
+  try { _isTechCv = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+  if (nt.shape === 'circle') return { w: _isTechCv ? 80 : 50, h: _isTechCv ? 80 : 50 };
+  if (_isTechCv && nt.shape === 'rect') return { w: 200, h: 90 };
+  return { w: _NODE_W, h: _NODE_H };
+}
+
 function _canvasRenderEdge(e) {
   var src = _findNode(e.from), tgt = _findNode(e.to);
   if (!src || !tgt) return '';
   // Pick anchors: use right/left for horizontal, top/bottom for vertical.
   // Heuristic: whichever pair gives the most direct line.
-  var srcW = (src.type === 'start' || src.type === 'end') ? 50 : _NODE_W;
-  var srcH = (src.type === 'start' || src.type === 'end') ? 50 : _NODE_H;
-  var tgtW = (tgt.type === 'start' || tgt.type === 'end') ? 50 : _NODE_W;
-  var tgtH = (tgt.type === 'start' || tgt.type === 'end') ? 50 : _NODE_H;
+  var srcD = _canvasNodeDims(src);
+  var tgtD = _canvasNodeDims(tgt);
+  var srcW = srcD.w, srcH = srcD.h, tgtW = tgtD.w, tgtH = tgtD.h;
   var sx = src.x + srcW/2, sy = src.y + srcH/2;
   var tx = tgt.x + tgtW/2, ty = tgt.y + tgtH/2;
   var dx = tx - sx, dy = ty - sy;
@@ -27222,13 +28733,13 @@ function _canvasRenderConfigPanel() {
       + '<div style="font-size:10px;color:var(--text3);line-height:1.4;margin-bottom:8px">填了就：节点子目录里出现匹配文件 → 立刻 abort LLM + 节点 SUCCEEDED（不等 LLM 自报完成）。<br>留空：走标准 LLM-COMPLETED + 兜底 timeout。<br>下游用 <code>{{节点id.deliverable}}</code> 永远拿到子目录路径，不论这里填没填。</div>';
   } else if (n.type === 'decision') {
     typeFields = ''
-      + '<div style="margin-bottom:8px"><label style="font-size:11px;color:var(--text3)">条件表达式</label>'
+      + '<div style="margin-bottom:8px"><label style="font-size:11px;color:var(--text3)">Condition expression</label>'
       + '<textarea data-cfg="condition" placeholder="result.success == true / output.length > 0" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:12px;min-height:60px;resize:vertical">' + esc(n.config.condition || '') + '</textarea></div>'
-      + '<div style="font-size:11px;color:var(--text3);line-height:1.5">出边的 label 字段 (yes/no) 决定走哪条分支</div>';
+      + '<div style="font-size:11px;color:var(--text3);line-height:1.5">The outgoing edge label (yes/no) decides which branch to take</div>';
   } else if (n.type === 'parallel') {
-    typeFields = '<div style="font-size:12px;color:var(--text3);line-height:1.5">所有出边并行执行,等所有分支完成后再继续。无需配置。</div>';
+    typeFields = '<div style="font-size:12px;color:var(--text3);line-height:1.5">All outgoing edges run in parallel — flow continues only after every branch completes. No config needed.</div>';
   } else if (n.type === 'start' || n.type === 'end') {
-    typeFields = '<div style="font-size:12px;color:var(--text3);line-height:1.5">' + esc(nt.label) + '节点无需配置。</div>';
+    typeFields = '<div style="font-size:12px;color:var(--text3);line-height:1.5">' + esc(nt.label) + ' node — no config needed.</div>';
   }
   // HANDOFF [H] — Available-variables panel. Lists every output key
   // produced by an upstream node, click-to-copy as {{node_id.key}}.
@@ -27304,7 +28815,7 @@ function _canvasRenderNodeRunResult(nid) {
   var nodeErr = (rs.node_errors || {})[nid];
   var dur = (startedAt && finishedAt) ? ((finishedAt - startedAt).toFixed(2) + 's') : null;
   var STATE_LABEL = {
-    running: '运行中', succeeded: '成功', failed: '失败', skipped: '跳过', pending: '等待',
+    running: 'Running', succeeded: 'Success', failed: 'Failed', skipped: '跳过', pending: '等待',
   };
   var STATE_KIND = {
     running: 'warning', succeeded: 'success', failed: 'error', skipped: 'neutral', pending: 'neutral',
@@ -27368,15 +28879,15 @@ function _canvasRenderNodeRunResult(nid) {
 window._canvasCopyVar = function(ref) {
   try {
     navigator.clipboard.writeText(ref);
-    _toast('已复制 ' + ref, 'success');
+    _toast('Copied ' + ref, 'success');
   } catch (e) {
     // Older browsers — fall back to a temporary textarea
     var ta = document.createElement('textarea');
     ta.value = ref;
     document.body.appendChild(ta);
     ta.select();
-    try { document.execCommand('copy'); _toast('已复制 ' + ref, 'success'); }
-    catch (_) { _toast('复制失败,请手动选择', 'error'); }
+    try { document.execCommand('copy'); _toast('Copied ' + ref, 'success'); }
+    catch (_) { _toast('Copy failed, please select manually', 'error'); }
     document.body.removeChild(ta);
   }
 };
@@ -27479,7 +28990,7 @@ window._canvasApplyConfig = function() {
     }
   });
   _canvasRedrawSvg();
-  _toast('已应用 (尚未保存到服务器)', 'info');
+  _toast('Applied (not yet saved to server)', 'info');
 };
 
 window._canvasDeleteSelected = function() {
@@ -27521,11 +29032,11 @@ window._canvasSave = async function() {
   try {
     var saved = await api('POST', '/api/portal/canvas-workflows', wf);
     _canvasState.current = saved;
-    _toast('已保存 ✓', 'success');
+    _toast('Saved ✓', 'success');
     // Refresh the visible id label in the toolbar
     _canvasRenderEditor();
   } catch (e) {
-    _toast('保存失败: ' + e, 'error');
+    _toast('Save failed:' + e, 'error');
   }
 };
 
@@ -27609,7 +29120,7 @@ function _canvasApplyRunState(stateMap) {
         var n = _findNode(nid);
         return n ? n.type : 'agent';
       })();
-      var nw = (nodeType === 'start' || nodeType === 'end') ? 50 : _NODE_W;
+      var nw = _canvasNodeDims({ type: nodeType }).w;
       var badgeStr = _canvasNodeStatusBadge(st, nw);
       if (badgeStr) {
         // SVG innerHTML doesn't accept fragments cleanly cross-browser;
@@ -27677,7 +29188,7 @@ function _canvasAttachRunStream(wfId, runId) {
       _canvasRefreshArtifactsList();
     } else if (t === 'node_failed') {
       var m = {}; m[d.node_id] = 'failed'; _canvasApplyRunState(m);
-      _toast('节点失败: ' + d.node_id + ' — ' + (d.error || '').slice(0, 80), 'error');
+      _toast('Node failed:' + d.node_id + ' — ' + (d.error || '').slice(0, 80), 'error');
     } else if (t === 'node_skipped') {
       var m = {}; m[d.node_id] = 'skipped'; _canvasApplyRunState(m);
     } else if (t === 'run_succeeded') {
@@ -27692,7 +29203,7 @@ function _canvasAttachRunStream(wfId, runId) {
       _canvasRenderEditor();
     } else if (t === 'run_aborted') {
       _canvasSetRunStatus('aborted', d);
-      _toast('◼ 已中止', 'info');
+      _toast('◼ Aborted', 'info');
       _canvasStopRunStream();
       _canvasRenderEditor();
     } else if (t === 'done' || t === 'timeout') {
@@ -27709,7 +29220,7 @@ function _canvasAttachRunStream(wfId, runId) {
 
 window._canvasStartRun = async function() {
   var wf = _canvasState.current;
-  if (!wf || !wf.id) { _toast('先保存 workflow', 'error'); return; }
+  if (!wf || !wf.id) { _toast('Save workflow first', 'error'); return; }
   if (String(wf.executable_status || '') !== 'ready') {
     _toast('需要先标为"可执行"', 'error');
     return;
@@ -27733,7 +29244,7 @@ window._canvasStartRun = async function() {
   try {
     run = await api('POST', '/api/portal/canvas-workflows/' + encodeURIComponent(wf.id) + '/runs', {});
   } catch (e) {
-    _toast('启动失败: ' + e, 'error');
+    _toast('Start failed:' + e, 'error');
     return;
   }
   _toast('▶ 运行已启动 (run ' + (run.id || '').slice(-8) + ')', 'info');
@@ -27810,7 +29321,7 @@ async function loadSkillCategoriesAdmin() {
       + _renderCatColumn('智能体类型 (agent_types)', 'agent_types', data.agent_types || [])
       + '</div>';
   } catch (e) {
-    box.innerHTML = '<div style="color:var(--error);padding:16px">加载失败: ' + esc(String(e)) + '</div>';
+    box.innerHTML = '<div style="color:var(--error);padding:16px">Load failed:' + esc(String(e)) + '</div>';
   }
 }
 
@@ -27844,7 +29355,7 @@ window._showCatEditModal = function(dim, existing) {
   var c = existing || { id: '', name: '', icon: '', order: 99, description: '' };
   var html = ''
     + '<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;width:480px;max-width:95vw">'
-    + '  <h3 style="margin:0 0 16px 0">' + (isEdit ? '编辑分类' : '新增分类') + ' · ' + esc(dim === 'scenarios' ? '业务场景' : 'Agent 类型') + '</h3>'
+    + '  <h3 style="margin:0 0 16px 0">' + (isEdit ? '编辑分类' : '新增分类') + ' · ' + esc(dim === 'scenarios' ? '业务场景' : 'Agent Type') + '</h3>'
     + '  <div style="display:flex;flex-direction:column;gap:10px">'
     + '    <div><label style="font-size:11px;color:var(--text3)">ID (slug, 仅小写字母/数字/-)</label>'
     + '      <input id="cat-edit-id" value="' + esc(c.id) + '" ' + (isEdit ? 'disabled' : '') + ' placeholder="legal, design-pro, ..." style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-family:monospace;font-size:12px"></div>'
@@ -27860,7 +29371,7 @@ window._showCatEditModal = function(dim, existing) {
     + '      <textarea id="cat-edit-desc" placeholder="什么时候用这个分类" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);min-height:60px;resize:vertical">' + esc(c.description) + '</textarea></div>'
     + '  </div>'
     + '  <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">'
-    + '    <button class="btn btn-ghost btn-sm" onclick="closeModal()">取消</button>'
+    + '    <button class="btn btn-ghost btn-sm" onclick="closeModal()">Cancel</button>'
     + '    <button class="btn btn-primary btn-sm" onclick="_saveCatEdit(\'' + dim + '\')">保存</button>'
     + '  </div>'
     + '</div>';
@@ -27877,15 +29388,15 @@ window._saveCatEdit = async function(dim) {
     order: parseInt(document.getElementById('cat-edit-order').value || '99', 10),
     description: (document.getElementById('cat-edit-desc').value || '').trim(),
   };
-  if (!body.id) return _toast('ID 不能为空', 'error');
-  if (!body.name) return _toast('显示名不能为空', 'error');
+  if (!body.id) return _toast('ID cannot be empty', 'error');
+  if (!body.name) return _toast('Display name cannot be empty', 'error');
   try {
     await api('POST', '/api/portal/skill-categories', body);
     closeModal();
-    _toast('已保存', 'success');
+    _toast('Saved', 'success');
     await loadSkillCategoriesAdmin();
   } catch (e) {
-    _toast('保存失败: ' + e, 'error');
+    _toast('Save failed:' + e, 'error');
   }
 };
 
@@ -27896,7 +29407,7 @@ window._openSkillCategoryAssignModal = async function(skillId, skillName) {
   var dict = _skillStoreState.categoriesPayload;
   if (!dict || (!dict.scenarios && !dict.agent_types)) {
     try { dict = await api('GET', '/api/portal/skill-categories'); }
-    catch (e) { return _toast('加载分类字典失败: ' + e, 'error'); }
+    catch (e) { return _toast('Load category dictionary failed:' + e, 'error'); }
   }
   var current;
   try {
@@ -27928,7 +29439,7 @@ window._openSkillCategoryAssignModal = async function(skillId, skillName) {
     + '    <div id="assign-at-chips" style="display:flex;flex-wrap:wrap;gap:6px">' + chips('agent_types') + '</div>'
     + '  </div>'
     + '  <div style="display:flex;justify-content:flex-end;gap:8px">'
-    + '    <button class="btn btn-ghost btn-sm" onclick="closeModal()">取消</button>'
+    + '    <button class="btn btn-ghost btn-sm" onclick="closeModal()">Cancel</button>'
     + '    <button class="btn btn-primary btn-sm" onclick="_saveSkillAssignments(\'' + esc(skillId) + '\')">保存</button>'
     + '  </div>'
     + '</div>';
@@ -27960,11 +29471,11 @@ window._saveSkillAssignments = async function(skillId) {
       agent_types: Array.from(sel.agent_types),
     });
     closeModal();
-    _toast('已保存', 'success');
+    _toast('Saved', 'success');
     // Refresh the store list so badges update
     if (typeof loadSkillStore === 'function') loadSkillStore();
   } catch (e) {
-    _toast('保存失败: ' + e, 'error');
+    _toast('Save failed:' + e, 'error');
   }
 };
 
@@ -27972,10 +29483,10 @@ window._deleteCat = async function(dim, catId, name) {
   if (!confirm('删除分类 "' + name + '" (id=' + catId + ')?\n\n已经引用这个分类的 skill 会自动失去这个标签 (无需迁移)。')) return;
   try {
     await api('DELETE', '/api/portal/skill-categories/' + encodeURIComponent(dim) + '/' + encodeURIComponent(catId));
-    _toast('已删除', 'success');
+    _toast('Deleted', 'success');
     await loadSkillCategoriesAdmin();
   } catch (e) {
-    _toast('删除失败: ' + e, 'error');
+    _toast('Delete failed:' + e, 'error');
   }
 };
 
@@ -28073,7 +29584,7 @@ async function renderSkillStore() {
       + '    <div style="display:flex;gap:8px">'
       + '    <button class="btn btn-sm" onclick="_showLocalImportModal()"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">folder_open</span> 从本地导入</button>'
       + '    <button class="btn btn-sm" onclick="_showRemoteScanModal()"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">cloud_download</span> 从 URL 导入</button>'
-      + '    <button class="btn btn-sm" onclick="rescanSkillStore()"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">refresh</span> 重新扫描</button>'
+      + '    <button class="btn btn-sm" onclick="rescanSkillStore()"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">refresh</span> Rescan</button>'
       + '    </div>'
       + '  </div>'
       + '  <div style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap">'
@@ -28174,7 +29685,7 @@ function _renderCategoryFilterBars() {
   }
   bar.innerHTML =
     row('业务场景', 'scenarios',  cats.scenarios   || [], _skillStoreState.scenarios   || []) +
-    row('Agent 类型', 'agent_types', cats.agent_types || [], _skillStoreState.agentTypes || []);
+    row('Agent Type', 'agent_types', cats.agent_types || [], _skillStoreState.agentTypes || []);
 }
 
 var _storeLoadTimer = null;
@@ -28280,6 +29791,9 @@ async function loadSkillStore() {
     });
     // Sort categories by defined order
     var orderedKeys = Object.keys(groups).sort(function(a,b){return groups[a].order - groups[b].order;});
+    var _techCard = false;
+    try { _techCard = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+
     // 豆腐块 grid — responsive, 3-4 per row depending on viewport
     function _renderCard(e){
       var srcColor = e.source === 'official' ? '#10b981'
@@ -28288,38 +29802,75 @@ async function loadSkillStore() {
                    : e.source === 'agent' ? '#f59e0b' : '#94a3b8';
       var ann = annMap[e.id] || annMap[e.installed_id];
       var annBadge = (ann && ann.notes && ann.notes.length)
-        ? '<span title="本地笔记" style="padding:1px 5px;font-size:10px;background:rgba(251,191,36,0.15);color:#f59e0b;border-radius:8px;margin-left:4px">💡'+ann.notes.length+'</span>'
+        ? '<span title="Local notes" style="padding:1px 5px;font-size:10px;background:rgba(251,191,36,0.15);color:#f59e0b;border-radius:8px;margin-left:4px">💡'+ann.notes.length+'</span>'
         : '';
-      // Special-case: pptx-author skill gets a "🎨 主题画廊" shortcut button.
-      // Clicking it opens a modal with 10 visual theme previews + a keyword-
-      // based theme recommender. No effect on other skills.
+      // Special-case: pptx-author skill gets a theme gallery shortcut.
       var pptxThemeBtn = '';
       if (e.name === 'pptx-author' || e.id === 'pptx-author') {
-        pptxThemeBtn = '<button class="btn btn-sm" title="浏览 10 套 PPT 主题预览" onclick="event.stopPropagation();openPptxThemeGallery()">🎨</button>';
+        pptxThemeBtn = '<button class="btn btn-sm" title="Browse 10 PPT theme previews" onclick="event.stopPropagation();openPptxThemeGallery()">🎨</button>';
       }
-      // Three lifecycle actions per skill:
-      //   uninstall   — remove the install (skill keeps in catalog)
-      //   disable     — soft-hide (catalog file kept, can re-enable)
-      //   delete      — hard-delete catalog directory (cannot undo)
+      // Lifecycle actions
       var disabled = !!(e.metadata && e.metadata.disabled);
       var actions = '';
-      if (e.installed) {
-        actions = '<button class="btn btn-sm" style="flex:1" onclick="event.stopPropagation();openGrantModal(\''+esc(e.installed_id)+'\',\''+esc(e.name)+'\')"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">badge</span> 授权</button>'
-                + pptxThemeBtn
-                + '<button class="btn btn-sm" title="笔记" onclick="event.stopPropagation();openAnnotateModal(\''+esc(e.installed_id)+'\',\''+esc(e.name)+'\')">📝</button>'
-                + '<button class="btn btn-sm" title="卸载 (保留目录)" style="color:var(--warning,#f59e0b)" onclick="event.stopPropagation();uninstallStoreEntry(\''+esc(e.id)+'\')"><span class="material-symbols-outlined" style="font-size:14px">remove_circle</span></button>'
-                + '<button class="btn btn-sm" title="彻底删除目录" style="color:var(--error)" onclick="event.stopPropagation();deleteCatalogEntry(\''+esc(e.id)+'\',\''+esc(e.name)+'\')"><span class="material-symbols-outlined" style="font-size:14px">delete_forever</span></button>';
+      if (_techCard) {
+        // Tech action row — mono-label minimal pills, primary for the
+        // main action (install / grant), ghost for secondary, error
+        // tint for delete.
+        var techBtn = function(label, icon, onclick, opts) {
+          opts = opts || {};
+          var bg = opts.primary ? 'var(--primary-fixed)'
+                  : opts.danger ? 'rgba(255,180,171,0.06)'
+                  : 'rgba(255,255,255,0.04)';
+          var color = opts.primary ? 'var(--on-primary-fixed)'
+                    : opts.danger ? 'var(--error)'
+                    : 'var(--on-surface)';
+          var border = opts.primary ? 'none'
+                     : opts.danger ? '1px solid rgba(255,180,171,0.20)'
+                     : '1px solid rgba(255,255,255,0.08)';
+          var hoverBg = opts.primary ? '' : (opts.danger ? 'rgba(255,180,171,0.14)' : 'rgba(255,255,255,0.08)');
+          var hoverOver = opts.primary
+            ? "this.style.filter='brightness(1.08)'"
+            : "this.style.background='" + hoverBg + "'";
+          var hoverOut = opts.primary
+            ? "this.style.filter=''"
+            : "this.style.background='" + bg + "'";
+          var styleStr = 'flex:' + (opts.flex || 'none') + ';padding:7px ' + (opts.iconOnly ? '8' : '12') + 'px;background:' + bg + ';color:' + color + ';border:' + border + ';border-radius:var(--r-md);font-family:var(--font-mono);font-size:10px;letter-spacing:0.05em;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;transition:all 0.15s';
+          return '<button title="' + esc(opts.title || label) + '" onclick="' + onclick + '" style="' + styleStr + '" onmouseover="' + hoverOver + '" onmouseout="' + hoverOut + '">' +
+            (icon ? '<span class="material-symbols-outlined" style="font-size:13px">' + icon + '</span>' : '') +
+            (opts.iconOnly ? '' : label) +
+          '</button>';
+        };
+        if (e.installed) {
+          actions = techBtn('GRANT', 'badge', "event.stopPropagation();openGrantModal('"+esc(e.installed_id)+"','"+esc(e.name)+"')", { primary: true, flex: 1 })
+                  + (pptxThemeBtn ? techBtn('THEMES', 'palette', 'event.stopPropagation();openPptxThemeGallery()', {}) : '')
+                  + techBtn('', 'edit_note', "event.stopPropagation();openAnnotateModal('"+esc(e.installed_id)+"','"+esc(e.name)+"')", { iconOnly: true, title: 'Notes' })
+                  + techBtn('', 'remove_circle', "event.stopPropagation();uninstallStoreEntry('"+esc(e.id)+"')", { iconOnly: true, title: 'Uninstall (keep catalog)' })
+                  + techBtn('', 'delete_forever', "event.stopPropagation();deleteCatalogEntry('"+esc(e.id)+"','"+esc(e.name)+"')", { iconOnly: true, danger: true, title: 'Hard-delete catalog dir' });
+        } else {
+          var disLabel = disabled ? 'Restore' : 'Hide';
+          var disIcon = disabled ? 'visibility' : 'visibility_off';
+          actions = techBtn('INSTALL', 'download', "event.stopPropagation();installStoreEntry('"+esc(e.id)+"')", { primary: true, flex: 1 })
+                  + techBtn('', disIcon, "event.stopPropagation();toggleDisableCatalogEntry('"+esc(e.id)+"',"+(!disabled)+")", { iconOnly: true, title: disLabel })
+                  + techBtn('', 'delete_forever', "event.stopPropagation();deleteCatalogEntry('"+esc(e.id)+"','"+esc(e.name)+"')", { iconOnly: true, danger: true, title: 'Hard-delete catalog dir' });
+        }
       } else {
-        var disableLabel = disabled ? '恢复' : '失效';
-        var disableIcon = disabled ? 'visibility' : 'visibility_off';
-        actions = '<button class="btn btn-primary btn-sm" style="flex:1" onclick="event.stopPropagation();installStoreEntry(\''+esc(e.id)+'\')"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">download</span> 安装</button>'
-                + '<button class="btn btn-sm" title="'+disableLabel+'" onclick="event.stopPropagation();toggleDisableCatalogEntry(\''+esc(e.id)+'\','+(!disabled)+')"><span class="material-symbols-outlined" style="font-size:14px">'+disableIcon+'</span></button>'
-                + '<button class="btn btn-sm" title="彻底删除目录" style="color:var(--error)" onclick="event.stopPropagation();deleteCatalogEntry(\''+esc(e.id)+'\',\''+esc(e.name)+'\')"><span class="material-symbols-outlined" style="font-size:14px">delete_forever</span></button>';
+        if (e.installed) {
+          actions = '<button class="btn btn-sm" style="flex:1" onclick="event.stopPropagation();openGrantModal(\''+esc(e.installed_id)+'\',\''+esc(e.name)+'\')"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">badge</span> 授权</button>'
+                  + pptxThemeBtn
+                  + '<button class="btn btn-sm" title="笔记" onclick="event.stopPropagation();openAnnotateModal(\''+esc(e.installed_id)+'\',\''+esc(e.name)+'\')">📝</button>'
+                  + '<button class="btn btn-sm" title="卸载 (保留目录)" style="color:var(--warning,#f59e0b)" onclick="event.stopPropagation();uninstallStoreEntry(\''+esc(e.id)+'\')"><span class="material-symbols-outlined" style="font-size:14px">remove_circle</span></button>'
+                  + '<button class="btn btn-sm" title="彻底删除目录" style="color:var(--error)" onclick="event.stopPropagation();deleteCatalogEntry(\''+esc(e.id)+'\',\''+esc(e.name)+'\')"><span class="material-symbols-outlined" style="font-size:14px">delete_forever</span></button>';
+        } else {
+          var disableLabel = disabled ? 'Resume' : 'Expired';
+          var disableIcon = disabled ? 'visibility' : 'visibility_off';
+          actions = '<button class="btn btn-primary btn-sm" style="flex:1" onclick="event.stopPropagation();installStoreEntry(\''+esc(e.id)+'\')"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">download</span> 安装</button>'
+                  + '<button class="btn btn-sm" title="'+disableLabel+'" onclick="event.stopPropagation();toggleDisableCatalogEntry(\''+esc(e.id)+'\','+(!disabled)+')"><span class="material-symbols-outlined" style="font-size:14px">'+disableIcon+'</span></button>'
+                  + '<button class="btn btn-sm" title="彻底删除目录" style="color:var(--error)" onclick="event.stopPropagation();deleteCatalogEntry(\''+esc(e.id)+'\',\''+esc(e.name)+'\')"><span class="material-symbols-outlined" style="font-size:14px">delete_forever</span></button>';
+        }
       }
       // Icon: from manifest metadata.emoji if present, else first char or 📦
       var emoji = (e.metadata && e.metadata.emoji) || e.icon || '';
       if (!emoji) {
-        // fallback by tags
         var tagsStr = (e.tags || []).join(' ').toLowerCase();
         emoji = /file|filesystem/.test(tagsStr) ? '📁'
               : /web|http/.test(tagsStr) ? '🌐'
@@ -28332,10 +29883,62 @@ async function loadSkillStore() {
               : /tool.?bundle|core/.test(tagsStr) ? '🧰'
               : '📦';
       }
+      var desc = esc(e.description || '').slice(0, 110);
+      if ((e.description || '').length > 110) desc += '…';
+
+      if (_techCard) {
+        // Stitch_27 bento card — same recipe as RAG / Wiki / Workflow.
+        // Source tier becomes the accent (OFFICIAL = lime, others map
+        // to indigo / cyan / orange). INSTALLED gets a glowing border.
+        var srcRGB = e.source === 'official' ? '173,255,47'
+                   : e.source === 'maintainer' ? '167,139,250'
+                   : e.source === 'community' ? '96,165,250'
+                   : e.source === 'agent' ? '245,158,11'
+                   : '148,163,184';
+        var statusLabel = e.installed ? 'INSTALLED'
+                        : (disabled ? 'HIDDEN' : (e.source || 'CATALOG').toUpperCase());
+        var statusColor = e.installed ? '#10b981' : srcColor;
+        var sensitivePill = e.sensitive
+          ? '<span class="tc-mono-label" style="padding:2px 7px;background:rgba(239,68,68,0.10);color:#ef4444;border:1px solid rgba(239,68,68,0.25);border-radius:9999px;font-size:9px;letter-spacing:0.05em">SENSITIVE</span>'
+          : '';
+        return '<div class="tc-card-glass" style="' +
+                 'padding:var(--s-lg);display:flex;flex-direction:column;gap:14px;' +
+                 'position:relative;overflow:hidden;border-top:1px solid rgba(255,255,255,0.15);' +
+                 (e.installed ? 'box-shadow:0 0 15px -3px rgba(' + srcRGB + ',0.30);' : 'box-shadow:0 0 12px -3px rgba(' + srcRGB + ',0.08);') +
+                 'transition:transform 0.15s,box-shadow 0.15s" ' +
+                 'onmouseenter="this.style.transform=\'translateY(-2px)\';this.style.boxShadow=\'0 8px 24px -4px rgba(' + srcRGB + ',0.30)\'" ' +
+                 'onmouseleave="this.style.transform=\'\';this.style.boxShadow=\'' + (e.installed ? '0 0 15px -3px rgba(' + srcRGB + ',0.30)' : '0 0 12px -3px rgba(' + srcRGB + ',0.08)') + '\'">' +
+                 // Ghost icon — emoji at low opacity in upper-right
+                 '<div style="position:absolute;top:0;right:0;padding:14px;pointer-events:none;font-size:64px;opacity:0.10;line-height:1">' + emoji + '</div>' +
+                 // Header: small icon-square + status pill
+                 '<div style="display:flex;justify-content:space-between;align-items:flex-start;position:relative">' +
+                   '<div style="padding:8px;background:rgba(' + srcRGB + ',0.10);border:1px solid rgba(' + srcRGB + ',0.20);border-radius:var(--r-md);display:inline-flex;align-items:center;justify-content:center;font-size:22px;line-height:1;width:38px;height:38px;box-sizing:border-box">' +
+                     emoji +
+                   '</div>' +
+                   '<div style="display:flex;align-items:center;gap:6px;background:var(--surface-container-high);padding:4px 10px;border-radius:9999px;border:1px solid rgba(255,255,255,0.05)">' +
+                     '<span style="width:6px;height:6px;border-radius:50%;background:' + statusColor + ';' + (e.installed ? 'animation:pulse-dot 2s infinite ease-in-out;box-shadow:0 0 6px ' + statusColor + ';' : '') + '"></span>' +
+                     '<span class="tc-mono-label" style="font-size:10px;color:var(--on-surface);letter-spacing:0.05em">' + esc(statusLabel) + '</span>' +
+                   '</div>' +
+                 '</div>' +
+                 // Title row + version + sensitive
+                 '<div style="position:relative">' +
+                   '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
+                     '<h3 style="font-family:var(--font-display);font-size:16px;font-weight:600;color:var(--on-surface);margin:0;letter-spacing:-0.01em;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%">' + esc(e.name) + '</h3>' +
+                     annBadge +
+                     sensitivePill +
+                   '</div>' +
+                   '<p class="tc-mono-label" style="font-size:10px;color:var(--on-surface-variant);margin:4px 0 0;font-family:var(--font-mono)">v' + esc(e.version) + ' · ' + esc((e.source || '').toUpperCase()) + '</p>' +
+                   (desc ? '<p class="tc-text-dim" style="font-size:12px;line-height:1.5;margin:8px 0 0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">' + desc + '</p>' : '') +
+                 '</div>' +
+                 _renderTagChips(e) +
+                 _renderCategoryBadges(e) +
+                 '<div style="display:flex;gap:6px;margin-top:auto;flex-wrap:wrap">' + actions + '</div>' +
+               '</div>';
+      }
+
+      // Legacy fallback (unchanged)
       var sensitive = e.sensitive ? '<span style="padding:1px 5px;font-size:10px;background:rgba(239,68,68,0.15);color:#ef4444;border-radius:8px;margin-left:4px">敏感</span>' : '';
       var installedBadge = e.installed ? '<span style="position:absolute;top:10px;right:10px;padding:2px 6px;font-size:10px;background:rgba(16,185,129,0.15);color:#10b981;border-radius:8px">✓ 已安装</span>' : '';
-      var desc = esc(e.description || '').slice(0, 90);
-      if ((e.description || '').length > 90) desc += '…';
       return (
         '<div style="position:relative;border:1px solid var(--border);border-radius:12px;padding:16px;background:var(--surface);display:flex;flex-direction:column;gap:10px;transition:transform 0.15s,box-shadow 0.15s" '
         +  'onmouseenter="this.style.transform=\'translateY(-2px)\';this.style.boxShadow=\'0 4px 12px rgba(0,0,0,0.08)\'" '
@@ -28384,7 +29987,7 @@ async function loadSkillStore() {
       // Admin gets a "+ 管理" pill even when no categories are assigned yet.
       var adminBtn = '';
       if (typeof _isAdmin === 'function' && _isAdmin()) {
-        adminBtn = '<span title="管理分类" style="padding:1px 6px;font-size:10px;border-radius:8px;background:var(--surface3);color:var(--text2);border:1px dashed var(--border);cursor:pointer" onclick="event.stopPropagation();_openSkillCategoryAssignModal(\'' + esc(e.id) + '\',\'' + esc(e.name) + '\')">+ 管理</span>';
+        adminBtn = '<span title="Manage Categories" style="padding:1px 6px;font-size:10px;border-radius:8px;background:var(--surface3);color:var(--text2);border:1px dashed var(--border);cursor:pointer" onclick="event.stopPropagation();_openSkillCategoryAssignModal(\'' + esc(e.id) + '\',\'' + esc(e.name) + '\')">+ Manage</span>';
       }
       if (!badges.length && !adminBtn) return '';
       return '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:-2px">' + badges.join('') + adminBtn + '</div>';
@@ -28426,7 +30029,7 @@ async function loadSkillStore() {
     }).join('');
     box.innerHTML = sections;
   } catch(err) {
-    box.innerHTML = '<div style="color:var(--error);padding:20px">加载失败: '+esc(String(err))+'</div>';
+    box.innerHTML = '<div style="color:var(--error);padding:20px">Load failed:'+esc(String(err))+'</div>';
   }
 }
 
@@ -28434,15 +30037,15 @@ async function rescanSkillStore() {
   try {
     await api('POST', '/api/portal/skill-store', {action: 'rescan'});
     loadSkillStore();
-  } catch(e) { alert('扫描失败: '+e); }
+  } catch(e) { alert('Scan failed:'+e); }
 }
 
 async function installStoreEntry(entryId) {
   try {
     var r = await api('POST', '/api/portal/skill-store', {action:'install', entry_id: entryId});
     if (r && r.ok) loadSkillStore();
-    else alert('安装失败: ' + JSON.stringify(r));
-  } catch(e) { alert('安装失败: '+e); }
+    else alert('Install failed:' + JSON.stringify(r));
+  } catch(e) { alert('Install failed:'+e); }
 }
 
 async function uninstallStoreEntry(entryId) {
@@ -28451,20 +30054,20 @@ async function uninstallStoreEntry(entryId) {
     var r = await api('POST', '/api/portal/skill-store', {action:'uninstall', entry_id: entryId});
     if (r && r.ok) loadSkillStore();
     else alert('卸载失败');
-  } catch(e) { alert('卸载失败: '+e); }
+  } catch(e) { alert('Uninstall failed:'+e); }
 }
 
 // Soft-disable: hide from default list but keep on disk
 async function toggleDisableCatalogEntry(entryId, disable) {
-  var verb = disable ? '失效' : '恢复';
+  var verb = disable ? 'Expired' : 'Resume';
   try {
     var r = await api('POST', '/api/portal/skill-store',
       {action:'disable', entry_id: entryId, disabled: !!disable});
     if (r && r.ok) {
       loadSkillStore();
-      if (window._toast) window._toast(verb + '成功', 'success');
+      if (window._toast) window._toast(verb + 'Success', 'success');
     } else {
-      alert(verb + '失败');
+      alert(verb + 'Failed');
     }
   } catch(e) { alert(verb + '失败: '+e); }
 }
@@ -28484,7 +30087,7 @@ async function toggleDisableCatalogEntry(entryId, disable) {
 function _confirmTypedDelete(opts) {
   return new Promise(function(resolve) {
     var name = String(opts.typeName || '');
-    var ctaText = opts.confirmText || '删除';
+    var ctaText = opts.confirmText || 'Delete';
     var ctaColor = opts.confirmColor || 'var(--error)';
     var html = ''
       + '<div style="padding:24px">'
@@ -28499,7 +30102,7 @@ function _confirmTypedDelete(opts) {
       +     'style="width:100%;padding:10px 12px;font-size:14px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:monospace;outline:none;box-sizing:border-box">'
       +   '<div id="_ctd-hint" style="font-size:11px;color:var(--text3);margin-top:6px;min-height:14px"></div>'
       +   '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">'
-      +     '<button id="_ctd-cancel" class="btn btn-ghost btn-sm">取消</button>'
+      +     '<button id="_ctd-cancel" class="btn btn-ghost btn-sm">Cancel</button>'
       +     '<button id="_ctd-ok" class="btn btn-sm" disabled '
       +       'style="background:' + ctaColor + ';color:#fff;opacity:0.4;cursor:not-allowed">'
       +       esc(ctaText)
@@ -28559,7 +30162,7 @@ async function deleteCatalogEntry(entryId, entryName) {
             + '此操作不可撤销 — 文件会从磁盘删除。\n'
             + '如果只是暂时不用,改用"失效"按钮即可。',
     typeName: entryName,
-    confirmText: '删除',
+    confirmText: 'Delete',
   });
   if (!confirmed) return;
 
@@ -28568,13 +30171,13 @@ async function deleteCatalogEntry(entryId, entryName) {
       {action:'delete_catalog', entry_id: entryId});
     if (r && r.ok) {
       loadSkillStore();
-      if (window._toast) window._toast('已彻底删除 ' + entryName, 'success');
-      else alert('已删除');
+      if (window._toast) window._toast('Permanently deleted ' + entryName, 'success');
+      else alert('Deleted');
     } else {
       var msg = (r && (r.error || r.detail)) || '后端返回 ok=false (可能路径不在 catalog 根目录下,或 entry 已不存在)';
-      alert('删除失败: ' + msg);
+      alert('Delete failed:' + msg);
     }
-  } catch(e) { alert('删除失败: ' + (e.message || e)); }
+  } catch(e) { alert('Delete failed:' + (e.message || e)); }
 }
 
 window.toggleDisableCatalogEntry = toggleDisableCatalogEntry;
@@ -28625,7 +30228,7 @@ async function openPptxThemeGallery() {
     _renderPptxLayoutRef();
   } catch(e) {
     document.getElementById('pptx-theme-grid').innerHTML =
-      '<div style="color:var(--error);padding:20px">加载失败: '+esc(String(e))+'</div>';
+      '<div style="color:var(--error);padding:20px">Load failed:'+esc(String(e))+'</div>';
   }
 }
 
@@ -28664,7 +30267,7 @@ async function _loadPptxLayoutGrid() {
     var data = await api('GET', '/api/portal/pptx-layouts');
   } catch (e) {
     grid.innerHTML = '<div style="grid-column:1/-1;color:var(--error);'
-      + 'padding:20px">加载失败: ' + esc(String(e)) + '</div>';
+      + 'padding:20px">Load failed:' + esc(String(e)) + '</div>';
     return;
   }
   var layouts = data.layouts || [];
@@ -28969,7 +30572,7 @@ async function previewFile(filePath, title, expectedKind) {
   } catch(e) {
     var body2 = document.getElementById('doc-preview-body');
     if (body2) {
-      body2.innerHTML = '<div style="color:#b91c1c;padding:20px">加载失败: '+esc(String(e))+'</div>';
+      body2.innerHTML = '<div style="color:#b91c1c;padding:20px">Load failed:'+esc(String(e))+'</div>';
     }
   }
 }
@@ -29017,7 +30620,7 @@ async function _pptxRecommend() {
     var hits = Object.keys(_pptxThemeState.highlighted).length;
     if (status) status.textContent = hits ? (hits + ' 个匹配') : '无关键词命中';
   } catch(e) {
-    if (status) status.textContent = '请求失败';
+    if (status) status.textContent = 'Request failed';
   }
 }
 
@@ -29051,10 +30654,10 @@ function _copyPptxSnippet(themeId) {
     'prs.save("out.pptx")\n' +
     'verify_slides("out.pptx")\n';
   navigator.clipboard.writeText(snippet).then(function(){
-    if (window._toast) window._toast('已复制 ' + themeId + ' 示例代码', 'success');
-    else alert('已复制 ' + themeId + ' 示例代码');
+    if (window._toast) window._toast('Copied ' + themeId + ' 示例代码', 'success');
+    else alert('Copied ' + themeId + ' 示例代码');
   }).catch(function(e){
-    alert('复制失败: ' + e);
+    alert('Copy failed:' + e);
   });
 }
 
@@ -29118,7 +30721,7 @@ function _showLocalImportModal() {
       + '</div>'
       + '<div id="local-import-status" style="font-size:12px;margin-bottom:8px;display:none"></div>'
       + '<div style="display:flex;justify-content:flex-end;gap:8px">'
-      + '<button class="btn btn-sm" onclick="document.getElementById(\'local-import-modal\').remove()">取消</button>'
+      + '<button class="btn btn-sm" onclick="document.getElementById(\'local-import-modal\').remove()">Cancel</button>'
       + '<button class="btn btn-primary btn-sm" id="local-import-btn" onclick="_doLocalImport()">导入</button>'
       + '</div></div>';
   }
@@ -29129,7 +30732,7 @@ function _showLocalImportModal() {
 async function _doLocalImport() {
   var pathInput = document.getElementById('local-import-path');
   var srcPath = (pathInput && pathInput.value || '').trim();
-  if (!srcPath) { alert('请输入本地路径'); return; }
+  if (!srcPath) { alert('Please enter local path'); return; }
   var tierSel = document.getElementById('local-import-tier');
   var tier = tierSel ? tierSel.value : 'community';
   var btn = document.getElementById('local-import-btn');
@@ -29154,14 +30757,14 @@ async function _doLocalImport() {
       }, 1500);
     } else {
       status.style.color = 'var(--error)';
-      status.innerHTML = '导入失败: ' + esc(data.error || JSON.stringify(data));
+      status.innerHTML = 'Import failed:' + esc(data.error || JSON.stringify(data));
     }
   } catch(err) {
     status.style.color = 'var(--error)';
     status.innerHTML = '请求失败: ' + esc(String(err));
   }
   btn.disabled = false;
-  btn.innerHTML = '导入';
+  btn.innerHTML = 'Import';
 }
 
 // ── Remote URL Scan Modal ──
@@ -29256,7 +30859,7 @@ function _looksLikeDirectInstallURL(url) {
 async function _doRemoteScan() {
   var urlInput = document.getElementById('remote-scan-url');
   var url = (urlInput && urlInput.value || '').trim();
-  if (!url) { alert('请输入 URL'); return; }
+  if (!url) { alert('Please enter URL'); return; }
   var btn = document.getElementById('remote-scan-btn');
   var status = document.getElementById('remote-scan-status');
   var results = document.getElementById('remote-scan-results');
@@ -29327,7 +30930,7 @@ async function _doRemoteScan() {
         return;
       }
       // status === 'error'
-      status.innerHTML = '<span style="color:var(--error)">✗ 安装失败: ' + esc(finalState.error || 'unknown') + '</span>';
+      status.innerHTML = '<span style="color:var(--error)">✗ Install failed:' + esc(finalState.error || 'unknown') + '</span>';
       return;
     } catch (err) {
       btn.disabled = false;
@@ -29350,7 +30953,7 @@ async function _doRemoteScan() {
     btn.disabled = false;
     btn.innerHTML = '<span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">search</span> 扫描';
     if (!data.ok) {
-      status.innerHTML = '<span style="color:var(--error)">扫描失败: ' + esc(data.error || 'unknown') + '</span>';
+      status.innerHTML = '<span style="color:var(--error)">Scan failed:' + esc(data.error || 'unknown') + '</span>';
       results.innerHTML = '';
       if (data.scanned_dirs) {
         results.innerHTML = '<div style="font-size:11px;color:var(--text3);margin-top:6px">目录结构: ' + esc(JSON.stringify(data.scanned_dirs).substring(0, 400)) + '</div>';
@@ -29402,13 +31005,13 @@ function _renderScanResults(skills) {
 }
 
 async function _doImportScanned() {
-  if (!_remoteScanState.temp_dir) { alert('没有扫描数据'); return; }
+  if (!_remoteScanState.temp_dir) { alert('No scan data'); return; }
   var checks = document.querySelectorAll('[id^="scan-skill-"]');
   var names = [];
   for (var i = 0; i < checks.length; i++) {
     if (checks[i].checked) names.push(checks[i].getAttribute('data-skill-name'));
   }
-  if (!names.length) { alert('请至少选择一个技能'); return; }
+  if (!names.length) { alert('Please select at least one skill'); return; }
   var tierSel = document.getElementById('scan-import-tier');
   var tier = tierSel ? tierSel.value : 'community';
   var btn = document.getElementById('scan-import-btn');
@@ -29443,7 +31046,7 @@ async function _doImportScanned() {
       // Refresh skill store list
       loadSkillStore();
     } else {
-      status.innerHTML = '<span style="color:var(--error)">导入失败: ' + esc(data.error || 'unknown') + '</span>';
+      status.innerHTML = '<span style="color:var(--error)">Import failed:' + esc(data.error || 'unknown') + '</span>';
     }
   } catch(err) {
     status.innerHTML = '<span style="color:var(--error)">请求失败: ' + esc(String(err)) + '</span>';
@@ -29457,8 +31060,8 @@ async function openGrantModal(installedId, skillName) {
   try {
     var d = await api('GET', '/api/portal/agents');
     ags = (d && d.agents) || [];
-  } catch(e) { alert('无法获取 agent 列表: '+e); return; }
-  if (!ags.length) { alert('还没有 agent'); return; }
+  } catch(e) { alert('Cannot fetch agent list:'+e); return; }
+  if (!ags.length) { alert('No agents yet'); return; }
   var opts = ags.map(function(a){
     var granted = (a.granted_skills||[]).indexOf(installedId) >= 0;
     return '<label style="display:flex;align-items:center;gap:8px;padding:6px;border-bottom:1px solid var(--border)"><input type="checkbox" data-agent-id="'+esc(a.id)+'" '+(granted?'checked':'')+'><span>'+esc(a.name||a.id)+' <span style="color:var(--text3);font-size:11px">('+esc(a.role||'-')+')</span></span></label>';
@@ -29470,7 +31073,7 @@ async function openGrantModal(installedId, skillName) {
     + '<div style="font-size:11px;color:var(--text3);margin-bottom:10px">勾选后点击保存。会同时向 agent working_dir/.claw/granted_skills/ 写入 pointer 文件，支持独立进程 agent 发现。</div>'
     + '<div id="grant-ag-list" style="max-height:320px;overflow:auto">'+opts+'</div>'
     + '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">'
-    + '<button class="btn btn-sm" onclick="this.closest(\'div[style*=fixed]\').remove()">取消</button>'
+    + '<button class="btn btn-sm" onclick="this.closest(\'div[style*=fixed]\').remove()">Cancel</button>'
     + '<button class="btn btn-primary btn-sm" onclick="submitGrant(\''+esc(installedId)+'\', this)">保存</button>'
     + '</div></div>';
   document.body.appendChild(modal);
@@ -29500,7 +31103,7 @@ function openAnnotateModal(installedId, skillName) {
     + '<div style="font-size:11px;color:var(--text3);margin-bottom:10px">本地笔记会在 agent 加载这个 skill 时自动附加到 prompt 里，下次 session 无需手动回忆。建议写：踩过的坑 / workaround / 版本差异。</div>'
     + '<textarea id="ann-text" rows="5" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:13px" placeholder="例如：调用时如果 traceId 为空会 500，必须先生成 UUID 再传入"></textarea>'
     + '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">'
-    + '<button class="btn btn-sm" onclick="this.closest(\'div[style*=fixed]\').remove()">取消</button>'
+    + '<button class="btn btn-sm" onclick="this.closest(\'div[style*=fixed]\').remove()">Cancel</button>'
     + '<button class="btn btn-primary btn-sm" onclick="submitAnnotate(\''+esc(installedId)+'\', this)">保存</button>'
     + '</div></div>';
   document.body.appendChild(modal);
@@ -29511,12 +31114,12 @@ async function submitAnnotate(installedId, btn) {
   var modal = btn.closest('div[style*=fixed]');
   var ta = modal.querySelector('#ann-text');
   var text = (ta && ta.value || '').trim();
-  if (!text) { alert('笔记不能为空'); return; }
+  if (!text) { alert('Note cannot be empty'); return; }
   try {
     await api('POST', '/api/portal/skill-store', {action:'annotate', skill_id: installedId, text: text});
     modal.remove();
     loadSkillStore();
-  } catch(e) { alert('保存失败: '+e); }
+  } catch(e) { alert('Save failed:'+e); }
 }
 
 // ============ Skill Packages (new SkillRegistry-backed UI) ============
@@ -29558,7 +31161,7 @@ function renderSkillPkgs() {
     }).join('');
     box.innerHTML = rows;
   }).catch(function(e){
-    document.getElementById('skill-pkgs-list').innerHTML = '<div style="color:var(--error)">加载失败: '+esc(String(e))+'</div>';
+    document.getElementById('skill-pkgs-list').innerHTML = '<div style="color:var(--error)">Load failed:'+esc(String(e))+'</div>';
   });
 }
 
@@ -29577,7 +31180,7 @@ function showInstallSkillPkg() {
     + '    <div style="margin-top:6px;font-size:11px;color:var(--text3)">支持 <code>~</code> 开头的用户目录；相对路径会基于服务器工作目录解析。</div>'
     + '    <div id="install-skill-msg" style="margin-top:12px;font-size:12px;min-height:16px"></div>'
     + '    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px">'
-    + '      <button class="btn btn-sm" onclick="renderSkillPkgs()">取消</button>'
+    + '      <button class="btn btn-sm" onclick="renderSkillPkgs()">Cancel</button>'
     + '      <button id="install-skill-submit" class="btn btn-primary btn-sm" onclick="submitInstallSkillPkg()">安装</button>'
     + '    </div>'
     + '  </div>'
@@ -29636,7 +31239,7 @@ function grantSkillPkg(sid) {
     var skName = (sk && sk.manifest && sk.manifest.name) || sid;
 
     var list = (typeof agents !== 'undefined' && agents) ? agents : [];
-    if (!list.length) { alert('当前没有可授权的 agent，请先创建 agent。'); return; }
+    if (!list.length) { alert('No agents available to grant; please create one first.'); return; }
 
     // Filter: only include top-level agents (hide sub-agents)
     var visible = list.filter(function(a){ return !a.parent_id; });
@@ -29667,7 +31270,7 @@ function grantSkillPkg(sid) {
       + '  <div style="padding:8px 10px"><input id="grant-skill-search" placeholder="搜索 agent…" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text)"></div>'
       + '  <div id="grant-skill-list" style="flex:1;overflow:auto;padding:6px 12px 0">'+rows+'</div>'
       + '  <div style="padding:12px 16px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px">'
-      + '    <button class="btn btn-sm" onclick="document.getElementById(\'grant-skill-modal\').remove()">取消</button>'
+      + '    <button class="btn btn-sm" onclick="document.getElementById(\'grant-skill-modal\').remove()">Cancel</button>'
       + '    <button class="btn btn-primary btn-sm" onclick="submitGrantSkill(\''+esc(sid)+'\')">保存</button>'
       + '  </div>'
       + '</div>';
@@ -29683,7 +31286,7 @@ function grantSkillPkg(sid) {
     });
     // Stash original grants for diff
     modal._originalGrants = grantedSet;
-  }).catch(function(e){ alert('加载技能信息失败: '+e); });
+  }).catch(function(e){ alert('Load skill info failed:'+e); });
 }
 
 function submitGrantSkill(sid) {
@@ -29717,14 +31320,14 @@ function submitGrantSkill(sid) {
     if (errs.length) { alert('部分操作失败：'+errs.map(function(e){return e.error;}).join('; ')); }
     modal.remove();
     renderSkillPkgs();
-  }).catch(function(e){ alert('授权失败: '+e); });
+  }).catch(function(e){ alert('Authorize failed:'+e); });
 }
 
 async function uninstallSkillPkg(sid) {
   if (!await confirm('确定卸载技能 '+sid+'？')) return;
   fetch('/api/portal/skill-pkgs/'+encodeURIComponent(sid)+'/uninstall', {method:'POST'})
     .then(function(r){return r.json();}).then(function(d){
-      if (d.error) { alert('卸载失败: '+d.error); return; }
+      if (d.error) { alert('Uninstall failed:'+d.error); return; }
       renderSkillPkgs();
     });
 }
@@ -29802,7 +31405,7 @@ async function renderToolDenylist() {
             // Section header
             '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:var(--s-sm)">' +
               '<div style="display:flex;align-items:center;gap:14px">' +
-                '<h3 class="tc-mono-label" style="color:var(--on-surface-variant);font-size:12px;letter-spacing:0.08em;margin:0">TOOL DENY LIST (工具禁用清单)</h3>' +
+                '<h3 class="tc-mono-label" style="color:var(--on-surface-variant);font-size:12px;letter-spacing:0.08em;margin:0">TOOL DENY LIST</h3>' +
                 '<span id="td-total-chip" class="tc-mono-label" style="padding:3px 10px;background:var(--surface-container-high);border-radius:var(--r-md);color:var(--on-surface-variant);border:1px solid var(--outline-variant);font-size:10px">Total — Rules</span>' +
               '</div>' +
               '<div style="display:flex;gap:10px;align-items:center">' +
@@ -30211,7 +31814,7 @@ function renderSettingsHub() {
     { id: 'nodeconfig',  label: window.t('tab.settings.nodeConfig',   '节点配置'),    icon: 'tune' },
     { id: 'nodes',       label: window.t('tab.settings.nodes',        '节点列表'),    icon: 'device_hub' },
     { id: 'tokens',      label: window.t('tab.settings.apiTokens',    'API Tokens'),   icon: 'key' },
-    { id: 'audit',       label: window.t('tab.settings.auditLog',     '审计日志'),    icon: 'assignment' },
+    { id: 'audit',       label: window.t('tab.settings.auditLog',     'Audit Log'),    icon: 'assignment' },
     // SuperAdmin-only tab — filtered out below when the caller isn't super.
     { id: 'permissions', label: window.t('tab.settings.permissions',  '用户管理'),    icon: 'shield_person' },
   ];
@@ -30290,7 +31893,7 @@ async function renderPermissionsPanel() {
     try { _techPm = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
     var pmHeaderTitle = _techPm
       ? '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px"><span>ACCESS CONTROL</span><span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span></div><h1 class="tc-h2" style="margin:6px 0 0">' + window.t('perm.title', 'User Management') + '</h1>'
-      : '<h3 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:20px;font-weight:700;margin:0 0 4px">' + window.t('perm.title', '用户管理') + '</h3>';
+      : '<h3 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:20px;font-weight:700;margin:0 0 4px">' + window.t('perm.title', 'User Management') + '</h3>';
     c.innerHTML = ''
       + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:20px">'
       +   '<div>'
@@ -30324,7 +31927,7 @@ function _permRenderList(admins, allAgents, allNodes) {
   if (!list) return;
   if (!admins.length) {
     list.innerHTML = '<div style="padding:16px;color:var(--text3);text-align:center">'
-      + window.t('common.noData', '暂无数据') + '</div>';
+      + window.t('common.noData', 'No data') + '</div>';
     return;
   }
   var roleChip = function(role) {
@@ -30411,7 +32014,7 @@ function _permSelectUser(uid) {
             + (node ? '<span style="font-size:10px;color:var(--text3)">' + esc(node) + '</span>' : '')
             + '</label>';
         }).join('')
-      : '<div style="padding:8px;color:var(--text3);font-size:12px">' + window.t('common.noData', '暂无数据') + '</div>';
+      : '<div style="padding:8px;color:var(--text3);font-size:12px">' + window.t('common.noData', 'No data') + '</div>';
     body = ''
       + '<div style="padding:10px 12px;background:var(--overlay-8);border-radius:8px;font-size:12px;color:var(--text2);margin-bottom:16px">'
       +   window.t('perm.userNote', 'user 只能使用被授权的 agent，不能管理。勾选允许此用户使用的 agent。')
@@ -30425,7 +32028,7 @@ function _permSelectUser(uid) {
       +       '<button class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 8px" onclick="_permUserToggleAll(true)">'
       +         window.t('perm.selectAll', '全选') + '</button>'
       +       '<button class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 8px" onclick="_permUserToggleAll(false)">'
-      +         window.t('perm.clearAll', '清空') + '</button>'
+      +         window.t('perm.clearAll', 'Clear') + '</button>'
       +     '</div>'
       +   '</div>'
       +   '<div style="font-size:11px;color:var(--text3);margin-bottom:8px">'
@@ -30438,7 +32041,7 @@ function _permSelectUser(uid) {
   } else if (isAdmin) {
     // Admin: node delegation only (admin's agent access derives from node ownership)
     var nodeRows = nodes.length === 0
-      ? '<div style="padding:8px;color:var(--text3);font-size:12px">' + window.t('common.noData', '暂无数据') + '</div>'
+      ? '<div style="padding:8px;color:var(--text3);font-size:12px">' + window.t('common.noData', 'No data') + '</div>'
       : nodes.map(function(n) {
           var nid = n.node_id || n.id;
           var checked = delegatedNodes.has(nid) ? 'checked' : '';
@@ -30467,7 +32070,7 @@ function _permSelectUser(uid) {
     + ((isAdmin || isUser)
         ? '<button class="btn btn-primary btn-sm" onclick="_permSaveDelegation(\'' + esc(uid) + '\',\'' + esc(a.role) + '\')">'
           + '<span class="material-symbols-outlined" style="font-size:16px">save</span> '
-          + window.t('action.save', '保存') + '</button>'
+          + window.t('action.save', 'Save') + '</button>'
         : '')
     + '<button class="btn btn-ghost btn-sm" onclick="_permResetPassword(\'' + esc(uid) + '\')">'
     +   '<span class="material-symbols-outlined" style="font-size:16px">lock_reset</span> '
@@ -30479,7 +32082,7 @@ function _permSelectUser(uid) {
     + (isSuper ? '' :
         '<button class="btn btn-ghost btn-sm" style="color:var(--error)" onclick="_permDeleteUser(\'' + esc(uid) + '\',\'' + esc(a.username) + '\')">'
         + '<span class="material-symbols-outlined" style="font-size:16px">delete</span> '
-        + window.t('action.delete', '删除') + '</button>')
+        + window.t('action.delete', 'Delete') + '</button>')
     + '</div>';
 
   detail.innerHTML = header + body + actions;
@@ -30531,7 +32134,7 @@ function _permShowCreateUserModal() {
         '<input id="perm-new-password" type="password" placeholder="min 6 chars" />' +
       '</div>' +
       '<div class="form-group">' +
-        '<label>' + window.t('perm.role', '角色') + '</label>' +
+        '<label>' + window.t('perm.role', 'Role') + '</label>' +
         '<select id="perm-new-role" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">' +
           '<option value="user">user ' + window.t('perm.roleUserHint', '（只能使用 agent）') + '</option>' +
           '<option value="admin">admin ' + window.t('perm.roleAdminHint', '（管理被授权节点上的 agent 与配置）') + '</option>' +
@@ -30539,8 +32142,8 @@ function _permShowCreateUserModal() {
         '</select>' +
       '</div>' +
       '<div class="form-actions" style="margin-top:16px">' +
-        '<button class="btn btn-ghost" onclick="closeModal()">' + window.t('action.cancel', '取消') + '</button>' +
-        '<button class="btn btn-primary" onclick="_permCreateUser()">' + window.t('action.create', '新建') + '</button>' +
+        '<button class="btn btn-ghost" onclick="closeModal()">' + window.t('action.cancel', 'Cancel') + '</button>' +
+        '<button class="btn btn-primary" onclick="_permCreateUser()">' + window.t('action.create', 'New') + '</button>' +
       '</div>' +
     '</div>';
   showCustomModal(html);
@@ -30572,10 +32175,10 @@ async function _permCreateUser() {
       window._toast(window.t('perm.userCreated', '用户已创建'), 'success');
       renderPermissionsPanel();
     } else {
-      alert(window.t('perm.createFailed', '创建失败') + ': ' + ((r && r.error) || 'unknown'));
+      alert(window.t('perm.createFailed', 'Create failed') + ': ' + ((r && r.error) || 'unknown'));
     }
   } catch (e) {
-    alert(window.t('perm.createFailed', '创建失败') + ': ' + (e && e.message || e));
+    alert(window.t('perm.createFailed', 'Create failed') + ': ' + (e && e.message || e));
   }
 }
 
@@ -30588,10 +32191,10 @@ async function _permDeleteUser(uid, username) {
       window._toast(window.t('perm.userDeleted', '用户已删除'), 'success');
       renderPermissionsPanel();
     } else {
-      alert(window.t('perm.deleteFailed', '删除失败') + ': ' + ((r && r.error) || 'unknown'));
+      alert(window.t('perm.deleteFailed', 'Delete failed') + ': ' + ((r && r.error) || 'unknown'));
     }
   } catch (e) {
-    alert(window.t('perm.deleteFailed', '删除失败') + ': ' + (e && e.message || e));
+    alert(window.t('perm.deleteFailed', 'Delete failed') + ': ' + (e && e.message || e));
   }
 }
 
@@ -30762,7 +32365,7 @@ async function renderBrandingSettings(container) {
     });
     _brandingPreviewLogo();
   } catch (e) {
-    c.innerHTML = '<div style="color:var(--error);padding:20px">加载失败: ' + esc(String(e)) + '</div>';
+    c.innerHTML = '<div style="color:var(--error);padding:20px">Load failed:' + esc(String(e)) + '</div>';
   }
 }
 
@@ -30799,9 +32402,9 @@ window._brandingSave = async function() {
     var p = document.getElementById('brand-preview-name');
     if (p) p.textContent = updated.site_name || 'Tudou Claws';
     _brandingPreviewLogo();
-    _toast('品牌已保存', 'success');
+    _toast('Branding saved', 'success');
   } catch (e) {
-    _toast('保存失败: ' + e, 'error');
+    _toast('Save failed:' + e, 'error');
   }
 };
 
@@ -30812,9 +32415,9 @@ window._brandingReset = async function() {
     window._branding = d;
     _applyBranding();
     renderBrandingSettings();   // refresh form
-    _toast('已恢复默认', 'info');
+    _toast('Restored to defaults', 'info');
   } catch (e) {
-    _toast('重置失败: ' + e, 'error');
+    _toast('Reset failed:' + e, 'error');
   }
 };
 
@@ -30828,7 +32431,7 @@ async function renderSystemSettings(container) {
   try {
     data = await api('GET', '/api/portal/system-settings');
   } catch (e) {
-    c.innerHTML = '<div style="padding:24px;color:var(--error)">加载失败: ' + esc(String(e)) + '</div>';
+    c.innerHTML = '<div style="padding:24px;color:var(--error)">Load failed:' + esc(String(e)) + '</div>';
     return;
   }
   var settings = (data && data.settings) || {};
@@ -30854,15 +32457,99 @@ async function renderSystemSettings(container) {
 
   var _techSs2 = false;
   try { _techSs2 = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
-  c.innerHTML = ''
-    + '<div style="padding:' + (_techSs2 ? 'var(--s-lg)' : '24px') + ';max-width:680px">'
-    + (_techSs2
-        ? '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px"><span>RUNTIME PARAMETERS</span><span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span></div>' +
-          '<h2 style="font-family:var(--font-display);font-size:24px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:8px 0 6px">System Configuration</h2>' +
-          '<div class="tc-text-dim" style="font-size:13px;line-height:1.55;margin-bottom:24px">Deployment-wide runtime knobs. Saved values take effect on the next canvas run / agent call.</div>'
-        : '<h2 style="margin:0 0 6px;font-size:18px">系统配置</h2>' +
-          '<div style="font-size:12px;color:var(--text3);margin-bottom:24px">影响整个部署的运行时参数。改完保存后，下次画布运行 / agent 调用立即生效。</div>')
 
+  // Tech: stitch_26-style bento. Each runtime knob is a glass card
+  // with ghost icon + small icon square + CURRENT/DEFAULT status pill,
+  // h3 + sub, stats grid, and the select inline at the bottom.
+  if (_techSs2) {
+    var configCard = function(opts) {
+      var diverged = opts.current !== opts.defaultVal;
+      var statusColor = diverged ? 'var(--warning, #ff9800)' : 'var(--secondary)';
+      var statusLabel = diverged ? 'CUSTOMIZED' : 'DEFAULT';
+      return '<div class="tc-card-glass" style="' +
+               'padding:var(--s-lg);display:flex;flex-direction:column;gap:14px;' +
+               'position:relative;overflow:hidden;border-top:1px solid rgba(255,255,255,0.15);' +
+               (diverged ? 'box-shadow:0 0 15px -3px rgba(255,152,0,0.20);' : 'box-shadow:0 0 15px -3px rgba(137,206,255,0.10);') +
+             '">' +
+               '<div style="position:absolute;top:0;right:0;padding:14px;pointer-events:none">' +
+                 '<span class="material-symbols-outlined" style="font-size:64px;color:rgba(192,193,255,0.18);margin:-12px -12px 0 0">' + esc(opts.ghostIcon) + '</span>' +
+               '</div>' +
+               '<div style="display:flex;justify-content:space-between;align-items:flex-start;position:relative">' +
+                 '<div style="padding:8px;background:rgba(192,193,255,0.10);border:1px solid rgba(192,193,255,0.20);border-radius:var(--r-md);display:inline-flex">' +
+                   '<span class="material-symbols-outlined" style="font-size:22px;color:var(--primary);font-variation-settings:\'FILL\' 1">' + esc(opts.icon) + '</span>' +
+                 '</div>' +
+                 '<div style="display:flex;align-items:center;gap:6px;background:var(--surface-container-high);padding:4px 10px;border-radius:9999px;border:1px solid rgba(255,255,255,0.05)">' +
+                   '<span style="width:6px;height:6px;border-radius:50%;background:' + statusColor + ';animation:pulse-dot 2s infinite ease-in-out;box-shadow:0 0 6px ' + statusColor + '"></span>' +
+                   '<span class="tc-mono-label" style="font-size:10px;color:var(--on-surface);letter-spacing:0.05em">' + statusLabel + '</span>' +
+                 '</div>' +
+               '</div>' +
+               '<div style="position:relative">' +
+                 '<h3 style="font-family:var(--font-display);font-size:18px;font-weight:600;color:var(--on-surface);margin:0;letter-spacing:-0.01em;line-height:1.3">' + esc(opts.title) + '</h3>' +
+                 '<p class="tc-text-dim" style="font-size:12px;line-height:1.5;margin:6px 0 0">' + esc(opts.description) + '</p>' +
+               '</div>' +
+               '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:12px 0;border-top:1px solid rgba(255,255,255,0.05);border-bottom:1px solid rgba(255,255,255,0.05)">' +
+                 '<div>' +
+                   '<p class="tc-mono-label" style="font-size:10px;color:var(--outline);margin:0 0 4px">CURRENT</p>' +
+                   '<p style="font-family:var(--font-mono);font-size:18px;font-weight:600;color:' + (diverged ? 'var(--warning, #ff9800)' : 'var(--secondary)') + ';margin:0">' + opts.current + '</p>' +
+                 '</div>' +
+                 '<div>' +
+                   '<p class="tc-mono-label" style="font-size:10px;color:var(--outline);margin:0 0 4px">DEFAULT</p>' +
+                   '<p style="font-family:var(--font-mono);font-size:18px;color:var(--outline);margin:0">' + opts.defaultVal + '</p>' +
+                 '</div>' +
+               '</div>' +
+               '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:auto">' +
+                 '<span class="tc-mono-label" style="font-size:10px;color:var(--on-surface-variant)">' + esc(opts.controlLabel) + '</span>' +
+                 renderSelect(opts.path, opts.current, opts.defaultVal) +
+               '</div>' +
+             '</div>';
+    };
+
+    c.innerHTML = ''
+      + '<section style="padding:var(--s-lg) 0">'
+      + '<div class="tc-mono-label" style="color:var(--primary);letter-spacing:0.20em;display:flex;align-items:center;gap:8px">'
+      +   '<span style="width:8px;height:8px;border-radius:50%;background:var(--primary);box-shadow:0 0 8px var(--primary);animation:pulse-dot 2s infinite ease-in-out"></span>'
+      +   'RUNTIME PARAMETERS'
+      + '</div>'
+      + '<h2 style="font-family:var(--font-display);font-size:30px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:6px 0 0">System Configuration</h2>'
+      + '<p class="tc-text-dim" style="font-size:14px;line-height:1.55;margin:8px 0 0;max-width:640px">Deployment-wide runtime knobs. Saved values take effect on the next canvas run / agent call.</p>'
+      + '<div style="margin-top:var(--s-xl);display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:var(--s-lg)">'
+      +   configCard({
+            icon: 'account_tree',
+            ghostIcon: 'account_tree',
+            title: 'Canvas Parallelism',
+            description: '画布编排 — every workflow run can fan out up to N nodes concurrently before the scheduler queues the rest.',
+            current: canvasMax,
+            defaultVal: canvasDefault,
+            path: 'canvas.max_parallel_nodes',
+            controlLabel: 'MAX NODES / RUN',
+          })
+      +   configCard({
+            icon: 'fork_right',
+            ghostIcon: 'fork_right',
+            title: 'Delegate Fan-out',
+            description: 'Agent 委派 — a single delegate_parallel tool call from a parent agent spawns at most N child agents.',
+            current: delegateMax,
+            defaultVal: delegateDefault,
+            path: 'delegate.max_parallel_children',
+            controlLabel: 'MAX CHILDREN / CALL',
+          })
+      + '</div>'
+      + '<div style="margin-top:var(--s-xl)">'
+      +   '<button class="tc-mono-label" onclick="_systemSettingsResetDefaults()" '
+      +     (anyDiverged
+              ? 'style="padding:8px 16px;background:rgba(255,180,171,0.06);border:1px solid rgba(255,180,171,0.20);border-radius:var(--r-md);color:var(--error);font-size:10px;cursor:pointer;letter-spacing:0.05em;display:inline-flex;align-items:center;gap:6px;transition:all 0.15s" onmouseover="this.style.background=\'rgba(255,180,171,0.14)\'" onmouseout="this.style.background=\'rgba(255,180,171,0.06)\'"'
+              : 'disabled style="padding:8px 16px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:var(--r-md);color:var(--outline);font-size:10px;cursor:not-allowed;letter-spacing:0.05em;display:inline-flex;align-items:center;gap:6px;opacity:0.5"')
+      +     '><span class="material-symbols-outlined" style="font-size:14px">restart_alt</span> RESET TO DEFAULTS</button>'
+      + '</div>'
+      + '</section>';
+    return;
+  }
+
+  // Legacy fallback (unchanged)
+  c.innerHTML = ''
+    + '<div style="padding:24px;max-width:680px">'
+    + '<h2 style="margin:0 0 6px;font-size:18px">系统配置</h2>'
+    + '<div style="font-size:12px;color:var(--text3);margin-bottom:24px">影响整个部署的运行时参数。改完保存后，下次画布运行 / agent 调用立即生效。</div>'
     +   '<div style="background:var(--surface);border:1px solid var(--border-light);border-radius:10px;padding:18px;margin-bottom:14px">'
     +     '<div style="font-size:13px;font-weight:700;margin-bottom:4px">画布编排 (Canvas)</div>'
     +     '<div style="font-size:11px;color:var(--text3);margin-bottom:12px">每次画布运行同时最多跑几个节点</div>'
@@ -30871,7 +32558,6 @@ async function renderSystemSettings(container) {
     +       renderSelect('canvas.max_parallel_nodes', canvasMax, canvasDefault)
     +     '</div>'
     +   '</div>'
-
     +   '<div style="background:var(--surface);border:1px solid var(--border-light);border-radius:10px;padding:18px;margin-bottom:14px">'
     +     '<div style="font-size:13px;font-weight:700;margin-bottom:4px">Agent 委派 (Delegate)</div>'
     +     '<div style="font-size:11px;color:var(--text3);margin-bottom:12px">父 agent 一次 delegate_parallel 调用最多并发几个子 agent</div>'
@@ -30880,7 +32566,6 @@ async function renderSystemSettings(container) {
     +       renderSelect('delegate.max_parallel_children', delegateMax, delegateDefault)
     +     '</div>'
     +   '</div>'
-
     +   '<button class="btn btn-ghost btn-sm" onclick="_systemSettingsResetDefaults()" '
     +     (anyDiverged ? '' : 'disabled style="opacity:0.5"')
     +     '><span class="material-symbols-outlined" style="font-size:14px">restart_alt</span> Reset to defaults</button>'
@@ -30890,10 +32575,10 @@ async function renderSystemSettings(container) {
 async function _systemSettingsPatch(path, value) {
   try {
     await api('PATCH', '/api/portal/system-settings', { path: path, value: value });
-    _toast('已保存', 'success');
+    _toast('Saved', 'success');
     renderSystemSettings();   // re-render so Reset button state updates
   } catch (e) {
-    _toast('保存失败: ' + e, 'error');
+    _toast('Save failed:' + e, 'error');
   }
 }
 
@@ -30902,10 +32587,10 @@ async function _systemSettingsResetDefaults() {
   try {
     await api('PATCH', '/api/portal/system-settings', { path: 'canvas.max_parallel_nodes', value: 6 });
     await api('PATCH', '/api/portal/system-settings', { path: 'delegate.max_parallel_children', value: 6 });
-    _toast('已重置为默认', 'success');
+    _toast('Reset to defaults', 'success');
     renderSystemSettings();
   } catch (e) {
-    _toast('重置失败: ' + e, 'error');
+    _toast('Reset failed:' + e, 'error');
   }
 }
 
@@ -30946,11 +32631,11 @@ async function renderLLMTiers(container) {
       '</div>';
     } else {
       html += '<div style="margin-bottom:16px">' +
-        '<h3 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:20px;font-weight:700;margin-bottom:4px">LLM 档位 Tier Routing</h3>' +
-        '<p style="color:var(--text2);font-size:13px">把角色的「LLM 档位」映射到真实 provider/model。新角色（会议助理/PM/产品架构师）会按档位自动路由；未配置则回退全局默认。</p>' +
+        '<h3 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:20px;font-weight:700;margin-bottom:4px">LLM Tier Routing</h3>' +
+        '<p style="color:var(--text2);font-size:13px">Map each role tier to a real provider/model. New roles (meeting assistant / PM / product architect) auto-route by tier; unmapped roles fall back to the global default.</p>' +
         '<div style="margin-top:12px;display:flex;gap:8px">' +
-          '<button class="btn btn-primary btn-sm" onclick="_llmTiersAutofill(false)"><span class="material-symbols-outlined" style="font-size:16px">auto_fix_high</span> 智能预填（仅补空白）</button>' +
-          '<button class="btn btn-ghost btn-sm" onclick="_llmTiersAutofill(true)">强制覆盖预填</button>' +
+          '<button class="btn btn-primary btn-sm" onclick="_llmTiersAutofill(false)"><span class="material-symbols-outlined" style="font-size:16px">auto_fix_high</span> Auto-fill empty</button>' +
+          '<button class="btn btn-ghost btn-sm" onclick="_llmTiersAutofill(true)">Force overwrite</button>' +
         '</div>' +
       '</div>';
     }
@@ -30986,7 +32671,7 @@ async function renderLLMTiers(container) {
 
     c.innerHTML = html;
   } catch (e) {
-    c.innerHTML = '<div style="color:#ef4444;padding:20px">加载失败: ' + esc(String(e)) + '</div>';
+    c.innerHTML = '<div style="color:#ef4444;padding:20px">Load failed:' + esc(String(e)) + '</div>';
   }
 }
 
@@ -31036,7 +32721,7 @@ function _llmTiersEdit(tier) {
     '<div class="form-group"><label>备注</label>' +
       '<input id="lt-note" value="' + esc(existing.note || '') + '" placeholder="可选"></div>' +
     '<div class="form-actions">' +
-      '<button class="btn btn-ghost" onclick="document.getElementById(\'llm-tier-modal\').remove()">取消</button>' +
+      '<button class="btn btn-ghost" onclick="document.getElementById(\'llm-tier-modal\').remove()">Cancel</button>' +
       '<button class="btn btn-primary" onclick="_llmTiersSave(\'' + esc(tier) + '\')">保存</button>' +
     '</div></div></div>';
   document.body.insertAdjacentHTML('beforeend', html);
@@ -31068,9 +32753,9 @@ async function _llmTiersSave(tier) {
       provider: provider, model: model, fallback_tier: fallback, note: note, enabled: true
     });
     var m = document.getElementById('llm-tier-modal'); if (m) m.remove();
-    toast('已保存');
+    toast('Saved');
     renderLLMTiers();
-  } catch (e) { toast('保存失败: ' + e, 'error'); }
+  } catch (e) { toast('Save failed:' + e, 'error'); }
 }
 
 async function _llmTiersDelete(tier) {
@@ -31102,16 +32787,16 @@ async function renderRolePresetsV2(container) {
       '</div>';
     } else {
       html = '<div style="margin-bottom:16px">' +
-        '<h3 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:20px;font-weight:700;margin-bottom:4px">高级角色（7 维度 · Playbook）</h3>' +
-        '<p style="color:var(--text2);font-size:13px">声明式角色：Knowledge / Tooling / Methodology / Quality / LLM Tier / Collaboration / Evolution</p>' +
+        '<h3 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:20px;font-weight:700;margin-bottom:4px">Advanced Roles (7-dim Playbook)</h3>' +
+        '<p style="color:var(--text2);font-size:13px">Declarative roles: Knowledge / Tooling / Methodology / Quality / LLM Tier / Collaboration / Evolution</p>' +
         '<div style="margin-top:12px;display:flex;gap:8px">' +
-          '<button class="btn btn-primary btn-sm" onclick="_rpv2Reload()"><span class="material-symbols-outlined" style="font-size:16px">refresh</span> 重载 YAML</button>' +
+          '<button class="btn btn-primary btn-sm" onclick="_rpv2Reload()"><span class="material-symbols-outlined" style="font-size:16px">refresh</span> Reload YAML</button>' +
         '</div>' +
       '</div>';
     }
 
     if (presets.length === 0) {
-      html += '<div style="padding:40px;text-align:center;color:var(--text3);background:var(--surface);border-radius:12px">暂无 V2 角色。请在 <code>data/roles/*.yaml</code> 或 <code>~/.tudou_claw/roles/*.yaml</code> 添加角色定义。</div>';
+      html += '<div style="padding:40px;text-align:center;color:var(--text3);background:var(--surface);border-radius:12px">No V2 roles yet. Add a YAML file under <code>data/roles/*.yaml</code> or <code>~/.tudou_claw/roles/*.yaml</code> to define one.</div>';
     } else {
       html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px">';
       presets.forEach(function(p) {
@@ -31139,7 +32824,7 @@ async function renderRolePresetsV2(container) {
     }
     c.innerHTML = html;
   } catch (e) {
-    c.innerHTML = '<div style="color:#ef4444;padding:20px">加载失败: ' + esc(String(e)) + '</div>';
+    c.innerHTML = '<div style="color:#ef4444;padding:20px">Load failed:' + esc(String(e)) + '</div>';
   }
 }
 
@@ -31162,7 +32847,7 @@ async function _rpv2View(roleId) {
       '<div class="form-actions"><button class="btn btn-primary" onclick="document.getElementById(\'rpv2-view-modal\').remove()">关闭</button></div>' +
       '</div></div>';
     document.body.insertAdjacentHTML('beforeend', html);
-  } catch (e) { toast('加载失败: ' + e, 'error'); }
+  } catch (e) { toast('Load failed:' + e, 'error'); }
 }
 
 async function _rpv2Kpi(roleId) {
@@ -31189,7 +32874,7 @@ async function _rpv2Kpi(roleId) {
       '<div class="form-actions"><button class="btn btn-primary" onclick="document.getElementById(\'rpv2-kpi-modal\').remove()">关闭</button></div>' +
       '</div></div>';
     document.body.insertAdjacentHTML('beforeend', html);
-  } catch (e) { toast('加载失败: ' + e, 'error'); }
+  } catch (e) { toast('Load failed:' + e, 'error'); }
 }
 
 // ============ Playbook 内嵌编辑器（面向非技术管理员） ============
@@ -31236,7 +32921,7 @@ async function _rpv2EditPlaybook(roleId) {
       dirty: false
     };
     _pbRender();
-  } catch (e) { window._toast('加载失败: ' + e, 'error'); }
+  } catch (e) { window._toast('Load failed:' + e, 'error'); }
 }
 
 function _pbRender() {
@@ -31249,7 +32934,7 @@ function _pbRender() {
     return '<div style="display:flex;gap:6px;margin-bottom:6px;align-items:center">' +
       '<span style="color:var(--text3);width:24px;text-align:right">' + (i+1) + '.</span>' +
       '<input type="text" value="' + esc(step) + '" oninput="_pbUpdateStep(' + i + ', this.value)" style="flex:1" />' +
-      '<button class="btn btn-sm btn-ghost" onclick="_pbRemoveStep(' + i + ')">删除</button>' +
+      '<button class="btn btn-sm btn-ghost" onclick="_pbRemoveStep(' + i + ')">Delete</button>' +
     '</div>';
   }).join('');
 
@@ -31342,7 +33027,7 @@ function _pbRender() {
     '</section>' +
 
     '<div style="display:flex;gap:8px;justify-content:flex-end;padding:16px 0;border-top:1px solid var(--border)">' +
-      '<button class="btn btn-ghost" onclick="renderConfig()">取消</button>' +
+      '<button class="btn btn-ghost" onclick="renderConfig()">Cancel</button>' +
       '<button class="btn btn-primary" onclick="_pbSave()">保存 Playbook</button>' +
     '</div>' +
     '</div>';
@@ -31364,7 +33049,7 @@ function _pbRuleCardHtml(rule, idx, bucket) {
       '<input type="text" placeholder="规则 ID（英文+下划线，如 cite_evidence）" value="' + esc(rule.id || '') + '" oninput="_pbUpdateRuleField(\'' + bucket + '\', ' + idx + ', \'id\', this.value)" style="flex:0 0 240px;font-family:monospace;font-size:12px" />' +
       '<label style="font-size:12px"><input type="radio" name="pb-sev-' + bucket + '-' + idx + '" ' + (sev==='hard'?'checked':'') + ' onchange="_pbUpdateRuleField(\'' + bucket + '\', ' + idx + ', \'severity\', \'hard\')" /> 严格 (hard)</label>' +
       '<label style="font-size:12px"><input type="radio" name="pb-sev-' + bucket + '-' + idx + '" ' + (sev==='soft'?'checked':'') + ' onchange="_pbUpdateRuleField(\'' + bucket + '\', ' + idx + ', \'severity\', \'soft\')" /> 提示 (soft)</label>' +
-      '<button class="btn btn-sm btn-ghost" style="margin-left:auto" onclick="_pbRemoveRule(\'' + bucket + '\', ' + idx + ')">删除</button>' +
+      '<button class="btn btn-sm btn-ghost" style="margin-left:auto" onclick="_pbRemoveRule(\'' + bucket + '\', ' + idx + ')">Delete</button>' +
     '</div>' +
     '<textarea rows="2" placeholder="规则内容（' + (bucket==='must_do' ? '比如：必须引用会议原文中的时间/人名/数据支撑结论' : '比如：不要在没有数据的情况下给出结论') + '）" oninput="_pbUpdateRuleField(\'' + bucket + '\', ' + idx + ', \'statement\', this.value)" style="width:100%;font-size:12px;margin-bottom:8px">' + esc(rule.statement || '') + '</textarea>' +
     '<div style="margin-bottom:6px">' +
@@ -31437,7 +33122,7 @@ function _pbToggleScope(bucket, i, tag, on) {
 function _pbAddScopeSection() {
   if (!_pbState) return;
   var sel = document.getElementById('pb-new-scope');
-  if (!sel || !sel.value) { window._toast('请先选择一个场景', 'warning'); return; }
+  if (!sel || !sel.value) { window._toast('Please select a scene first', 'warning'); return; }
   _pbState.playbook.required_sections_when[sel.value] = [];
   _pbMarkDirty();
   _pbRender();
@@ -31463,11 +33148,11 @@ async function _pbSave() {
     for (var i = 0; i < pb[bucket].length; i++) {
       var r = pb[bucket][i];
       if (!r.id || !/^[a-zA-Z0-9_]+$/.test(r.id)) {
-        window._toast('【' + (bucket==='must_do'?'必须做':'禁止') + ' 第' + (i+1) + '条】ID 只能包含字母/数字/下划线', 'error');
+        window._toast('【' + (bucket==='must_do'?'必须做':'Disabled') + ' 第' + (i+1) + '条】ID 只能包含字母/数字/下划线', 'error');
         return;
       }
       if (!r.statement || r.statement.trim() === '') {
-        window._toast('【' + (bucket==='must_do'?'必须做':'禁止') + ' 第' + (i+1) + '条】规则内容不能为空', 'error');
+        window._toast('【' + (bucket==='must_do'?'必须做':'Disabled') + ' 第' + (i+1) + '条】规则内容不能为空', 'error');
         return;
       }
     }
@@ -31475,19 +33160,19 @@ async function _pbSave() {
   try {
     var resp = await api('PUT', '/api/role_presets_v2/' + encodeURIComponent(_pbState.roleId) + '/playbook', pb);
     if (resp && (resp.error || resp.detail)) {
-      window._toast('保存失败: ' + (resp.detail || resp.error), 'error');
+      window._toast('Save failed:' + (resp.detail || resp.error), 'error');
       return;
     }
     if (!resp || !resp.ok) {
-      window._toast('保存失败：服务端未返回 ok', 'error');
+      window._toast('Save failed: server did not return ok', 'error');
       return;
     }
-    window._toast('Playbook 已保存', 'success');
+    window._toast('Playbook saved', 'success');
     _pbState.dirty = false;
     // 重新加载显示
     _rpv2EditPlaybook(_pbState.roleId);
   } catch (e) {
-    window._toast('保存失败: ' + e, 'error');
+    window._toast('Save failed:' + e, 'error');
   }
 }
 
@@ -31526,8 +33211,8 @@ async function renderPolicyConfig(container) {
       '</div>';
     } else {
       html += '<div style="margin-bottom:20px">' +
-        '<h3 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:20px;font-weight:700;margin-bottom:4px">审批策略 Tool Policy</h3>' +
-        '<p style="color:var(--text2);font-size:13px">管理员可以调整每个工具的风险级别，定义不同角色的审批权限。</p>' +
+        '<h3 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:20px;font-weight:700;margin-bottom:4px">Tool Policy</h3>' +
+        '<p style="color:var(--text2);font-size:13px">Adjust risk tier per tool and define approval authority across role tiers.</p>' +
       '</div>';
     }
 
@@ -31673,7 +33358,7 @@ async function renderPolicyConfig(container) {
           '<td style="padding:8px 14px;font-size:12px;color:var(--text2)">' + childStr + '</td>' +
           '<td style="padding:8px 14px;text-align:right">' +
             '<button class="btn btn-ghost btn-sm" style="font-size:11px" onclick="editRoleEdge(\'' + esc(pr) + '\')">编辑</button>' +
-            '<button class="btn btn-ghost btn-sm" style="font-size:11px;color:#ef4444" onclick="deleteRoleEdge(\'' + esc(pr) + '\')">删除</button>' +
+            '<button class="btn btn-ghost btn-sm" style="font-size:11px;color:#ef4444" onclick="deleteRoleEdge(\'' + esc(pr) + '\')">Delete</button>' +
           '</td></tr>';
       });
     }
@@ -31848,7 +33533,7 @@ async function renderPendingSkills() {
       '      <div style="font-size:12px;color:var(--text3);margin-top:4px">Agent 从经验库中提炼出的技能草稿，等待管理员审核后导入技能商店。</div>' +
       '    </div>';
   var psImportLabel = _techPs ? 'IMPORT FROM AGENT' : '从 Agent 工作区导入';
-  var psRefreshLabel = _techPs ? 'REFRESH' : '刷新';
+  var psRefreshLabel = _techPs ? 'REFRESH' : 'Refresh';
   var psStatusOpts = _techPs
     ? '<option value="">ALL STATUSES</option>' +
       '<option value="draft">DRAFT</option>' +
@@ -31899,7 +33584,7 @@ async function loadPendingSkills() {
       + _pendingSkillsState.drafts.map(_renderDraftCard).join('')
       + '</div>';
   } catch (e) {
-    box.innerHTML = '<div style="color:var(--error);padding:20px">加载失败: ' + esc(e.message || String(e)) + '</div>';
+    box.innerHTML = '<div style="color:var(--error);padding:20px">Load failed:' + esc(e.message || String(e)) + '</div>';
   }
 }
 
@@ -31907,7 +33592,7 @@ function _renderDraftCard(d) {
   var _techDc = false;
   try { _techDc = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
   var statusColors = { draft: '#60a5fa', exported: '#a78bfa', approved: '#10b981', rejected: '#ef4444' };
-  var statusLabels = { draft: '草稿', exported: '已导出', approved: '已批准', rejected: '已拒绝' };
+  var statusLabels = { draft: 'Draft', exported: '已导出', approved: '已批准', rejected: '已拒绝' };
   var statusLabelsEN = { draft: 'DRAFT', exported: 'EXPORTED', approved: 'APPROVED', rejected: 'REJECTED' };
   var statusColor = statusColors[d.status] || '#94a3b8';
   var statusLabel = (_techDc ? statusLabelsEN[d.status] : statusLabels[d.status]) || d.status;
@@ -32065,7 +33750,7 @@ async function showDraftDetail(draftId) {
         + '<button class="btn btn-sm" style="color:var(--error)" onclick="closeModal();rejectDraft(\'' + esc(d.id) + '\',\'' + esc(d.name) + '\')">拒绝</button></div>');
     }
     showModalHTML('<div style="max-width:700px;max-height:80vh;overflow-y:auto;padding:4px">' + s.join('') + '</div>');
-  } catch (e) { alert('加载详情失败: ' + (e.message || String(e))); }
+  } catch (e) { alert('Load details failed:' + (e.message || String(e))); }
 }
 
 async function approveDraft(draftId, draftName) {
@@ -32074,10 +33759,10 @@ async function approveDraft(draftId, draftName) {
     if (res.ok) {
       window._toast('✓ 已批准: ' + draftName + (res['import']&&res['import'].imported ? '，已自动导入技能商店' : ''), 'success');
     } else {
-      window._toast('批准失败: ' + JSON.stringify(res), 'error');
+      window._toast('Approve failed:' + JSON.stringify(res), 'error');
     }
   } catch (e) {
-    window._toast('操作失败: ' + (e.message || String(e)), 'error');
+    window._toast('Operation failed:' + (e.message || String(e)), 'error');
   }
   loadPendingSkills();
 }
@@ -32088,10 +33773,10 @@ async function rejectDraft(draftId, draftName) {
     if (res.ok) {
       window._toast('已拒绝: ' + draftName, 'success');
     } else {
-      window._toast('操作失败: ' + JSON.stringify(res), 'error');
+      window._toast('Operation failed:' + JSON.stringify(res), 'error');
     }
   } catch (e) {
-    window._toast('操作失败: ' + (e.message || String(e)), 'error');
+    window._toast('Operation failed:' + (e.message || String(e)), 'error');
   }
   loadPendingSkills();
 }
@@ -32111,7 +33796,7 @@ async function importSkillFromWorkspace() {
     + '<div style="margin-bottom:14px"><label style="font-size:12px;font-weight:600">技能目录名</label>'
     + '<input id="import-dir-name" placeholder="pptx_skill" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);margin-top:4px;box-sizing:border-box" /></div>'
     + '<div style="display:flex;gap:8px;justify-content:flex-end">'
-    + '<button class="btn btn-sm" onclick="closeCustomModal()">取消</button>'
+    + '<button class="btn btn-sm" onclick="closeCustomModal()">Cancel</button>'
     + '<button class="btn btn-sm" style="background:var(--primary);color:#fff" onclick="_doImportSkill()">导入</button>'
     + '</div></div>';
   showModalHTML(html);
@@ -32120,19 +33805,19 @@ async function importSkillFromWorkspace() {
 async function _doImportSkill() {
   var agentId = document.getElementById('import-agent-id').value;
   var dirName = (document.getElementById('import-dir-name').value||'').trim();
-  if (!agentId || !dirName) { alert('请选择 Agent 并输入目录名'); return; }
+  if (!agentId || !dirName) { alert('Please select Agent and enter folder name'); return; }
   closeModal();
   try {
     var res = await api('POST', '/api/portal/pending-skills/import', {
       agent_id: agentId, dir_name: dirName
     });
     if (res && res.ok) {
-      alert('导入成功: ' + res.name + ' (' + res.draft_id + ')\n代码文件: ' + (res.code_files||[]).join(', '));
+      alert('Import succeeded:' + res.name + ' (' + res.draft_id + ')\n代码文件: ' + (res.code_files||[]).join(', '));
       loadPendingSkills();
     } else {
-      alert('导入失败: ' + JSON.stringify(res));
+      alert('Import failed:' + JSON.stringify(res));
     }
-  } catch(e) { alert('导入失败: ' + (e.message || String(e))); }
+  } catch(e) { alert('Import failed:' + (e.message || String(e))); }
 }
 
 // ============ Inbox (Block 0 Day 6) ============
@@ -32458,7 +34143,7 @@ async function _inboxRefresh() {
     html += '</div>';
     listEl.innerHTML = html;
   } catch (e) {
-    listEl.innerHTML = '<div style="color:var(--error);padding:20px">加载失败: '+_inboxEsc(e.message || String(e))+'</div>';
+    listEl.innerHTML = '<div style="color:var(--error);padding:20px">Load failed:'+_inboxEsc(e.message || String(e))+'</div>';
   }
   _inboxFetchCount();
 }
@@ -32471,7 +34156,7 @@ async function _inboxAck(mid) {
       message_ids: [mid],
     });
     _inboxRefresh();
-  } catch (e) { alert('Ack 失败: ' + (e.message || String(e))); }
+  } catch (e) { alert('Ack failed:' + (e.message || String(e))); }
 }
 
 function _inboxReply(mid, fromAgent) {
@@ -32486,7 +34171,7 @@ function _inboxReply(mid, fromAgent) {
     content: body,
     priority: 'normal',
   }).then(function(){ _inboxRefresh(); })
-    .catch(function(e){ alert('Reply 失败: ' + (e.message || String(e))); });
+    .catch(function(e){ alert('Reply failed: ' + (e.message || String(e))); });
 }
 
 async function _inboxShowThread(tid) {
@@ -32503,7 +34188,7 @@ async function _inboxShowThread(tid) {
     });
     html += '<div style="text-align:right"><button class="btn btn-sm" onclick="closeModal()">关闭</button></div></div>';
     showModalHTML(html);
-  } catch (e) { alert('Thread 加载失败: '+(e.message||String(e))); }
+  } catch (e) { alert('Thread Load failed:'+(e.message||String(e))); }
 }
 
 // NOTE: the old global `_inboxFetchCount` badge updater is obsolete —
@@ -32640,7 +34325,7 @@ async function _ckptRefresh() {
     html += '</div>';
     listEl.innerHTML = html;
   } catch (e) {
-    listEl.innerHTML = '<div style="color:var(--error);padding:20px">加载失败: '+_inboxEsc(e.message || String(e))+'</div>';
+    listEl.innerHTML = '<div style="color:var(--error);padding:20px">Load failed:'+_inboxEsc(e.message || String(e))+'</div>';
   }
   _ckptFetchCount();
 }
@@ -32656,7 +34341,7 @@ async function _ckptShowDigest(cid) {
       '<pre style="white-space:pre-wrap;word-break:break-word;background:var(--bg2);padding:12px;border-radius:8px;font-family:inherit;font-size:12px;max-height:60vh;overflow:auto">'+_inboxEsc(d.text)+'</pre>' +
       '<div style="text-align:right;margin-top:10px"><button class="btn btn-sm" onclick="closeModal()">关闭</button></div></div>';
     showModalHTML(html);
-  } catch (e) { alert('Digest 失败: '+(e.message||String(e))); }
+  } catch (e) { alert('Digest failed:'+(e.message||String(e))); }
 }
 
 async function _ckptRestore(cid) {
@@ -32665,7 +34350,7 @@ async function _ckptRestore(cid) {
     var d = await api('POST', '/api/portal/checkpoint/'+encodeURIComponent(cid)+'/restore', {});
     alert('已恢复。Digest 长度 ~'+(d.token_estimate||0)+' tokens。');
     _ckptRefresh();
-  } catch (e) { alert('恢复失败: '+(e.message||String(e))); }
+  } catch (e) { alert('Restore failed:'+(e.message||String(e))); }
 }
 
 async function _ckptArchive(cid) {
@@ -32673,14 +34358,14 @@ async function _ckptArchive(cid) {
   try {
     await api('POST', '/api/portal/checkpoint/'+encodeURIComponent(cid)+'/archive', {});
     _ckptRefresh();
-  } catch (e) { alert('归档失败: '+(e.message||String(e))); }
+  } catch (e) { alert('Archive failed:'+(e.message||String(e))); }
 }
 
 async function _ckptRebuildDigest(cid) {
   try {
     await api('POST', '/api/portal/checkpoint/'+encodeURIComponent(cid)+'/digest/rebuild', {token_budget: 2000});
     alert('已重算并缓存 digest。');
-  } catch (e) { alert('重算失败: '+(e.message||String(e))); }
+  } catch (e) { alert('Recompute failed:'+(e.message||String(e))); }
 }
 
 // (old global checkpoint badge polling removed — now per-agent)
@@ -32723,7 +34408,7 @@ async function _showAgentInboxModal(agentId) {
   _inboxSelectedAgent = agentId;
   var html =
     '<div style="max-width:900px;min-width:640px">' +
-      '<h3 style="margin:0 0 12px">📮 ' + window.t('chat.inbox', '收件箱') + ' <span style="font-family:monospace;font-size:11px;color:var(--text3)">'+_inboxEsc(agentId)+'</span></h3>' +
+      '<h3 style="margin:0 0 12px">📮 ' + window.t('chat.inbox', 'Inbox') + ' <span style="font-family:monospace;font-size:11px;color:var(--text3)">'+_inboxEsc(agentId)+'</span></h3>' +
       '<div style="display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap">' +
         '<label style="font-size:12px;color:var(--text3)"><input type="checkbox" id="inbox-show-read" onchange="_agentInboxModalRefresh(\''+_inboxEsc(agentId)+'\')" checked /> ' + window.t('inbox.showRead', '显示已读') + '</label>' +
         '<label style="font-size:12px;color:var(--text3)"><input type="checkbox" id="inbox-show-acked" onchange="_agentInboxModalRefresh(\''+_inboxEsc(agentId)+'\')" /> ' + window.t('inbox.showAcked', '显示已确认') + '</label>' +
@@ -32731,7 +34416,7 @@ async function _showAgentInboxModal(agentId) {
         '<button class="btn btn-ghost btn-sm" onclick="_agentInboxModalRefresh(\''+_inboxEsc(agentId)+'\')">' + window.t('action.refresh', 'Refresh') + '</button>' +
       '</div>' +
       '<div id="inbox-list" style="min-height:120px;max-height:60vh;overflow:auto">' + window.t('common.loading', '加载中…') + '</div>' +
-      '<div style="text-align:right;margin-top:12px"><button class="btn btn-sm" onclick="closeModal()">' + window.t('action.close', '关闭') + '</button></div>' +
+      '<div style="text-align:right;margin-top:12px"><button class="btn btn-sm" onclick="closeModal()">' + window.t('action.close', 'Close') + '</button></div>' +
     '</div>';
   showModalHTML(html);
   await _agentInboxModalRefresh(agentId);
@@ -32780,7 +34465,7 @@ async function _agentInboxModalRefresh(agentId) {
     html += '</div>';
     listEl.innerHTML = html;
   } catch (e) {
-    listEl.innerHTML = '<div style="color:var(--error);padding:20px">加载失败: '+_inboxEsc(e.message || String(e))+'</div>';
+    listEl.innerHTML = '<div style="color:var(--error);padding:20px">Load failed:'+_inboxEsc(e.message || String(e))+'</div>';
   }
   _refreshAgentHeaderCounts(agentId);
 }
@@ -32789,7 +34474,7 @@ async function _agentInboxAck(agentId, mid) {
   try {
     await api('POST', '/api/portal/inbox/ack', {agent_id: agentId, message_ids: [mid]});
     _agentInboxModalRefresh(agentId);
-  } catch (e) { alert('Ack 失败: '+(e.message||String(e))); }
+  } catch (e) { alert('Ack failed:'+(e.message||String(e))); }
 }
 
 function _agentInboxReply(agentId, mid, fromAgent) {
@@ -32800,7 +34485,7 @@ function _agentInboxReply(agentId, mid, fromAgent) {
   api('POST', '/api/portal/inbox/reply', {
     agent_id: agentId, message_id: mid, content: body, priority: 'normal',
   }).then(function(){ _agentInboxModalRefresh(agentId); })
-    .catch(function(e){ alert('Reply 失败: '+(e.message||String(e))); });
+    .catch(function(e){ alert('Reply failed: '+(e.message||String(e))); });
 }
 
 // ── Checkpoint modal ────────────────────────────────────────────
@@ -32817,17 +34502,17 @@ async function _showAgentCheckpointsModal(agentId) {
   }).join('');
   var html =
     '<div style="max-width:1000px;min-width:720px">' +
-      '<h3 style="margin:0 0 12px">🔖 ' + window.t('chat.checkpoints', '检查点') + ' <span style="font-family:monospace;font-size:11px;color:var(--text3)">'+_inboxEsc(agentId)+'</span></h3>' +
+      '<h3 style="margin:0 0 12px">🔖 ' + window.t('chat.checkpoints', 'Checkpoints') + ' <span style="font-family:monospace;font-size:11px;color:var(--text3)">'+_inboxEsc(agentId)+'</span></h3>' +
       '<div style="display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap">' +
         '<label style="font-size:12px;color:var(--text3)">' + window.t('ckpt.scope', 'Scope') + ':</label>' +
         '<select id="ckpt-scope-sel" onchange="_agentCkptScopeChange(\''+_inboxEsc(agentId)+'\', this.value)" style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">'+scopeOpts+'</select>' +
-        '<label style="font-size:12px;color:var(--text3)">' + window.t('ckpt.status', '状态') + ':</label>' +
+        '<label style="font-size:12px;color:var(--text3)">' + window.t('ckpt.status', 'Status') + ':</label>' +
         '<select id="ckpt-status-sel" onchange="_agentCkptStatusChange(\''+_inboxEsc(agentId)+'\', this.value)" style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">'+statusOpts+'</select>' +
         '<span id="ckpt-summary" style="margin-left:auto;font-size:12px;color:var(--text3)"></span>' +
         '<button class="btn btn-ghost btn-sm" onclick="_agentCkptModalRefresh(\''+_inboxEsc(agentId)+'\')">' + window.t('action.refresh', 'Refresh') + '</button>' +
       '</div>' +
       '<div id="ckpt-list" style="min-height:120px;max-height:60vh;overflow:auto">' + window.t('common.loading', '加载中…') + '</div>' +
-      '<div style="text-align:right;margin-top:12px"><button class="btn btn-sm" onclick="closeModal()">' + window.t('action.close', '关闭') + '</button></div>' +
+      '<div style="text-align:right;margin-top:12px"><button class="btn btn-sm" onclick="closeModal()">' + window.t('action.close', 'Close') + '</button></div>' +
     '</div>';
   showModalHTML(html);
   await _agentCkptModalRefresh(agentId);
@@ -32879,7 +34564,7 @@ async function _agentCkptModalRefresh(agentId) {
     html += '</div>';
     listEl.innerHTML = html;
   } catch (e) {
-    listEl.innerHTML = '<div style="color:var(--error);padding:20px">加载失败: '+_inboxEsc(e.message || String(e))+'</div>';
+    listEl.innerHTML = '<div style="color:var(--error);padding:20px">Load failed:'+_inboxEsc(e.message || String(e))+'</div>';
   }
   _refreshAgentHeaderCounts(agentId);
 }
@@ -32890,7 +34575,7 @@ async function _agentCkptRestore(agentId, cid) {
     var d = await api('POST', '/api/portal/checkpoint/'+encodeURIComponent(cid)+'/restore', {});
     alert('已恢复。Digest 长度 ~'+(d.token_estimate||0)+' tokens。');
     _agentCkptModalRefresh(agentId);
-  } catch (e) { alert('恢复失败: '+(e.message||String(e))); }
+  } catch (e) { alert('Restore failed:'+(e.message||String(e))); }
 }
 
 async function _agentCkptArchive(agentId, cid) {
@@ -32898,7 +34583,7 @@ async function _agentCkptArchive(agentId, cid) {
   try {
     await api('POST', '/api/portal/checkpoint/'+encodeURIComponent(cid)+'/archive', {});
     _agentCkptModalRefresh(agentId);
-  } catch (e) { alert('归档失败: '+(e.message||String(e))); }
+  } catch (e) { alert('Archive failed:'+(e.message||String(e))); }
 }
 
 
@@ -33021,10 +34706,10 @@ async function _memoryMarkWrong(factId) {
         row.appendChild(tag);
       }
     } else {
-      alert('删除失败: ' + JSON.stringify(r));
+      alert('Delete failed:' + JSON.stringify(r));
     }
   } catch (e) {
-    alert('删除失败: ' + (e.message || String(e)));
+    alert('Delete failed:' + (e.message || String(e)));
   }
 }
 
@@ -33056,7 +34741,7 @@ async function _memoryViewFull(factId) {
       '</div>';
     showModalHTML(html);
   } catch (e) {
-    alert('加载失败: ' + (e.message || String(e)));
+    alert('Load failed:' + (e.message || String(e)));
   }
 }
 
@@ -33118,10 +34803,10 @@ async function _ltShowDraftModal(projectId, draftId) {
     var draft = await api('GET',
       '/api/portal/projects/' + encodeURIComponent(projectId)
       + '/decomposition-drafts/' + encodeURIComponent(draftId));
-    if (!draft || draft.error) { alert('加载失败: ' + (draft&&draft.error||'?')); return; }
+    if (!draft || draft.error) { alert('Load failed:' + (draft&&draft.error||'?')); return; }
     _ltRenderDraftModal(projectId, draft);
   } catch(e) {
-    alert('加载失败: ' + e);
+    alert('Load failed:' + e);
   }
 }
 
@@ -33143,7 +34828,7 @@ function _ltRenderDraftModal(projectId, draft) {
         + '<span style="background:'+color+'20;color:'+color+';padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700">'+esc(st.role_hint||'general')+'</span>'
         + '<input value="'+esc(st.title)+'" data-field="title" data-st="'+esc(st.id)+'" oninput="_ltOverride(\''+esc(st.id)+'\',\'title\',this.value)" style="flex:1;background:transparent;border:none;font-weight:700;font-size:13px;color:var(--text);outline:none">'
         + (deps?'<span style="font-size:10px;color:var(--text3)" title="depends on">↳ '+esc(deps)+'</span>':'')
-        + '<button onclick="_ltToggleDrop(\''+esc(st.id)+'\')" title="'+(dropped?'恢复':'丢弃')+'" style="background:transparent;border:none;color:'+(dropped?'var(--success)':'var(--text3)')+';cursor:pointer;font-size:14px">'+(dropped?'↺':'×')+'</button>'
+        + '<button onclick="_ltToggleDrop(\''+esc(st.id)+'\')" title="'+(dropped?'Resume':'Discard')+'" style="background:transparent;border:none;color:'+(dropped?'var(--success)':'var(--text3)')+';cursor:pointer;font-size:14px">'+(dropped?'↺':'×')+'</button>'
       + '</div>'
       + '<div style="font-size:11px;color:var(--text3);margin-bottom:4px">'+esc(st.description||'')+'</div>'
       + '<div style="display:flex;gap:12px;align-items:center;font-size:10px;color:var(--text3);font-family:monospace">'
@@ -33212,7 +34897,7 @@ window._ltToggleDrop = function(stId) {
     if (btn) {
       btn.textContent = dropped ? '↺' : '×';
       btn.style.color = dropped ? 'var(--success)' : 'var(--text3)';
-      btn.title = dropped ? '恢复' : '丢弃';
+      btn.title = dropped ? 'Resume' : 'Discard';
     }
   }
 };
@@ -33224,7 +34909,7 @@ window._ltCancelDraft = async function(projectId, draftId) {
       + '/decomposition-drafts/' + encodeURIComponent(draftId) + '/cancel');
     var m = document.getElementById('lt-draft-modal'); if (m) m.remove();
     _ltCheckPendingDrafts(projectId);
-  } catch(e) { alert('取消失败: ' + e); }
+  } catch(e) { alert('Cancel failed:' + e); }
 };
 
 window._ltConfirmDraft = async function(projectId, draftId) {
@@ -33239,14 +34924,14 @@ window._ltConfirmDraft = async function(projectId, draftId) {
     var resp = await api('POST', '/api/portal/projects/' + encodeURIComponent(projectId)
       + '/decomposition-drafts/' + encodeURIComponent(draftId) + '/confirm',
       { user_overrides: overrides });
-    if (resp && resp.error) { alert('确认失败: ' + resp.error); return; }
+    if (resp && resp.error) { alert('Confirm failed:' + resp.error); return; }
     var m = document.getElementById('lt-draft-modal'); if (m) m.remove();
     var n = (resp && resp.sub_task_ids || []).length;
     alert('✓ 已创建 ' + n + ' 个子任务,框架将自动派单到匹配的 idle agent。');
     _ltCheckPendingDrafts(projectId);
     // Refresh the project view to show the newly-created tasks.
     if (typeof renderProjectDetail === 'function') renderProjectDetail(projectId);
-  } catch(e) { alert('确认失败: ' + e); }
+  } catch(e) { alert('Confirm failed:' + e); }
 };
 
 

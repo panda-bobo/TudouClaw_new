@@ -36,22 +36,28 @@ class PersistenceManager(ManagerBase):
     # ------------------------------------------------------------------
 
     def _load_agents(self):
-        """Load agents from SQLite (primary) or JSON (fallback)."""
+        """Load agents from a SINGLE source of truth.
+
+        2026-05-05 — strict single-source policy (matches ``_save_agents``).
+        No SQLite→JSON fallback: if SQLite is available, it IS the source,
+        and an empty-but-present DB means "no agents" (NOT "fall back to
+        JSON and resurrect deleted agents"). The old fallback was a
+        consistency hazard.
+        """
         from ..agent import Agent
 
-        # 优先从 SQLite 加载
-        if self._db and self._db.count("agents") > 0:
+        if self._db:
             try:
                 for d in self._db.load_agents():
                     agent = Agent.from_persist_dict(d)
                     self.agents[agent.id] = agent
                 logger.info("Loaded %d agents from SQLite", len(self.agents))
-                self._auto_migrate_role_defaults()
-                return
             except Exception as e:
-                logger.warning("SQLite agent load failed, trying JSON: %s", e)
+                logger.warning("SQLite agent load failed: %s", e)
+            self._auto_migrate_role_defaults()
+            return
 
-        # JSON fallback
+        # No DB — JSON is the source.
         if not os.path.exists(self._hub._agents_file):
             return
         try:

@@ -4607,10 +4607,18 @@ def _do_post_inner(handler, path: str):
                 "source": "domain_import",
             })
         count = get_rag_registry().ingest(kb.provider_id, kb.collection, chunks)
-        store.increment_doc_count(kb_id, len(chunks))
+        err_msg = ""
+        if count < len(chunks):
+            err_msg = (f"{len(chunks) - count} of {len(chunks)} chunks did not "
+                       f"reach the vector store — check the embedding "
+                       f"provider (embedding_provider_id={kb.embedding_provider_id!r}, "
+                       f"model={kb.embedding_model!r}).")
+        store.record_ingest(kb_id, attempted=len(chunks), succeeded=count, error=err_msg)
         auth.audit("domain_kb_import", actor=actor_name, role=user_role,
                    target=f"{kb_id}:{title}", ip=get_client_ip(handler))
-        handler._json({"ok": True, "count": count, "chunks": len(chunks)})
+        handler._json({"ok": True, "count": count, "chunks": len(chunks),
+                       "indexed_total": kb.indexed_count, "doc_total": kb.doc_count,
+                       "warning": err_msg})
 
     elif path == "/api/portal/domain-kb/search":
         # Search within a domain knowledge base
