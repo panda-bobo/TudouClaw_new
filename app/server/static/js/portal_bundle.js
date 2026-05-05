@@ -22553,15 +22553,30 @@ function renderOrchestrationPage() {
 }
 function _renderOrchestrationPageLegacy() {
   var c = document.getElementById('content');
-  c.innerHTML =
-    '<div style="padding:18px;display:flex;flex-direction:column;height:calc(100vh - 80px)">'
-    + '<div style="margin-bottom:14px">'
-    + '<h2 style="margin:0;font-family:\'Plus Jakarta Sans\',sans-serif;font-size:22px;font-weight:800">编排总览</h2>'
-    + '<p style="font-size:12px;color:var(--text3);margin-top:4px">画布工作流 · 长任务流水线 · Agent 表现 · 系统健康</p>'
-    + '</div>'
-    + '<div id="orch-tabbar" style="display:flex;gap:2px;border-bottom:1px solid var(--border);margin-bottom:16px;flex-wrap:wrap"></div>'
-    + '<div id="orch-tab-content" style="flex:1;min-height:0;overflow:auto"></div>'
-    + '</div>';
+  var _techOp = false;
+  try { _techOp = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+  if (_techOp) {
+    c.innerHTML = '' +
+      '<div style="padding:var(--s-lg);display:flex;flex-direction:column;height:calc(100vh - 80px)">' +
+        '<div style="margin-bottom:var(--s-lg)">' +
+          '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px"><span>WORKFLOW ENGINE</span><span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span></div>' +
+          '<h2 style="font-family:var(--font-display);font-size:30px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:8px 0 6px">Orchestration</h2>' +
+          '<p class="tc-text-dim" style="font-size:14px;line-height:1.55;max-width:680px">Visual canvas workflows · long-task pipelines · agent performance · system health.</p>' +
+        '</div>' +
+        '<div id="orch-tabbar" style="display:flex;gap:4px;padding:4px;background:var(--surface-container-low);border:1px solid var(--outline-variant);border-radius:var(--r-md);margin-bottom:var(--s-lg);flex-wrap:wrap;align-self:flex-start"></div>' +
+        '<div id="orch-tab-content" style="flex:1;min-height:0;overflow:auto"></div>' +
+      '</div>';
+  } else {
+    c.innerHTML =
+      '<div style="padding:18px;display:flex;flex-direction:column;height:calc(100vh - 80px)">'
+      + '<div style="margin-bottom:14px">'
+      + '<h2 style="margin:0;font-family:\'Plus Jakarta Sans\',sans-serif;font-size:22px;font-weight:800">编排总览</h2>'
+      + '<p style="font-size:12px;color:var(--text3);margin-top:4px">画布工作流 · 长任务流水线 · Agent 表现 · 系统健康</p>'
+      + '</div>'
+      + '<div id="orch-tabbar" style="display:flex;gap:2px;border-bottom:1px solid var(--border);margin-bottom:16px;flex-wrap:wrap"></div>'
+      + '<div id="orch-tab-content" style="flex:1;min-height:0;overflow:auto"></div>'
+      + '</div>';
+  }
   _renderOrchTabBar();
   _renderOrchTabContent();
 }
@@ -22569,15 +22584,36 @@ function _renderOrchestrationPageLegacy() {
 function _renderOrchTabBar() {
   var bar = document.getElementById('orch-tabbar');
   if (!bar) return;
-  var tabs = [
-    {key: 'canvas',    label: '画布工作流',     icon: 'account_tree'},
-    {key: 'pipelines', label: '长任务流水线',   icon: 'timeline'},
-    {key: 'agents',    label: 'Agent 排行',     icon: 'leaderboard'},
-    {key: 'preproc',   label: '预处理 metrics', icon: 'bolt'},
-    {key: 'overview',  label: '系统概览',       icon: 'insights'},
-  ];
+  var _techOtb = false;
+  try { _techOtb = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+  var tabs = _techOtb
+    ? [
+        {key: 'canvas',    label: 'Canvas Workflows',  icon: 'account_tree'},
+        {key: 'pipelines', label: 'Long-Task Pipelines', icon: 'timeline'},
+        {key: 'agents',    label: 'Agent Rankings',    icon: 'leaderboard'},
+        {key: 'preproc',   label: 'Preprocessor Metrics', icon: 'bolt'},
+        {key: 'overview',  label: 'System Overview',   icon: 'insights'},
+      ]
+    : [
+        {key: 'canvas',    label: '画布工作流',     icon: 'account_tree'},
+        {key: 'pipelines', label: '长任务流水线',   icon: 'timeline'},
+        {key: 'agents',    label: 'Agent 排行',     icon: 'leaderboard'},
+        {key: 'preproc',   label: '预处理 metrics', icon: 'bolt'},
+        {key: 'overview',  label: '系统概览',       icon: 'insights'},
+      ];
   bar.innerHTML = tabs.map(function(t) {
     var active = (_orchActiveTab === t.key);
+    if (_techOtb) {
+      var bg = active ? 'rgba(192,193,255,0.10)' : 'transparent';
+      var bd = active ? '1px solid rgba(192,193,255,0.30)' : '1px solid transparent';
+      var color = active ? 'var(--primary)' : 'var(--outline)';
+      return '<button onclick="_switchOrchTab(\'' + t.key + '\')" ' +
+        'style="background:' + bg + ';border:' + bd + ';color:' + color + ';' +
+        'font-family:var(--font-mono);font-size:11px;letter-spacing:0.04em;' +
+        'padding:7px 14px;border-radius:var(--r-md);cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:all 0.15s">' +
+        '<span class="material-symbols-outlined" style="font-size:14px">' + t.icon + '</span>' +
+        t.label + '</button>';
+    }
     return '<button onclick="_switchOrchTab(\'' + t.key + '\')" class="btn btn-ghost btn-sm" '
       + 'style="border-radius:0;border-bottom:2px solid '+(active?'var(--primary)':'transparent')
       + ';color:'+(active?'var(--primary)':'var(--text2)')
@@ -26707,17 +26743,43 @@ function _canvasNodeStatusBadge(state, nodeW) {
 function _canvasRenderNode(n) {
   var nt = _NODE_TYPES[n.type] || _NODE_TYPES.agent;
   var isSel = (_canvasState.selectedNodeId === n.id);
+  var _techNd = false;
+  try { _techNd = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
   var stroke = isSel ? 'var(--primary)' : nt.color;
   var sw = isSel ? 3 : 2;
   var w = _NODE_W, h = _NODE_H;
+  // Tech mode: bigger rect nodes (200x90) with header band — closer to
+  // stitch_19's "AGENT: SEARCH" cards. Circle/diamond nodes keep their
+  // legacy compact form so start/end/decision shapes still read as
+  // distinct from agent cards.
+  if (_techNd && nt.shape === 'rect') {
+    w = 200;
+    h = 90;
+  }
   var shapeSvg = '';
   if (nt.shape === 'circle') {
     w = h = 50;
-    shapeSvg = '<circle cx="25" cy="25" r="23" fill="' + nt.color + '" fill-opacity="0.15" stroke="' + stroke + '" stroke-width="' + sw + '"/>';
+    if (_techNd) {
+      shapeSvg = '<circle cx="25" cy="25" r="23" fill="' + nt.color + '" fill-opacity="0.18" stroke="' + stroke + '" stroke-width="' + sw + '" filter="drop-shadow(0 0 8px ' + nt.color + '40)"/>';
+    } else {
+      shapeSvg = '<circle cx="25" cy="25" r="23" fill="' + nt.color + '" fill-opacity="0.15" stroke="' + stroke + '" stroke-width="' + sw + '"/>';
+    }
   } else if (nt.shape === 'diamond') {
     shapeSvg = '<path d="M ' + (w/2) + ' 2 L ' + (w-2) + ' ' + (h/2) + ' L ' + (w/2) + ' ' + (h-2) + ' L 2 ' + (h/2) + ' z" fill="' + nt.color + '" fill-opacity="0.15" stroke="' + stroke + '" stroke-width="' + sw + '"/>';
   } else {
-    shapeSvg = '<rect x="2" y="2" width="' + (w-4) + '" height="' + (h-4) + '" rx="6" ry="6" fill="' + nt.color + '" fill-opacity="0.15" stroke="' + stroke + '" stroke-width="' + sw + '"/>';
+    if (_techNd) {
+      // Glass-panel rect: dark indigo bg + 1px outline + colored top
+      // accent bar with the tier color, plus inset highlight.
+      var bgFill = isSel ? 'rgba(31,31,39,0.95)' : 'rgba(31,31,39,0.85)';
+      var topAccent = '<rect x="2" y="2" width="' + (w-4) + '" height="3" rx="2" ry="2" fill="' + nt.color + '" fill-opacity="0.85"/>';
+      shapeSvg =
+        '<rect x="2" y="2" width="' + (w-4) + '" height="' + (h-4) + '" rx="8" ry="8" fill="' + bgFill + '" stroke="' + stroke + '" stroke-width="' + sw + '"/>' +
+        topAccent +
+        // Subtle inner glow when selected
+        (isSel ? '<rect x="3" y="3" width="' + (w-6) + '" height="' + (h-6) + '" rx="7" ry="7" fill="none" stroke="' + nt.color + '" stroke-width="1" stroke-opacity="0.3"/>' : '');
+    } else {
+      shapeSvg = '<rect x="2" y="2" width="' + (w-4) + '" height="' + (h-4) + '" rx="6" ry="6" fill="' + nt.color + '" fill-opacity="0.15" stroke="' + stroke + '" stroke-width="' + sw + '"/>';
+    }
   }
   // Label — for agent nodes, surface the BOUND AGENT'S NAME so the
   // canvas isn't a sea of identical "Agent 节点" boxes. Falls back to
@@ -26754,9 +26816,31 @@ function _canvasRenderNode(n) {
   } else {
     primaryLabel = n.label || nt.label;
   }
-  primaryLabel = primaryLabel.slice(0, 18);
+  primaryLabel = _techNd ? primaryLabel.slice(0, 24) : primaryLabel.slice(0, 18);
   var labelSvg;
-  if (secondaryLabel) {
+  if (_techNd && nt.shape === 'rect') {
+    // Stitch_19 layout: AGENT: NAME header band on top + meta line
+    // below, with tier-color icon dot at left.
+    var bandY = 14;
+    var headerKicker = (n.type === 'agent' ? 'AGENT' :
+                       n.type === 'parallel' ? 'PARALLEL' :
+                       n.type === 'decision' ? 'BRANCH' :
+                       (n.type || '').toUpperCase()) || 'NODE';
+    var titleY = bandY + 14;
+    labelSvg =
+      // Tier kicker (mono, color-tinted)
+      '<text x="36" y="' + bandY + '" font-family="\'Space Grotesk\', monospace" font-size="9" font-weight="500" fill="' + nt.color + '" letter-spacing="1.2" pointer-events="none">' + headerKicker + '</text>' +
+      // Primary label (Inter, white, bold)
+      '<text x="36" y="' + titleY + '" font-family="Inter, sans-serif" font-size="13" font-weight="600" fill="#e4e1ed" letter-spacing="-0.2" pointer-events="none">' +
+        esc(primaryLabel) +
+      '</text>' +
+      // Bottom divider
+      '<line x1="14" y1="' + (h - 26) + '" x2="' + (w - 14) + '" y2="' + (h - 26) + '" stroke="rgba(255,255,255,0.08)" stroke-width="1" pointer-events="none"/>' +
+      // Secondary meta line in mono
+      (secondaryLabel
+        ? '<text x="14" y="' + (h - 11) + '" font-family="\'Space Grotesk\', monospace" font-size="9" letter-spacing="0.5" fill="' + (secondaryColor === 'var(--chip-error-fg)' ? '#ffb4ab' : '#908fa0') + '" pointer-events="none">' + esc(secondaryLabel.slice(0, 28).replace('👤', '')) + '</text>'
+        : '');
+  } else if (secondaryLabel) {
     labelSvg = '<text x="' + (w/2) + '" y="' + (h/2 - 2) + '" text-anchor="middle" '
       + 'font-size="12" font-weight="600" fill="var(--text)" pointer-events="none">'
       + esc(primaryLabel) + '</text>'
@@ -26768,10 +26852,17 @@ function _canvasRenderNode(n) {
       + 'font-size="12" fill="var(--text)" pointer-events="none">'
       + esc(primaryLabel) + '</text>';
   }
-  // Icon (top-left for rect, hidden for circle/diamond)
-  var iconSvg = (nt.shape === 'rect')
-    ? '<text x="8" y="16" font-size="13" fill="' + nt.color + '" pointer-events="none">' + nt.icon + '</text>'
-    : '';
+  // Icon — tech rect uses a 18px round colored block on the left of
+  // the header band; legacy / circle / diamond uses the unicode glyph.
+  var iconSvg;
+  if (_techNd && nt.shape === 'rect') {
+    iconSvg = '<rect x="14" y="6" width="18" height="18" rx="4" ry="4" fill="' + nt.color + '" fill-opacity="0.20" stroke="' + nt.color + '" stroke-width="1" stroke-opacity="0.40"/>' +
+      '<text x="23" y="20" text-anchor="middle" font-size="11" fill="' + nt.color + '" pointer-events="none">' + nt.icon + '</text>';
+  } else {
+    iconSvg = (nt.shape === 'rect')
+      ? '<text x="8" y="16" font-size="13" fill="' + nt.color + '" pointer-events="none">' + nt.icon + '</text>'
+      : '';
+  }
   // Anchor handles (for edge creation) — shown only on hover via opacity
   var anchors = ['top','right','bottom','left'].map(function(a) {
     var p = { top:[w/2,0], right:[w,h/2], bottom:[w/2,h], left:[0,h/2] }[a];
