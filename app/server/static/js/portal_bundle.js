@@ -16908,15 +16908,28 @@ function buildAgentOptions() {
 // ============ Projects ============
 async function renderProjects() {
   var c = document.getElementById('content');
-  c.style.padding = '24px';
+  var _techPj = false;
+  try { _techPj = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+  c.style.padding = _techPj ? 'var(--s-lg)' : '24px';
   // Inline header with title + action button (top-right) — mirrors the
   // Workflow tab pattern. No button duplication in the global topbar.
-  var _projHeader = ''
-    + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">'
-    + '  <div><h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:22px;font-weight:800;margin:0">Projects</h2>'
-    + '    <p style="font-size:12px;color:var(--text3);margin-top:4px">' + t('project.subtitle', '组织多 agent 协作项目与任务') + '</p></div>'
-    + '  <button class="btn btn-primary btn-sm" onclick="showCreateProjectModal()"><span class="material-symbols-outlined" style="font-size:14px">add</span> ' + t('project.new', 'New Project') + '</button>'
-    + '</div>';
+  var _projHeader = _techPj
+    ? '<div style="display:flex;justify-content:space-between;align-items:flex-end;gap:var(--s-md);margin-bottom:var(--s-lg);flex-wrap:wrap">' +
+        '<div style="flex:1;min-width:240px">' +
+          '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px"><span>WORKSPACE</span><span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span></div>' +
+          '<h2 style="font-family:var(--font-display);font-size:30px;font-weight:600;letter-spacing:-0.01em;color:var(--on-surface);margin:8px 0 0">Projects &amp; Tasks</h2>' +
+          '<p class="tc-text-dim" style="font-size:14px;line-height:1.55;margin-top:8px;max-width:640px">Organize multi-agent collaboration into projects with goals, milestones, deliverables, and shared workspaces.</p>' +
+        '</div>' +
+        '<button onclick="showCreateProjectModal()" style="background:var(--primary-fixed);color:var(--on-primary-fixed);padding:10px 20px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:8px;box-shadow:0 4px 14px rgba(192,193,255,0.20)" onmouseover="this.style.filter=\'brightness(1.08)\'" onmouseout="this.style.filter=\'\'">' +
+          '<span class="material-symbols-outlined" style="font-size:16px">add_circle</span> NEW PROJECT' +
+        '</button>' +
+      '</div>'
+    : ''
+      + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">'
+      + '  <div><h2 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:22px;font-weight:800;margin:0">Projects</h2>'
+      + '    <p style="font-size:12px;color:var(--text3);margin-top:4px">' + t('project.subtitle', '组织多 agent 协作项目与任务') + '</p></div>'
+      + '  <button class="btn btn-primary btn-sm" onclick="showCreateProjectModal()"><span class="material-symbols-outlined" style="font-size:14px">add</span> ' + t('project.new', 'New Project') + '</button>'
+      + '</div>';
   try {
     var data = await api('GET', '/api/portal/projects');
     var projects = data.projects || [];
@@ -16950,32 +16963,95 @@ async function renderProjects() {
     var activeProjs    = projects.filter(function(p){ return OPEN_STATES[p.status] === 1; });
     var completedProjs = projects.filter(function(p){ return OPEN_STATES[p.status] !== 1; });
 
+    // English status labels for tech mode
+    var STATUS_EN = {
+      planning: 'PLANNING', active: 'ACTIVE', suspended: 'SUSPENDED',
+      cancelled: 'CANCELLED', completed: 'COMPLETED', archived: 'ARCHIVED',
+    };
+
     function _projCard(p) {
       var ts = p.task_summary || {};
       var meta = _statusMeta(p.status);
       var isClosed = !OPEN_STATES[p.status];
-      // Status transition buttons contextual to current state
+      var labelTxt = _techPj ? (STATUS_EN[p.status] || (p.status||'').toUpperCase()) : meta.label;
+
+      // Status transition buttons contextual to current state. In tech
+      // mode they collapse to icon-only ghost buttons to keep the
+      // footer tidy.
       var statusBtns = '';
       function _btn(icon, label, target, color){
         var col = color || 'var(--text2)';
+        if (_techPj) {
+          return '<button title="' + label + '" onclick="event.stopPropagation();changeProjectStatus(\''+p.id+'\',\''+target+'\')" style="background:transparent;border:none;color:'+col+';padding:6px;border-radius:var(--r-md);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;transition:background 0.15s" onmouseover="this.style.background=\'rgba(255,255,255,0.04)\'" onmouseout="this.style.background=\'transparent\'"><span class="material-symbols-outlined" style="font-size:18px">'+icon+'</span></button>';
+        }
         return '<button class="btn btn-ghost btn-sm" style="flex:none;color:'+col+'" onclick="event.stopPropagation();changeProjectStatus(\''+p.id+'\',\''+target+'\')"><span class="material-symbols-outlined" style="font-size:14px">'+icon+'</span> '+label+'</button>';
       }
+      var resumeLabel = _techPj ? 'Resume' : '恢复';
+      var pauseLabel  = _techPj ? 'Suspend' : '挂起';
+      var startLabel  = _techPj ? 'Start' : '启动';
+      var stopLabel   = _techPj ? 'Cancel' : '停止';
+      var doneLabel   = _techPj ? 'Complete' : '结束';
+      var reactLabel  = _techPj ? 'Reactivate' : '重新激活';
+      var archLabel   = _techPj ? 'Archive' : '归档';
+      var unarchLabel = _techPj ? 'Unarchive' : '取消归档';
       if (p.status === 'planning') {
-        statusBtns += _btn('play_arrow', '启动', 'active', 'var(--primary)');
-        statusBtns += _btn('cancel', '停止', 'cancelled', '#ef4444');
+        statusBtns += _btn('play_arrow', startLabel, 'active', 'var(--primary)');
+        statusBtns += _btn('cancel', stopLabel, 'cancelled', '#ef4444');
       } else if (p.status === 'active') {
-        statusBtns += _btn('pause', '挂起', 'suspended', '#f59e0b');
-        statusBtns += _btn('check_circle', '结束', 'completed', '#22c55e');
-        statusBtns += _btn('cancel', '停止', 'cancelled', '#ef4444');
+        statusBtns += _btn('pause', pauseLabel, 'suspended', '#f59e0b');
+        statusBtns += _btn('check_circle', doneLabel, 'completed', '#22c55e');
+        statusBtns += _btn('cancel', stopLabel, 'cancelled', '#ef4444');
       } else if (p.status === 'suspended') {
-        statusBtns += _btn('play_arrow', '恢复', 'active', 'var(--primary)');
-        statusBtns += _btn('cancel', '停止', 'cancelled', '#ef4444');
+        statusBtns += _btn('play_arrow', resumeLabel, 'active', 'var(--primary)');
+        statusBtns += _btn('cancel', stopLabel, 'cancelled', '#ef4444');
       } else if (p.status === 'cancelled' || p.status === 'completed') {
-        statusBtns += _btn('restart_alt', '重新激活', 'active', 'var(--primary)');
-        statusBtns += _btn('archive', '归档', 'archived', 'var(--text3)');
+        statusBtns += _btn('restart_alt', reactLabel, 'active', 'var(--primary)');
+        statusBtns += _btn('archive', archLabel, 'archived', 'var(--text3)');
       } else if (p.status === 'archived') {
-        statusBtns += _btn('unarchive', '取消归档', 'active', 'var(--primary)');
+        statusBtns += _btn('unarchive', unarchLabel, 'active', 'var(--primary)');
       }
+
+      if (_techPj) {
+        var statChip = function(label, val, color, bg) {
+          return '<div style="display:flex;flex-direction:column;gap:2px">' +
+            '<div class="tc-mono-label" style="color:var(--outline);font-size:9px">' + label + '</div>' +
+            '<div style="font-size:18px;font-weight:700;color:' + color + ';font-family:var(--font-mono)">' + val + '</div>' +
+          '</div>';
+        };
+        return '<div class="tc-card-glass" style="padding:20px;display:flex;flex-direction:column;gap:14px;cursor:pointer;border-top:1px solid rgba(255,255,255,0.10);transition:all 0.18s' + (isClosed ? ';opacity:0.6' : '') + '"' +
+            ' onmouseover="this.style.borderColor=\'rgba(192,193,255,0.30)\';this.style.transform=\'translateY(-2px)\'"' +
+            ' onmouseout="this.style.borderColor=\'\';this.style.transform=\'\'"' +
+            ' onclick="openProject(\'' + p.id + '\')">' +
+          // Header: name + status chip
+          '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px">' +
+            '<div style="flex:1;min-width:0">' +
+              '<div style="font-family:var(--font-display);font-size:18px;font-weight:600;color:var(--on-surface);line-height:1.3">' + esc(p.name) + '</div>' +
+              (p.description ? '<div class="tc-text-dim" style="font-size:12px;line-height:1.55;margin-top:6px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">' + esc(p.description) + '</div>' : '') +
+            '</div>' +
+            '<span class="tc-mono-label" style="padding:3px 8px;border-radius:9999px;background:' + meta.bg + ';color:' + meta.color + ';border:1px solid ' + meta.color + '40;font-size:9px;letter-spacing:0.05em;flex-shrink:0">' + esc(labelTxt) + '</span>' +
+          '</div>' +
+          // Member + message meta
+          '<div style="display:flex;gap:16px;font-family:var(--font-mono);font-size:10px;color:var(--outline);letter-spacing:0.04em;text-transform:uppercase">' +
+            '<span style="display:inline-flex;align-items:center;gap:4px"><span class="material-symbols-outlined" style="font-size:13px">group</span>' + p.members.length + ' MEMBERS</span>' +
+            '<span style="display:inline-flex;align-items:center;gap:4px"><span class="material-symbols-outlined" style="font-size:13px">chat</span>' + p.chat_count + ' MSGS</span>' +
+          '</div>' +
+          // Stats row (3-col grid)
+          '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;padding:12px 0;border-top:1px solid var(--outline-variant);border-bottom:1px solid var(--outline-variant)">' +
+            statChip('DONE', (ts.done||0), 'var(--cyber-lime, #adff2f)') +
+            statChip('ACTIVE', (ts.in_progress||0), 'var(--secondary)') +
+            statChip('TODO', (ts.todo||0), 'var(--outline)') +
+          '</div>' +
+          // Footer actions
+          '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
+            '<button onclick="event.stopPropagation();openProject(\'' + p.id + '\')" style="background:var(--primary-fixed);color:var(--on-primary-fixed);padding:7px 14px;border-radius:var(--r-md);font-family:var(--font-mono);font-size:10px;letter-spacing:0.05em;text-transform:uppercase;font-weight:600;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:6px;box-shadow:0 4px 14px rgba(192,193,255,0.20)"><span class="material-symbols-outlined" style="font-size:14px">open_in_new</span> OPEN</button>' +
+            statusBtns +
+            '<button title="Edit" onclick="event.stopPropagation();editProject(\'' + p.id + '\',\'' + esc(p.name).replace(/'/g, "\\'") + '\',\'' + esc(p.description||'').replace(/'/g, "\\'") + '\')" style="background:transparent;border:none;color:var(--outline);padding:6px;border-radius:var(--r-md);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;margin-left:auto" onmouseover="this.style.background=\'rgba(255,255,255,0.04)\';this.style.color=\'var(--primary)\'" onmouseout="this.style.background=\'transparent\';this.style.color=\'var(--outline)\'"><span class="material-symbols-outlined" style="font-size:18px">edit</span></button>' +
+            '<button title="Delete" onclick="event.stopPropagation();deleteProject(\'' + p.id + '\')" style="background:transparent;border:none;color:var(--outline);padding:6px;border-radius:var(--r-md);cursor:pointer;display:inline-flex;align-items:center;justify-content:center" onmouseover="this.style.background=\'rgba(255,180,171,0.10)\';this.style.color=\'var(--error)\'" onmouseout="this.style.background=\'transparent\';this.style.color=\'var(--outline)\'"><span class="material-symbols-outlined" style="font-size:18px">delete</span></button>' +
+          '</div>' +
+        '</div>';
+      }
+
+      // Legacy theme card
       return '<div class="card" style="background:var(--surface);border-radius:14px;padding:24px;border:1px solid var(--border-light);cursor:pointer;transition:transform 0.15s,box-shadow 0.15s;opacity:'+(isClosed?'0.78':'1')+'" onmouseenter="this.style.transform=\'translateY(-2px)\';this.style.boxShadow=\'0 8px 24px rgba(0,0,0,0.2)\'" onmouseleave="this.style.transform=\'none\';this.style.boxShadow=\'none\'" onclick="openProject(\''+p.id+'\')">' +
         '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">' +
           '<div style="font-size:17px;font-weight:700;color:var(--text)">'+esc(p.name)+'</div>' +
