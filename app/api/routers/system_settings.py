@@ -66,7 +66,22 @@ def _validate_value(path: str, value: Any) -> None:
     # ── Agent guardrails ──
     if path in ("agent_guardrails.glob_soft_warn_per_hour",
                 "agent_guardrails.glob_hard_deny_per_hour",
-                "agent_guardrails.tool_budget_per_turn"):
+                "agent_guardrails.tool_budget_per_turn",
+                "agent_guardrails.bash_soft_cap",
+                "agent_guardrails.read_valve_hard_cap"):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise HTTPException(400, f"{path} must be an integer")
+        if not (1 <= value <= 1000):
+            raise HTTPException(400, f"{path} must be in 1..1000")
+        return
+    # Per-role tool_budget override:
+    #   agent_guardrails.role_overrides.<role>.tool_budget_per_turn
+    import re as _re_role
+    if _re_role.match(
+        r"^agent_guardrails\.role_overrides\.[a-z_][a-z0-9_]*"
+        r"\.tool_budget_per_turn$",
+        path,
+    ):
         if isinstance(value, bool) or not isinstance(value, int):
             raise HTTPException(400, f"{path} must be an integer")
         if not (1 <= value <= 1000):

@@ -302,12 +302,19 @@ class ProjectWatcher:
                 project = hub.projects.get(self.project_id) if hub else None
                 if project is not None:
                     sev = "high" if kind == "escalate" else "medium"
+                    # Title MUST be stable across consecutive ticks so
+                    # _auto_report_issue's "exact-title + 1h" dedup
+                    # catches re-fires. Previous form embedded the
+                    # since_progress seconds in the title and got 30
+                    # duplicate issues per hour (one per poll cycle).
+                    # Seconds + per-tick stats now live in description.
                     _auto_report_issue(
                         project,
-                        title=(f"Agent stuck: {agent_id[:8]} no progress "
-                               f"for {detail.get('since_progress_s', '?')}s"),
+                        title=f"Agent stuck: {agent_id[:8]} (no progress)",
                         description=(
-                            f"Watcher detected: reads={detail.get('read_count')}, "
+                            f"Watcher detected: no progress for "
+                            f"{detail.get('since_progress_s', '?')}s. "
+                            f"reads={detail.get('read_count')}, "
                             f"writes={detail.get('write_count')}, "
                             f"ratio={detail.get('ratio')}, "
                             f"tool_rate={detail.get('tool_rate_per_min')}/min. "

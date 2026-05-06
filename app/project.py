@@ -2998,6 +2998,38 @@ class ProjectChatEngine:
         if not explicit_done and not implicit_done:
             return
 
+        # Blockage veto (implicit path only — explicit [STEP_DONE] is
+        # deliberate intent and overrides). Implicit detection is too
+        # lenient: an agent saying "未发现交付物 / 任务阻塞" while quoting
+        # another step's "✅" status trips the keyword scan even though
+        # the agent is explicitly reporting that it COULDN'T finish.
+        # Veto if (a) the structured turn-end JSON has blocked_by set,
+        # or (b) plain-text contains an unambiguous blockage phrase.
+        if not explicit_done and implicit_done:
+            blocked_match = re.search(
+                r'"blocked_by"\s*:\s*"([^"]+)"', response)
+            if blocked_match:
+                bv = blocked_match.group(1).strip().lower()
+                if bv and bv not in ("null", "none"):
+                    logger.info(
+                        "WF Step completion suppressed for %s: agent "
+                        "self-reported blocked_by=%r — treating as "
+                        "blockage, not completion",
+                        agent_id[:8], blocked_match.group(1))
+                    return
+            blocked_phrases = (
+                "任务阻塞", "工作阻塞", "暂时阻塞", "无法启动",
+                "无法继续", "无法开始", "尚未交付", "未交付",
+                "需要 pm", "需 pm", "blocked_by",
+            )
+            if any(p in response_lower for p in blocked_phrases):
+                logger.info(
+                    "WF Step completion suppressed for %s: blockage "
+                    "phrase in response — implicit ✅+keyword likely "
+                    "false positive (response head=%r)",
+                    agent_id[:8], response[:120])
+                return
+
         # 找到该 Agent 负责的、尚未完成的 WF Step 任务
         wf_tasks = [t for t in project.tasks
                     if t.title.startswith("[WF Step")
@@ -3416,14 +3448,59 @@ class ProjectChatEngine:
 
         # ── Admin 优先级：抓取最近的 admin 指令并高亮 ──
         # 这一段会出现在 prompt 顶部，让 agent 在执行任何工作前先看到。
+        # Two filters layered (A + C):
+        #   A. @-mention targeting — drop messages addressed to OTHER
+        #      agents (e.g. "@reviewer-大卫 ..." shouldn't show in
+        #      pm-小明's prompt). Untargeted (no @) admin shows to all.
+        #   B. timestamp cutoff — only inject admin messages that arrived
+        #      AFTER this agent's last reply. Already-acknowledged ones
+        #      drop off so the prompt doesn't replay handled history.
+        # `m.sender == "user"` was previously included in the admin pool;
+        # dropped here — only sender_role=="admin" counts now.
         admin_cmds_block = ""
         try:
+            import re as _re_admin
             recent = project.chat_history[-30:] if project.chat_history else []
-            admin_msgs = [m for m in recent
-                          if getattr(m, "sender_role", "") == "admin"
-                          or m.sender == "user"]
+
+            # ── 1. Find this agent's last reply timestamp ──
+            my_id = agent.id if agent else ""
+            last_reply_ts = 0.0
+            if my_id:
+                for _m in recent:
+                    if _m.sender == my_id and _m.timestamp:
+                        last_reply_ts = max(last_reply_ts, _m.timestamp)
+
+            # ── 2. Build @-mention matcher for this agent ──
+            my_role = ((agent.role or "").strip() if agent else "")
+            my_name = ((agent.name or "").strip() if agent else "")
+            my_handles = {h for h in (
+                f"{my_role}-{my_name}" if (my_role and my_name) else "",
+                my_name, my_role,
+            ) if h}
+
+            def _admin_targets_us(content: str) -> bool:
+                # No @-mention → global → show to everyone
+                # Any @-mention matching our role/name/role-name → show
+                # Only OTHER @-mentions → skip (it's not for us)
+                mentions = _re_admin.findall(
+                    r"@([一-鿿A-Za-z0-9_\-]+)", content or "")
+                if not mentions:
+                    return True
+                strip_chars = "，,。.：:!?！？、;；"
+                for mn in mentions:
+                    if mn.rstrip(strip_chars) in my_handles:
+                        return True
+                return False
+
+            # ── 3. Filter ──
+            admin_msgs = [
+                m for m in recent
+                if getattr(m, "sender_role", "") == "admin"
+                and (m.timestamp or 0) > last_reply_ts
+                and _admin_targets_us(m.content or "")
+            ]
             if admin_msgs:
-                last_admin = admin_msgs[-3:]  # 最近 3 条
+                last_admin = admin_msgs[-5:]  # cap at 5 to bound prompt
                 lines = []
                 for m in last_admin:
                     ts = ""

@@ -41,7 +41,13 @@ DEFAULTS: dict[str, Any] = {
     "rate_limit": {
         "enabled": True,
         # Sliding-window cap per (client_ip, path).
-        "max_requests": 10,
+        # Bumped 10 → 30 (2026-05-06): SPA components legitimately
+        # poll some read-heavy endpoints (e.g. /api/portal/projects has
+        # 7+ call sites — dashboard tiles, project list, view rerenders)
+        # and 10/5s = 2 req/s tripped 429 in normal navigation. The
+        # frontend now also coalesces same-URL GETs via _apiShortGet,
+        # so this bump is mostly headroom against bursts.
+        "max_requests": 30,
         "window_seconds": 5.0,
     },
     # ── Agent runtime guardrails (read by tools_split + agent.py) ──
@@ -53,7 +59,32 @@ DEFAULTS: dict[str, Any] = {
         "glob_hard_deny_per_hour": 15,
         # Per-response tool budget — agent must finalize after N tool
         # calls in one assistant turn (prevents runaway loops).
-        "tool_budget_per_turn": 5,
+        # Bumped 5 → 12 (2026-05-06): PM was hitting cap on legitimate
+        # multi-step turns (read 5+ deliverables → write report → update
+        # milestones → QA gate). 12 allows orchestrator-level tasks to
+        # complete; runaway-loop detection is layered on top via
+        # agent_guardrails (signature_count + 3-signal Hermes detector).
+        "tool_budget_per_turn": 12,
+        # Per-role overrides on tool_budget_per_turn. Falls back to the
+        # global value above if a role isn't listed. coder/researcher
+        # legitimately do exploration-heavy turns (ls + cat + grep +
+        # project_state + read_file + write_file in one breath) and
+        # need higher headroom than orchestrator roles like pm.
+        "role_overrides": {
+            "coder":      {"tool_budget_per_turn": 20},
+            "researcher": {"tool_budget_per_turn": 18},
+        },
+        # bash soft cap — was hardcoded inside agent.py's
+        # _PER_TOOL_SOFT_CAP at 8. Promoted here so admin can tune via
+        # Settings UI without restart. Soft = system message warning,
+        # NOT a hard block (LLM can keep going by stating reason).
+        "bash_soft_cap": 8,
+        # Read-valve cross-tool hard cap — was hardcoded as
+        # HARD_CAP_DEFAULT=5 in tools_split/_read_counter.py. Counts
+        # read_file + bash cat/head/tail/less/more on the same path
+        # within one turn. At cap+1 the read is BLOCKED. Bump if your
+        # agents legitimately need to re-read large config files.
+        "read_valve_hard_cap": 5,
         # "strict" → all deliverable contract failures block DONE.
         # "lenient" → only output_files presence checked, content rules
         # demoted to system warnings.

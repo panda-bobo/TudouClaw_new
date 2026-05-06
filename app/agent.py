@@ -8444,11 +8444,21 @@ Write only the summary body. Do not include any preamble or prefix."""
                 # Per-tool soft caps are tuned so research-heavy tools
                 # (web_*, mcp_call) get more headroom than directed tools
                 # (read_file, knowledge_lookup) which usually converge
-                # in 2-3 calls.
+                # in 2-3 calls. bash is read from system_settings so
+                # admin can tune via Settings UI without restart
+                # (defaults to 8).
+                try:
+                    from .system_settings import get_store as _get_ss
+                    _ss_for_caps = _get_ss()
+                    _bash_soft = int(
+                        (_ss_for_caps.get("agent_guardrails.bash_soft_cap", 8)
+                         if _ss_for_caps else 8) or 8)
+                except Exception:
+                    _bash_soft = 8
                 _PER_TOOL_SOFT_CAP = {
                     "web_search": 5, "web_fetch": 5, "mcp_call": 5,
                     "knowledge_lookup": 4, "memory_recall": 4,
-                    "read_file": 6, "bash": 8,
+                    "read_file": 6, "bash": _bash_soft,
                 }
                 _DEFAULT_SOFT_CAP = 4
                 # 2026-04-30: We don't hard-cap on total count anymore. Long
@@ -8686,15 +8696,37 @@ Write only the summary body. Do not include any preamble or prefix."""
                 # forces tool_choice="none" so the model must emit
                 # text — typically a structured status JSON the
                 # orchestrator (cron / channel / canvas / inline)
-                # decides to continue or stop. Default 5; configurable
-                # per-agent via env or instance attr.
+                # decides to continue or stop. Resolution order:
+                #   per-agent attr → env → system_settings per-role
+                #   override → system_settings global default → 12.
                 try:
-                    _per_resp_cap = int(getattr(self, "per_response_tool_cap", 0)
-                                        or os.getenv("TUDOU_PER_RESP_TOOL_CAP", "5"))
+                    _per_resp_cap = int(getattr(self, "per_response_tool_cap", 0) or 0)
+                    if _per_resp_cap < 1:
+                        _env = os.getenv("TUDOU_PER_RESP_TOOL_CAP")
+                        if _env:
+                            _per_resp_cap = int(_env)
+                    if _per_resp_cap < 1:
+                        from .system_settings import get_store as _get_settings_store
+                        _ss = _get_settings_store()
+                        if _ss:
+                            _role = (getattr(self, "role", "") or "").strip()
+                            _role_cap = 0
+                            if _role:
+                                _role_cap = int(_ss.get(
+                                    f"agent_guardrails.role_overrides.{_role}.tool_budget_per_turn",
+                                    0) or 0)
+                            if _role_cap > 0:
+                                _per_resp_cap = _role_cap
+                            else:
+                                _per_resp_cap = int(_ss.get(
+                                    "agent_guardrails.tool_budget_per_turn",
+                                    12) or 12)
+                        else:
+                            _per_resp_cap = 12
                 except Exception:
-                    _per_resp_cap = 5
+                    _per_resp_cap = 12
                 if _per_resp_cap < 1:
-                    _per_resp_cap = 5
+                    _per_resp_cap = 12
                 _response_tool_count = 0
                 _force_text_next_iter = False
 

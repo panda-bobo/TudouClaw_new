@@ -39,13 +39,32 @@ _READ_BIN_NAMES = frozenset({
 
 
 def _hard_cap() -> int:
+    """Resolution order:
+    1. env TUDOU_XTOOL_READ_CAP (escape hatch — wins over UI setting)
+    2. system_settings.agent_guardrails.read_valve_hard_cap
+    3. HARD_CAP_DEFAULT (5)
+    """
+    # 1. env override
     try:
-        v = int(os.getenv("TUDOU_XTOOL_READ_CAP", str(HARD_CAP_DEFAULT)))
-        if v < 1:
-            return HARD_CAP_DEFAULT
-        return v
+        env_v = os.getenv("TUDOU_XTOOL_READ_CAP", "").strip()
+        if env_v:
+            v = int(env_v)
+            if v >= 1:
+                return v
     except Exception:
-        return HARD_CAP_DEFAULT
+        pass
+    # 2. system_settings (admin-tunable via Settings UI)
+    try:
+        from .. import system_settings as _ss_mod
+        store = _ss_mod.get_store()
+        if store is not None:
+            v = int(store.get("agent_guardrails.read_valve_hard_cap",
+                              HARD_CAP_DEFAULT) or HARD_CAP_DEFAULT)
+            if v >= 1:
+                return v
+    except Exception:
+        pass
+    return HARD_CAP_DEFAULT
 
 
 def _normalize_path(p: str) -> str:

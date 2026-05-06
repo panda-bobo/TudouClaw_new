@@ -583,6 +583,25 @@ async function api(method, url, body) {
   return data;
 }
 
+// Short-window read coalesce. Multiple near-simultaneous GETs to the
+// same URL (e.g. the 3 dashboard tiles each fetching
+// /api/portal/projects) share one in-flight request + cached body.
+// Prevents trivial rate-limit trips (RateLimitMiddleware caps each
+// (ip, path) at 10 req / 5s) and saves roundtrips. TTL default 2s.
+// On error the cache entry is dropped so the next caller retries.
+const _apiShortCache = new Map();
+function _apiShortGet(url, ttlMs) {
+  ttlMs = ttlMs || 2000;
+  const now = Date.now();
+  const hit = _apiShortCache.get(url);
+  if (hit && (now - hit.ts) < ttlMs) return hit.promise;
+  const p = api('GET', url);
+  _apiShortCache.set(url, {ts: now, promise: p});
+  p.catch(function(){ _apiShortCache.delete(url); });
+  return p;
+}
+window._apiShortGet = _apiShortGet;
+
 function esc(s) { const d=document.createElement('div'); d.textContent=s||''; return d.innerHTML; }
 
 // Auto-grow textarea to fit content. Used by chat-input boxes — caller
@@ -2304,7 +2323,17 @@ function renderCurrentView() {
   const titleEl = document.getElementById('view-title');
   const actionsEl = document.getElementById('topbar-actions');
   const c = document.getElementById('content');
+  // Reset inline styles set by views that turn #content into a flex
+  // column (renderAgentChat / renderAgentChatTech / project detail).
+  // Without this, navigating BACK to a normal block-flow view (e.g.
+  // Dashboard) leaves #content as display:flex height:100% — its
+  // children become flex items sharing viewport height, squeezing
+  // panels like the Active Agents grid down to a fraction of their
+  // natural height ("agent 卡片显示不全 / 缩进去了" bug).
   c.style.padding = '24px';
+  c.style.display = '';
+  c.style.flexDirection = '';
+  c.style.height = '';
   actionsEl.innerHTML = '';
   // Tech mode: ALL add/action buttons live in each page's hero, not
   // in the topbar — keeps actions context-bound to the current page
@@ -5174,7 +5203,7 @@ async function _loadDashProjectCount() {
   var el = document.getElementById('dash-project-count') || document.getElementById('dash-tech-project-count');
   if (!el) return;
   try {
-    var data = await api('GET', '/api/portal/projects');
+    var data = await _apiShortGet('/api/portal/projects');
     var list = (data && (data.projects || data)) || [];
     el.textContent = String(list.length);
   } catch (e) { el.textContent = '?'; }
@@ -5185,7 +5214,7 @@ async function _loadDashActivityFeed() {
   var el = document.getElementById('dash-activity-feed') || document.getElementById('dash-tech-activity-feed');
   if (!el) return;
   try {
-    var data = await api('GET', '/api/portal/projects');
+    var data = await _apiShortGet('/api/portal/projects');
     var list = (data && (data.projects || data)) || [];
     var items = [];
     for (var i = 0; i < list.length; i++) {
@@ -5225,7 +5254,7 @@ async function _loadDashTaskQueue() {
   var el = document.getElementById('dash-task-queue') || document.getElementById('dash-tech-task-queue');
   if (!el) return;
   try {
-    var data = await api('GET', '/api/portal/projects');
+    var data = await _apiShortGet('/api/portal/projects');
     var list = (data && (data.projects || data)) || [];
     var items = [];
     for (var i = 0; i < list.length; i++) {
@@ -33839,9 +33868,10 @@ async function renderSystemSettings(container) {
   var settings = (data && data.settings) || {};
   var defaults = (data && data.defaults) || {};
 
-  function renderSelect(path, current, defaultVal) {
+  function renderSelect(path, current, defaultVal, maxVal) {
+    var max = maxVal || 32;
     var opts = '';
-    for (var i = 1; i <= 32; i++) {
+    for (var i = 1; i <= max; i++) {
       opts += '<option value="' + i + '"' + (i === current ? ' selected' : '') + '>' + i + '</option>';
     }
     return '<select onchange="_systemSettingsPatch(\'' + path + '\', parseInt(this.value, 10))" '
@@ -33855,7 +33885,39 @@ async function renderSystemSettings(container) {
   var canvasDefault = (defaults.canvas && defaults.canvas.max_parallel_nodes) || 6;
   var delegateMax = (settings.delegate && settings.delegate.max_parallel_children) || 6;
   var delegateDefault = (defaults.delegate && defaults.delegate.max_parallel_children) || 6;
-  var anyDiverged = (canvasMax !== canvasDefault) || (delegateMax !== delegateDefault);
+
+  // Agent guardrails (tool budgets, soft caps, read-valve hard cap).
+  // Each value falls back through: persisted setting → DEFAULTS → literal.
+  var ag        = settings.agent_guardrails || {};
+  var agDefault = defaults.agent_guardrails || {};
+  var agRoleOv  = (ag.role_overrides || {});
+  var agRoleOvD = (agDefault.role_overrides || {});
+  var toolBudget        = ag.tool_budget_per_turn || agDefault.tool_budget_per_turn || 12;
+  var toolBudgetDefault = agDefault.tool_budget_per_turn || 12;
+  var coderBudget       = (agRoleOv.coder && agRoleOv.coder.tool_budget_per_turn)
+                          || (agRoleOvD.coder && agRoleOvD.coder.tool_budget_per_turn) || toolBudget;
+  var coderBudgetDefault = (agRoleOvD.coder && agRoleOvD.coder.tool_budget_per_turn) || toolBudgetDefault;
+  var researcherBudget   = (agRoleOv.researcher && agRoleOv.researcher.tool_budget_per_turn)
+                          || (agRoleOvD.researcher && agRoleOvD.researcher.tool_budget_per_turn) || toolBudget;
+  var researcherBudgetDefault = (agRoleOvD.researcher && agRoleOvD.researcher.tool_budget_per_turn) || toolBudgetDefault;
+  var bashSoftCap        = ag.bash_soft_cap || agDefault.bash_soft_cap || 8;
+  var bashSoftCapDefault = agDefault.bash_soft_cap || 8;
+  var readValveCap        = ag.read_valve_hard_cap || agDefault.read_valve_hard_cap || 5;
+  var readValveCapDefault = agDefault.read_valve_hard_cap || 5;
+  var globSoftWarn        = ag.glob_soft_warn_per_hour || agDefault.glob_soft_warn_per_hour || 5;
+  var globSoftWarnDefault = agDefault.glob_soft_warn_per_hour || 5;
+  var globHardDeny        = ag.glob_hard_deny_per_hour || agDefault.glob_hard_deny_per_hour || 15;
+  var globHardDenyDefault = agDefault.glob_hard_deny_per_hour || 15;
+
+  var anyDiverged = (canvasMax !== canvasDefault)
+                 || (delegateMax !== delegateDefault)
+                 || (toolBudget !== toolBudgetDefault)
+                 || (coderBudget !== coderBudgetDefault)
+                 || (researcherBudget !== researcherBudgetDefault)
+                 || (bashSoftCap !== bashSoftCapDefault)
+                 || (readValveCap !== readValveCapDefault)
+                 || (globSoftWarn !== globSoftWarnDefault)
+                 || (globHardDeny !== globHardDenyDefault);
 
   var _techSs2 = false;
   try { _techSs2 = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
@@ -33935,6 +33997,76 @@ async function renderSystemSettings(container) {
             path: 'delegate.max_parallel_children',
             controlLabel: 'MAX CHILDREN / CALL',
           })
+      +   configCard({
+            icon: 'token',
+            ghostIcon: 'bolt',
+            title: 'Tool Budget / Turn',
+            description: '每轮工具调用上限(全局默认) — agent 单轮最多调用 N 个 tool 后被强制收尾。orchestrator 类(pm)够用,coder/researcher 用下面的 role override 提高。',
+            current: toolBudget,
+            defaultVal: toolBudgetDefault,
+            path: 'agent_guardrails.tool_budget_per_turn',
+            controlLabel: 'GLOBAL CAP',
+          })
+      +   configCard({
+            icon: 'code',
+            ghostIcon: 'code',
+            title: 'Coder Tool Budget',
+            description: 'Coder 角色专用上限 — coder 探索式工作流(ls + cat + grep + project_state + read_file + write_file)需要更多 headroom。覆盖全局值。',
+            current: coderBudget,
+            defaultVal: coderBudgetDefault,
+            path: 'agent_guardrails.role_overrides.coder.tool_budget_per_turn',
+            controlLabel: 'CODER CAP',
+          })
+      +   configCard({
+            icon: 'travel_explore',
+            ghostIcon: 'travel_explore',
+            title: 'Researcher Tool Budget',
+            description: 'Researcher 角色专用上限 — 调研类任务通常需要多轮 web_search + read_file + memory_recall。覆盖全局值。',
+            current: researcherBudget,
+            defaultVal: researcherBudgetDefault,
+            path: 'agent_guardrails.role_overrides.researcher.tool_budget_per_turn',
+            controlLabel: 'RESEARCHER CAP',
+          })
+      +   configCard({
+            icon: 'terminal',
+            ghostIcon: 'terminal',
+            title: 'Bash Soft Cap',
+            description: 'bash 工具调用次数软警告阈值 — 超过 N 次时系统注入提醒(不是硬拦)。设太低 LLM 容易误读为硬墙提前收尾。',
+            current: bashSoftCap,
+            defaultVal: bashSoftCapDefault,
+            path: 'agent_guardrails.bash_soft_cap',
+            controlLabel: 'BASH WARN AT',
+          })
+      +   configCard({
+            icon: 'visibility_off',
+            ghostIcon: 'visibility_off',
+            title: 'Read-Valve Hard Cap',
+            description: '同一文件单轮读取上限(read_file + bash cat/head/tail/...) — 超过 N 次硬拦,防止 agent 反复读同一文件浪费预算。',
+            current: readValveCap,
+            defaultVal: readValveCapDefault,
+            path: 'agent_guardrails.read_valve_hard_cap',
+            controlLabel: 'PER-PATH MAX',
+          })
+      +   configCard({
+            icon: 'manage_search',
+            ghostIcon: 'manage_search',
+            title: 'Glob Soft Warn / Hour',
+            description: 'glob_files 工具每小时软警告阈值 — 项目内 glob 超过 N 次/agent 注入提醒,引导用 project_state 替代。',
+            current: globSoftWarn,
+            defaultVal: globSoftWarnDefault,
+            path: 'agent_guardrails.glob_soft_warn_per_hour',
+            controlLabel: 'WARN / HOUR',
+          })
+      +   configCard({
+            icon: 'block',
+            ghostIcon: 'block',
+            title: 'Glob Hard Deny / Hour',
+            description: 'glob_files 工具每小时硬拦阈值 — 项目内 glob 超过 N 次/agent 直接拒绝,防止扫描风暴。',
+            current: globHardDeny,
+            defaultVal: globHardDenyDefault,
+            path: 'agent_guardrails.glob_hard_deny_per_hour',
+            controlLabel: 'DENY / HOUR',
+          })
       + '</div>'
       + '<div style="margin-top:var(--s-xl)">'
       +   '<button class="tc-mono-label" onclick="_systemSettingsResetDefaults()" '
@@ -33985,10 +34117,28 @@ async function _systemSettingsPatch(path, value) {
 }
 
 async function _systemSettingsResetDefaults() {
-  // Two single-path PATCHes — keep API surface minimal
+  // Reset every System Configuration card back to its DEFAULTS value.
+  // Single-path PATCHes — keep API surface flat. New cards must be
+  // added here too so Reset clears all of them.
   try {
-    await api('PATCH', '/api/portal/system-settings', { path: 'canvas.max_parallel_nodes', value: 6 });
-    await api('PATCH', '/api/portal/system-settings', { path: 'delegate.max_parallel_children', value: 6 });
+    var data = await api('GET', '/api/portal/system-settings');
+    var defaults = (data && data.defaults) || {};
+    var ag = defaults.agent_guardrails || {};
+    var roleOv = ag.role_overrides || {};
+    var resets = [
+      ['canvas.max_parallel_nodes',                                 (defaults.canvas    || {}).max_parallel_nodes    || 6],
+      ['delegate.max_parallel_children',                            (defaults.delegate  || {}).max_parallel_children || 6],
+      ['agent_guardrails.tool_budget_per_turn',                     ag.tool_budget_per_turn     || 12],
+      ['agent_guardrails.role_overrides.coder.tool_budget_per_turn',     (roleOv.coder      || {}).tool_budget_per_turn || 20],
+      ['agent_guardrails.role_overrides.researcher.tool_budget_per_turn', (roleOv.researcher || {}).tool_budget_per_turn || 18],
+      ['agent_guardrails.bash_soft_cap',                            ag.bash_soft_cap            || 8],
+      ['agent_guardrails.read_valve_hard_cap',                      ag.read_valve_hard_cap      || 5],
+      ['agent_guardrails.glob_soft_warn_per_hour',                  ag.glob_soft_warn_per_hour  || 5],
+      ['agent_guardrails.glob_hard_deny_per_hour',                  ag.glob_hard_deny_per_hour  || 15],
+    ];
+    for (var i = 0; i < resets.length; i++) {
+      await api('PATCH', '/api/portal/system-settings', { path: resets[i][0], value: resets[i][1] });
+    }
     _toast('Reset to defaults', 'success');
     renderSystemSettings();
   } catch (e) {
