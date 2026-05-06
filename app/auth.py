@@ -133,6 +133,17 @@ DEFAULT_TOOL_RISK: dict[str, str] = {
     "emit_ui_block":    "low",      # Render UI block in chat (presentational)
     "propose_decomposition": "low", # Suggest sub-task breakdown
     "update_milestone_responsibility": "low",  # Reassign milestone owner
+    # Phase 3 (2026-05-06) — structured handoff + issue tracking
+    # All low-risk: no system access, only DB writes to project state.
+    "dispatch_task":      "low",    # PM hands work to worker
+    "accept_task":        "low",    # Worker accepts assignment
+    "report_back":        "low",    # Worker reports completion/blocker
+    "inbox_assignments":  "low",    # List structured assignments
+    "report_issue":       "low",    # Log a project issue
+    "update_issue":       "low",    # Update issue status
+    "list_issues":        "low",    # Read project issues
+    "query_team_status":  "low",    # Read team_dashboard
+    "query_agent_status": "low",    # Read single agent status
     # ── Shared-context (SC) protocol — coordination only, no execution ──
     "sc_query":         "low",      # Read shared context
     "sc_get_artifact":  "low",      # Read an artifact

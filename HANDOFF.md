@@ -9,6 +9,48 @@
 
 ---
 
+## 0. Update — 2026-05-05 (post-handoff state)
+
+The ~30 commits between `7aebcfb` (2026-05-04 stitch-theme handoff)
+and `e7ca242` (today, **HEAD**) are not in §1–§6 below — the original
+handoff snapshot froze on 2026-05-02. Two distinct waves landed:
+
+**Wave 1 — Stitch tech-theme rollout (2026-05-04, ~25 commits)**
+Visual overhaul of every page in tech mode: canvas glass cards, hero
+sections with "kicker" labels, dashed "Add Workflow" cards, stitch_18
+channel rows, stitch_19 SVG nodes, MCP catalog bento, role-preset V2.
+Touchpoints: `app/server/static/css/theme-tech.css` and many sections
+of `portal_bundle.js`. README now has fresh screenshots reflecting
+this style — see `assets/screenshots/`.
+
+**Wave 2 — RAG / memory / project workflow / sandbox (2026-05-05, `e7ca242`)**
+A single batch commit (18 files, +4840 / −1466) covering:
+
+| Area | Change |
+|------|--------|
+| RAG quality | HCS-inspired intent classification (`statistical` / `detail` / `normal`); markdown table-atomic chunking with heading prepend; "UNINDEXED N" chip on KB cards |
+| Memory provenance | `project_id` / `task_id` / `source_message_id` / `scope` on every fact; vector-search round-trip preserves scope via ChromaDB metadata |
+| Memory scope filter | Recall filtered by `global` ∪ `agent:{id}` ∪ `project:{pid}` ∪ `task:{tid}`; identity categories (contact/preference) always `scope='global'` |
+| Caller context | `_caller_agent_id` always-injected for ALL tool dispatches (not just an allowlist) — fixes `memory_recall` requiring caller and the `read_file` sandbox jail-escape complaint |
+| Stage-aware files | `StepTemplate.input_files` / `output_files`; `ProjectTask` carries the same; `_auto_progress_next_step` builds upstream files block; `system_prompt.py` rule forbids `glob_files` when pinned files block is present |
+| Workflow approval | `_find_ready_dag_tasks` skips `metadata.pending_approval=True`; `bind_workflow` preserves `require_approval` (was previously dropped on rebuild) |
+| Project ops | Abort cascades all `project:{id}:task:{tid}` keys; queue+merge for project chat; reopen step API + UI; deliverable file delete removes from disk |
+| Persistence | Single-source-of-truth load (no JSON-fallback resurrection); dual-write kept consistent (snapshot replace + JSON full rewrite) |
+
+Root cause patterns worth remembering:
+- **"Approve button no-op"** — backend returned `approval_id`, frontend read `a.id`. Always alias `a.approval_id || a.id`.
+- **"Domain picker input destroyed on each keystroke"** — `oninput` rebuilt the whole modal. Extracted `buildCardsHtml` + `_spOnSearchInput` to update only `#sp-cards`.
+- **"Agent delete resurrected"** — JSON fallback re-loaded a deleted snapshot. Fix: strict single-source load.
+
+**Branch state**: `main` is current; `e7ca242` is HEAD. Working tree
+clean. Push state: see `git status -uno` — the original handoff said
+"NOT pushed per user direction" but multiple pushes have happened
+since; verify before assuming.
+
+§1–§6 below are preserved verbatim for historical reference.
+
+---
+
 ## 1. Current state
 
 **Branch**: `main` (14 commits ahead of `origin/main` — **NOT pushed**

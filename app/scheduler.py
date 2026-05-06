@@ -1002,7 +1002,17 @@ class TaskScheduler:
 
         def run():
             try:
-                result_holder["result"] = agent.chat(prompt)
+                # Phase 2 P2-1 (2026-05-06): cron is non-interactive, so
+                # auto-continue when the per-response cap forces an
+                # intermediate status JSON. Caps at 6 rounds (= up to
+                # ~30 tool calls per scheduled job).
+                from .core.agent_runner import run_with_auto_continue
+                result_holder["result"] = run_with_auto_continue(
+                    chat_fn=lambda p: agent.chat(p),
+                    initial_prompt=prompt,
+                    max_rounds=6,
+                    log_label=f"cron[agent={agent.id[:8]}]",
+                )
             except Exception as e:
                 result_holder["error"] = e
 

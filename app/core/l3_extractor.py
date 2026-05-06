@@ -267,16 +267,16 @@ def extract_on_task_done(agent_id: str,
                          recent_messages: list[dict],
                          llm_call: Callable[[str], str],
                          store: Optional[Any] = None,
-                         lang: str = "zh") -> list[SemanticFact]:
+                         lang: str = "zh",
+                         project_id: str = "",
+                         task_id: str = "") -> list[SemanticFact]:
     """Primary trigger — invoked when an agent or project task transitions
     to DONE. Builds task-scoped context, calls the extractor LLM, and
     upserts surviving facts.
 
-    ``lang`` selects between the ZH/EN extractor prompts; pass the agent's
-    ``profile.language`` (defaults to ZH for any non-en value).
-
-    Fails silently on any error — extraction must NEVER bubble up and
-    break the calling business logic (task status transition).
+    Phase 3 P3-5 (2026-05-06): project_id / task_id stamp scope onto
+    the extracted facts so they're scoped (or marked global for
+    contact/preference) — see _run_extraction.
     """
     if store is None:
         store = get_memory_manager()
@@ -285,7 +285,8 @@ def extract_on_task_done(agent_id: str,
     context = _build_task_context(task_title, task_description,
                                   task_result, recent_messages, lang=lang)
     return _run_extraction(agent_id, context, llm_call, store, lang=lang,
-                           source_label=f"task_done:{task_title[:40]}")
+                           source_label=f"task_done:{task_title[:40]}",
+                           project_id=project_id, task_id=task_id)
 
 
 def extract_on_strong_signal(agent_id: str,
@@ -293,7 +294,9 @@ def extract_on_strong_signal(agent_id: str,
                              assistant_response: str,
                              llm_call: Callable[[str], str],
                              store: Optional[Any] = None,
-                             lang: str = "zh") -> list[SemanticFact]:
+                             lang: str = "zh",
+                             project_id: str = "",
+                             task_id: str = "") -> list[SemanticFact]:
     """Strong-signal trigger — user explicitly said "remember X / 以后都...".
 
     Skips the task-completion gate and fires this turn. Recent messages
@@ -315,7 +318,8 @@ def extract_on_strong_signal(agent_id: str,
             f"助手: {assistant_response[:1500]}"
         )
     return _run_extraction(agent_id, context, llm_call, store, lang=lang,
-                           source_label="strong_signal")
+                           source_label="strong_signal",
+                           project_id=project_id, task_id=task_id)
 
 
 def extract_fallback(agent_id: str,
@@ -412,8 +416,15 @@ def _format_messages_window(messages: list[dict], max_msgs: int = 6,
 def _run_extraction(agent_id: str, context: str,
                     llm_call: Callable[[str], str],
                     store: Any, source_label: str,
-                    lang: str = "zh") -> list[SemanticFact]:
-    """Single shared pipeline: prompt → LLM → parse → quality gate → upsert."""
+                    lang: str = "zh",
+                    project_id: str = "",
+                    task_id: str = "",
+                    source_message_id: str = "") -> list[SemanticFact]:
+    """Single shared pipeline: prompt → LLM → parse → quality gate → upsert.
+
+    Phase 3 P3-5 (2026-05-06): scope params propagate onto the
+    extracted SemanticFact so cross-project recall doesn't see them.
+    """
     prompt = f"{_select_prompt(lang)}\n\n{context}"
     try:
         raw = llm_call(prompt)
@@ -437,12 +448,29 @@ def _run_extraction(agent_id: str, context: str,
                          str(fd.get("content", ""))[:60])
             continue
 
+        # Phase 3 P3-5 (2026-05-06): identity-class facts (contact /
+        # preference) ALWAYS get scope='global' — they're cross-project
+        # by design (e.g. user's email). Other categories carry the
+        # provenance of the extracting context.
+        cat = fd["category"]
+        if cat in ("contact", "preference", "user_pref"):
+            _scope = "global"
+        elif task_id:
+            _scope = f"task:{task_id}"
+        elif project_id:
+            _scope = f"project:{project_id}"
+        else:
+            _scope = f"agent:{agent_id}"
         fact = SemanticFact(
             agent_id=agent_id,
-            category=fd["category"],
+            category=cat,
             content=fd["content"],
             source=source_str,
             confidence=float(fd.get("confidence", 0.7)),
+            project_id=project_id,
+            task_id=task_id,
+            source_message_id=source_message_id,
+            scope=_scope,
         )
         try:
             outcome = store.upsert_fact(fact, threshold=_DEDUP_THRESHOLD,

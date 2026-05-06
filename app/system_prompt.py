@@ -62,7 +62,12 @@ _TOOL_RULES_ZH = (
     "块时,**只 read_file 列出的那些路径**。**严禁** glob_files / `**/*` / "
     "ls / find / search 探索其它文件 —— 框架已经把上游产出和本步骤所需的"
     "文件清单准备好了,你的工作是消费它们,不是重新发现。如果列表不足以完成任务,"
-    "回复中明确说『缺少 X 文件』,让上游补,不要自己瞎搜。"
+    "回复中明确说『缺少 X 文件』,让上游补,不要自己瞎搜。\n"
+    "• 📦 **交付契约(关键)**:任务可能携带 `output_files` + `must_contain` "
+    "+ `min_lines` 的硬契约。每次 write_file 后系统会**自动校验**并把结果"
+    "(✅/❌ + 失败原因)以 system message 注入。你看到 ❌ 必须修复 — "
+    "**所有 output_files 全部 ✅ 之前禁止任何形式的『任务完成』动作**。"
+    "系统会在你试图完成时强制拒绝。"
 )
 
 _TOOL_RULES_EN = (
@@ -87,7 +92,13 @@ _TOOL_RULES_EN = (
     "to discover other files — the framework already prepared the upstream "
     "outputs and required inputs for this step. Your job is to consume them, "
     "not rediscover. If the list is insufficient, reply explicitly with "
-    "\"missing file X\" so upstream can supply it; don't guess-search."
+    "\"missing file X\" so upstream can supply it; don't guess-search.\n"
+    "• 📦 **Deliverable contract (critical)**: A task may carry "
+    "`output_files` + `must_contain` + `min_lines` requirements. After "
+    "every write_file, the framework auto-verifies and injects a system "
+    "message with ✅/❌ status. ❌ means you MUST fix it — **no form of "
+    "'task complete' is allowed until every output_file is ✅**. The "
+    "framework will reject completion attempts otherwise."
 )
 
 
@@ -756,13 +767,100 @@ def compose_full_prompt(
         custom_instructions=agent_custom_instructions,
         use_zh=use_zh,
     )
+    handoff_block = build_handoff_role_block(role, use_zh=use_zh)
 
     parts = [default_block]
     if settings_block:
         parts.append(settings_block)
+    if handoff_block:
+        parts.append(handoff_block)
     if persona_block:
         parts.append(persona_block)
     return "\n\n".join(parts)
+
+
+# Phase 2 P2-3 (2026-05-06) — role-aware handoff guidance.
+# Coordinator/PM-class roles should DISPATCH structured tasks to others.
+# Worker-class roles should ACCEPT structured tasks and not write
+# free-form 任务派发 markdown documents.
+_PM_LIKE_ROLES = frozenset({
+    "pm", "ceo", "cto", "manager", "coordinator", "lead", "architect",
+    "product", "owner", "chief",
+})
+_WORKER_LIKE_ROLES = frozenset({
+    "coder", "developer", "engineer", "designer", "tester", "qa",
+    "reviewer", "researcher", "writer", "data", "devops", "analyst",
+    "general",
+})
+
+
+def build_handoff_role_block(role: str, *, use_zh: bool = False) -> str:
+    """Return role-specific handoff guidance, or '' for unknown roles.
+
+    PM-class: instructed to use ``dispatch_task`` (structured) instead
+    of writing 任务派发_X.md free-form documents.
+
+    Worker-class: instructed to start each turn with
+    ``inbox_assignments`` / ``accept_task`` and consume the structured
+    brief, NOT to read free-form 任务派发 markdown.
+    """
+    r = (role or "").strip().lower()
+    is_pm = any(tag in r for tag in _PM_LIKE_ROLES)
+    is_worker = (not is_pm) and any(tag in r for tag in _WORKER_LIKE_ROLES)
+    if not (is_pm or is_worker):
+        return ""
+
+    if use_zh:
+        if is_pm:
+            return (
+                "## Handoff 角色规则 (你是协调/PM 角色)\n"
+                "• 给其他 agent 派活,**必须**用 `dispatch_task(to_agent, brief, "
+                "deliverables, context_refs)` 工具 — 结构化派单。\n"
+                "• **禁止** write_file 写「任务派发_X.md」「指派_X.md」这类自由文本派单文档 —— "
+                "下游会忽略并报错。\n"
+                "• brief ≤500 字, 1-3 句; 每个 deliverable 必须给 path + must_contain "
+                "+ min_lines, 否则下游无法验收。\n"
+                "• 派单前先 `query_team_status` 看谁有空 (Watcher 可见)。"
+            )
+        return (
+            "## Handoff 角色规则 (你是执行/Worker 角色)\n"
+            "• Turn 开始时,**必须**先调 `inbox_assignments` 看是否有派单; "
+            "有的话先 `accept_task` 接最高优先级那条。\n"
+            "• 拿到 TaskAssignment 后,**只读** context_refs 列出的文件 (read_file) — "
+            "**禁止** glob_files / find / search 探索其它文件。\n"
+            "• **禁止** read_file「任务派发_X.md」这类历史派单文档 (已 deprecated, "
+            "新派单走 dispatch_task)。\n"
+            "• 写完所有 deliverables 后, 框架会自动校验 must_contain; "
+            "全部 ✅ 才能 task_complete。"
+        )
+    if is_pm:
+        return (
+            "## Handoff Role Rules (you are a coordinator/PM-class role)\n"
+            "• To assign work to another agent, **MUST** use `dispatch_task("
+            "to_agent, brief, deliverables, context_refs)` — structured "
+            "handoff.\n"
+            "• **DO NOT** write_file free-form '任务派发_X.md' / "
+            "'assignment_X.md' documents — downstream will ignore and "
+            "report errors.\n"
+            "• brief ≤ 500 chars, 1-3 sentences; every deliverable MUST "
+            "have path + must_contain + min_lines or downstream cannot "
+            "verify.\n"
+            "• Before dispatching, call `query_team_status` to see who's "
+            "available (when Watcher is in play)."
+        )
+    return (
+        "## Handoff Role Rules (you are a worker/executor-class role)\n"
+        "• At turn start, **MUST** call `inbox_assignments` to check for "
+        "dispatched tasks; if any, call `accept_task` to take the "
+        "highest-priority one.\n"
+        "• Once you have a TaskAssignment, **read ONLY** the listed "
+        "context_refs (via read_file) — **DO NOT** use glob_files / find "
+        "/ search to discover other files.\n"
+        "• **DO NOT** read_file '任务派发_X.md' / 'assignment_X.md' "
+        "(deprecated; new assignments come via dispatch_task).\n"
+        "• Once all deliverables are written, the framework auto-verifies "
+        "must_contain; only when every output is ✅ may you task_complete."
+    )
 
 
 # Back-compat alias — earlier callers used this name; still works.
@@ -784,6 +882,8 @@ __all__ = [
     "build_settings_block",
     # PART 3: persona builder
     "build_persona_block",
+    # PART 4: handoff role guidance (Phase 2 P2-3)
+    "build_handoff_role_block",
     # combined
     "compose_full_prompt",
     "compose_default_and_settings",   # back-compat alias

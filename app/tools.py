@@ -762,6 +762,189 @@ TOOL_DEFINITIONS: list[dict] = [
             },
         },
     },
+    # Day 5 (2026-05-05) — Structured handoff tools
+    {
+        "type": "function",
+        "function": {
+            "name": "dispatch_task",
+            "description": (
+                "PM-side tool: hand a structured task to another agent. "
+                "Replaces 'write 任务派发_X.md to shared workspace' pattern with "
+                "a typed object (brief + context_refs + deliverables) the "
+                "receiver can consume directly without parsing markdown.\n"
+                "\n"
+                "USE WHEN: you (as PM/coordinator) need to assign work to "
+                "another specific agent. The receiver will see this in their "
+                "inbox the next time they call accept_task or "
+                "inbox_assignments.\n"
+                "\n"
+                "REQUIRED: brief (≤500 chars, 1-3 sentences) + at least one "
+                "deliverable (path + must_contain). Without a contract the "
+                "receiver can't verify completion.\n"
+                "\n"
+                "DELIVERABLE FORMAT: each entry is "
+                "{path: 'src/foo.py', kind: 'code'|'doc'|'data', "
+                "must_contain: ['def main', 'import x'], min_lines: 20, "
+                "max_lines: 0, acceptance_cmd: 'pytest tests/foo.py'}. "
+                "must_contain prefixed with 're:' is treated as regex."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to_agent": {"type": "string",
+                                 "description": "Recipient agent_id."},
+                    "brief": {"type": "string",
+                              "description": "1-3 sentences (≤500 chars). What and why; no how."},
+                    "context_refs": {
+                        "type": "array",
+                        "description": (
+                            "List of [{path, why_relevant, expected_section}]. "
+                            "These are the ONLY files the receiver should "
+                            "read — pin specific files instead of letting "
+                            "them search."
+                        ),
+                        "items": {"type": "object"},
+                    },
+                    "deliverables": {
+                        "type": "array",
+                        "description": (
+                            "List of [{path, kind, must_contain[], "
+                            "min_lines, max_lines, acceptance_cmd}]. "
+                            "Required — at least 1 entry."
+                        ),
+                        "items": {"type": "object"},
+                    },
+                    "project_id": {"type": "string",
+                                   "description": "Project this task belongs to (auto from scope if omitted)."},
+                    "project_task_id": {"type": "string",
+                                        "description": "Optional ProjectTask.id link."},
+                    "priority": {"type": "integer",
+                                 "description": "0 normal, 1 high, 2 urgent."},
+                    "deadline": {"type": "string",
+                                 "description": "Optional ISO timestamp or epoch seconds."},
+                },
+                "required": ["to_agent", "brief", "deliverables"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "accept_task",
+            "description": (
+                "Receiver-side tool: pop a task assignment from your inbox "
+                "and get its structured brief. Without ta_id, returns the "
+                "highest-priority pending task. Renders the assignment as a "
+                "concise markdown brief — read ONLY the listed context_refs "
+                "(no glob/search), produce ALL listed deliverables.\n"
+                "\n"
+                "USE WHEN: starting your turn and you have inbox assignments. "
+                "Always preferred over reading 'task 派发' markdown files "
+                "(those are deprecated)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ta_id": {"type": "string",
+                              "description": "Specific assignment id (optional — defaults to highest-priority pending)."},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "inbox_assignments",
+            "description": (
+                "List structured task assignments waiting in your inbox. "
+                "Different from check_inbox (which is chat messages). Use "
+                "when looking for work-to-do."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    # Phase 3 P3-4 (2026-05-06) — Close the handoff loop
+    {
+        "type": "function",
+        "function": {
+            "name": "report_back",
+            "description": (
+                "Coder-side: report task completion (or blocker) back to "
+                "the PM. Closes the dispatch loop — PM gets a structured "
+                "chat message in their inbox. Auto-marks the assignment "
+                "as done/cancelled in SQLite. If you don't pass ta_id, "
+                "uses your most recently accepted task.\n"
+                "\n"
+                "USE WHEN: you finished (or got blocked on) a task you "
+                "previously accepted via accept_task. Always preferred "
+                "over a vague 'I'm done' message — this keeps the "
+                "dispatch table consistent."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ta_id": {"type": "string",
+                              "description": "TaskAssignment id. Optional — defaults to your most recent accepted."},
+                    "status": {"type": "string",
+                               "description": "done | blocked | needs_clarification | cancelled"},
+                    "summary": {"type": "string",
+                                "description": "1-3 sentences describing what you did / what blocked you."},
+                    "actual_deliverables": {"type": "array",
+                                            "description": "List of paths actually produced (relative to workspace).",
+                                            "items": {"type": "string"}},
+                    "blocker": {"type": "string",
+                                "description": "If status=blocked, what's blocking you."},
+                },
+                "required": ["status"],
+            },
+        },
+    },
+    # Phase 2 P2-6 (2026-05-06) — Team status query
+    {
+        "type": "function",
+        "function": {
+            "name": "query_team_status",
+            "description": (
+                "List the current activity of every agent in a project — "
+                "what they're doing, on what task, and how long ago they "
+                "last reported progress. Reads from a single SQLite table "
+                "(no LLM cost, no agent introspection).\n"
+                "\n"
+                "USE WHEN: you (as PM) are about to dispatch_task and want "
+                "to see who's idle vs busy. Or when checking team health."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string",
+                                   "description": "Project ID (auto from current scope if omitted)."},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_agent_status",
+            "description": (
+                "Get one agent's current action — what task they're on and "
+                "what they last reported. Useful for checking on a specific "
+                "worker before re-dispatching."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string",
+                                 "description": "Target agent_id."},
+                    "project_id": {"type": "string",
+                                   "description": "Restrict to one project (optional)."},
+                },
+                "required": ["agent_id"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -2272,6 +2455,71 @@ TOOL_DEFINITIONS: list[dict] = [
             },
         },
     },
+    # Phase 3 (2026-05-06) — Issue / risk tracking
+    {
+        "type": "function",
+        "function": {
+            "name": "report_issue",
+            "description": (
+                "Report a project issue / risk / blocker. Surfaces in the project's Issues tab AND posts a notice to project chat.\n"
+                "USE WHEN: you hit a blocker that needs human/PM attention (missing API key, upstream incomplete, repeated failure, ambiguous requirements).\n"
+                "DON'T USE for casual 'I'm slow' — those go in chat. Issues are for things that need explicit status tracking (open → resolved).\n"
+                "Severity: low (FYI) / medium (slows you) / high (blocks delivery) / critical (blocks the whole project)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "1-line summary (≤200 chars)"},
+                    "description": {"type": "string", "description": "Details: what happened, what you tried, what you need"},
+                    "severity": {"type": "string", "description": "low | medium | high | critical (default: medium)"},
+                    "related_task_id": {"type": "string", "description": "Optional ProjectTask id this issue is about"},
+                    "related_milestone_id": {"type": "string", "description": "Optional milestone id"},
+                    "project_id": {"type": "string", "description": "Project id (auto from scope if omitted)"},
+                },
+                "required": ["title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_issue",
+            "description": (
+                "Update an existing issue — change status / add resolution / reassign / change severity. "
+                "Common: open → investigating (you picked it up); investigating → resolved (with resolution text); → wontfix (won't address)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "issue_id": {"type": "string", "description": "Issue id"},
+                    "status": {"type": "string", "description": "open | investigating | resolved | wontfix"},
+                    "resolution": {"type": "string", "description": "What was done to resolve (required when status=resolved)"},
+                    "severity": {"type": "string", "description": "Override severity"},
+                    "assigned_to": {"type": "string", "description": "Reassign to another agent_id"},
+                    "project_id": {"type": "string", "description": "Project id (auto from scope)"},
+                },
+                "required": ["issue_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_issues",
+            "description": (
+                "List project issues filtered by status. Defaults to 'open'. Pass status='all' for everything. "
+                "Use when: starting a turn and want to see what's blocking the team."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string", "description": "open (default) | investigating | resolved | wontfix | all"},
+                    "project_id": {"type": "string", "description": "Project id (auto from scope)"},
+                },
+                "required": [],
+            },
+        },
+    },
     # ---- UI block tools (rich interactive messages) ----
     {
         "type": "function",
@@ -2437,6 +2685,12 @@ from .tools_split.coordination import (  # noqa: E402,F401
     _tool_check_inbox,
     _tool_ack_message,
     _tool_reply_message,
+    _tool_dispatch_task,
+    _tool_accept_task,
+    _tool_inbox_assignments,
+    _tool_report_back,
+    _tool_query_team_status,
+    _tool_query_agent_status,
 )
 
 # _get_hub re-exported for backwards compat with any external importer.
@@ -2457,6 +2711,10 @@ from .tools_split.project import (  # noqa: E402,F401
     _tool_update_milestone_responsibility,
     _tool_update_milestone_status,
     _tool_propose_decomposition,
+    _tool_report_issue,
+    _tool_update_issue,
+    _tool_list_issues,
+    _auto_report_issue,
 )
 
 # MCP call + builtin audio TTS/STT handler moved to
@@ -2557,6 +2815,14 @@ _TOOL_FUNCS: dict[str, callable] = {
     "check_inbox": _tool_check_inbox,
     "ack_message": _tool_ack_message,
     "reply_message": _tool_reply_message,
+    # Day 5 (2026-05-05) — Structured handoff
+    "report_back": _tool_report_back,
+    "dispatch_task": _tool_dispatch_task,
+    "accept_task": _tool_accept_task,
+    "inbox_assignments": _tool_inbox_assignments,
+    # Phase 2 P2-6 (2026-05-06) — Team status query
+    "query_team_status": _tool_query_team_status,
+    "query_agent_status": _tool_query_agent_status,
     # Project-scope tools (auto-discover project from thread-local context)
     "submit_deliverable": _tool_submit_deliverable,
     "create_goal": _tool_create_goal,
@@ -2567,6 +2833,10 @@ _TOOL_FUNCS: dict[str, callable] = {
     # Long-task subsystem (app/long_task) — propose decomposition draft
     # for user confirmation; does NOT immediately create sub-tasks.
     "propose_decomposition": _tool_propose_decomposition,
+    # Phase 3 (2026-05-06) — Issues / risks tracking
+    "report_issue": _tool_report_issue,
+    "update_issue": _tool_update_issue,
+    "list_issues": _tool_list_issues,
     "mcp_call": _tool_mcp_call,
     # Experience persistence + skill generation
     "save_experience": _tool_save_experience,

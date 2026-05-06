@@ -822,7 +822,21 @@ class ChannelRouter:
         reply = ""
         if ch.agent_id and self._agent_chat_fn:
             try:
-                reply = self._agent_chat_fn(ch.agent_id, msg.text)
+                # Phase 2 P2-1 (2026-05-06): channels are user-facing
+                # one-shot ("ask once, get answer"). Use auto-continue
+                # so the per-response cap doesn't surface intermediate
+                # status JSONs to end users; render_status_for_user
+                # also strips them from the final response if present.
+                from .core.agent_runner import (
+                    run_with_auto_continue, render_status_for_user,
+                )
+                reply = run_with_auto_continue(
+                    chat_fn=lambda p: self._agent_chat_fn(ch.agent_id, p),
+                    initial_prompt=msg.text,
+                    max_rounds=4,
+                    log_label=f"channel[{ch.channel_id[:8]}]",
+                )
+                reply = render_status_for_user(reply)
             except Exception as e:
                 reply = f"Error: {e}"
 

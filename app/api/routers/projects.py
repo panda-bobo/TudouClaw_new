@@ -297,6 +297,137 @@ async def get_project_deliverables(
 
 
 # ---------------------------------------------------------------------------
+# Team Status (Phase 3 P3-2, 2026-05-06)
+# ---------------------------------------------------------------------------
+
+@router.get("/projects/{project_id}/team_status")
+async def get_project_team_status(
+    project_id: str,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Live team activity for a project. Reads team_dashboard SQLite +
+    Watcher snapshot. Used by the Portal Team Status tab.
+    """
+    try:
+        _ = _get_project_or_404(hub, project_id)
+    except HTTPException:
+        raise
+    rows: list = []
+    watcher_snap: list = []
+    interventions_count = 0
+    watcher_running = False
+    try:
+        from ...core.team_dashboard import get_dashboard
+        rows = get_dashboard().query_project(project_id)
+    except Exception:
+        rows = []
+    try:
+        from ...core import watcher as _wt
+        w = _wt.get_watcher(project_id)
+        if w is not None:
+            watcher_running = True
+            watcher_snap = w.snapshot()
+            interventions_count = w._interventions_emitted
+    except Exception:
+        pass
+    # Merge agent name + active flag into rows for nicer display
+    # Phase 3 P3-fix-watcher-idle (2026-05-06): is_active comes from
+    # Watcher snapshot — UI uses it to show "Idle" vs "Stuck"
+    active_lookup = {row.get("agent_id", ""): bool(row.get("is_active"))
+                     for row in (watcher_snap or [])}
+    for r in rows:
+        aid = r.get("agent_id", "")
+        ag = hub.agents.get(aid) if hasattr(hub, "agents") else None
+        if ag is not None:
+            r["agent_name"] = getattr(ag, "name", "") or ""
+            r["agent_role"] = getattr(ag, "role", "") or ""
+        r["is_active"] = active_lookup.get(aid, False)
+    return {
+        "project_id": project_id,
+        "agents": rows,
+        "watcher": {
+            "running": watcher_running,
+            "snapshot": watcher_snap,
+            "interventions_emitted": interventions_count,
+        },
+    }
+
+
+@router.get("/projects/{project_id}/team_events")
+async def get_project_team_events(
+    project_id: str,
+    limit: int = 30,
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Recent team_dashboard events (start / status / progress / done /
+    intervention) for the project — UI shows as a timeline."""
+    try:
+        _ = _get_project_or_404(hub, project_id)
+    except HTTPException:
+        raise
+    try:
+        from ...core.team_dashboard import get_dashboard
+        events = get_dashboard().recent_events(project_id, limit=limit)
+        return {"project_id": project_id, "events": events}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# TaskAssignment inbox (Phase 3 P3-3, 2026-05-06)
+# ---------------------------------------------------------------------------
+
+@router.get("/projects/{project_id}/assignments")
+async def get_project_assignments(
+    project_id: str,
+    status: str = "",
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """List structured TaskAssignments for a project. ``status`` filters
+    (pending/accepted/done/cancelled). Empty = all."""
+    try:
+        _ = _get_project_or_404(hub, project_id)
+    except HTTPException:
+        raise
+    try:
+        from ...core.task_assignment import get_store
+        store = get_store()
+        # Query directly — TaskAssignmentStore doesn't have a "by project"
+        # method yet; iterate via SQL.
+        sql = "SELECT body_json FROM task_assignments WHERE project_id=?"
+        params: list = [project_id]
+        if status:
+            sql += " AND status=?"
+            params.append(status)
+        sql += " ORDER BY priority DESC, created_at DESC LIMIT 100"
+        rows = store._conn.execute(sql, params).fetchall()
+        import json as _json
+        items = []
+        for r in rows:
+            try:
+                items.append(_json.loads(r["body_json"]))
+            except Exception:
+                continue
+        # Inject agent name lookup
+        for it in items:
+            for fld in ("from_agent", "to_agent"):
+                aid = it.get(fld, "")
+                ag = hub.agents.get(aid) if hasattr(hub, "agents") else None
+                if ag is not None:
+                    it[fld + "_name"] = getattr(ag, "name", "") or ""
+                    it[fld + "_role"] = getattr(ag, "role", "") or ""
+        return {"project_id": project_id, "assignments": items,
+                "count": len(items)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
 # Issues
 # ---------------------------------------------------------------------------
 

@@ -954,6 +954,32 @@ class Hub:
         # Local agent — route through supervisor (handles both isolated
         # and in-process paths transparently)
         if agent_id in self.agents:
+            # Phase 2 P2-2 (2026-05-06): also set scenario on the
+            # workflow path. The child-agent that supervisor.delegate
+            # spawns won't inherit (it has a fresh uuid), but the
+            # parent's scenario at least labels what context this work
+            # belongs to in audit logs.
+            try:
+                from ..core.scenario import Scenario, set_agent_scenario
+                parent = self.agents.get(agent_id)
+                if parent is not None and getattr(parent, "current_scenario", None) is None:
+                    # Try to discover the project from current scope or
+                    # from agent.project_id. Best-effort.
+                    pid = getattr(parent, "project_id", "") or ""
+                    if pid:
+                        proj = self.projects.get(pid) if hasattr(self, "projects") else None
+                        pname = proj.name if proj is not None else ""
+                        try:
+                            from ..agent import Agent as _A
+                            ws = _A.get_shared_workspace_path(pid) or ""
+                        except Exception:
+                            ws = ""
+                        set_agent_scenario(parent, Scenario.for_canvas(
+                            project_id=pid, instance_id="workflow",
+                            project_name=pname, workspace_dir=ws,
+                        ))
+            except Exception as _sc_err:
+                logger.debug("workflow scenario set skipped: %s", _sc_err)
             return self.supervisor.delegate(agent_id, message,
                                             from_agent="workflow")
         # Try remote (remote only supports string)
@@ -1005,6 +1031,48 @@ class Hub:
         """
         agent = self.agents.get(agent_id)
         if agent is not None:
+            # Day 3 PM (2026-05-05): set scenario before chat so memory
+            # recall scope-filters correctly + prompt block is rendered.
+            try:
+                from ..core.scenario import Scenario, set_agent_scenario
+                sc = None
+                if context_id and context_id.startswith("project:"):
+                    pid = context_id.split(":", 1)[1]
+                    proj = self.projects.get(pid) if hasattr(self, "projects") else None
+                    pname = proj.name if proj is not None else ""
+                    # Resolve workspace + active task (best-effort)
+                    ws = ""
+                    tid = ""
+                    ttitle = ""
+                    try:
+                        from ..agent import Agent as _A
+                        ws = _A.get_shared_workspace_path(pid) or ""
+                    except Exception:
+                        pass
+                    if proj is not None:
+                        try:
+                            from ..project import ProjectTaskStatus as _PTS
+                            for t in proj.tasks:
+                                if (t.assigned_to == agent_id
+                                        and t.status == _PTS.IN_PROGRESS):
+                                    tid = t.id
+                                    ttitle = t.title
+                                    break
+                        except Exception:
+                            pass
+                    sc = Scenario.for_project(
+                        project_id=pid, project_name=pname,
+                        workspace_dir=ws, task_id=tid, task_title=ttitle,
+                    )
+                elif context_id and context_id.startswith("meeting:"):
+                    sc = Scenario(kind="chat",
+                                  extras={"meeting_id": context_id.split(":", 1)[1]})
+                else:
+                    sc = Scenario.for_chat(agent_id=agent_id)
+                if sc is not None:
+                    set_agent_scenario(agent, sc)
+            except Exception as _sc_err:
+                logger.debug("scenario set skipped: %s", _sc_err)
             return agent.chat(message, context_id=context_id, source=source)
         # Remote — same as _workflow_chat's remote branch.
         node = self.find_agent_node(agent_id)
@@ -1714,6 +1782,7 @@ class Hub:
                     self.projects[proj.id] = proj
                 logger.info("Loaded %d projects from SQLite",
                             len(self.projects))
+                self._boot_watchers()
                 return
             except Exception as e:
                 logger.warning("SQLite project load failed: %s", e)
@@ -1728,6 +1797,27 @@ class Hub:
         except Exception:
             import traceback
             traceback.print_exc()
+        self._boot_watchers()
+
+    def _boot_watchers(self) -> None:
+        """Phase 3 P3-1 (2026-05-06): on hub boot, start a Watcher for
+        every project that's currently active and not paused.
+        Idempotent — start_for_project is a no-op if one's already running.
+        """
+        try:
+            from ..core import watcher as _wt
+            from ..project import ProjectStatus
+            count = 0
+            for proj in self.projects.values():
+                if getattr(proj, "paused", False):
+                    continue
+                if proj.status in (ProjectStatus.ACTIVE, ProjectStatus.PLANNING):
+                    _wt.start_for_project(proj.id, project_name=proj.name)
+                    count += 1
+            if count:
+                logger.info("Watcher: booted for %d active project(s)", count)
+        except Exception as e:
+            logger.debug("watcher boot-start skipped: %s", e)
 
     def _save_projects(self):
         import os

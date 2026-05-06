@@ -32,11 +32,32 @@ _DESKTOP_CAPTURE_TIMEOUT_S = 10
 # ── bash ─────────────────────────────────────────────────────────────
 
 def _tool_bash(command: str, timeout: int = _BASH_TIMEOUT_DEFAULT_S,
-               **_: Any) -> str:
+               **kwargs: Any) -> str:
     pol = _sandbox.get_current_policy()
     ok, err = pol.check_command(command)
     if not ok:
         return f"Error: {err}"
+    # Day 3 AM (2026-05-05): cross-tool read counter. If the bash
+    # command is a read primitive (cat / head / tail / less / sed -n
+    # / awk on a file), share the read-valve counter with read_file.
+    # Closes the loophole where agents bypass fs.py's read-valve by
+    # switching to ``bash cat <path>``.
+    try:
+        from . import _read_counter as _xc
+        from .fs import _get_caller_agent
+        caller_id = kwargs.get("_caller_agent_id", "") or ""
+        agent = _get_caller_agent(caller_id) if caller_id else None
+        if agent is not None:
+            extracted = _xc.extract_read_path_from_bash(command)
+            if extracted is not None:
+                _xtpath, _xtsource = extracted
+                # Count BEFORE check so blocked-message uses the
+                # incremented number that triggered the block.
+                _xtn = _xc.bump_read(agent, _xtpath, source=_xtsource)
+                if _xc.is_blocked(agent, _xtpath):
+                    return _xc.blocked_message(_xtpath, _xtn, _xtsource)
+    except Exception:
+        pass
     try:
         timeout = max(_BASH_TIMEOUT_MIN_S,
                       min(int(timeout), _BASH_TIMEOUT_MAX_S))

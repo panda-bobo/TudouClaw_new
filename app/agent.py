@@ -4599,10 +4599,16 @@ class Agent:
                 # named WF Step, we don't have direct access to it here
                 # — best-effort use project_id only; task-scoped recall
                 # will be added when WF runner sets a task context.
-                _cur_pid = getattr(self, "project_id", "") or ""
+                # Day 3 PM: prefer current_scenario if set, fall back
+                # to legacy self.project_id for back-compat.
+                _sc = getattr(self, "current_scenario", None)
+                _cur_pid = (_sc.project_id if _sc else "") \
+                    or (getattr(self, "project_id", "") or "")
+                _cur_tid = (_sc.task_id if _sc else "")
                 memory_context = mm.retrieve_for_prompt(
                     self.id, current_query, config=mem_config,
                     current_project_id=_cur_pid,
+                    current_task_id=_cur_tid,
                 )
                 _try_add(memory_context or "", "memory_l2l3")
                 # ── 记录本次记忆注入的体量，供 portal 展示"记忆使用比例" ──
@@ -4761,9 +4767,21 @@ class Agent:
         """
         static = self._build_static_system_prompt()
         dynamic = self._build_dynamic_context()
+        # Day 3 PM (2026-05-05): inject scenario block when set so the
+        # model knows where it's operating + sees the recall policy.
+        scenario_block = ""
+        try:
+            sc = getattr(self, "current_scenario", None)
+            if sc is not None:
+                scenario_block = sc.to_prompt_block()
+        except Exception:
+            scenario_block = ""
+        parts = [static]
+        if scenario_block:
+            parts.append(scenario_block)
         if dynamic:
-            return static + "\n\n" + dynamic
-        return static
+            parts.append(dynamic)
+        return "\n\n".join(parts)
 
     def _get_memory_manager(self):
         """懒加载获取 MemoryManager 实例。"""
@@ -5023,6 +5041,14 @@ class Agent:
                     if _l3.has_strong_signal(user_message):
                         llm_call = self._make_summary_llm_call()
                         if llm_call:
+                            # Phase 3 P3-5 (2026-05-06): pass scope so
+                            # the fact carries project/task tag. Identity
+                            # categories (preference) get scope=global
+                            # automatically inside _run_extraction.
+                            _sc = getattr(self, "current_scenario", None)
+                            _sc_pid = (_sc.project_id if _sc else "") \
+                                or (getattr(self, "project_id", "") or "")
+                            _sc_tid = (_sc.task_id if _sc else "")
                             facts = _l3.extract_on_strong_signal(
                                 agent_id=self.id,
                                 user_message=user_message,
@@ -5030,6 +5056,8 @@ class Agent:
                                 llm_call=llm_call,
                                 store=mm,
                                 lang=_lang,
+                                project_id=_sc_pid,
+                                task_id=_sc_tid,
                             )
                             if facts:
                                 self._log("memory", {
@@ -5232,16 +5260,21 @@ class Agent:
         plan_summary = self._format_active_plan_summary()
 
         # ---- Retrieve relevant facts from L3 memory ----
+        # Day 1 PM (2026-05-05): pass current scope so cross-project
+        # facts don't bleed in.
         use_vector = mem_config.vector_search_enabled and mm._check_chromadb_available()
+        _cur_pid = getattr(self, "project_id", "") or ""
         facts_by_category: dict[str, list] = {}
         for cat in ("goal", "action_plan", "action_done", "decision", "context"):
             try:
                 if use_vector:
                     facts = mm.search_facts_vector(
-                        self.id, query, top_k=max_facts_per_cat, category=cat)
+                        self.id, query, top_k=max_facts_per_cat, category=cat,
+                        current_project_id=_cur_pid)
                 else:
                     facts = mm.search_facts(
-                        self.id, query, top_k=max_facts_per_cat, category=cat)
+                        self.id, query, top_k=max_facts_per_cat, category=cat,
+                        current_project_id=_cur_pid)
             except Exception:
                 facts = []
             if facts:
@@ -5536,8 +5569,19 @@ class Agent:
                 parts.append(plan_summary)
 
         # 2/3. L3 facts — 只纳入 updated_at 在 cutoff 之后的条目
+        # Day 1 PM (2026-05-05): pass current scope so action_done /
+        # action_plan facts from OTHER projects don't bleed in.
+        # Day 3 PM (2026-05-05): prefer current_scenario.
         if mm:
-            recent_done = mm.get_recent_facts(self.id, limit=10, category="action_done")
+            _sc = getattr(self, "current_scenario", None)
+            _cur_pid = (_sc.project_id if _sc else "") \
+                or (getattr(self, "project_id", "") or "")
+            _cur_tid = (_sc.task_id if _sc else "")
+            recent_done = mm.get_recent_facts(
+                self.id, limit=10, category="action_done",
+                current_project_id=_cur_pid,
+                current_task_id=_cur_tid,
+            )
             fresh_done = [f for f in recent_done
                           if getattr(f, "updated_at", 0) >= stale_cutoff]
             if fresh_done:
@@ -5545,7 +5589,11 @@ class Agent:
                 for f in fresh_done[:10]:
                     parts.append(f"- {f.content}")
 
-            plans_facts = mm.get_recent_facts(self.id, limit=5, category="action_plan")
+            plans_facts = mm.get_recent_facts(
+                self.id, limit=5, category="action_plan",
+                current_project_id=_cur_pid,
+                current_task_id=_cur_tid,
+            )
             fresh_plans = [f for f in plans_facts
                            if getattr(f, "updated_at", 0) >= stale_cutoff]
             if fresh_plans:
@@ -6649,9 +6697,24 @@ Write only the summary body. Do not include any preamble or prefix."""
         # Add infra tools to allowed set so their schemas also ship to LLM
         # (otherwise LLM doesn't know they exist and never calls them).
         # Matches the bypass in _execute_tool_with_policy above.
+        # Phase 3 (2026-05-06): added dispatch_task / accept_task /
+        # report_back / inbox_assignments — structured handoff tools
+        # MUST be available to all agents (PM dispatches, Coder accepts,
+        # Coder reports back). Without this, the LLM doesn't see the
+        # schemas → emits "DSML" pseudo-tool-call markup as text → no
+        # actual dispatch happens.
         _INFRA_TOOLS_SCHEMA = frozenset({
             "memory_recall", "knowledge_lookup", "save_experience",
             "get_skill_guide", "plan_update", "complete_step",
+            "dispatch_task", "accept_task", "report_back",
+            "inbox_assignments",
+            # Phase 3 (2026-05-06): goal/milestone primitives also
+            # universally available (otherwise PM with goal_owner can
+            # see goal in prompt but can't update it).
+            "update_goal_progress", "create_goal",
+            "update_milestone_status", "update_milestone_responsibility",
+            # Phase 3 issue tracking
+            "report_issue", "update_issue", "list_issues",
         })
         allowed_set = set(allowed) | _INFRA_TOOLS_SCHEMA
         all_tools = [t for t in all_tools
@@ -7111,9 +7174,19 @@ Write only the summary body. Do not include any preamble or prefix."""
         # 老的 role preset (code_reviewer/researcher) 没在 allowed_tools 里
         # 列它们,但我们希望所有 agent 都能自查记忆 —— 否则 agent 会反复
         # 重新学,也无法 save_experience 沉淀经验。除非 denied_tools 显式禁。
+        # Phase 3 (2026-05-06): keep this set identical to
+        # _INFRA_TOOLS_SCHEMA in _get_effective_tools — schema visibility
+        # and execution gating must agree, else the LLM sees a tool but
+        # gets DENIED on call.
         _INFRA_TOOLS = frozenset({
             "memory_recall", "knowledge_lookup", "save_experience",
             "get_skill_guide", "plan_update", "complete_step",
+            "dispatch_task", "accept_task", "report_back",
+            "inbox_assignments",
+            # Phase 3 (2026-05-06): keep in sync with _INFRA_TOOLS_SCHEMA
+            "update_goal_progress", "create_goal",
+            "update_milestone_status", "update_milestone_responsibility",
+            "report_issue", "update_issue", "list_issues",
         })
 
         # Check agent-level allowed tools (empty list = all allowed;
@@ -7298,6 +7371,37 @@ Write only the summary body. Do not include any preamble or prefix."""
         except Exception as _mw_err:
             logger.debug("post_tool middleware skipped: %s", _mw_err)
 
+        # ── Phase 2 P2-5 (2026-05-06): Watcher instrumentation ──
+        # Feed tool calls + outcomes into the project's Watcher so it
+        # can detect read/write imbalance, no-progress, etc. No-op when
+        # no project context or no watcher started.
+        try:
+            _pid = getattr(self, "project_id", "") or ""
+            if _pid:
+                from .core import watcher as _wt
+                _ok = isinstance(result, str) and not result.lstrip().lower().startswith("error")
+                _wt.record_tool_call(_pid, self.id, tool_name, succeeded=_ok)
+        except Exception:
+            pass
+
+        # ── Phase 2 P2-6 (2026-05-06): Team Dashboard heartbeat ──
+        # Every tool call updates current_action so query_team_status
+        # reflects "what is each agent doing right now".
+        try:
+            _pid = getattr(self, "project_id", "") or ""
+            if _pid:
+                from .core import team_dashboard as _td
+                _sc = getattr(self, "current_scenario", None)
+                _td.update_status(
+                    self.id, _pid,
+                    task_id=(_sc.task_id if _sc else ""),
+                    task_title=(_sc.task_title if _sc else ""),
+                    scenario_kind=(_sc.kind if _sc else ""),
+                    current_action=f"calling {tool_name}",
+                )
+        except Exception:
+            pass
+
         # ── Stage-aware file pinning (2026-05-05) — auto-track outputs ──
         # When the agent calls write_file / edit_file inside a project
         # workflow step, append the touched path to the current task's
@@ -7312,6 +7416,41 @@ Write only the summary body. Do not include any preamble or prefix."""
                 self._track_workflow_output(arguments)
             except Exception as _tr_err:
                 logger.debug("workflow-output tracking skipped: %s", _tr_err)
+            # ── Deliverable contract check (Day 1 AM, 2026-05-05) ──
+            # After every successful write_file/edit_file, re-verify the
+            # current task's output_files against must_contain + min_lines.
+            # Failed deliverables → inject a system message so the agent
+            # sees concrete reasons instead of silently moving on.
+            try:
+                msg = self._check_active_task_deliverables(arguments)
+                if msg:
+                    self.messages.append({"role": "system", "content": msg})
+                    # Phase 2 P2-5: when the check msg contains a ✅,
+                    # mark progress so Watcher's no-progress timer
+                    # resets — even before final task_complete.
+                    if "✅" in msg:
+                        try:
+                            from .core import watcher as _wt
+                            from .core import team_dashboard as _td
+                            _pid = getattr(self, "project_id", "") or ""
+                            if _pid:
+                                _wt.mark_progress(_pid, self.id)
+                                _td.update_status(self.id, _pid,
+                                                  current_action="deliverable verified",
+                                                  progress=True)
+                                _td.log_event(self.id, _pid,
+                                              "progress", "deliverable ✅")
+                        except Exception:
+                            pass
+                    # Phase 3 (2026-05-06): track repeat deliverable
+                    # failures → auto-issue when same task fails 3+ times.
+                    elif "❌" in msg:
+                        try:
+                            self._track_deliverable_failure(arguments, msg)
+                        except Exception as _df_err:
+                            logger.debug("deliv-fail track skipped: %s", _df_err)
+            except Exception as _dc_err:
+                logger.debug("deliverable check skipped: %s", _dc_err)
 
         # Forensic audit: capture full arguments + result + elapsed.
         # The smoking gun for the 2026-04-29 self-sent-email incident
@@ -7418,6 +7557,126 @@ Write only the summary body. Do not include any preamble or prefix."""
             )
         except Exception as _e:
             logger.debug("output-track append failed: %s", _e)
+
+    def _track_deliverable_failure(self, arguments: dict, msg: str = "") -> None:
+        """Phase 3 (2026-05-06): count repeated deliverable failures
+        per task; auto-create Issue when count crosses threshold."""
+        pid = getattr(self, "project_id", "") or ""
+        if not pid:
+            return
+        # Find active WF task
+        try:
+            import sys as _sys
+            _llm_mod = _sys.modules.get(__package__ + ".llm") if __package__ else None
+            hub = getattr(_llm_mod, "_active_hub", None) if _llm_mod else None
+        except Exception:
+            hub = None
+        if hub is None:
+            return
+        project = hub.get_project(pid) if hasattr(hub, "get_project") else None
+        if project is None:
+            return
+        from .project import ProjectTaskStatus as _PTS
+        active = next((t for t in project.tasks
+                       if t.assigned_to == self.id
+                       and t.status == _PTS.IN_PROGRESS
+                       and t.title.startswith("[WF Step")), None)
+        if active is None:
+            return
+        counts = getattr(self, "_deliv_fail_counts", None)
+        if counts is None:
+            counts = {}
+            self._deliv_fail_counts = counts
+        key = f"{pid}::{active.id}"
+        n = counts.get(key, 0) + 1
+        counts[key] = n
+        # Threshold = 3 fails (configurable later)
+        if n == 3:
+            try:
+                from .tools_split.project import _auto_report_issue
+                _auto_report_issue(
+                    project,
+                    title=f"Deliverable repeatedly failing: {active.title[:80]}",
+                    description=(
+                        f"Task '{active.title}' has failed deliverable "
+                        f"contract verification {n} times in a row. "
+                        f"Last failure detail: {msg[:600]}\n\n"
+                        f"Suggested action: review must_contain requirements; "
+                        f"agent may need clarification or task re-scoping."
+                    ),
+                    severity="medium",
+                    related_task_id=active.id,
+                    reporter=self.id,
+                    source="deliverable_check",
+                )
+                logger.info("Auto-issue: deliverable failure ×%d on task=%s",
+                            n, active.id[:8])
+            except Exception as _e:
+                logger.debug("auto-issue from deliv-fail skipped: %s", _e)
+
+    def _check_active_task_deliverables(self, arguments: dict) -> str:
+        """Re-verify deliverables for this agent's active WF task after a
+        write_file/edit_file. Returns the human-readable status block to
+        inject as a system message — empty string when no active task or
+        no contract.
+
+        Day 1 AM (2026-05-05).
+        """
+        import os as _os
+        pid = getattr(self, "project_id", "") or ""
+        if not pid or not isinstance(arguments, dict):
+            return ""
+        path_arg = (arguments.get("path") or arguments.get("file_path")
+                    or arguments.get("filename") or "").strip()
+        # Resolve hub
+        try:
+            import sys as _sys
+            _llm_mod = _sys.modules.get(__package__ + ".llm") if __package__ else None
+            hub = getattr(_llm_mod, "_active_hub", None) if _llm_mod else None
+        except Exception:
+            hub = None
+        if hub is None:
+            return ""
+        project = hub.get_project(pid) if hasattr(hub, "get_project") else None
+        if project is None:
+            return ""
+        from .project import ProjectTaskStatus as _PTS
+        active = None
+        for t in project.tasks:
+            if (t.assigned_to == self.id
+                    and t.status == _PTS.IN_PROGRESS
+                    and t.title.startswith("[WF Step")):
+                active = t
+                break
+        if active is None:
+            return ""
+        # Skip if no deliverable contract on this task
+        if not (getattr(active, "output_files", None)
+                and (getattr(active, "must_contain", None)
+                     or getattr(active, "must_contain_per_file", None)
+                     or getattr(active, "min_lines", 0)
+                     or getattr(active, "acceptance_cmd", ""))):
+            return ""
+        # Resolve workspace
+        ws_dir = ""
+        try:
+            if hasattr(self, "get_shared_workspace_path"):
+                ws_dir = type(self).get_shared_workspace_path(pid) or ""
+        except Exception:
+            pass
+        try:
+            from .core.deliverable_check import (
+                verify_task_deliverables, render_status_for_agent,
+            )
+            verify_task_deliverables(active, ws_dir, only_path=path_arg)
+            try:
+                hub._save_projects()
+            except Exception:
+                pass
+            return render_status_for_agent(active)
+        except Exception as _e:
+            logger.debug("deliverable verify failed: %s", _e)
+            return ""
 
     def _sandbox_scope(self):
         """Install a sandbox policy rooted at this agent's working_dir."""
@@ -8253,6 +8512,34 @@ Write only the summary body. Do not include any preamble or prefix."""
                 # corrective injection instead of breaking the loop.
                 _nudge_count = 0
                 _MAX_NUDGES_PER_TURN = 3
+                # ── Day 2 PM (2026-05-05): Hermes-style guardrail ──
+                # Per-turn loop detector with 3 signals (exact_failure,
+                # same_tool_failure, no_progress). Layers AFTER the
+                # inline signature_count guard.
+                try:
+                    from .agent_guardrails import ToolCallGuardrailController as _GC
+                    if not hasattr(self, "_guardrail") or self._guardrail is None:
+                        self._guardrail = _GC()
+                    self._guardrail.reset()
+                except Exception:
+                    self._guardrail = None
+                # ── Day 2 AM (2026-05-05): per-response tool budget ──
+                # Hard cap on how many tool_calls the agent can issue
+                # within ONE user turn. When exceeded, the next iter
+                # forces tool_choice="none" so the model must emit
+                # text — typically a structured status JSON the
+                # orchestrator (cron / channel / canvas / inline)
+                # decides to continue or stop. Default 5; configurable
+                # per-agent via env or instance attr.
+                try:
+                    _per_resp_cap = int(getattr(self, "per_response_tool_cap", 0)
+                                        or os.getenv("TUDOU_PER_RESP_TOOL_CAP", "5"))
+                except Exception:
+                    _per_resp_cap = 5
+                if _per_resp_cap < 1:
+                    _per_resp_cap = 5
+                _response_tool_count = 0
+                _force_text_next_iter = False
 
                 # Plan D: handoff-trigger force. Only active on iteration 0,
                 # only when handoff_request is actually in the tool list, and
@@ -8361,8 +8648,12 @@ Write only the summary body. Do not include any preamble or prefix."""
                     if _is_aborted():
                         final_content = final_content or "[Aborted]"
                         break
+                    # When per-response cap tripped, we must pass
+                    # tool_choice="none" → use no-stream path (stream
+                    # adapter doesn't carry tool_choice).
                     _can_stream = bool(on_event) and not (
-                        iteration == 0 and _forced_tool_choice)
+                        iteration == 0 and _forced_tool_choice) \
+                        and not _force_text_next_iter
                     # _effective_temperature 来自 AgentLLMMixin; 某些旧 Agent
                     # 实例可能未继承到 (比如反序列化场景), 用 hasattr 兜底。
                     _temp = (self._effective_temperature()
@@ -8378,11 +8669,39 @@ Write only the summary body. Do not include any preamble or prefix."""
                                 is_aborted=_is_aborted,
                             )
                         else:
+                            # Day 2 AM: per-response cap tripped → force
+                            # text-only response so caller sees a status
+                            # instead of more tool calls.
+                            _eff_tool_choice = None
+                            if _force_text_next_iter:
+                                _eff_tool_choice = "none"
+                                # Inject a one-shot system message so the
+                                # model knows WHY it's being forced to
+                                # text and what shape to emit.
+                                self.messages.append({
+                                    "role": "system",
+                                    "content": (
+                                        f"[per-response cap reached: "
+                                        f"{_response_tool_count}/{_per_resp_cap} tools used in this turn]\n"
+                                        "STOP calling tools. Reply with a single short "
+                                        "JSON object on the FIRST line: "
+                                        "{\"done\":[...completed actions...], "
+                                        "\"current\":\"what you were about to do\", "
+                                        "\"next\":\"what you'd do if continued\", "
+                                        "\"budget_remaining\":<int>, "
+                                        "\"blocked_by\":\"\"}\n"
+                                        "Then a 1-2 sentence human summary. The orchestrator "
+                                        "will decide whether to continue."
+                                    ),
+                                    "_source": "per_response_cap",
+                                })
+                                _force_text_next_iter = False  # one-shot
+                            elif iteration == 0 and _forced_tool_choice:
+                                _eff_tool_choice = _forced_tool_choice
                             response = llm.chat_no_stream(
                                 _msgs_to_send, tools=_effective_tools,
                                 provider=_eff_provider, model=_eff_model,
-                                tool_choice=(_forced_tool_choice
-                                             if iteration == 0 else None),
+                                tool_choice=_eff_tool_choice,
                             )
                     except (ConnectionError, OSError) as conn_err:
                         # Provider unreachable — stop retrying immediately
@@ -8781,6 +9100,22 @@ Write only the summary body. Do not include any preamble or prefix."""
                                 arguments = {"raw": str(arguments)}
                         parsed_calls.append((name, arguments, call_id))
 
+                    # Day 2 AM: count toward per-response cap. Set the
+                    # flag so the NEXT iteration's LLM call uses
+                    # tool_choice="none". (We can't abort this iteration
+                    # — the tools were already issued by the model.)
+                    _response_tool_count += len(parsed_calls)
+                    if _response_tool_count >= _per_resp_cap:
+                        _force_text_next_iter = True
+                        try:
+                            self._log("per_response_cap_tripped", {
+                                "count": _response_tool_count,
+                                "cap": _per_resp_cap,
+                                "iteration": iteration,
+                            })
+                        except Exception:
+                            pass
+
                     # ── Block list: signature dedup + per-tool cap ──
                     # Both guards funnel into _blocked_calls so the
                     # parallel/sequential executors below can short-
@@ -8977,6 +9312,39 @@ Write only the summary body. Do not include any preamble or prefix."""
                                 results.append((name, result, call_id))
                                 continue
 
+                            # Day 2 PM (2026-05-05): Hermes-style guardrail
+                            # before_call check. block / halt → synthetic
+                            # error; warn → execute but inject system msg.
+                            _gd = None
+                            if getattr(self, "_guardrail", None) is not None:
+                                try:
+                                    _gd = self._guardrail.before_call(name, arguments)
+                                except Exception:
+                                    _gd = None
+                            if _gd is not None and _gd.should_halt:
+                                result = (
+                                    f"[Guardrail {_gd.code}] {_gd.message}"
+                                )
+                                result = self._handle_large_result(name, result)
+                                results.append((name, result, call_id))
+                                try:
+                                    self._log("guardrail_block", {
+                                        "tool": name, "code": _gd.code,
+                                        "count": _gd.count,
+                                    })
+                                except Exception:
+                                    pass
+                                continue
+                            if _gd is not None and _gd.action == "warn":
+                                # Inject a one-line nudge into messages
+                                # so the model sees the warning before
+                                # next turn. Don't block this call.
+                                self.messages.append({
+                                    "role": "system",
+                                    "content": f"[Guardrail warning] {_gd.message}",
+                                    "_source": "guardrail_warn",
+                                })
+
                             # Inject caller agent ID for ALL tools (sequential
                             # path mirror of the parallel path above; was the
                             # same hardcoded-list bug that broke memory_recall
@@ -9009,6 +9377,13 @@ Write only the summary body. Do not include any preamble or prefix."""
 
                             # Handle large results
                             result = self._handle_large_result(name, result)
+
+                            # Day 2 PM: update guardrail counters
+                            if getattr(self, "_guardrail", None) is not None:
+                                try:
+                                    self._guardrail.after_call(name, arguments, result)
+                                except Exception:
+                                    pass
 
                             results.append((name, result, call_id))
 
@@ -12376,6 +12751,13 @@ Write only the summary body. Do not include any preamble or prefix."""
                         llm_call = self._make_summary_llm_call()
                         if llm_call:
                             _lang = getattr(self.profile, "language", "auto") or "auto"
+                            # Phase 3 P3-5 (2026-05-06): pass scope from
+                            # current scenario so the extracted facts
+                            # carry the right tag.
+                            _sc = getattr(self, "current_scenario", None)
+                            _sc_pid = (_sc.project_id if _sc else "") \
+                                or (getattr(self, "project_id", "") or "")
+                            _sc_tid = (_sc.task_id if _sc else "")
                             _l3.extract_on_task_done(
                                 agent_id=self.id,
                                 task_title=t.title or "",
@@ -12384,6 +12766,8 @@ Write only the summary body. Do not include any preamble or prefix."""
                                 recent_messages=self.messages[-12:],
                                 llm_call=llm_call,
                                 lang=_lang,
+                                project_id=_sc_pid,
+                                task_id=_sc_tid,
                             )
                     except Exception as _l3_err:  # noqa: BLE001
                         logger.debug("L3 task-done hook failed: %s", _l3_err)

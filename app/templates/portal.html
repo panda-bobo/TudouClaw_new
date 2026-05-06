@@ -1962,8 +1962,11 @@ h4, h5 { letter-spacing: -0.01em; }
       <div style="font-size:11px;color:var(--text3);margin-bottom:8px;line-height:1.5">
         勾选 = 允许调用。核心工具 (memory_recall / knowledge_lookup / plan_update / get_skill_guide) 无论是否勾选都会自动放行。
       </div>
-      <div id="ea-tools-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:6px;max-height:240px;overflow-y:auto;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:8px">
+      <div id="ea-tools-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:6px;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:8px">
         <!-- filled by _eaRenderToolsGrid() -->
+        <!-- 2026-05-06: removed max-height:240px + overflow-y:auto.
+             Nested scroll inside modal ate wheel events, freezing the
+             modal scroll. Now grid expands inline; modal handles scroll. -->
       </div>
       <div style="margin-top:8px;font-size:11px;color:var(--text3)">
         <span id="ea-tools-summary">—</span>
@@ -1998,7 +2001,9 @@ h4, h5 { letter-spacing: -0.01em; }
         Agent 收到任务时优先注入这些模版作为领域指引（最佳实践 / 检查清单 / 步骤）。<br>
         留空 → 仅走系统自动匹配（按 role + 关键词）。
       </div>
-      <div id="ea-knowledge-templates-list" style="max-height:240px;overflow-y:auto;border:1px solid var(--border-light);border-radius:6px;padding:8px;background:var(--bg)">
+      <div id="ea-knowledge-templates-list" style="border:1px solid var(--border-light);border-radius:6px;padding:8px;background:var(--bg)">
+        <!-- 2026-05-06: removed nested scroll for the same reason as
+             ea-tools-grid above. Modal handles scrolling. -->
         <div style="font-size:12px;color:var(--text3);padding:8px">Loading templates...</div>
       </div>
       <div id="ea-knowledge-templates-counter" style="font-size:11px;color:var(--text3);margin-top:6px">已选 0 个</div>

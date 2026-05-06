@@ -778,3 +778,392 @@ def _tool_task_update(action: str, task_id: str = "", title: str = "",
     except Exception as e:
         return f"Error managing tasks: {e}"
 
+
+# ============================================================
+# Day 5 (2026-05-05) — Structured handoff: dispatch_task / accept_task
+# ============================================================
+# Replaces "PM writes 任务派发_X.md, Coder reads markdown" pattern with
+# typed TaskAssignment objects in SQLite + recipient inbox. See
+# app/core/task_assignment.py for the data model.
+
+def _tool_dispatch_task(
+    to_agent: str = "",
+    brief: str = "",
+    context_refs: Any = None,
+    deliverables: Any = None,
+    project_id: str = "",
+    project_task_id: str = "",
+    priority: int = 0,
+    deadline: str = "",
+    **kwargs: Any,
+) -> str:
+    """PM-side tool: hand a structured task to another agent.
+
+    Returns the task_assignment id. The receiving agent will see this
+    task in its inbox the next time it calls accept_task — no markdown
+    parsing required.
+    """
+    from ..core.task_assignment import (
+        TaskAssignment, FileRef, Deliverable, get_store,
+    )
+    if not to_agent or not brief:
+        return ("Error: dispatch_task requires `to_agent` and `brief`. "
+                "Brief should be 1-3 sentences (≤ 500 chars).")
+    if len(brief) > 500:
+        return (f"Error: brief is too long ({len(brief)} chars). "
+                f"Max 500 — be concise. Put detail in deliverables.")
+    # Coerce JSON-string args (LLMs sometimes pass arrays as strings)
+    def _coerce_list(v):
+        if isinstance(v, list):
+            return v
+        if isinstance(v, str) and v.strip():
+            try:
+                import json as _j
+                d = _j.loads(v)
+                return d if isinstance(d, list) else []
+            except Exception:
+                return []
+        return []
+    refs_raw = _coerce_list(context_refs)
+    delivs_raw = _coerce_list(deliverables)
+
+    refs = []
+    for r in refs_raw:
+        if isinstance(r, str):
+            refs.append(FileRef(path=r))
+        elif isinstance(r, dict):
+            refs.append(FileRef.from_dict(r))
+    delivs = []
+    for d in delivs_raw:
+        if isinstance(d, dict):
+            delivs.append(Deliverable.from_dict(d))
+    if not delivs:
+        return ("Error: dispatch_task requires at least one deliverable. "
+                "Format: [{\"path\": \"src/foo.py\", \"must_contain\": "
+                "[\"def main\"], \"min_lines\": 20}]. Without a contract "
+                "the receiver can't verify completion.")
+
+    deadline_ts = 0.0
+    if deadline:
+        try:
+            deadline_ts = float(deadline)
+        except (TypeError, ValueError):
+            try:
+                import datetime as _dt
+                deadline_ts = _dt.datetime.fromisoformat(deadline).timestamp()
+            except Exception:
+                deadline_ts = 0.0
+
+    from_agent = kwargs.get("_caller_agent_id", "") or ""
+    if not project_id:
+        # Best-effort: pick from current scope
+        try:
+            from ..tools import _get_current_scope
+            project_id = _get_current_scope().get("project_id", "") or ""
+        except Exception:
+            project_id = ""
+
+    ta = TaskAssignment(
+        from_agent=from_agent, to_agent=to_agent,
+        brief=brief.strip(),
+        context_refs=refs, deliverables=delivs,
+        project_id=project_id, project_task_id=project_task_id,
+        priority=int(priority or 0), deadline=deadline_ts,
+    )
+    try:
+        get_store().insert(ta)
+    except Exception as e:
+        return f"Error persisting task assignment: {e}"
+
+    return (
+        f"✅ Dispatched task {ta.id} to agent {to_agent}.\n"
+        f"  Brief: {brief[:120]}\n"
+        f"  Deliverables: {len(delivs)} ({', '.join(d.path for d in delivs)})\n"
+        f"  Context refs: {len(refs)}\n"
+        f"The receiving agent will see this in its inbox. You may "
+        f"continue with other work or wait for status."
+    )
+
+
+def _tool_accept_task(
+    ta_id: str = "",
+    **kwargs: Any,
+) -> str:
+    """Receiver-side tool: pop a task assignment from this agent's inbox
+    and render it as a structured brief.
+
+    If ``ta_id`` is empty, returns the highest-priority pending task.
+    """
+    from ..core.task_assignment import get_store
+    caller_id = kwargs.get("_caller_agent_id", "") or ""
+    if not caller_id:
+        return ("Error: accept_task requires caller agent context "
+                "(_caller_agent_id). The framework injects this "
+                "automatically — likely a dispatcher bug.")
+    store = get_store()
+
+    if ta_id:
+        ta = store.get(ta_id)
+        if ta is None or ta.to_agent != caller_id:
+            return f"Error: task {ta_id} not found or not assigned to you."
+    else:
+        # Pop top-priority pending
+        inbox = store.list_inbox(caller_id, status="pending", limit=1)
+        if not inbox:
+            return ("(no pending task assignments in your inbox; "
+                    "you can ask the user / PM what to do next)")
+        ta = inbox[0]
+
+    if ta.status != "pending":
+        return f"Task {ta.id} is already {ta.status}."
+    store.update_status(ta.id, "accepted")
+    return ta.render_for_recipient()
+
+
+def _tool_inbox_assignments(**kwargs: Any) -> str:
+    """List structured task assignments waiting in this agent's inbox.
+
+    Different from check_inbox (which lists chat messages). Use this
+    when looking for work-to-do.
+    """
+    from ..core.task_assignment import get_store
+    caller_id = kwargs.get("_caller_agent_id", "") or ""
+    if not caller_id:
+        return "Error: requires caller agent context."
+    inbox = get_store().list_inbox(caller_id, status="pending", limit=20)
+    if not inbox:
+        return "(inbox empty — no pending task assignments)"
+    lines = [f"## Pending task assignments ({len(inbox)})"]
+    for ta in inbox:
+        prio = "🔥" if ta.priority >= 2 else ("⭐" if ta.priority == 1 else "•")
+        lines.append(
+            f"  {prio} {ta.id} from {ta.from_agent}: {ta.brief[:80]}"
+            f"  ({len(ta.deliverables)} deliverables)"
+        )
+    lines.append("")
+    lines.append("Call `accept_task(ta_id=\"<id>\")` to take one.")
+    return "\n".join(lines)
+
+
+# ============================================================
+# Phase 3 P3-4 (2026-05-06): report_back — close the dispatch loop
+# ============================================================
+# After Coder finishes a TaskAssignment, it calls report_back with the
+# outcome ("done" / "blocked" / "needs_clarification" + summary). The
+# tool:
+#   1. Marks the TaskAssignment as done/cancelled in SQLite
+#   2. Sends a structured chat message to the original PM (from_agent)
+#      so PM sees the result in their inbox without needing to poll
+#   3. Optionally lists actual deliverable paths produced
+
+def _tool_report_back(
+    ta_id: str = "",
+    status: str = "done",
+    summary: str = "",
+    actual_deliverables: Any = None,
+    blocker: str = "",
+    **kwargs: Any,
+) -> str:
+    """Coder-side: report task completion (or blocker) back to the PM.
+
+    status ∈ done / blocked / needs_clarification / cancelled
+    """
+    from ..core.task_assignment import get_store
+    from .. import auth as _auth_mod
+    caller_id = kwargs.get("_caller_agent_id", "") or ""
+    if not caller_id:
+        return "Error: requires caller agent context."
+    if not ta_id:
+        # Auto-pick most recent accepted task for this caller
+        try:
+            store = get_store()
+            rows = store._conn.execute(
+                "SELECT id FROM task_assignments WHERE to_agent=? AND status='accepted' "
+                "ORDER BY accepted_at DESC LIMIT 1",
+                (caller_id,),
+            ).fetchall()
+            if not rows:
+                return ("Error: no accepted task found for you. Pass ta_id "
+                        "explicitly, or accept_task first.")
+            ta_id = rows[0]["id"]
+        except Exception as e:
+            return f"Error finding accepted task: {e}"
+
+    store = get_store()
+    ta = store.get(ta_id)
+    if ta is None:
+        return f"Error: task {ta_id} not found."
+    if ta.to_agent != caller_id:
+        return f"Error: task {ta_id} is not assigned to you."
+
+    valid_status = {"done", "blocked", "needs_clarification", "cancelled"}
+    if status not in valid_status:
+        return f"Error: status must be one of {sorted(valid_status)}, got {status!r}."
+
+    # Coerce deliverables list
+    actual_paths: list[str] = []
+    if actual_deliverables is not None:
+        if isinstance(actual_deliverables, list):
+            actual_paths = [str(p) for p in actual_deliverables]
+        elif isinstance(actual_deliverables, str):
+            try:
+                import json as _j
+                d = _j.loads(actual_deliverables)
+                if isinstance(d, list):
+                    actual_paths = [str(p) for p in d]
+            except Exception:
+                actual_paths = [actual_deliverables]
+
+    # Update store status: done/cancelled close the row; blocked / needs_*
+    # leave it accepted so the PM can re-dispatch with clarification.
+    if status in ("done", "cancelled"):
+        store.update_status(ta_id, "done" if status == "done" else "cancelled")
+
+    # Compose a chat message to the PM (from_agent) via the standard inbox
+    icon = {"done": "✅", "blocked": "⛔",
+            "needs_clarification": "❓", "cancelled": "🚫"}.get(status, "📨")
+    msg_lines = [f"{icon} Report back on task {ta_id} (status={status})"]
+    if summary:
+        msg_lines.append("")
+        msg_lines.append(summary)
+    if actual_paths:
+        msg_lines.append("")
+        msg_lines.append("Deliverables produced:")
+        for p in actual_paths:
+            msg_lines.append(f"  • {p}")
+    if blocker:
+        msg_lines.append("")
+        msg_lines.append(f"Blocker: {blocker}")
+    chat_msg = "\n".join(msg_lines)
+
+    # Best-effort send to PM via existing send_message infrastructure
+    sent_ok = False
+    if ta.from_agent and ta.from_agent != caller_id:
+        try:
+            send_result = _tool_send_message(
+                to_agent=ta.from_agent,
+                content=chat_msg,
+                priority=("urgent" if status == "blocked" else "normal"),
+                _caller_agent_id=caller_id,
+            )
+            sent_ok = (isinstance(send_result, str)
+                       and not send_result.lower().startswith("error"))
+        except Exception:
+            sent_ok = False
+
+    # Audit
+    try:
+        _auth_mod.get_auth().audit(
+            "task_report_back", actor=caller_id, target=ta.from_agent,
+            detail=f"ta={ta_id} status={status}",
+            agent_id=caller_id,
+            project_id=ta.project_id,
+        )
+    except Exception:
+        pass
+
+    # Phase 3 (2026-05-06): blocked / needs_clarification → auto-issue
+    # so PM has a tracked item to follow up on (not just a chat msg).
+    auto_issue_id = ""
+    if status in ("blocked", "needs_clarification") and ta.project_id:
+        try:
+            from ..tools_split.project import _auto_report_issue
+            from ..hub import get_hub
+            hub = get_hub()
+            project = hub.projects.get(ta.project_id) if hub else None
+            if project is not None:
+                sev = "high" if status == "blocked" else "medium"
+                desc_parts = []
+                if summary:
+                    desc_parts.append(summary)
+                if blocker:
+                    desc_parts.append(f"Blocker: {blocker}")
+                desc_parts.append(f"From task assignment: {ta_id}")
+                auto_issue_id = _auto_report_issue(
+                    project,
+                    title=f"{status}: {ta.brief[:120]}",
+                    description="\n".join(desc_parts),
+                    severity=sev,
+                    related_task_id=ta.project_task_id,
+                    reporter=caller_id,
+                    source=f"report_back:{status}",
+                )
+        except Exception as e:
+            logger.debug("report_back auto-issue skipped: %s", e)
+
+    return (
+        f"Reported back on {ta_id} as {status}."
+        + (f" PM ({ta.from_agent}) notified via inbox." if sent_ok else
+           " (PM notification skipped — could not deliver chat message.)")
+        + (f" Issue {auto_issue_id} auto-created for tracking."
+           if auto_issue_id and not auto_issue_id.startswith("(") else "")
+    )
+
+
+# ============================================================
+# Phase 2 P2-6 (2026-05-06) — Team status query tools
+# ============================================================
+
+def _tool_query_team_status(project_id: str = "", **kwargs: Any) -> str:
+    """List the current activity of every agent in the given project.
+
+    Use this BEFORE dispatching a task to see who's idle vs busy. Reads
+    from the team_dashboard SQLite table — no agent introspection /
+    LLM cost.
+    """
+    from ..core.team_dashboard import get_dashboard
+    if not project_id:
+        try:
+            from ..tools import _get_current_scope
+            project_id = _get_current_scope().get("project_id", "") or ""
+        except Exception:
+            project_id = ""
+    if not project_id:
+        return ("Error: query_team_status requires project_id (or call from "
+                "within a project context).")
+    rows = get_dashboard().query_project(project_id)
+    if not rows:
+        return f"(no agent activity recorded for project {project_id[:8]})"
+    import time as _time
+    now = _time.time()
+    lines = [f"## Team status for project {project_id[:8]} ({len(rows)} agents)"]
+    for r in rows:
+        since = int(now - float(r.get("last_update_at", now)))
+        cur = r.get("current_action") or "(idle)"
+        nxt = r.get("next_action") or ""
+        blocked = r.get("blocked_by") or ""
+        marker = "🟡" if blocked else ("🟢" if since < 30 else "⚪")
+        line = (f"  {marker} {r['agent_id'][:10]}  task={r.get('task_id','')[:8] or '-'}"
+                f"  cur={cur[:40]!r}  age={since}s")
+        if nxt:
+            line += f"  next={nxt[:40]!r}"
+        if blocked:
+            line += f"  ⚠ blocked_by={blocked[:30]!r}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _tool_query_agent_status(agent_id: str = "", project_id: str = "",
+                             **kwargs: Any) -> str:
+    """Get one agent's current action — what task they're on and what
+    they last did. Useful when the PM agent wants to check up on a
+    specific worker before re-dispatching."""
+    from ..core.team_dashboard import get_dashboard
+    if not agent_id:
+        return "Error: agent_id required."
+    row = get_dashboard().query_agent(agent_id, project_id=project_id)
+    if not row:
+        return f"(no recorded activity for agent {agent_id[:10]})"
+    import time as _time
+    age = int(_time.time() - float(row.get("last_update_at", _time.time())))
+    lines = [f"## Agent {agent_id[:10]}"]
+    lines.append(f"  project: {row.get('project_id','')[:10]}  task: {row.get('task_id','')[:10]}")
+    lines.append(f"  current: {row.get('current_action','(idle)')!r}")
+    if row.get("next_action"):
+        lines.append(f"  next:    {row['next_action']!r}")
+    if row.get("blocked_by"):
+        lines.append(f"  ⚠ blocked: {row['blocked_by']!r}")
+    lines.append(f"  age:     {age}s since last update")
+    if row.get("deliverable_progress"):
+        lines.append(f"  deliverables: {row['deliverable_progress']}")
+    return "\n".join(lines)

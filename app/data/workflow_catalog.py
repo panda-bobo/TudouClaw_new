@@ -15,6 +15,29 @@ workflow_catalog.py — 企业级工作流模板 Catalog。
   8. 人力资源 (HR)
   9. 市场营销 (Marketing)
   10. 安全合规 (Security & Compliance)
+
+Phase 2 P2-7 (2026-05-06) — Deliverable contract pattern:
+
+  Each step CAN declare a machine-checkable contract via these fields
+  (see app/workflow.py StepTemplate + app/core/deliverable_check.py):
+
+      "output_files":    ["spec.md", "src/api.py"],   # required outputs
+      "must_contain":    ["## API", "FastAPI"],       # substrings (re: prefix = regex)
+      "must_contain_per_file": {                       # per-file overrides
+          "src/api.py": ["@app.get", "uvicorn.run"],
+      },
+      "min_lines": 30,                                 # per-output_file
+      "max_lines": 0,                                  # 0 = unlimited
+      "acceptance_cmd": "pytest tests/api.py",         # whitelisted bins only
+      "acceptance_expect_exit": 0,
+
+  Without a contract, the step's task_complete is unrestricted (legacy
+  behavior). With a contract, the framework auto-verifies after each
+  write_file and refuses task_complete until every output_file passes.
+
+  Currently filled: 产品开发全流程 — s_architecture / s_development /
+  s_testing. Other workflows ship without contracts; users add them
+  when they want stricter verification.
 """
 
 from typing import Any
@@ -94,6 +117,13 @@ WORKFLOW_CATALOG: list[dict[str, Any]] = [
                 "output_spec": "技术架构设计文档",
                 "suggested_role": "architect",
                 "depends_on": ["s_requirements"],
+                # Phase 2 P2-7 (2026-05-06): deliverable contract
+                "output_files": ["architecture-design.md"],
+                "must_contain": [
+                    "## 系统架构", "## 技术选型", "## 数据模型",
+                    "## API", "## 部署", "## 风险",
+                ],
+                "min_lines": 60,
             },
             {
                 "id": "s_development",
@@ -113,6 +143,16 @@ WORKFLOW_CATALOG: list[dict[str, Any]] = [
                 "output_spec": "代码实现 + 单元测试 + 开发报告",
                 "suggested_role": "coder",
                 "depends_on": ["s_architecture"],
+                # Phase 2 P2-7 (2026-05-06): deliverable contract
+                # NOTE: paths are relative to the project's shared
+                # workspace. Replace with the project's actual entry
+                # point file when binding the workflow.
+                "output_files": ["development-report.md"],
+                "must_contain": [
+                    "## 任务拆分", "## 核心实现",
+                    "## 单元测试", "## 自审",
+                ],
+                "min_lines": 50,
             },
             {
                 "id": "s_testing",
@@ -132,6 +172,12 @@ WORKFLOW_CATALOG: list[dict[str, Any]] = [
                 "output_spec": "测试报告（含通过率、缺陷列表）",
                 "suggested_role": "tester",
                 "depends_on": ["s_development"],
+                # Phase 2 P2-7: deliverable contract
+                "output_files": ["test-report.md"],
+                "must_contain": [
+                    "## 测试用例", "## 通过率", "## 缺陷列表",
+                ],
+                "min_lines": 30,
             },
             {
                 "id": "s_deploy",
@@ -311,6 +357,13 @@ WORKFLOW_CATALOG: list[dict[str, Any]] = [
                 "output_spec": "审查通过确认",
                 "suggested_role": "coder",
                 "depends_on": ["s_security_review", "s_peer_review"],
+                # Phase 3 P3-6 (2026-05-06): deliverable contract
+                "output_files": ["code-review-report.md"],
+                "must_contain": [
+                    "## 静态分析", "## 安全审查",
+                    "## 同行评审", "## 修复确认",
+                ],
+                "min_lines": 30,
             },
         ],
     },
@@ -400,6 +453,14 @@ WORKFLOW_CATALOG: list[dict[str, Any]] = [
                 "output_spec": "发布就绪的文章 + 发布清单",
                 "suggested_role": "writer",
                 "depends_on": ["s_seo"],
+                # Phase 3 P3-6 (2026-05-06): deliverable contract
+                "output_files": ["article-final.md", "publish-checklist.md"],
+                "must_contain_per_file": {
+                    "publish-checklist.md": [
+                        "## 格式", "## 图片", "## 分类", "## 发布时间",
+                    ],
+                },
+                "min_lines": 20,
             },
         ],
     },
@@ -486,6 +547,13 @@ WORKFLOW_CATALOG: list[dict[str, Any]] = [
                 "output_spec": "回归测试报告",
                 "suggested_role": "tester",
                 "depends_on": ["s_implement_fix"],
+                # Phase 3 P3-6 (2026-05-06): deliverable contract
+                "output_files": ["regression-report.md"],
+                "must_contain": [
+                    "## 原始 Bug 验证", "## 相关功能",
+                    "## 性能影响", "## 结论",
+                ],
+                "min_lines": 25,
             },
         ],
     },
@@ -664,6 +732,13 @@ WORKFLOW_CATALOG: list[dict[str, Any]] = [
                 "output_spec": "完整数据分析报告",
                 "suggested_role": "data_analyst",
                 "depends_on": ["s_visualization"],
+                # Phase 3 P3-6 (2026-05-06): deliverable contract
+                "output_files": ["data-analysis-report.md"],
+                "must_contain": [
+                    "## Executive Summary", "## 关键发现",
+                    "## 详细分析", "## 建议行动项",
+                ],
+                "min_lines": 50,
             },
         ],
     },
@@ -931,6 +1006,13 @@ WORKFLOW_CATALOG: list[dict[str, Any]] = [
                 "output_spec": "工单关闭报告 + 知识库更新",
                 "suggested_role": "support",
                 "depends_on": ["s_customer_reply"],
+                # Phase 3 P3-6 (2026-05-06): deliverable contract
+                "output_files": ["ticket-close-report.md"],
+                "must_contain": [
+                    "## 客户确认", "## 知识库更新",
+                    "## 改进建议", "## 满意度",
+                ],
+                "min_lines": 15,
             },
         ],
     },
@@ -1258,6 +1340,13 @@ WORKFLOW_CATALOG: list[dict[str, Any]] = [
                 "output_spec": "API 文档",
                 "suggested_role": "writer",
                 "depends_on": ["s_api_implement"],
+                # Phase 3 P3-6 (2026-05-06): deliverable contract
+                "output_files": ["api-docs.md"],
+                "must_contain": [
+                    "## 接口列表", "## 参数说明", "## 调用示例",
+                    "## 错误码", "## 认证",
+                ],
+                "min_lines": 40,
             },
             {
                 "id": "s_api_test",

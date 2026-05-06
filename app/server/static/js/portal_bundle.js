@@ -17848,6 +17848,8 @@ async function renderProjectDetail(projId) {
       _tabBtn('milestones',   _isTechPd ? 'Milestones'   : 'Milestone',       'timeline') +
       _tabBtn('deliverables', _isTechPd ? 'Deliverables' : 'Deliverable',       'description') +
       _tabBtn('issues',       _isTechPd ? 'Issues'       : 'Issue',         'bug_report') +
+      _tabBtn('team',         _isTechPd ? 'Team Status'  : '团队状态',     'monitoring') +
+      _tabBtn('inbox',        _isTechPd ? 'Inbox'        : '收件箱',         'inbox') +
       _tabBtn('chat',         _isTechPd ? 'Team Chat'    : '团队协作',     'forum') +
     '</div>';
     // Tech mode: page hero with project name + status pill + action
@@ -17891,6 +17893,8 @@ async function renderProjectDetail(projId) {
       '<div id="proj-pane-milestones-'+projId+'" style="flex:1;overflow:auto;padding:20px;'+paneVis('milestones')+'"></div>' +
       '<div id="proj-pane-deliverables-'+projId+'" style="flex:1;overflow:auto;padding:20px;'+paneVis('deliverables')+'"></div>' +
       '<div id="proj-pane-issues-'+projId+'" style="flex:1;overflow:auto;padding:20px;'+paneVis('issues')+'"></div>' +
+      '<div id="proj-pane-team-'+projId+'" style="flex:1;overflow:auto;padding:20px;'+paneVis('team')+'"><div class="tc-text-dim" style="font-size:12px">Loading team status…</div></div>' +
+      '<div id="proj-pane-inbox-'+projId+'" style="flex:1;overflow:auto;padding:20px;'+paneVis('inbox')+'"><div class="tc-text-dim" style="font-size:12px">Loading inbox…</div></div>' +
       '<div id="proj-pane-chat-'+projId+'" style="flex:1;min-height:0;'+paneVis('chat')+'">' +
       '<div style="display:grid;grid-template-columns:1fr 300px;height:100%;min-height:0;overflow:hidden">' +
       '<!-- Chat Area -->' +
@@ -18147,7 +18151,9 @@ async function renderProjectDetail(projId) {
 window._projectDetailTab = window._projectDetailTab || {};
 function switchProjectTab(projId, tabKey) {
   window._projectDetailTab[projId] = tabKey;
-  var keys = ['overview','goals','milestones','deliverables','issues','chat'];
+  // Phase 3 P3-2/P3-3 (2026-05-06): added 'team' and 'inbox' tabs
+  var keys = ['overview','goals','milestones','deliverables','issues',
+              'team','inbox','chat'];
   keys.forEach(function(k){
     var el = document.getElementById('proj-pane-'+k+'-'+projId);
     if (el) el.style.display = (k === tabKey) ? (k === 'chat' ? 'flex' : 'block') : 'none';
@@ -18176,10 +18182,194 @@ async function loadProjectTabContent(projId, tabKey) {
     } else if (tabKey === 'issues') {
       var r4 = await api('GET', '/api/portal/projects/'+projId+'/issues');
       pane.innerHTML = _renderProjectIssues(projId, r4.issues || []);
+    } else if (tabKey === 'team') {
+      // Phase 3 P3-2 (2026-05-06): Team Status pane
+      await _renderProjectTeamStatus(projId, pane);
+    } else if (tabKey === 'inbox') {
+      // Phase 3 P3-3 (2026-05-06): TaskAssignment inbox pane
+      await _renderProjectInbox(projId, pane);
     }
   } catch(e) {
     pane.innerHTML = '<div style="color:var(--error)">Error: '+esc(e.message)+'</div>';
   }
+}
+
+// Phase 3 P3-3 (2026-05-06): TaskAssignment inbox renderer
+async function _renderProjectInbox(projId, pane) {
+  var r = await api('GET', '/api/portal/projects/'+projId+'/assignments');
+  var items = (r && r.assignments) || [];
+  var html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">' +
+    '<div><h3 style="font-size:18px;font-weight:700;margin:0">Task Assignments</h3>' +
+    '<div style="font-size:11px;color:var(--text3);margin-top:2px">Structured PM → Worker handoffs (replaces 任务派发 markdown documents).</div></div>' +
+    '<div class="tc-row-sm">' +
+      '<span class="tc-chip">' + items.length + ' total</span>' +
+      '<button class="btn btn-ghost btn-sm" onclick="loadProjectTabContent(\''+projId+'\',\'inbox\')"><span class="material-symbols-outlined" style="font-size:14px">refresh</span></button>' +
+    '</div></div>';
+  if (!items.length) {
+    html += '<div class="tc-text-dim" style="font-size:12px;padding:30px;text-align:center">No task assignments yet — when a PM agent calls <code>dispatch_task</code>, the assignment will appear here.</div>';
+    pane.innerHTML = html;
+    return;
+  }
+  // Group by status
+  var groups = {pending:[], accepted:[], done:[], cancelled:[]};
+  items.forEach(function(it){
+    var s = it.status || 'pending';
+    (groups[s] || groups.pending).push(it);
+  });
+  var statusMeta = {
+    pending:   {label:'Pending',   color:'#f59e0b', icon:'schedule'},
+    accepted:  {label:'In Progress', color:'#3b82f6', icon:'autorenew'},
+    done:      {label:'Done',      color:'#22c55e', icon:'check_circle'},
+    cancelled: {label:'Cancelled', color:'#9ca3af', icon:'cancel'},
+  };
+  ['pending','accepted','done','cancelled'].forEach(function(status){
+    var arr = groups[status];
+    if (!arr.length) return;
+    var meta = statusMeta[status];
+    html += '<div style="margin-bottom:24px">' +
+      '<div style="display:flex;align-items:center;gap:6px;margin-bottom:10px;color:'+meta.color+';font-weight:700;font-size:13px">' +
+        '<span class="material-symbols-outlined" style="font-size:16px">'+meta.icon+'</span>' +
+        meta.label + ' (' + arr.length + ')' +
+      '</div>';
+    html += '<div style="display:flex;flex-direction:column;gap:8px">';
+    arr.forEach(function(ta){
+      var prio = ta.priority >= 2 ? '🔥' : (ta.priority === 1 ? '⭐' : '');
+      var fromName = ta.from_agent_name || ta.from_agent || '?';
+      var toName = ta.to_agent_name || ta.to_agent || '?';
+      var deadline = ta.deadline ? new Date(ta.deadline * 1000).toLocaleString() : '';
+      html += '<div class="tc-card" style="border-left:3px solid '+meta.color+'">' +
+        '<div class="tc-row-spread">' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-weight:700;font-size:13px;display:flex;align-items:center;gap:6px">' +
+              (prio ? prio+' ' : '') +
+              '<code style="font-size:11px;color:var(--text3)">'+esc(ta.id || '')+'</code>' +
+              '<span style="color:var(--text3)">·</span>' +
+              '<span>'+esc(fromName)+'</span>' +
+              '<span class="material-symbols-outlined" style="font-size:14px;color:var(--text3)">arrow_forward</span>' +
+              '<span>'+esc(toName)+'</span>' +
+            '</div>' +
+            '<div style="font-size:12px;color:var(--text2);margin-top:6px;line-height:1.5">'+esc(ta.brief || '')+'</div>' +
+          '</div>' +
+        '</div>' +
+        // Deliverables
+        '<div style="margin-top:10px;padding:8px;background:var(--surface);border-radius:6px">' +
+          '<div class="tc-mono-label" style="margin-bottom:4px">Deliverables ('+(ta.deliverables||[]).length+')</div>' +
+          (ta.deliverables||[]).map(function(d){
+            var must = (d.must_contain||[]).slice(0,3).map(function(x){
+              return '<code style="font-size:10px;background:var(--overlay-8);padding:1px 4px;border-radius:3px">'+esc(x)+'</code>';
+            }).join(' ');
+            return '<div style="font-size:11px;margin:3px 0">' +
+              '<span style="color:var(--primary)">📄 '+esc(d.path||'')+'</span>' +
+              (d.min_lines ? ' <span style="color:var(--text3)">≥'+d.min_lines+' lines</span>' : '') +
+              (must ? '<div style="margin-left:18px;margin-top:2px">'+must+'</div>' : '') +
+            '</div>';
+          }).join('') +
+        '</div>' +
+        // Context refs
+        ((ta.context_refs||[]).length ? '<div style="margin-top:6px;font-size:11px;color:var(--text3)">' +
+          '<b>Context:</b> ' +
+          (ta.context_refs||[]).map(function(r){return esc(r.path||'');}).join(', ') +
+        '</div>' : '') +
+        '<div style="margin-top:6px;font-size:10px;color:var(--text3);display:flex;gap:12px">' +
+          (deadline ? '<span>⏱ ' + esc(deadline) + '</span>' : '') +
+          (ta.created_at ? '<span>created ' + new Date(ta.created_at*1000).toLocaleString() + '</span>' : '') +
+        '</div>' +
+      '</div>';
+    });
+    html += '</div></div>';
+  });
+  pane.innerHTML = html;
+}
+
+// Phase 3 P3-2 (2026-05-06): Team Status renderer
+async function _renderProjectTeamStatus(projId, pane) {
+  var r = await api('GET', '/api/portal/projects/'+projId+'/team_status');
+  var ev = await api('GET', '/api/portal/projects/'+projId+'/team_events?limit=20');
+  var agents = (r && r.agents) || [];
+  var watcher = (r && r.watcher) || {};
+  var events = (ev && ev.events) || [];
+  var now = Math.floor(Date.now() / 1000);
+  function fmtAge(ts) {
+    var s = Math.max(0, now - Math.floor(ts || now));
+    if (s < 60) return s + 's';
+    if (s < 3600) return Math.floor(s/60) + 'm';
+    if (s < 86400) return Math.floor(s/3600) + 'h';
+    return Math.floor(s/86400) + 'd';
+  }
+  var html = '';
+  // Watcher status pill
+  html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">' +
+    '<div><h3 style="font-size:18px;font-weight:700;margin:0">Team Status</h3>' +
+    '<div style="font-size:11px;color:var(--text3);margin-top:2px">Live agent activity from team_dashboard table.</div></div>' +
+    '<div class="tc-row-sm">' +
+      '<span class="tc-chip ' + (watcher.running ? 'tc-chip-success' : '') + '">' +
+        (watcher.running ? '🟢 Watcher running' : '⚪ Watcher idle') +
+      '</span>' +
+      '<span class="tc-chip">interventions: ' + (watcher.interventions_emitted || 0) + '</span>' +
+      '<button class="btn btn-ghost btn-sm" onclick="loadProjectTabContent(\''+projId+'\',\'team\')"><span class="material-symbols-outlined" style="font-size:14px">refresh</span></button>' +
+    '</div></div>';
+  if (!agents.length) {
+    html += '<div class="tc-text-dim" style="font-size:12px;padding:30px;text-align:center">No agent activity yet — start a workflow to see live status here.</div>';
+  } else {
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px;margin-bottom:24px">';
+    agents.forEach(function(a){
+      var name = a.agent_name ? esc(a.agent_name) : esc(a.agent_id.slice(0,10));
+      var role = a.agent_role ? esc(a.agent_role) : '';
+      var sinceProgress = Math.max(0, now - Math.floor(a.last_progress_at || now));
+      // Phase 3 P3-fix-watcher-idle (2026-05-06): only call it Stuck/Slow
+      // when the agent is CURRENTLY in_progress on a project task.
+      // Otherwise it's Idle (finished, waiting) — not a problem.
+      var isActive = !!a.is_active;
+      var statusClass, statusLabel;
+      if (!isActive) {
+        statusClass = 'online';
+        statusLabel = 'Idle';
+      } else if (sinceProgress < 60) {
+        statusClass = 'online'; statusLabel = 'Active';
+      } else if (sinceProgress < 180) {
+        statusClass = 'busy';   statusLabel = 'Slow';
+      } else {
+        statusClass = 'error';  statusLabel = 'Stuck';
+      }
+      html += '<div class="tc-card">' +
+        '<div class="tc-row-spread"><div>' +
+          '<div style="font-weight:700;font-size:14px">' + name + '</div>' +
+          '<div class="tc-mono-label">' + role + '</div>' +
+        '</div>' +
+        '<span class="tc-row-sm" style="gap:4px">' +
+          '<span class="tc-status-dot ' + statusClass + '"></span>' +
+          '<span class="tc-mono-label" style="text-transform:none">' + statusLabel + '</span>' +
+        '</span></div>' +
+        '<div style="margin-top:10px;font-size:12px;color:var(--text2)">' +
+          '<div><b>Current:</b> ' + esc(a.current_action || '(idle)') + '</div>' +
+          (a.next_action ? '<div><b>Next:</b> ' + esc(a.next_action) + '</div>' : '') +
+          (a.blocked_by ? '<div style="color:var(--error)"><b>⚠ Blocked:</b> ' + esc(a.blocked_by) + '</div>' : '') +
+          '<div style="color:var(--text3);margin-top:4px">' +
+            'task=' + esc(a.task_id || '-').slice(0,10) + '  ·  ' +
+            'no progress for ' + fmtAge(a.last_progress_at) +
+          '</div>' +
+        '</div></div>';
+    });
+    html += '</div>';
+  }
+  // Recent events timeline
+  if (events.length) {
+    html += '<h4 style="font-size:14px;font-weight:700;margin:24px 0 12px">Recent Events</h4>';
+    html += '<div style="display:flex;flex-direction:column;gap:6px;max-height:340px;overflow:auto">';
+    events.forEach(function(e){
+      var icon = e.kind === 'progress' ? '✅' : (e.kind === 'intervention' ? '⚠️' :
+                 e.kind === 'done' ? '🎯' : (e.kind === 'error' ? '❌' : '📋'));
+      html += '<div style="display:flex;gap:8px;font-size:11px;padding:6px 8px;background:var(--surface);border-radius:4px;border:1px solid var(--border-light)">' +
+        '<span>' + icon + '</span>' +
+        '<span class="tc-mono-label" style="min-width:60px">' + esc(e.kind) + '</span>' +
+        '<span style="color:var(--text3);min-width:80px">' + esc(e.agent_id.slice(0,10)) + '</span>' +
+        '<span style="flex:1;color:var(--text2)">' + esc(e.detail || '') + '</span>' +
+        '<span style="color:var(--text3)">' + fmtAge(e.ts) + '</span>' +
+      '</div>';
+    });
+    html += '</div>';
+  }
+  pane.innerHTML = html;
 }
 
 function _pctBar(pct) {
@@ -18497,38 +18687,102 @@ function _renderProjectDeliverables(projId, data) {
 }
 
 function _renderProjectIssues(projId, items) {
+  // Phase 3 (2026-05-06): grouped view by status (open / investigating /
+  // resolved / wontfix), severity-sorted within each group, with badges.
   var sevColor = function(s){ return s==='critical'?'#ef4444':s==='high'?'#f59e0b':s==='medium'?'var(--primary)':'var(--text3)'; };
-  var rows = (items||[]).map(function(iss){
+  var sevIcon  = function(s){ return s==='critical'?'🔴':s==='high'?'🟠':s==='medium'?'🟡':'🔵'; };
+  var sevOrder = function(s){ return s==='critical'?0:s==='high'?1:s==='medium'?2:3; };
+  var _techIss = false;
+  try { _techIss = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+
+  var groups = {open:[], investigating:[], resolved:[], wontfix:[]};
+  (items||[]).forEach(function(i){
+    var s = i.status || 'open';
+    (groups[s] || groups.open).push(i);
+  });
+  // Within each group, sort by severity then recency
+  Object.keys(groups).forEach(function(k){
+    groups[k].sort(function(a,b){
+      var d = sevOrder(a.severity) - sevOrder(b.severity);
+      return d !== 0 ? d : (b.created_at||0) - (a.created_at||0);
+    });
+  });
+
+  var renderCard = function(iss){
     var resolved = (iss.status==='resolved'||iss.status==='wontfix');
     var actions = resolved ? '' :
-      '<button class="btn btn-primary btn-xs" onclick="resolveIssuePrompt(\''+projId+'\',\''+iss.id+'\')">Mark Resolved</button>';
+      '<button class="btn btn-primary btn-xs" onclick="resolveIssuePrompt(\''+projId+'\',\''+iss.id+'\')">'+(_techIss?'Resolve':'解决')+'</button>';
     var resLine = iss.resolution ? '<div style="margin-top:6px;font-size:11px;color:#22c55e;padding:6px 8px;background:rgba(34,197,94,0.08);border-radius:3px">✓ '+esc(iss.resolution)+'</div>' : '';
-    return '<div style="background:var(--surface);border-radius:10px;padding:14px 16px;border:1px solid var(--overlay-6);margin-bottom:10px;border-left:3px solid '+sevColor(iss.severity)+'">' +
+    var ageS = iss.created_at ? Math.floor(Date.now()/1000 - iss.created_at) : 0;
+    var age = ageS < 60 ? ageS+'s' : ageS < 3600 ? Math.floor(ageS/60)+'m' :
+              ageS < 86400 ? Math.floor(ageS/3600)+'h' : Math.floor(ageS/86400)+'d';
+    var meta = [];
+    if (iss.assigned_to) meta.push('→ '+esc(iss.assigned_to.slice(0,8)));
+    if (iss.related_task_id) meta.push('task '+esc(iss.related_task_id.slice(0,8)));
+    if (iss.reporter) meta.push('by '+esc(iss.reporter.slice(0,8)));
+    meta.push(age+' ago');
+    return '<div style="background:var(--surface);border-radius:8px;padding:12px 14px;border:1px solid var(--overlay-6);margin-bottom:8px;border-left:3px solid '+sevColor(iss.severity)+'">' +
       '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">' +
         '<div style="flex:1;min-width:0">' +
-          '<div style="font-weight:700;font-size:14px">'+esc(iss.title)+(resolved?' <span style="font-size:10px;color:var(--text3)">['+esc(iss.status)+']</span>':'')+'</div>' +
-          (iss.description?'<div style="font-size:12px;color:var(--text2);margin-top:4px">'+esc(iss.description)+'</div>':'') +
-          '<div style="font-size:11px;color:var(--text3);margin-top:6px">Severity: '+esc(iss.severity)+' · Status: '+esc(iss.status)+(iss.assigned_to?' · → '+esc(iss.assigned_to):'')+'</div>' +
+          '<div style="font-weight:600;font-size:13px;display:flex;gap:6px;align-items:center">' +
+            '<span>'+sevIcon(iss.severity)+'</span>' +
+            '<code style="font-size:10px;color:var(--text3)">'+esc(iss.id)+'</code>' +
+            '<span>'+esc(iss.title)+'</span>' +
+          '</div>' +
+          (iss.description?'<div style="font-size:11px;color:var(--text2);margin-top:4px;line-height:1.5">'+esc(iss.description.slice(0,300))+(iss.description.length>300?'…':'')+'</div>':'') +
+          '<div style="font-size:10px;color:var(--text3);margin-top:6px">'+meta.join(' · ')+'</div>' +
           resLine +
         '</div>' +
-        '<div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">'+actions+
-          '<button class="btn btn-ghost btn-xs" style="color:var(--error)" onclick="deleteIssue(\''+projId+'\',\''+iss.id+'\')">Delete</button>' +
+        '<div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end">'+actions+
+          '<button class="btn btn-ghost btn-xs" style="color:var(--error);font-size:10px" onclick="deleteIssue(\''+projId+'\',\''+iss.id+'\')">'+(_techIss?'Delete':'删除')+'</button>' +
         '</div>' +
       '</div>' +
     '</div>';
-  });
-  var _techIss = false;
-  try { _techIss = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
-  var emptyIss = _techIss
-    ? '<div class="tc-text-dim" style="font-size:13px;padding:20px;text-align:center">No issues recorded</div>'
-    : '<div style="color:var(--text3);font-size:13px;padding:20px;text-align:center">暂无问题记录</div>';
-  rows = rows.join('') || emptyIss;
-  return '<div style="max-width:900px">' +
-    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">' +
-      '<div style="font-size:16px;font-weight:700">' + (_techIss ? 'Issues / Risks' : '问题 / 风险') + '</div>' +
-      '<button class="btn btn-primary btn-sm" onclick="showAddIssueModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> ' + (_techIss ? 'NEW ISSUE' : '新建问题') + '</button>' +
-    '</div>' + rows +
+  };
+
+  var statusMeta = {
+    open:          {label: _techIss?'Open':'待处理',      color:'#f59e0b', icon:'pending'},
+    investigating: {label: _techIss?'Investigating':'排查中', color:'#3b82f6', icon:'troubleshoot'},
+    resolved:      {label: _techIss?'Resolved':'已解决',   color:'#22c55e', icon:'check_circle'},
+    wontfix:       {label: _techIss?"Won't Fix":'不修',    color:'#9ca3af', icon:'cancel'},
+  };
+
+  var html = '<div style="max-width:980px">';
+  // Header
+  var counts = {open:groups.open.length, investigating:groups.investigating.length,
+                resolved:groups.resolved.length, wontfix:groups.wontfix.length};
+  var openHigh = groups.open.filter(function(i){return i.severity==='critical'||i.severity==='high';}).length;
+  html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">' +
+    '<div><h3 style="font-size:18px;font-weight:700;margin:0">'+(_techIss?'Issues / Risks':'问题 / 风险')+'</h3>' +
+    '<div style="font-size:11px;color:var(--text3);margin-top:2px">' +
+      counts.open+' open' + (openHigh>0?' ('+openHigh+' urgent)':'') +
+      ' · '+counts.investigating+' investigating · '+counts.resolved+' resolved · '+counts.wontfix+" won't-fix" +
+    '</div></div>' +
+    '<button class="btn btn-primary btn-sm" onclick="showAddIssueModal(\''+projId+'\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> '+(_techIss?'New Issue':'新建问题')+'</button>' +
   '</div>';
+
+  if (!(items||[]).length) {
+    html += '<div class="tc-text-dim" style="font-size:13px;padding:30px;text-align:center;background:var(--surface);border-radius:8px">' +
+      (_techIss
+        ? 'No issues recorded — agents auto-create issues when blocked or stuck.<br/>You can manually add via the New Issue button.'
+        : '暂无问题记录 — agent 卡住或阻塞时会自动创建,也可手工添加。') +
+      '</div>';
+    return html + '</div>';
+  }
+  // Render each non-empty group
+  ['open','investigating','resolved','wontfix'].forEach(function(s){
+    var arr = groups[s];
+    if (!arr.length) return;
+    var meta = statusMeta[s];
+    html += '<div style="margin-bottom:24px">' +
+      '<div style="display:flex;align-items:center;gap:6px;margin-bottom:10px;color:'+meta.color+';font-weight:700;font-size:13px">' +
+        '<span class="material-symbols-outlined" style="font-size:16px">'+meta.icon+'</span>' +
+        meta.label + ' (' + arr.length + ')' +
+      '</div>' +
+      arr.map(renderCard).join('') +
+    '</div>';
+  });
+  return html + '</div>';
 }
 
 // ── Goal CRUD helpers ──
@@ -23587,9 +23841,9 @@ function _orchSelect(nid) {
     realId = nid.replace(/^agent:/, '');
     navBtns =
       '<button class="btn btn-primary btn-sm" onclick="_orchOpenAgent(\''+esc(realId)+'\')">'
-      + '<span class="material-symbols-outlined" style="font-size:14px">smart_toy</span> 进入 Agent</button>'
+      + '<span class="material-symbols-outlined" style="font-size:14px">smart_toy</span> '+t('orch.openAgent','Open Agent')+'</button>'
       + '<button class="btn btn-ghost btn-sm" onclick="showAgentMemoryView(\''+esc(realId)+'\')">'
-      + '<span class="material-symbols-outlined" style="font-size:14px">psychology</span> 记忆视图</button>';
+      + '<span class="material-symbols-outlined" style="font-size:14px">psychology</span> '+t('mem.openBtn','Memory View')+'</button>';
   } else if (n.type === 'task') {
     // task:projId:taskId
     var rest = nid.replace(/^task:/, '');
@@ -26862,17 +27116,19 @@ function showAgentMemoryView(aid) {
   var modal = document.createElement('div');
   modal.id = 'agent-mem-modal';
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9999;display:flex;align-items:center;justify-content:center';
+  var T = window.t || function(k, f){ return f || k; };
+  var _fmt = function(s, n){ return String(s).replace('{n}', String(n)); };
   modal.innerHTML = ''
     + '<div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;width:820px;max-width:94vw;max-height:86vh;display:flex;flex-direction:column">'
     + '  <div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">'
-    + '    <div><div style="font-weight:700;font-size:15px">🧠 '+esc(name)+' — 记忆视图</div>'
-    + '    <div style="font-size:11px;color:var(--text3);margin-top:2px">L1 短时 / L2 工作 / L3 长期 · ExecutionPlan · Transcript</div></div>'
+    + '    <div><div style="font-weight:700;font-size:15px">🧠 '+esc(name)+' — '+T('mem.title','Memory View')+'</div>'
+    + '    <div style="font-size:11px;color:var(--text3);margin-top:2px">'+T('mem.subtitle','L1 short-term / L2 working / L3 long-term · Execution Plan · Transcript')+'</div></div>'
     + '    <div style="display:flex;gap:8px">'
-    + '      <button class="btn btn-sm" onclick="compactAgentMemoryFromModal(\''+esc(aid)+'\')">压缩记忆</button>'
+    + '      <button class="btn btn-sm" onclick="compactAgentMemoryFromModal(\''+esc(aid)+'\')">'+T('mem.compactBtn','Compact Memory')+'</button>'
     + '      <button class="btn btn-sm" onclick="document.getElementById(\'agent-mem-modal\').remove()">×</button>'
     + '    </div>'
     + '  </div>'
-    + '  <div id="agent-mem-body" style="flex:1;overflow:auto;padding:16px 18px;font-size:12px;color:var(--text2)">加载中…</div>'
+    + '  <div id="agent-mem-body" style="flex:1;overflow:auto;padding:16px 18px;font-size:12px;color:var(--text2)">'+T('mem.loading','Loading…')+'</div>'
     + '</div>';
   document.body.appendChild(modal);
 
@@ -26897,23 +27153,23 @@ function showAgentMemoryView(aid) {
     var l3cat = mem.l3_by_category || {};
     sections.push(
       '<div style="background:var(--surface);border-radius:8px;padding:12px;margin-bottom:14px;border:1px solid var(--border-light)">'
-      + '<div style="font-weight:600;margin-bottom:10px">记忆层级概览</div>'
+      + '<div style="font-weight:600;margin-bottom:10px">'+T('mem.overview','Memory Hierarchy Overview')+'</div>'
       + '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:10px">'
-      + _memStatCard('L1 短时记忆', l1, '#3b82f6', '当前对话窗口中的消息')
-      + _memStatCard('L2 工作记忆', l2, '#8b5cf6', '历史对话压缩摘要')
-      + _memStatCard('L3 长期记忆', l3, '#10b981', '结构化语义知识')
+      + _memStatCard(T('mem.l1Label','L1 Short-Term'), l1, '#3b82f6', T('mem.l1Desc','Messages in current conversation window'))
+      + _memStatCard(T('mem.l2Label','L2 Working'),    l2, '#8b5cf6', T('mem.l2Desc','Compressed summaries of past conversations'))
+      + _memStatCard(T('mem.l3Label','L3 Long-Term'),  l3, '#10b981', T('mem.l3Desc','Structured semantic knowledge'))
       + '</div>'
       + (l3 > 0 ? '<div style="display:flex;gap:6px;flex-wrap:wrap">'
-        + _catBadge('contact', '联系', l3cat.contact||0)
-        + _catBadge('preference', '偏好', (l3cat.preference||0) + (l3cat.user_pref||0))
-        + _catBadge('intent', 'Intent', l3cat.intent||0)
-        + _catBadge('reasoning', '推理', l3cat.reasoning||0)
-        + _catBadge('outcome', '结果', l3cat.outcome||0)
-        + _catBadge('rule', '规则', l3cat.rule||0)
-        + _catBadge('reflection', '反思', l3cat.reflection||0)
+        + _catBadge('contact',    T('mem.cat.contact','Contact'),       l3cat.contact||0)
+        + _catBadge('preference', T('mem.cat.preference','Preference'), (l3cat.preference||0) + (l3cat.user_pref||0))
+        + _catBadge('intent',     T('mem.cat.intent','Intent'),         l3cat.intent||0)
+        + _catBadge('reasoning',  T('mem.cat.reasoning','Reasoning'),   l3cat.reasoning||0)
+        + _catBadge('outcome',    T('mem.cat.outcome','Outcome'),       l3cat.outcome||0)
+        + _catBadge('rule',       T('mem.cat.rule','Rule'),             l3cat.rule||0)
+        + _catBadge('reflection', T('mem.cat.reflection','Reflection'), l3cat.reflection||0)
         + '</div>' : '')
       + '<div style="margin-top:10px;padding:8px 10px;background:var(--surface2, #222);border-radius:6px;font-size:11px;color:var(--text3)">'
-      + '<b>压缩策略：</b>L1（最近对话）超出窗口后 → 自动压缩为 L2 摘要（渐进式 Level 0→1→2，信息保留递减）→ 对话中提取结构化事实写入 L3（分 6 类：👤偏好 / 🎯意图 / 🧠推理 / ✅结果 / 📏规则 / 💡反思；👤偏好永久注入，不受检索 TopK 限制）'
+      + T('mem.compactStrategy','<b>Compaction strategy:</b> L1 → L2 summaries → L3 facts.')
       + '</div></div>'
     );
 
@@ -26922,7 +27178,9 @@ function showAgentMemoryView(aid) {
     if (l2entries.length) {
       var l2rows = l2entries.map(function(ep){
         var lvl = ep.compression_level || 0;
-        var lvlLabel = lvl === 0 ? '详细' : lvl === 1 ? '中等' : '精简';
+        var lvlLabel = lvl === 0 ? T('mem.compLevelDetailed','Detailed')
+                     : lvl === 1 ? T('mem.compLevelMedium','Medium')
+                                 : T('mem.compLevelBrief','Brief');
         var lvlColor = lvl === 0 ? '#3b82f6' : lvl === 1 ? '#f59e0b' : '#ef4444';
         return '<div style="padding:8px;border-bottom:1px solid var(--border-light)">'
           + '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">'
@@ -26932,12 +27190,12 @@ function showAgentMemoryView(aid) {
             + '<span style="font-size:10px;color:var(--text3);margin-left:auto">'+esc(_formatTs(ep.created_at))+'</span>'
           + '</div>'
           + '<div style="font-size:11px;color:var(--text2);white-space:pre-wrap;max-height:80px;overflow:auto">'+esc(ep.summary||'')+'</div>'
-          + (ep.keywords ? '<div style="margin-top:4px;font-size:10px;color:var(--text3)">关键词: '+esc(ep.keywords)+'</div>' : '')
+          + (ep.keywords ? '<div style="margin-top:4px;font-size:10px;color:var(--text3)">'+T('mem.keywords','Keywords')+': '+esc(ep.keywords)+'</div>' : '')
           + '</div>';
       }).join('');
       sections.push(
         '<div style="background:var(--surface);border-radius:8px;padding:12px;margin-bottom:14px;border:1px solid var(--border-light)">'
-        + '<div style="font-weight:600;margin-bottom:8px;color:#8b5cf6">L2 工作记忆 — 对话摘要 ('+l2+')</div>'
+        + '<div style="font-weight:600;margin-bottom:8px;color:#8b5cf6">'+_fmt(T('mem.l2Title','L2 Working Memory — Conversation Summaries ({n})'), l2)+'</div>'
         + l2rows + '</div>'
       );
     }
@@ -26950,7 +27208,16 @@ function showAgentMemoryView(aid) {
       // per-row delete handlers can hit the right backend route.
       _l3SelectedIds = new Set();
       _l3CurrentAgentId = aid;
-      var CAT_LABELS = {contact:'📇联系',preference:'👤偏好',user_pref:'👤偏好',intent:'Intent',reasoning:'推理',outcome:'结果',rule:'规则',reflection:'反思'};
+      var CAT_LABELS = {
+        contact:    '📇 ' + T('mem.cat.contact','Contact'),
+        preference: '👤 ' + T('mem.cat.preference','Preference'),
+        user_pref:  '👤 ' + T('mem.cat.preference','Preference'),
+        intent:           T('mem.cat.intent','Intent'),
+        reasoning:        T('mem.cat.reasoning','Reasoning'),
+        outcome:          T('mem.cat.outcome','Outcome'),
+        rule:             T('mem.cat.rule','Rule'),
+        reflection:       T('mem.cat.reflection','Reflection'),
+      };
       var CAT_COLORS = {contact:'#14b8a6',preference:'#ec4899',user_pref:'#ec4899',intent:'#3b82f6',reasoning:'#f59e0b',outcome:'#10b981',rule:'#ef4444',reflection:'#8b5cf6'};
       var l3rows = l3entries.map(function(f){
         var cat = f.category || 'unknown';
@@ -26963,26 +27230,26 @@ function showAgentMemoryView(aid) {
           + '<div style="flex:1;min-width:0">'
             + '<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">'
               + '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:'+catColor+'20;color:'+catColor+'">'+esc(catLabel)+'</span>'
-              + '<span style="font-size:10px;color:var(--text3)">置信度 '+conf+'%</span>'
+              + '<span style="font-size:10px;color:var(--text3)">'+T('mem.confidence','Confidence')+' '+conf+'%</span>'
               + '<span style="font-size:10px;color:var(--text3);margin-left:auto">'+esc(_formatTs(f.created_at))+'</span>'
             + '</div>'
             + '<div style="font-size:11px;color:var(--text2);word-break:break-word">'+esc(f.content||'')+'</div>'
           + '</div>'
-          + '<button onclick="_l3DeleteOne(\''+fid+'\')" title="删除这条记忆" style="background:transparent;border:none;color:var(--text3);cursor:pointer;padding:4px 6px;font-size:14px;line-height:1;flex-shrink:0;border-radius:4px" onmouseenter="this.style.background=\'var(--surface2)\';this.style.color=\'var(--error)\'" onmouseleave="this.style.background=\'transparent\';this.style.color=\'var(--text3)\'">×</button>'
+          + '<button onclick="_l3DeleteOne(\''+fid+'\')" title="'+T('mem.deleteOne','Delete this memory')+'" style="background:transparent;border:none;color:var(--text3);cursor:pointer;padding:4px 6px;font-size:14px;line-height:1;flex-shrink:0;border-radius:4px" onmouseenter="this.style.background=\'var(--surface2)\';this.style.color=\'var(--error)\'" onmouseleave="this.style.background=\'transparent\';this.style.color=\'var(--text3)\'">×</button>'
         + '</div>';
       }).join('');
       // Toolbar (select-all + delete selected + clear all)
       var toolbar = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;padding:6px 8px;background:var(--surface2,rgba(0,0,0,0.06));border-radius:6px">'
         + '<input type="checkbox" id="l3-select-all" onchange="_l3ToggleSelectAll(this.checked)" style="cursor:pointer">'
-        + '<label for="l3-select-all" style="font-size:11px;color:var(--text3);cursor:pointer;user-select:none">全选</label>'
-        + '<span id="l3-sel-count" style="font-size:11px;color:var(--text3);margin-left:4px">已选 0</span>'
+        + '<label for="l3-select-all" style="font-size:11px;color:var(--text3);cursor:pointer;user-select:none">'+T('mem.selectAll','Select All')+'</label>'
+        + '<span id="l3-sel-count" style="font-size:11px;color:var(--text3);margin-left:4px">'+_fmt(T('mem.selectedCount','Selected {n}'), 0)+'</span>'
         + '<div style="flex:1"></div>'
-        + '<button id="l3-del-selected-btn" onclick="_l3DeleteSelected()" disabled style="font-size:11px;padding:4px 10px;background:transparent;color:var(--text3);border:1px solid var(--border-light);border-radius:4px;cursor:not-allowed">删除选中</button>'
-        + '<button onclick="_l3ClearAll()" style="font-size:11px;padding:4px 10px;background:transparent;color:#ef4444;border:1px solid rgba(239,68,68,0.4);border-radius:4px;cursor:pointer" onmouseenter="this.style.background=\'rgba(239,68,68,0.08)\'" onmouseleave="this.style.background=\'transparent\'">清空全部</button>'
+        + '<button id="l3-del-selected-btn" onclick="_l3DeleteSelected()" disabled style="font-size:11px;padding:4px 10px;background:transparent;color:var(--text3);border:1px solid var(--border-light);border-radius:4px;cursor:not-allowed">'+T('mem.deleteSelected','Delete Selected')+'</button>'
+        + '<button onclick="_l3ClearAll()" style="font-size:11px;padding:4px 10px;background:transparent;color:#ef4444;border:1px solid rgba(239,68,68,0.4);border-radius:4px;cursor:pointer" onmouseenter="this.style.background=\'rgba(239,68,68,0.08)\'" onmouseleave="this.style.background=\'transparent\'">'+T('mem.clearAll','Clear All')+'</button>'
         + '</div>';
       sections.push(
         '<div style="background:var(--surface);border-radius:8px;padding:12px;margin-bottom:14px;border:1px solid var(--border-light)">'
-        + '<div style="font-weight:600;margin-bottom:8px;color:#10b981">L3 长期记忆 — 语义知识 ('+l3+')</div>'
+        + '<div style="font-weight:600;margin-bottom:8px;color:#10b981">'+_fmt(T('mem.l3Title','L3 Long-Term Memory — Semantic Knowledge ({n})'), l3)+'</div>'
         + toolbar + l3rows + '</div>'
       );
     } else {
@@ -26993,7 +27260,7 @@ function showAgentMemoryView(aid) {
     // ── Engine overview ──
     sections.push(
       '<div style="background:var(--surface);border-radius:8px;padding:12px;margin-bottom:14px;border:1px solid var(--border-light)">'
-      + '<div style="font-weight:600;margin-bottom:8px">引擎概览</div>'
+      + '<div style="font-weight:600;margin-bottom:8px">'+T('mem.engineOverview','Engine Overview')+'</div>'
       + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">'
       + '<div><div style="color:var(--text3);font-size:10px">TURN</div><div style="font-size:18px;font-weight:600">'+esc(String(eng.turn_count||0))+'</div></div>'
       + '<div><div style="color:var(--text3);font-size:10px">TRANSCRIPT</div><div style="font-size:18px;font-weight:600">'+esc(String(eng.transcript_size||0))+'</div></div>'
@@ -27011,9 +27278,9 @@ function showAgentMemoryView(aid) {
       }).join('');
       sections.push(
         '<div style="background:var(--surface);border-radius:8px;padding:12px;margin-bottom:14px;border:1px solid var(--border-light)">'
-        + '<div style="font-weight:600;margin-bottom:8px">当前执行计划</div>'
+        + '<div style="font-weight:600;margin-bottom:8px">'+T('mem.currentPlan','Current Execution Plan')+'</div>'
         + '<div style="font-size:11px;color:var(--text3);margin-bottom:6px">'+esc(cp.task_summary||'')+'</div>'
-        + (steps || '<div style="color:var(--text3)">无步骤</div>')
+        + (steps || '<div style="color:var(--text3)">'+T('mem.noSteps','No steps')+'</div>')
         + '</div>'
       );
     }
@@ -27055,25 +27322,24 @@ function showAgentMemoryView(aid) {
         var badge = row.count > 1 ? ' <span style="color:var(--text3);font-size:10px">×'+row.count+'</span>' : '';
         return '<div style="padding:4px 6px;border-bottom:1px solid var(--border-light);font-size:11px;color:var(--text2);word-break:break-word">'+esc(disp)+badge+'</div>';
       }).join('');
-      var subtitle = '最近 Transcript (显示 ' + tail.length + ' 条';
-      if (noiseFiltered > 0) subtitle += '，已过滤 ' + noiseFiltered + ' 条基础设施错误';
-      subtitle += ')';
+      var subtitle = _fmt(T('mem.transcriptTitle','Recent Transcript (showing {n} entries)'), tail.length);
+      if (noiseFiltered > 0) subtitle += _fmt(T('mem.transcriptFiltered',' · {n} infrastructure errors filtered'), noiseFiltered);
       sections.push(
         '<div style="background:var(--surface);border-radius:8px;padding:12px;margin-bottom:14px;border:1px solid var(--border-light)">'
         + '<div style="font-weight:600;margin-bottom:8px">'+esc(subtitle)+'</div>'
-        + (rows || '<div style="color:var(--text3);padding:6px">无可展示内容</div>')
+        + (rows || '<div style="color:var(--text3);padding:6px">'+T('mem.noContent','No content to display')+'</div>')
         + '</div>'
       );
     }
 
     if (!sections.length) {
-      body.innerHTML = '<div style="color:var(--text3);padding:20px;text-align:center">该 agent 暂无记忆数据</div>';
+      body.innerHTML = '<div style="color:var(--text3);padding:20px;text-align:center">'+T('mem.empty','This agent has no memory data yet')+'</div>';
     } else {
       body.innerHTML = sections.join('');
     }
   }).catch(function(e){
     var body = document.getElementById('agent-mem-body');
-    if (body) body.innerHTML = '<div style="color:var(--error)">Load failed:'+esc(String(e))+'</div>';
+    if (body) body.innerHTML = '<div style="color:var(--error)">'+T('mem.loadFailed','Load failed: ')+esc(String(e))+'</div>';
   });
 }
 

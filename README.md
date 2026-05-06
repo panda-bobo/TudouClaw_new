@@ -81,31 +81,77 @@ TudouClaw 是一个**多智能体协作平台**，你可以在其中创建、编
 内置完整的项目管理体系和 DAG 工作流引擎，支持从需求到交付的全流程管理。
 
 <p align="center">
-  <img src="assets/screenshots/workflow_execution.png" alt="Workflow" width="800" />
+  <img src="assets/screenshots/projects.png" alt="Projects & Tasks" width="800" />
   <br/>
-  <em>DAG 工作流引擎 — 自动编排多步骤任务</em>
+  <em>Projects & Tasks — 多 Agent 协作的项目工作台</em>
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/workflow_execution.png" alt="Workflow Templates" width="800" />
+  <br/>
+  <em>15+ 工作流模板 — 覆盖软件开发、内容创作、数据分析、客户支持等场景</em>
 </p>
 
 - **15+ 预定义工作流模板**：包含软件开发全生命周期（需求分析 → 架构设计 → 编码 → 代码审查 → 测试 → 部署）
 - **DAG 依赖调度**：自动识别步骤依赖关系，支持并行/串行混合执行
 - **累积上下文传递**：每个步骤可获取所有前序步骤的输出
-- **项目看板**：任务、里程碑、交付件、Issue 全景管理
+- **阶段感知的文件钉选（Stage-Aware File Pinning）**：每个工作流步骤可声明 `input_files` / `output_files`，Agent 在执行该步骤时只读必需文件，避免无关 RAG 检索；上游步骤的产出自动成为下游步骤的输入
+- **审批门控**：步骤可标记为 `require_approval`，编排器在审批前不会调度下游
+- **步骤重开（Reopen Step）**：已完成步骤可一键重开，下游状态级联清空、产出件标记为待重生
+- **项目操作并发安全**：项目级聊天与子任务消息走"queue + merge"模式（参考 Claude Code），高频消息会自动合并而非阻塞
+- **交付件管理**：任意交付件可单独删除并自动从磁盘清理，避免幽灵文件
+- **项目终止级联**：终止一个项目会级联取消所有正在执行的子任务（按 `project:{id}:task:{tid}` 键定位）
 - **会议功能**：Agent 之间可以召开"会议"（Meetings），多方协商讨论复杂决策
+
+#### 可视化编排画布（Visual Orchestration Canvas）
+
+<p align="center">
+  <img src="assets/screenshots/orchestration.png" alt="Orchestration Hub" width="800" />
+  <br/>
+  <em>Orchestration Hub — Canvas 工作流、长任务管线、Agent 排行、系统总览</em>
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/canvas.png" alt="Workflow Canvas" width="800" />
+  <br/>
+  <em>Workflow Editor — 拖拽式 DAG 设计器，多 Agent 流程可视化拼装</em>
+</p>
 
 ### 🧠 三层记忆与经验自成长
 
 Agent 不只是执行指令——它们会学习和成长。
 
 <p align="center">
-  <img src="assets/screenshots/experience_library.png" alt="Experience Library" width="700" />
+  <img src="assets/screenshots/experience_library.png" alt="Knowledge & Memory" width="700" />
   <br/>
-  <em>经验库 — Agent 从实践中学习，自动积累知识</em>
+  <em>知识与记忆中心 — 知识库、Agent 记忆、Wiki、RAG Provider 一体化管理</em>
 </p>
 
 - **三层记忆架构**：L1 工作记忆（当前对话）→ L2 情景记忆（近期经验）→ L3 语义记忆（长期知识）
 - **双环学习**：回顾式学习（Retrospective）+ 主动学习（Active Learning）
 - **经验模板**：每条经验包含场景、核心知识、行动规则和禁忌规则
 - **自动淘汰**：低成功率经验自动降权或清除
+
+#### 记忆溯源与作用域过滤（Memory Provenance + Scope）
+
+每条记忆都自带溯源信息，避免"哪个项目的事跑到另一个项目里"的污染：
+
+| 字段 | 作用 |
+|------|------|
+| `project_id` / `task_id` | 这条记忆是从哪个项目/任务产生的 |
+| `source_message_id` | 触发记忆写入的具体消息 ID，可回溯到原始对话 |
+| `scope` | `global` / `agent:{id}` / `project:{pid}` / `task:{tid}` — 决定召回时谁能看到 |
+| 身份类记忆豁免 | `contact` / `preference` 类别永远写入 `scope='global'`，跨项目可见 |
+
+召回时按当前调用上下文过滤：在项目 A 的会话里只会看到 `global` + `project:A` + `task:A.*` 的记忆，项目 B 的内部细节不会泄漏过来。`memory_recall` 工具会自动注入 `_caller_agent_id` 让作用域判定生效——以前的"硬编码白名单"已经移除。
+
+#### HCS 启发的 RAG 质量改进
+
+知识库的检索质量经过专门优化（参考了 HCS RAG 项目的实践）：
+
+- **意图感知召回**：查询前先做轻量级分类——`statistical`（统计/聚合类）走表格优先策略；`detail`（细节/事实类）走段落 + 表格；`normal` 默认混合
+- **表格原子化分块**：Markdown 表格作为整体切块，自动前置最近的标题路径（H1 → H2 → H3），保证表格上下文不丢
+- **未索引可见**：每个知识库卡片显示"未索引（UNINDEXED）"计数，embedding 失败的文档不会静默吞掉
 - **Knowledge Base**：支持上传文档、笔记等知识资料，Agent 在对话中自动检索引用
 
 ### 🎯 意图理解 — IntentResolver
@@ -586,9 +632,13 @@ Agent 在执行任务过程中自动积累经验。随着经验增多，SkillFor
 - [x] Personas 人设管理
 - [x] 国际化 (i18n)
 - [x] 语音输入与朗读
+- [x] 可视化工作流编辑器（Canvas DAG Designer）
+- [x] HCS 启发的 RAG 召回质量改进（意图分类 + 表格原子分块）
+- [x] 记忆溯源与作用域过滤（project / task / agent / global）
+- [x] 阶段感知的文件钉选（Stage-Aware File Pinning）
+- [x] 项目 / 工作流操作的 queue+merge 并发模型
 - [ ] 插件市场
 - [ ] Agent 间自主协商机制
-- [ ] 可视化工作流编辑器
 - [ ] 移动端适配
 - [ ] Rust CLI 功能对齐
 

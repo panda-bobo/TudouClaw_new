@@ -24,6 +24,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .middleware.security import SecurityHeadersMiddleware
@@ -405,6 +406,12 @@ def create_app() -> FastAPI:
 
     # ── Security headers ──────────────────────────────────────────────
     app.add_middleware(SecurityHeadersMiddleware)
+
+    # ── Gzip compression (2026-05-06) ─────────────────────────────────
+    # portal_bundle.js is ~1.9 MB uncompressed; gzip cuts it to ~600 KB
+    # → first-load TTI ~1.3 s → ~0.4 s. minimum_size=1000 skips tiny
+    # JSON responses where gzip overhead > saved bytes.
+    app.add_middleware(GZipMiddleware, minimum_size=1000)
 
     # ── Register routers ──────────────────────────────────────────────
     from .routers import (

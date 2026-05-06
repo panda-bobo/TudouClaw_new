@@ -449,9 +449,25 @@ def _tool_memory_recall(query: str = "",
         k = max(1, min(int(top_k or 5), 20))
     except Exception:
         k = 5
+    # Phase 3 P3-5 (2026-05-06): pass current scenario's scope so
+    # cross-project memory doesn't leak through this read path.
+    _cur_pid = ""
+    _cur_tid = ""
+    try:
+        if _agent is not None:
+            _sc = getattr(_agent, "current_scenario", None)
+            if _sc is not None:
+                _cur_pid = getattr(_sc, "project_id", "") or ""
+                _cur_tid = getattr(_sc, "task_id", "") or ""
+            if not _cur_pid:
+                _cur_pid = getattr(_agent, "project_id", "") or ""
+    except Exception:
+        pass
     try:
         hits = mm.recall(caller_id, q, top_k=k,
-                         category=(category or "").strip())
+                         category=(category or "").strip(),
+                         current_project_id=_cur_pid,
+                         current_task_id=_cur_tid)
     except Exception as e:
         return f"Error recalling memory: {e}"
 

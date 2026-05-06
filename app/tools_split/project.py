@@ -603,3 +603,207 @@ def _tool_update_milestone_status(milestone_id: str = "", status: str = "",
     except Exception as e:
         logger.exception("update_milestone_status failed")
         return f"Error: update_milestone_status failed: {e}"
+
+
+# ============================================================
+# Phase 3 (2026-05-06) — Issues / Risks tracking
+# ============================================================
+# Replaces the empty Issues tab with a real auto-population pipeline.
+# Agents call report_issue when they hit a blocker, watcher / report_back
+# auto-call it on detection. UI groups by status for review.
+
+_VALID_SEVERITIES = ("low", "medium", "high", "critical")
+_VALID_STATUSES = ("open", "investigating", "resolved", "wontfix")
+
+
+def _tool_report_issue(
+    title: str = "",
+    description: str = "",
+    severity: str = "medium",
+    related_task_id: str = "",
+    related_milestone_id: str = "",
+    project_id: str = "",
+    **kwargs: Any,
+) -> str:
+    """Report a project issue / risk / blocker. Surfaces in the project's
+    Issues tab.
+
+    USE WHEN: you hit a blocker that needs human/PM attention, OR
+    discover a risk that should be tracked. Examples:
+      - missing API key / credential
+      - upstream task incomplete; can't proceed
+      - external dependency unavailable
+      - quality gate fails repeatedly
+      - process / requirement ambiguity
+
+    DON'T USE for: random "I'm slow today" — those go in chat. Issues
+    are for things that need a status transition (open → resolved).
+    """
+    if not title:
+        return "Error: 'title' is required."
+    proj, err = _resolve_project(project_id,
+                                 kwargs=kwargs if isinstance(kwargs, dict) else None)
+    if err:
+        return err
+    sev = (severity or "medium").strip().lower()
+    if sev not in _VALID_SEVERITIES:
+        return f"Error: severity must be one of {list(_VALID_SEVERITIES)}, got {severity!r}."
+    caller_id = kwargs.get("_caller_agent_id", "") or ""
+    try:
+        iss = proj.add_issue(
+            title=title.strip()[:200],
+            description=(description or "").strip(),
+            severity=sev,
+            reporter=caller_id,
+            related_task_id=(related_task_id or "").strip(),
+            related_milestone_id=(related_milestone_id or "").strip(),
+        )
+        _save_projects_silently()
+        logger.info("report_issue OK: project=%s issue=%s severity=%s title=%r",
+                    proj.id, iss.id, sev, title[:80])
+        # Post to project chat so PM sees it without polling
+        try:
+            sev_icon = {"low": "🔵", "medium": "🟡",
+                        "high": "🟠", "critical": "🔴"}.get(sev, "🟡")
+            proj.post_message(
+                sender=caller_id or "system",
+                sender_name="Issue Tracker",
+                content=(f"{sev_icon} New issue [{iss.id}] {iss.title}"
+                         + (f"\n  {description[:200]}" if description else "")),
+                msg_type="task_update",
+            )
+        except Exception:
+            pass
+        return (f"Issue reported: {iss.id} (severity={sev}). "
+                f"Visible in project Issues tab and posted to chat.")
+    except Exception as e:
+        logger.exception("report_issue failed")
+        return f"Error: report_issue failed: {e}"
+
+
+def _tool_update_issue(
+    issue_id: str = "",
+    status: str = "",
+    resolution: str = "",
+    severity: str = "",
+    assigned_to: str = "",
+    project_id: str = "",
+    **kwargs: Any,
+) -> str:
+    """Update an existing issue — change status / add resolution / reassign.
+
+    Common flow:
+      open → investigating (someone picked it up)
+      investigating → resolved (with resolution text)
+      open → wontfix (decision made not to fix)
+    """
+    if not issue_id:
+        return "Error: 'issue_id' is required."
+    proj, err = _resolve_project(project_id,
+                                 kwargs=kwargs if isinstance(kwargs, dict) else None)
+    if err:
+        return err
+    upd: dict[str, Any] = {}
+    if status:
+        s = status.strip().lower()
+        if s not in _VALID_STATUSES:
+            return f"Error: status must be one of {list(_VALID_STATUSES)}, got {status!r}."
+        upd["status"] = s
+        if s == "resolved":
+            upd["resolved_at"] = __import__("time").time()
+    if resolution:
+        upd["resolution"] = resolution
+    if severity:
+        sv = severity.strip().lower()
+        if sv not in _VALID_SEVERITIES:
+            return f"Error: severity must be one of {list(_VALID_SEVERITIES)}, got {severity!r}."
+        upd["severity"] = sv
+    if assigned_to:
+        upd["assigned_to"] = assigned_to
+    if not upd:
+        return "Error: provide at least one of status/resolution/severity/assigned_to."
+    try:
+        iss = proj.update_issue(issue_id, **upd)
+        if iss is None:
+            return f"Error: issue not found: {issue_id}"
+        _save_projects_silently()
+        return f"Issue updated: {issue_id} — status={iss.status}, severity={iss.severity}"
+    except Exception as e:
+        logger.exception("update_issue failed")
+        return f"Error: update_issue failed: {e}"
+
+
+def _tool_list_issues(
+    status: str = "open",
+    project_id: str = "",
+    **kwargs: Any,
+) -> str:
+    """List project issues filtered by status. Default: open issues only.
+    Pass status='all' to see everything."""
+    proj, err = _resolve_project(project_id,
+                                 kwargs=kwargs if isinstance(kwargs, dict) else None)
+    if err:
+        return err
+    issues = list(getattr(proj, "issues", []) or [])
+    if status and status != "all":
+        s = status.strip().lower()
+        issues = [i for i in issues if i.status == s]
+    if not issues:
+        return f"(no {status} issues in project {proj.name})"
+    lines = [f"## Issues ({status}) in {proj.name} — {len(issues)} item(s)"]
+    sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    issues.sort(key=lambda i: (sev_order.get(i.severity, 9), -i.created_at))
+    for iss in issues[:30]:
+        sev_icon = {"low": "🔵", "medium": "🟡",
+                    "high": "🟠", "critical": "🔴"}.get(iss.severity, "🟡")
+        line = f"  {sev_icon} [{iss.id}] {iss.title}"
+        if iss.assigned_to:
+            line += f"  (→ {iss.assigned_to[:8]})"
+        if iss.related_task_id:
+            line += f"  [task={iss.related_task_id[:8]}]"
+        lines.append(line)
+        if iss.description:
+            preview = iss.description[:120].replace("\n", " ")
+            lines.append(f"      {preview}")
+    return "\n".join(lines)
+
+
+# Internal helper — called by Watcher / report_back (NOT exposed as a
+# dispatcher tool; bypasses the schema layer)
+def _auto_report_issue(project: Any, *, title: str, description: str,
+                       severity: str, related_task_id: str = "",
+                       reporter: str = "", source: str = "auto") -> str:
+    """Called from Watcher / report_back / deliverable hook. Dedups by
+    title + related_task_id within the last hour to avoid spam."""
+    import time as _time
+    if project is None:
+        return ""
+    now = _time.time()
+    try:
+        for iss in (project.issues or []):
+            if (iss.title == title
+                    and iss.related_task_id == related_task_id
+                    and iss.status in ("open", "investigating")
+                    and (now - iss.created_at) < 3600):
+                return f"(deduped existing issue {iss.id})"
+        iss = project.add_issue(
+            title=title[:200], description=description,
+            severity=severity, reporter=reporter,
+            related_task_id=related_task_id,
+        )
+        # Post a brief notice to project chat
+        try:
+            sev_icon = {"low": "🔵", "medium": "🟡",
+                        "high": "🟠", "critical": "🔴"}.get(severity, "🟡")
+            project.post_message(
+                sender=reporter or source, sender_name=f"Auto-Issue ({source})",
+                content=f"{sev_icon} {title}",
+                msg_type="task_update",
+            )
+        except Exception:
+            pass
+        _save_projects_silently()
+        return iss.id
+    except Exception as e:
+        logger.debug("auto_report_issue failed: %s", e)
+        return ""

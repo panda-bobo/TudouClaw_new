@@ -221,6 +221,23 @@ class StepTemplate:
     # so the dispatcher's "## 📂 Pinned input files" block carries them.
     input_files: list[str] = field(default_factory=list)
     output_files: list[str] = field(default_factory=list)
+    # ── Deliverable contract (added 2026-05-05, Day 1 AM) ──
+    # Machine-checkable acceptance criteria. Each entry in must_contain
+    # is a substring/regex that MUST appear in the produced output_file
+    # (per-file via dict, or all output_files via flat list). min_lines
+    # / max_lines apply to every output_file. acceptance_cmd is an
+    # optional shell command that, if exit code matches expect_exit,
+    # marks the deliverable verified.
+    #
+    # The post-tool hook on write_file evaluates these and INJECTS a
+    # system message back into the agent if the deliverable fails. The
+    # agent cannot call task_complete until every output_file passes.
+    must_contain: list[str] = field(default_factory=list)
+    must_contain_per_file: dict[str, list[str]] = field(default_factory=dict)
+    min_lines: int = 0
+    max_lines: int = 0  # 0 = unlimited
+    acceptance_cmd: str = ""
+    acceptance_expect_exit: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -237,6 +254,12 @@ class StepTemplate:
             "suggested_role": self.suggested_role,
             "input_files": list(self.input_files or []),
             "output_files": list(self.output_files or []),
+            "must_contain": list(self.must_contain or []),
+            "must_contain_per_file": dict(self.must_contain_per_file or {}),
+            "min_lines": self.min_lines,
+            "max_lines": self.max_lines,
+            "acceptance_cmd": self.acceptance_cmd,
+            "acceptance_expect_exit": self.acceptance_expect_exit,
         }
 
     @staticmethod
@@ -255,6 +278,12 @@ class StepTemplate:
             suggested_role=d.get("suggested_role", d.get("role", "")),
             input_files=list(d.get("input_files") or []),
             output_files=list(d.get("output_files") or []),
+            must_contain=list(d.get("must_contain") or []),
+            must_contain_per_file=dict(d.get("must_contain_per_file") or {}),
+            min_lines=int(d.get("min_lines", 0) or 0),
+            max_lines=int(d.get("max_lines", 0) or 0),
+            acceptance_cmd=str(d.get("acceptance_cmd") or ""),
+            acceptance_expect_exit=int(d.get("acceptance_expect_exit", 0) or 0),
         )
 
 

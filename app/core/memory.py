@@ -855,7 +855,9 @@ class MemoryManager:
 
     def search_facts(self, agent_id: str, query: str,
                      top_k: int = 5, category: str = "",
-                     touch: bool = True) -> list[SemanticFact]:
+                     touch: bool = True,
+                     current_project_id: str = "",
+                     current_task_id: str = "") -> list[SemanticFact]:
         """FTS5 搜索 L3 事实。
 
         Args:
@@ -863,15 +865,30 @@ class MemoryManager:
                 Default True (用户/agent 真实检索)。维护扫描（dream /
                 consolidator）应传 False，否则会把所有 fact 的访问时间
                 刷成"现在"，让 orphan 检测失效。
+            current_project_id / current_task_id: when set, applies
+                scope_filter post-query so cross-project / cross-task
+                facts (with non-matching scope) are dropped. Empty =
+                legacy behavior (no scope filter).  Day 1 PM 2026-05-05.
         """
         if not query.strip():
-            return self.get_recent_facts(agent_id, limit=top_k, category=category)
+            return self.get_recent_facts(
+                agent_id, limit=top_k, category=category,
+                current_project_id=current_project_id,
+                current_task_id=current_task_id,
+            )
 
         tokens = self._tokenize_query(query)
         if not tokens:
-            return self.get_recent_facts(agent_id, limit=top_k, category=category)
+            return self.get_recent_facts(
+                agent_id, limit=top_k, category=category,
+                current_project_id=current_project_id,
+                current_task_id=current_task_id,
+            )
 
         fts_query = " OR ".join(tokens)
+        # Over-fetch when scope filter is active so post-filter still
+        # returns ~top_k. Cap at 50 to bound work.
+        eff_limit = min(50, top_k * 3) if (current_project_id or current_task_id) else top_k
         try:
             if category:
                 rows = self._conn.execute("""
@@ -883,7 +900,7 @@ class MemoryManager:
                       AND s.category = ?
                     ORDER BY rank
                     LIMIT ?
-                """, (fts_query, agent_id, category, top_k)).fetchall()
+                """, (fts_query, agent_id, category, eff_limit)).fetchall()
             else:
                 rows = self._conn.execute("""
                     SELECT s.*, rank
@@ -893,36 +910,77 @@ class MemoryManager:
                       AND s.agent_id = ?
                     ORDER BY rank
                     LIMIT ?
-                """, (fts_query, agent_id, top_k)).fetchall()
+                """, (fts_query, agent_id, eff_limit)).fetchall()
         except sqlite3.OperationalError:
             logger.warning("FTS query failed for semantic: %s", fts_query)
-            return self.get_recent_facts(agent_id, limit=top_k, category=category)
+            return self.get_recent_facts(
+                agent_id, limit=top_k, category=category,
+                current_project_id=current_project_id,
+                current_task_id=current_task_id,
+            )
 
         facts = [SemanticFact.from_dict(dict(r)) for r in rows]
+        # Day 1 PM scope filter — drop cross-project/task facts.
+        if current_project_id or current_task_id:
+            before = len(facts)
+            facts = [f for f in facts
+                     if self._is_in_scope(getattr(f, "scope", ""),
+                                          agent_id, current_project_id,
+                                          current_task_id)]
+            facts = facts[:top_k]
+            try:
+                logger.info("[recall] search_facts agent=%s scope=(p=%s,t=%s) kept=%d filtered=%d",
+                            agent_id[:8], current_project_id[:8] if current_project_id else "-",
+                            current_task_id[:8] if current_task_id else "-",
+                            len(facts), before - len(facts))
+            except Exception:
+                pass
         if touch:
             self._touch_facts([f.id for f in facts])
         return facts
 
     def get_recent_facts(self, agent_id: str, limit: int = 10,
                          category: str = "",
-                         touch: bool = True) -> list[SemanticFact]:
+                         touch: bool = True,
+                         current_project_id: str = "",
+                         current_task_id: str = "") -> list[SemanticFact]:
         """获取最近的 L3 事实。
 
         See ``search_facts`` for the ``touch`` flag's purpose.
+        Day 1 PM 2026-05-05: ``current_project_id`` / ``current_task_id``
+        enable cross-project / cross-task scope filtering. Without them
+        the call behaves as before (all-scope).
         """
+        # Over-fetch when scope filter is active so post-filter still
+        # returns ~limit results.
+        eff_limit = min(50, limit * 3) if (current_project_id or current_task_id) else limit
         if category:
             rows = self._conn.execute("""
                 SELECT * FROM memory_semantic
                 WHERE agent_id = ? AND category = ?
                 ORDER BY updated_at DESC LIMIT ?
-            """, (agent_id, category, limit)).fetchall()
+            """, (agent_id, category, eff_limit)).fetchall()
         else:
             rows = self._conn.execute("""
                 SELECT * FROM memory_semantic
                 WHERE agent_id = ?
                 ORDER BY updated_at DESC LIMIT ?
-            """, (agent_id, limit)).fetchall()
+            """, (agent_id, eff_limit)).fetchall()
         facts = [SemanticFact.from_dict(dict(r)) for r in rows]
+        if current_project_id or current_task_id:
+            before = len(facts)
+            facts = [f for f in facts
+                     if self._is_in_scope(getattr(f, "scope", ""),
+                                          agent_id, current_project_id,
+                                          current_task_id)]
+            facts = facts[:limit]
+            try:
+                logger.info("[recall] get_recent_facts agent=%s scope=(p=%s,t=%s) kept=%d filtered=%d",
+                            agent_id[:8], current_project_id[:8] if current_project_id else "-",
+                            current_task_id[:8] if current_task_id else "-",
+                            len(facts), before - len(facts))
+            except Exception:
+                pass
         if touch:
             self._touch_facts([f.id for f in facts])
         return facts
@@ -1100,6 +1158,10 @@ class MemoryManager:
                     "fact": matched,
                 }
             # Refresh in place (historical memory may have been wrong).
+            # Phase 3 P3-5 (2026-05-06): forward provenance fields from
+            # the NEW fact onto the refreshed row so scope info doesn't
+            # get lost when an old global fact is updated by a
+            # project-scoped one (or vice versa).
             refreshed = SemanticFact(
                 id=matched.id,
                 agent_id=matched.agent_id,
@@ -1112,6 +1174,10 @@ class MemoryManager:
                 confidence=fact.confidence,
                 created_at=matched.created_at,   # preserve
                 updated_at=time.time(),
+                project_id=getattr(fact, "project_id", "") or getattr(matched, "project_id", ""),
+                task_id=getattr(fact, "task_id", "") or getattr(matched, "task_id", ""),
+                source_message_id=getattr(fact, "source_message_id", "") or getattr(matched, "source_message_id", ""),
+                scope=getattr(fact, "scope", "") or getattr(matched, "scope", ""),
             )
             self.save_fact(refreshed, preserve_timestamps=True)
             return {
@@ -1136,7 +1202,9 @@ class MemoryManager:
 
     def recall(self, agent_id: str, query: str, *,
                top_k: int = 5, category: str = "",
-               prefer_vector: bool = True) -> list[dict]:
+               prefer_vector: bool = True,
+               current_project_id: str = "",
+               current_task_id: str = "") -> list[dict]:
         """High-level read API. Returns a flat list of dicts ready for
         UI / LLM tool consumption (no SemanticFact class leak):
 
@@ -1144,6 +1212,10 @@ class MemoryManager:
               "confidence": ..., "updated_at": ..., "age_days": ...}]
 
         Prefers vector search when available, falls back to FTS5.
+
+        Phase 3 P3-5 (2026-05-06): scope filter forwards to underlying
+        search functions. Without it, this top-level helper would leak
+        cross-project facts.
         """
         if not agent_id or not query:
             return []
@@ -1151,12 +1223,16 @@ class MemoryManager:
         if prefer_vector and self._check_chromadb_available():
             try:
                 facts = self.search_facts_vector(
-                    agent_id, query, top_k=top_k, category=category)
+                    agent_id, query, top_k=top_k, category=category,
+                    current_project_id=current_project_id,
+                    current_task_id=current_task_id)
             except Exception as e:
                 logger.debug("recall vector failed: %s", e)
         if not facts:
             facts = self.search_facts(
-                agent_id, query, top_k=top_k, category=category)
+                agent_id, query, top_k=top_k, category=category,
+                current_project_id=current_project_id,
+                current_task_id=current_task_id)
         now = time.time()
         out: list[dict] = []
         for f in facts:
@@ -1726,9 +1802,34 @@ class MemoryManager:
         except Exception as e:
             return {"available": False, "error": str(e)}
 
+    def _build_chroma_where(self, agent_id: str, category: str = "",
+                            current_project_id: str = "",
+                            current_task_id: str = "") -> dict:
+        """Day 1 PM 2026-05-05: build a ChromaDB ``where`` filter that
+        respects scope. When scope filter is enabled, the result limits
+        hits to scope ∈ {global, agent:{aid}, project:{pid}, task:{tid}}.
+        """
+        clauses: list[dict] = [{"agent_id": agent_id}]
+        if category:
+            clauses.append({"category": category})
+        if current_project_id or current_task_id:
+            scope_or: list[dict] = [
+                {"scope": ""},                          # legacy / no-scope
+                {"scope": "global"},
+                {"scope": f"agent:{agent_id}"},
+            ]
+            if current_project_id:
+                scope_or.append({"scope": f"project:{current_project_id}"})
+            if current_task_id:
+                scope_or.append({"scope": f"task:{current_task_id}"})
+            clauses.append({"$or": scope_or})
+        return {"$and": clauses} if len(clauses) > 1 else clauses[0]
+
     def search_facts_vector_scored(
         self, agent_id: str, query: str,
         top_k: int = 5, category: str = "",
+        current_project_id: str = "",
+        current_task_id: str = "",
     ) -> list[tuple[SemanticFact, float]]:
         """Like ``search_facts_vector`` but returns ``(fact, similarity)``
         tuples so callers can apply a relevance threshold.
@@ -1738,17 +1839,22 @@ class MemoryManager:
         whether to keep results).
         """
         if not self._check_chromadb_available():
-            return [(f, 0.0) for f in self.search_facts(agent_id, query, top_k, category)]
+            return [(f, 0.0) for f in self.search_facts(
+                agent_id, query, top_k, category,
+                current_project_id=current_project_id,
+                current_task_id=current_task_id,
+            )]
         try:
             coll = self._get_chroma_collection("memory_facts")
             if coll.count() == 0:
-                return [(f, 0.0) for f in self.search_facts(agent_id, query, top_k, category)]
-            where_filter = {"agent_id": agent_id}
-            if category:
-                where_filter = {"$and": [
-                    {"agent_id": agent_id},
-                    {"category": category},
-                ]}
+                return [(f, 0.0) for f in self.search_facts(
+                    agent_id, query, top_k, category,
+                    current_project_id=current_project_id,
+                    current_task_id=current_task_id,
+                )]
+            where_filter = self._build_chroma_where(
+                agent_id, category, current_project_id, current_task_id,
+            )
             results = coll.query(
                 query_texts=[query],
                 n_results=min(top_k, 50),
@@ -1781,25 +1887,41 @@ class MemoryManager:
             return scored
         except Exception as e:
             logger.warning(f"ChromaDB search_facts_scored failed: {e}")
-            return [(f, 0.0) for f in self.search_facts(agent_id, query, top_k, category)]
+            return [(f, 0.0) for f in self.search_facts(
+                agent_id, query, top_k, category,
+                current_project_id=current_project_id,
+                current_task_id=current_task_id,
+            )]
 
     def search_facts_vector(self, agent_id: str, query: str,
-                            top_k: int = 5, category: str = "") -> list[SemanticFact]:
-        """Vector search for L3 facts using ChromaDB. Fallback to FTS5."""
+                            top_k: int = 5, category: str = "",
+                            current_project_id: str = "",
+                            current_task_id: str = "") -> list[SemanticFact]:
+        """Vector search for L3 facts using ChromaDB. Fallback to FTS5.
+
+        Day 1 PM 2026-05-05: scope filter pushed into ChromaDB ``where``
+        so cross-project/task facts are excluded at query time (not
+        post-filter), preserving topK accuracy.
+        """
         if not self._check_chromadb_available():
-            return self.search_facts(agent_id, query, top_k, category)
+            return self.search_facts(
+                agent_id, query, top_k, category,
+                current_project_id=current_project_id,
+                current_task_id=current_task_id,
+            )
 
         try:
             coll = self._get_chroma_collection("memory_facts")
             if coll.count() == 0:
-                return self.search_facts(agent_id, query, top_k, category)
+                return self.search_facts(
+                    agent_id, query, top_k, category,
+                    current_project_id=current_project_id,
+                    current_task_id=current_task_id,
+                )
 
-            where_filter = {"agent_id": agent_id}
-            if category:
-                where_filter = {"$and": [
-                    {"agent_id": agent_id},
-                    {"category": category},
-                ]}
+            where_filter = self._build_chroma_where(
+                agent_id, category, current_project_id, current_task_id,
+            )
 
             results = coll.query(
                 query_texts=[query],
@@ -1808,7 +1930,11 @@ class MemoryManager:
             )
 
             if not results or not results.get("ids") or not results["ids"][0]:
-                return self.search_facts(agent_id, query, top_k, category)
+                return self.search_facts(
+                    agent_id, query, top_k, category,
+                    current_project_id=current_project_id,
+                    current_task_id=current_task_id,
+                )
 
             # Convert ChromaDB results back to SemanticFact objects
             facts = []
@@ -1832,7 +1958,11 @@ class MemoryManager:
 
         except Exception as e:
             logger.warning(f"ChromaDB search_facts failed, falling back to FTS5: {e}")
-            return self.search_facts(agent_id, query, top_k, category)
+            return self.search_facts(
+                agent_id, query, top_k, category,
+                current_project_id=current_project_id,
+                current_task_id=current_task_id,
+            )
 
     def search_episodic_vector(self, agent_id: str, query: str,
                                top_k: int = 3) -> list[EpisodicEntry]:
@@ -2016,11 +2146,15 @@ class MemoryManager:
             other_facts = self.search_facts_vector(
                 agent_id, current_query,
                 top_k=config.l3_retrieve_top_k,
+                current_project_id=current_project_id,
+                current_task_id=current_task_id,
             )
         else:
             other_facts = self.search_facts(
                 agent_id, current_query,
                 top_k=config.l3_retrieve_top_k,
+                current_project_id=current_project_id,
+                current_task_id=current_task_id,
             )
         # 合并：pinned 在前且去重
         pinned_ids = {f.id for f in pinned_facts}

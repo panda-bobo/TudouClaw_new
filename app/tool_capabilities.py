@@ -81,6 +81,33 @@ CORE_TOOLS: frozenset[str] = frozenset({
     # The actual installation / activation still requires admin
     # approval in the Forge UI — this just creates a draft.
     "submit_skill",
+    # Phase 3 (2026-05-06): structured task handoff — these are
+    # infrastructure tier, every agent (PM dispatches, worker accepts /
+    # reports back) needs them. Without them in CORE, the strict
+    # capability filter drops the schemas → LLM doesn't know they
+    # exist → emits DSML-style pseudo-tool-call markup as text.
+    "dispatch_task",
+    "accept_task",
+    "report_back",
+    "inbox_assignments",
+    # Phase 3 (2026-05-06): project coordination primitives. These
+    # are called by EVERY agent in a project context (PM creates
+    # milestones / goals; worker updates progress as they complete
+    # work). Should not require a capability skill grant — they're
+    # the "talk about your work" primitives. Without these in CORE,
+    # PM agents that have a goal owner_agent_id pointing to them can
+    # see the goal in their prompt but have no way to update it →
+    # frustrating dead-end UX.
+    "update_goal_progress",
+    "create_goal",
+    "update_milestone_status",
+    "update_milestone_responsibility",
+    # Phase 3 (2026-05-06): issue / risk tracking — ALL agents need
+    # to be able to report blockers/risks they hit. Without these in
+    # CORE, Issues tab stays permanently empty.
+    "report_issue",
+    "update_issue",
+    "list_issues",
 })
 
 

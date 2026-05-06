@@ -421,7 +421,7 @@ class PersistenceManager(ManagerBase):
 
     def _load_projects(self):
         """Load projects from SQLite (primary) or JSON (fallback)."""
-        from ..project import Project
+        from ..project import Project, ProjectStatus
 
         if self._db and self._db.count("projects") > 0:
             try:
@@ -430,6 +430,7 @@ class PersistenceManager(ManagerBase):
                     self._hub.projects[proj.id] = proj
                 logger.info("Loaded %d projects from SQLite",
                             len(self._hub.projects))
+                self._start_watchers_for_active_projects()
                 return
             except Exception as e:
                 logger.warning("SQLite project load failed: %s", e)
@@ -445,6 +446,27 @@ class PersistenceManager(ManagerBase):
         except Exception:
             import traceback
             traceback.print_exc()
+        self._start_watchers_for_active_projects()
+
+    def _start_watchers_for_active_projects(self) -> None:
+        """Phase 3 P3-1 (2026-05-06): on hub boot, kick off Watcher for
+        every project that's currently in ACTIVE/PLANNING and not paused.
+        Idempotent — start_for_project is a no-op if one's already running.
+        """
+        try:
+            from ..core import watcher as _wt
+            from ..project import ProjectStatus
+            count = 0
+            for proj in self._hub.projects.values():
+                if getattr(proj, "paused", False):
+                    continue
+                if proj.status in (ProjectStatus.ACTIVE, ProjectStatus.PLANNING):
+                    _wt.start_for_project(proj.id, project_name=proj.name)
+                    count += 1
+            if count:
+                logger.info("Watcher: started for %d active project(s)", count)
+        except Exception as e:
+            logger.debug("watcher boot-start skipped: %s", e)
 
     def _save_projects(self):
         """Persist projects to SQLite (primary) + JSON (backup) + Markdown.

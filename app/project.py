@@ -140,6 +140,22 @@ class ProjectTask:
     # Both are paths RELATIVE to the project's shared workspace dir.
     input_files: list = field(default_factory=list)
     output_files: list = field(default_factory=list)
+    # ── Deliverable contract (Day 1 AM, 2026-05-05) ──
+    # Mirrors StepTemplate fields. Propagated by bind_workflow so the
+    # post-tool hook on write_file can verify deliverables and refuse
+    # task_complete until every output_file passes must_contain +
+    # min_lines + (optional) acceptance_cmd. Per-file overrides win
+    # over the flat must_contain list.
+    must_contain: list = field(default_factory=list)
+    must_contain_per_file: dict = field(default_factory=dict)
+    min_lines: int = 0
+    max_lines: int = 0
+    acceptance_cmd: str = ""
+    acceptance_expect_exit: int = 0
+    # Tracks per-file verification result. Keys = relative paths from
+    # output_files; values = {"verified": bool, "reasons": list[str],
+    # "checked_at": float}. Empty until first write_file post-hook.
+    deliverable_status: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -163,6 +179,13 @@ class ProjectTask:
             "decomp_metadata": dict(self.decomp_metadata or {}),
             "input_files": list(self.input_files or []),
             "output_files": list(self.output_files or []),
+            "must_contain": list(self.must_contain or []),
+            "must_contain_per_file": dict(self.must_contain_per_file or {}),
+            "min_lines": int(self.min_lines or 0),
+            "max_lines": int(self.max_lines or 0),
+            "acceptance_cmd": str(self.acceptance_cmd or ""),
+            "acceptance_expect_exit": int(self.acceptance_expect_exit or 0),
+            "deliverable_status": dict(self.deliverable_status or {}),
         }
 
     @staticmethod
@@ -190,6 +213,13 @@ class ProjectTask:
             decomp_metadata=dict(d.get("decomp_metadata") or {}),
             input_files=list(d.get("input_files") or []),
             output_files=list(d.get("output_files") or []),
+            must_contain=list(d.get("must_contain") or []),
+            must_contain_per_file=dict(d.get("must_contain_per_file") or {}),
+            min_lines=int(d.get("min_lines", 0) or 0),
+            max_lines=int(d.get("max_lines", 0) or 0),
+            acceptance_cmd=str(d.get("acceptance_cmd") or ""),
+            acceptance_expect_exit=int(d.get("acceptance_expect_exit", 0) or 0),
+            deliverable_status=dict(d.get("deliverable_status") or {}),
         )
 
     # ── Step-level helpers ──
@@ -779,6 +809,21 @@ class Project:
                     self.paused_by = ""
                     self.paused_reason = ""
 
+        # Phase 3 P3-1 (2026-05-06): Watcher lifecycle.
+        # Active/Planning  → start watcher (idempotent)
+        # Suspended/Cancelled/Completed/Archived → stop watcher
+        try:
+            from .core import watcher as _wt
+            if target in (ProjectStatus.ACTIVE, ProjectStatus.PLANNING):
+                _wt.start_for_project(self.id, project_name=self.name)
+            else:
+                _wt.stop_for_project(self.id)
+        except Exception as _wt_err:
+            try:
+                logger.debug("watcher lifecycle skipped: %s", _wt_err)
+            except Exception:
+                pass
+
         return True, f"{old_val} → {target.value}"
 
     # ── Pause / Resume + 暂停期间消息队列 ──
@@ -789,6 +834,12 @@ class Project:
             self.paused_by = by
             self.paused_reason = reason
             self.updated_at = time.time()
+        # Phase 3 P3-1: stop watcher when paused
+        try:
+            from .core import watcher as _wt
+            _wt.stop_for_project(self.id)
+        except Exception:
+            pass
 
     def resume(self, by: str = "user") -> None:
         with self._lock:
@@ -797,6 +848,12 @@ class Project:
             self.paused_by = ""
             self.paused_reason = ""
             self.updated_at = time.time()
+        # Phase 3 P3-1: restart watcher
+        try:
+            from .core import watcher as _wt
+            _wt.start_for_project(self.id, project_name=self.name)
+        except Exception:
+            pass
 
     def queue_paused_message(self, sender: str, sender_name: str,
                               content: str, target_agents: list[str] | None = None) -> None:
@@ -1163,6 +1220,13 @@ class Project:
                 # lists; auto-tracking (A) fills output_files at runtime.
                 input_files = list(step.get("input_files") or [])
                 output_files = list(step.get("output_files") or [])
+                # Day 1 AM (2026-05-05): propagate deliverable contract.
+                must_contain = list(step.get("must_contain") or [])
+                must_contain_per_file = dict(step.get("must_contain_per_file") or {})
+                min_lines = int(step.get("min_lines", 0) or 0)
+                max_lines = int(step.get("max_lines", 0) or 0)
+                acceptance_cmd = str(step.get("acceptance_cmd") or "")
+                acceptance_expect_exit = int(step.get("acceptance_expect_exit", 0) or 0)
 
                 task_desc_parts = []
                 if step_desc:
@@ -1180,6 +1244,12 @@ class Project:
                     priority=0,
                     input_files=input_files,
                     output_files=output_files,
+                    must_contain=must_contain,
+                    must_contain_per_file=must_contain_per_file,
+                    min_lines=min_lines,
+                    max_lines=max_lines,
+                    acceptance_cmd=acceptance_cmd,
+                    acceptance_expect_exit=acceptance_expect_exit,
                 )
                 self.tasks.append(task)
                 created_tasks.append(task)
@@ -2224,6 +2294,49 @@ class ProjectChatEngine:
                     msg_type="task_update",
                     task_id=task.id,
                 )
+                # ── Deliverable contract gate (Day 1 AM, 2026-05-05) ──
+                # If task carries an output_files contract, refuse DONE
+                # transition until every output_file passes verification.
+                # Re-runs verifier here to catch any files written outside
+                # the per-write_file post-tool path (defense in depth).
+                try:
+                    from .core.deliverable_check import (
+                        verify_task_deliverables, all_deliverables_verified,
+                    )
+                    ws_dir = ""
+                    try:
+                        from .agent import Agent as _Agent
+                        ws_dir = _Agent.get_shared_workspace_path(project.id) or ""
+                    except Exception:
+                        pass
+                    if getattr(task, "output_files", None) and ws_dir:
+                        verify_task_deliverables(task, ws_dir)
+                    ok, missing = all_deliverables_verified(task)
+                except Exception as _dv_err:
+                    logger.debug("deliverable gate skipped: %s", _dv_err)
+                    ok, missing = True, []
+
+                if not ok:
+                    # Block completion. Push back to IN_PROGRESS with a
+                    # message the agent will see on its next turn.
+                    fail_lines = []
+                    for rel in missing:
+                        s = (task.deliverable_status or {}).get(rel, {})
+                        reasons = "; ".join(s.get("reasons", []) or ["not yet written"])
+                        fail_lines.append(f"  ❌ {rel} — {reasons}")
+                    project.post_message(
+                        sender="system", sender_name="Deliverable Check",
+                        content=(
+                            f"⛔ 任务 {task.title} 未通过交付契约校验，无法完成:\n"
+                            + "\n".join(fail_lines) +
+                            "\n请补全/修正后再完成。"
+                        ),
+                        msg_type="task_update",
+                        task_id=task.id,
+                    )
+                    task.status = ProjectTaskStatus.IN_PROGRESS
+                    task.updated_at = time.time()
+                    return
                 # 标记完成
                 task.status = ProjectTaskStatus.DONE
                 task.result = result[:2000]
@@ -2760,6 +2873,18 @@ class ProjectChatEngine:
                 _lang = getattr(agent.profile, "language", "auto") or "auto"
             except Exception:
                 pass
+            # Phase 3 P3-5 (2026-05-06): stamp project + task scope on
+            # the extracted facts. Project-level extraction MUST scope
+            # to that project (otherwise project A's "decided to use
+            # X" leaks into project B).
+            _proj_id = ""
+            try:
+                for p in self._hub.projects.values() if hasattr(self, "_hub") else []:
+                    if any(t.id == task.id for t in p.tasks):
+                        _proj_id = p.id
+                        break
+            except Exception:
+                pass
             _l3.extract_on_task_done(
                 agent_id=agent.id,
                 task_title=task.title or "",
@@ -2768,6 +2893,8 @@ class ProjectChatEngine:
                 recent_messages=recent,
                 llm_call=llm_call,
                 lang=_lang,
+                project_id=_proj_id,
+                task_id=task.id,
             )
         except Exception as _l3_err:  # noqa: BLE001
             logger.debug("Project L3 task-done hook failed for task %s: %s",
@@ -3110,6 +3237,66 @@ class ProjectChatEngine:
         except Exception as _mb:
             logger.debug("milestones_block build failed: %s", _mb)
 
+        # ── Goals snapshot (Phase 3 P3-fix-goals, 2026-05-06) ──
+        # Without this block, agents NEVER see what the user wrote in the
+        # Goals tab — even goals explicitly assigned to them via
+        # owner_agent_id. Mirrors milestones_block style.
+        goals_block = ""
+        try:
+            my_goals: list[str] = []
+            other_goals: list[str] = []
+            agent_id_for_goal = agent.id if agent else ""
+            for g in (project.goals or []):
+                owner = (g.owner_agent_id or "").strip()
+                # Format the goal line — show progress in a metric-aware way
+                if g.metric == "boolean":
+                    progress = "✅ done" if g.done else "⏳ pending"
+                elif g.metric in ("count", "percent"):
+                    if g.target_value > 0:
+                        progress = (
+                            f"{g.current_value:g}/{g.target_value:g} "
+                            f"({g.progress:.0f}%)"
+                        )
+                    else:
+                        progress = f"{g.current_value:g}"
+                else:  # text
+                    progress = "✅ done" if g.done else "⏳ pending"
+                base_line = f"「{g.name}」 {progress}"
+                if g.target_text:
+                    base_line += f" — {g.target_text}"
+                elif g.description:
+                    base_line += f" — {g.description[:120]}"
+                if owner and owner == agent_id_for_goal:
+                    my_goals.append(f"  🎯 [属于你] {base_line}  [id={g.id}]")
+                elif owner:
+                    owner_a = self._lookup(owner)
+                    owner_tag = (f"{owner_a.role}-{owner_a.name}"
+                                 if owner_a else owner[:8])
+                    other_goals.append(
+                        f"  - {base_line}  (owner: {owner_tag}, id={g.id})"
+                    )
+                else:
+                    other_goals.append(f"  - {base_line}  (owner: 未指派, id={g.id})")
+            if my_goals or other_goals:
+                goals_block = "\n[项目目标 — 用户在 Goals tab 写的目标]\n"
+                if my_goals:
+                    goals_block += (
+                        "你被指派负责以下目标:\n"
+                        + "\n".join(my_goals) + "\n"
+                    )
+                if other_goals:
+                    goals_block += (
+                        ("团队其它目标:\n" if my_goals else "全部目标:\n")
+                        + "\n".join(other_goals) + "\n"
+                    )
+                goals_block += (
+                    "  → 推进自己的目标时,用 `update_goal_progress(goal_id, "
+                    "current_value=..., done=true/false)` 更新进度。"
+                    "**不要新建重复的 goal**;已存在就在原有上更新。\n"
+                )
+        except Exception as _gb:
+            logger.debug("goals_block build failed: %s", _gb)
+
         # ── Project-task snapshot (besides MY tasks above) ──
         # Show only tasks NOT assigned to me (mine are already in
         # task_lines). Helps the agent see what others are doing →
@@ -3251,6 +3438,10 @@ class ProjectChatEngine:
             f"\n团队成员:\n" + "\n".join(team_lines) +
             f"{task_lines}\n"
             f"{wf_hint}"
+            f"{goals_block}"
+            f"{milestones_block}"
+            f"{other_tasks_block}"
+            f"{save_path_block}"
             f"{project_scope_hint}"
             f"\n最近聊天记录:\n{ctx}\n"
             f"\n[User]: {user_msg}\n"
@@ -3264,12 +3455,64 @@ class ProjectChatEngine:
         responsibility = member.responsibility if member else ""
         ctx = project.get_chat_context_for_agent("", limit=10)
 
+        # ── Goals snapshot (Phase 3 P3-fix-goals, 2026-05-06) ──
+        # Same pattern as _build_chat_prompt — agents need to see project
+        # goals when running tasks too, especially goals owned by them.
+        goals_block = ""
+        try:
+            owner_aid = task.assigned_to or ""
+            my_goals: list[str] = []
+            other_goals: list[str] = []
+            for g in (project.goals or []):
+                owner = (g.owner_agent_id or "").strip()
+                if g.metric == "boolean":
+                    progress = "✅ done" if g.done else "⏳ pending"
+                elif g.metric in ("count", "percent"):
+                    if g.target_value > 0:
+                        progress = f"{g.current_value:g}/{g.target_value:g} ({g.progress:.0f}%)"
+                    else:
+                        progress = f"{g.current_value:g}"
+                else:
+                    progress = "✅ done" if g.done else "⏳ pending"
+                base_line = f"「{g.name}」 {progress}"
+                if g.target_text:
+                    base_line += f" — {g.target_text}"
+                elif g.description:
+                    base_line += f" — {g.description[:120]}"
+                if owner and owner == owner_aid:
+                    my_goals.append(f"  🎯 [属于你] {base_line}  [id={g.id}]")
+                elif owner:
+                    owner_a = self._lookup(owner)
+                    owner_tag = (f"{owner_a.role}-{owner_a.name}"
+                                 if owner_a else owner[:8])
+                    other_goals.append(
+                        f"  - {base_line}  (owner: {owner_tag}, id={g.id})"
+                    )
+                else:
+                    other_goals.append(f"  - {base_line}  (owner: 未指派, id={g.id})")
+            if my_goals or other_goals:
+                goals_block = "\n[项目目标 — 用户在 Goals tab 写的目标]\n"
+                if my_goals:
+                    goals_block += "你被指派负责以下目标:\n" + "\n".join(my_goals) + "\n"
+                if other_goals:
+                    goals_block += (
+                        ("团队其它目标:\n" if my_goals else "全部目标:\n")
+                        + "\n".join(other_goals) + "\n"
+                    )
+                goals_block += (
+                    "  → 完成本任务时,如果推进了某个目标,用 `update_goal_progress("
+                    "goal_id, current_value=..., done=true/false)` 同步进度。\n"
+                )
+        except Exception as _gb:
+            logger.debug("task goals_block build failed: %s", _gb)
+
         return (
             f"[项目: {project.name} — 任务分配]\n"
             f"你的职责: {responsibility}\n"
             f"\n任务标题: {task.title}\n"
             f"任务描述: {task.description}\n"
             f"优先级: {'🔴紧急' if task.priority >= 2 else '🟡高' if task.priority == 1 else '🟢普通'}\n"
+            f"{goals_block}"
             f"\n最近聊天上下文:\n{ctx}\n"
             f"\n请完成这个任务，给出详细的执行结果。"
         )

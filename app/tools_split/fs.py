@@ -104,6 +104,15 @@ def _tool_read_file(path: str, offset: int = 0, limit: int | None = None,
     # hard refusal at HARD_CAP+1 so the agent MUST switch tactic.
     path_str = str(p)
     soft_cap, hard_cap = _path_caps()
+    # Day 3 AM (2026-05-05): also bump cross-tool counter (bash cat /
+    # head / tail share this counter — see _read_counter.py).
+    try:
+        from . import _read_counter as _xc
+        _xt_n = _xc.bump_read(agent, path_str, source="read_file") if agent else 0
+        if agent and _xc.is_blocked(agent, path_str):
+            return _xc.blocked_message(path_str, _xt_n, "read_file")
+    except Exception:
+        pass
     if agent is not None:
         pcount = getattr(agent, _READ_PATH_COUNT_ATTR, None)
         if pcount is None:
