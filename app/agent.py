@@ -7921,14 +7921,16 @@ Write only the summary body. Do not include any preamble or prefix."""
                 readonly_dirs.append(_skills_root)
         except Exception:
             pass
-        # Member-project shared workspaces — readonly fallback so that
-        # an agent who is a project member can always READ that project's
-        # deliverables, even when _active_context_id wasn't switched to
-        # the project (e.g. admin DMs the agent in solo mode while it
-        # has unfinished WF Step work, or the active context drifted
-        # mid-turn). Writes still gated by the project being the
-        # current active context (which makes the path land in
-        # allowed_dirs above instead of just readonly_dirs here).
+        # Member-project shared workspaces — full read+write access for
+        # every project this agent is a member of. The shared workspace
+        # is the project's collaboration area; membership IS the access
+        # grant. Without this, when _active_context_id wasn't switched
+        # to the project (e.g. admin DMs the agent in solo mode, or the
+        # context drifted mid-turn), the agent couldn't even read its
+        # own project's deliverables — much less write to them.
+        # Note: appending to allowed_dirs (not readonly_dirs) so members
+        # can submit deliverables / write notes regardless of which
+        # surface (solo/project/meeting) is currently in front.
         try:
             import sys as _sys_mp
             _llm_mod_mp = _sys_mp.modules.get(__package__ + ".llm") if __package__ else None
@@ -7940,13 +7942,11 @@ Write only the summary body. Do not include any preamble or prefix."""
                     if any(getattr(_m, "agent_id", "") == self.id
                            for _m in _members_mp):
                         _pwd_mp = self.get_shared_workspace_path(_pid_mp)
-                        if (_pwd_mp
-                                and _pwd_mp not in readonly_dirs
-                                and _pwd_mp not in allowed_dirs):
-                            readonly_dirs.append(_pwd_mp)
+                        if _pwd_mp and _pwd_mp not in allowed_dirs:
+                            allowed_dirs.append(_pwd_mp)
         except Exception:
-            # Non-fatal — member-project read fallback is a defense in
-            # depth, not a primary access path.
+            # Non-fatal — member-project access widening is a defense
+            # in depth, not the primary grant path.
             pass
 
         policy = _sandbox.SandboxPolicy(
