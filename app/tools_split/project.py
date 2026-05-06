@@ -14,6 +14,7 @@ category's tools. ``_get_current_scope`` is re-exported from
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from ._common import _get_hub
@@ -807,3 +808,241 @@ def _auto_report_issue(project: Any, *, title: str, description: str,
     except Exception as e:
         logger.debug("auto_report_issue failed: %s", e)
         return ""
+
+
+# ============================================================
+# project_state — structured query replacing glob_files for status
+# ============================================================
+# Agents in a project chat used to scan the workspace with glob_files
+# to figure out "what's done" / "what's mine" / "what's missing". That
+# pattern (a) is slow, (b) hits unrelated files (build artifacts, agent
+# meta), (c) doesn't see structured truth (Milestone.status,
+# Deliverable.status). project_state is the canonical replacement —
+# returns a snapshot from the structured stores, scoped to the caller's
+# perspective.
+#
+# Once Rule Engine rules ship the "no glob_files in project" deny
+# (Phase 2), agents must use this skill instead. Schema declared in
+# tools.py; this is the handler.
+
+_VALID_STATE_SCOPES = ("my", "team", "step", "milestone", "all")
+
+
+def _tool_project_state(
+    scope: str = "my",
+    project_id: str = "",
+    step_id: str = "",
+    milestone_id: str = "",
+    **kwargs: Any,
+) -> str:
+    """Snapshot of project state from a chosen perspective.
+
+    scope:
+      - "my"        → calling agent's view: my role, my active task,
+                      my milestones, my deliverables, what blocks me
+      - "team"      → cross-team progress: WF % done, who's stuck,
+                      open issues, recent completions
+      - "step"      → details of one workflow step (requires step_id)
+      - "milestone" → details of one milestone (requires milestone_id)
+      - "all"       → everything (verbose; for debugging)
+    """
+    sc = (scope or "my").strip().lower()
+    if sc not in _VALID_STATE_SCOPES:
+        return (f"Error: scope must be one of {_VALID_STATE_SCOPES}, "
+                f"got {sc!r}")
+    proj, err = _resolve_project(project_id,
+                                 kwargs=kwargs if isinstance(kwargs, dict) else None)
+    if err:
+        return err
+
+    caller_id = ""
+    if isinstance(kwargs, dict):
+        caller_id = str(kwargs.get("_caller_agent_id") or "")
+
+    if sc == "my":
+        return _render_my_view(proj, caller_id)
+    if sc == "team":
+        return _render_team_view(proj)
+    if sc == "step":
+        if not step_id:
+            return "Error: scope='step' requires step_id"
+        return _render_step_view(proj, step_id)
+    if sc == "milestone":
+        if not milestone_id:
+            return "Error: scope='milestone' requires milestone_id"
+        return _render_milestone_view(proj, milestone_id)
+    return _render_all_view(proj)
+
+
+def _agent_label(agent_id: str) -> str:
+    """Resolve agent id → 'role-name' via hub. Cheap fallback to id."""
+    if not agent_id:
+        return "(unassigned)"
+    try:
+        hub = _get_hub()
+        a = hub.agents.get(agent_id)
+        if a:
+            return f"{a.role}-{a.name}"
+    except Exception:
+        pass
+    return agent_id[:8]
+
+
+def _render_my_view(proj: Any, caller_id: str) -> str:
+    """Caller-perspective: my active task, my milestones, what blocks me."""
+    if not caller_id:
+        return "Error: caller agent not identified (passed via dispatcher)"
+
+    lines = [f"## Project state — your view in {proj.name}"]
+    lines.append(f"Caller: {_agent_label(caller_id)}  [project={proj.id}]")
+    lines.append("")
+
+    # Active task assigned to me
+    my_tasks = [t for t in (proj.tasks or [])
+                if t.assigned_to == caller_id]
+    in_progress = [t for t in my_tasks if t.status.value == "in_progress"]
+    todo = [t for t in my_tasks if t.status.value == "todo"]
+    done_mine = [t for t in my_tasks if t.status.value == "done"]
+
+    lines.append(f"### My tasks ({len(my_tasks)} total: "
+                 f"{len(in_progress)} active, {len(todo)} pending, "
+                 f"{len(done_mine)} done)")
+    for t in (in_progress + todo)[:10]:
+        marker = "▶" if t.status.value == "in_progress" else "○"
+        lines.append(f"  {marker} [{t.id[:8]}] {t.title}")
+        if t.output_files:
+            lines.append(f"     output_files: {', '.join(t.output_files[:3])}")
+        if t.must_contain:
+            lines.append(f"     must_contain: {', '.join(t.must_contain[:3])}")
+
+    # Milestones I'm responsible for
+    my_ms = [m for m in (proj.milestones or [])
+             if m.responsible_agent_id == caller_id]
+    if my_ms:
+        lines.append("")
+        lines.append(f"### My milestones ({len(my_ms)})")
+        for m in my_ms:
+            lines.append(f"  • [{m.id[:8]}] {m.name} — status={m.status}")
+            if m.evidence:
+                ev = m.evidence.replace("\n", " | ")[:80]
+                lines.append(f"     evidence: {ev}")
+
+    # Deliverables I authored
+    my_dvs = [d for d in (proj.deliverables or [])
+              if d.author_agent_id == caller_id]
+    if my_dvs:
+        lines.append("")
+        lines.append(f"### My deliverables ({len(my_dvs)})")
+        for d in my_dvs[:10]:
+            status = d.status.value if hasattr(d.status, "value") else d.status
+            lines.append(f"  • [{d.id[:8]}] {d.title} ({status})")
+
+    # Blocking — for active task, what's missing
+    if in_progress:
+        lines.append("")
+        lines.append("### What blocks me")
+        for t in in_progress:
+            req = t.output_files or []
+            ds = t.deliverable_status or {}
+            missing = [r for r in req
+                       if not (ds.get(r) or {}).get("verified")]
+            if missing:
+                lines.append(f"  ❌ task {t.title}: missing {missing}")
+            else:
+                lines.append(f"  ✓ task {t.title}: contract satisfied")
+
+    return "\n".join(lines)
+
+
+def _render_team_view(proj: Any) -> str:
+    lines = [f"## Project state — team view of {proj.name}"]
+    tasks = list(proj.tasks or [])
+    total = len(tasks)
+    done = sum(1 for t in tasks if t.status.value == "done")
+    inp = sum(1 for t in tasks if t.status.value == "in_progress")
+    pct = round(100 * done / total, 1) if total else 0
+    lines.append(f"Workflow progress: {done}/{total} done ({pct}%) · "
+                 f"{inp} in progress")
+
+    lines.append("")
+    lines.append("### Active steps")
+    for t in tasks:
+        if t.status.value == "in_progress":
+            lines.append(f"  ▶ [{t.id[:8]}] {t.title}  → "
+                         f"{_agent_label(t.assigned_to)}")
+
+    if proj.milestones:
+        lines.append("")
+        lines.append("### Milestones")
+        for m in proj.milestones:
+            owner = _agent_label(m.responsible_agent_id) if m.responsible_agent_id else "(unassigned)"
+            lines.append(f"  • [{m.id[:8]}] {m.name} — {m.status} ({owner})")
+
+    open_issues = [i for i in (proj.issues or [])
+                   if i.status in ("open", "investigating")]
+    if open_issues:
+        lines.append("")
+        lines.append(f"### Open issues ({len(open_issues)})")
+        for i in open_issues[:10]:
+            lines.append(f"  ⚠️ [{i.id[:8]}] {i.severity} — {i.title}")
+
+    return "\n".join(lines)
+
+
+def _render_step_view(proj: Any, step_id: str) -> str:
+    """Look up a workflow step task by id (or partial-id prefix)."""
+    matched = [t for t in (proj.tasks or [])
+               if t.id == step_id or t.id.startswith(step_id)]
+    if not matched:
+        return f"Error: no workflow step matching {step_id}"
+    t = matched[0]
+    out = [f"## Step [{t.id}] {t.title}",
+           f"Status: {t.status.value}",
+           f"Assigned to: {_agent_label(t.assigned_to)}",
+           f"Description: {(t.description or '')[:200]}"]
+    if t.output_files:
+        out.append(f"\nRequired output_files ({len(t.output_files)}):")
+        for f in t.output_files:
+            ds = (t.deliverable_status or {}).get(f, {})
+            mark = "✓" if ds.get("verified") else "❌"
+            out.append(f"  {mark} {f}")
+    if t.must_contain:
+        out.append(f"\nMust contain: {', '.join(t.must_contain)}")
+    if t.acceptance_cmd:
+        out.append(f"\nAcceptance check: `{t.acceptance_cmd}`")
+    return "\n".join(out)
+
+
+def _render_milestone_view(proj: Any, milestone_id: str) -> str:
+    matched = [m for m in (proj.milestones or [])
+               if m.id == milestone_id or m.id.startswith(milestone_id)]
+    if not matched:
+        return f"Error: no milestone matching {milestone_id}"
+    m = matched[0]
+    out = [f"## Milestone [{m.id}] {m.name}",
+           f"Status: {m.status}",
+           f"Responsible: {_agent_label(m.responsible_agent_id)}",
+           f"Due: {m.due_date or '(unset)'}"]
+    if m.evidence:
+        out.append(f"\nEvidence:\n{m.evidence}")
+    if m.confirmed_by:
+        out.append(f"\nConfirmed by {m.confirmed_by} at "
+                   f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(m.confirmed_at))}")
+    return "\n".join(out)
+
+
+def _render_all_view(proj: Any) -> str:
+    """Verbose dump for debugging — all of: tasks, milestones, deliverables,
+    issues. Caps each list at 30 to keep token count sane."""
+    parts = [_render_team_view(proj), ""]
+    parts.append("### All tasks")
+    for t in (proj.tasks or [])[:30]:
+        parts.append(f"  [{t.id[:8]}] {t.title} — {t.status.value} "
+                     f"→ {_agent_label(t.assigned_to)}")
+    parts.append("")
+    parts.append("### All deliverables")
+    for d in (proj.deliverables or [])[:30]:
+        status = d.status.value if hasattr(d.status, "value") else d.status
+        parts.append(f"  [{d.id[:8]}] {d.title} ({status}) — "
+                     f"by {_agent_label(d.author_agent_id)}")
+    return "\n".join(parts)

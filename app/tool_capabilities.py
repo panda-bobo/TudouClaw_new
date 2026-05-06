@@ -108,6 +108,11 @@ CORE_TOOLS: frozenset[str] = frozenset({
     "report_issue",
     "update_issue",
     "list_issues",
+    # L2 (2026-05-06): structured project state query — replaces the
+    # glob_files anti-pattern for agents asking "what's done / what's
+    # mine". CORE so the eventual Rule Engine deny on glob_files in
+    # project context has a guaranteed alternative.
+    "project_state",
 })
 
 

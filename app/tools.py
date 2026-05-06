@@ -2520,6 +2520,47 @@ TOOL_DEFINITIONS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "project_state",
+            "description": (
+                "Snapshot of structured project state — replaces glob_files for status checks.\n"
+                "USE WHEN: you want to know what's done / what's yours / what blocks you. "
+                "ALWAYS prefer this over scanning files with glob_files / search_files when you're inside a project chat — "
+                "structured stores (Milestone, Deliverable, ProjectTask) are the source of truth, the filesystem is just artifacts.\n"
+                "scope:\n"
+                "  - 'my' (default): your role, your active task, your milestones, what blocks you\n"
+                "  - 'team': cross-team workflow %, who's in progress, open issues\n"
+                "  - 'step': details of one workflow step (requires step_id, partial-prefix accepted)\n"
+                "  - 'milestone': details of one milestone (requires milestone_id)\n"
+                "  - 'all': verbose dump (debugging only)\n"
+                "GOTCHA: scope='my' needs the dispatcher to inject _caller_agent_id — works automatically when called from chat."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "scope": {
+                        "type": "string",
+                        "description": "my (default) | team | step | milestone | all",
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Project id. Required: agents may belong to multiple projects, framework can't always infer.",
+                    },
+                    "step_id": {
+                        "type": "string",
+                        "description": "Required when scope='step'. Workflow step task id (partial prefix OK).",
+                    },
+                    "milestone_id": {
+                        "type": "string",
+                        "description": "Required when scope='milestone'. Milestone id (partial prefix OK).",
+                    },
+                },
+                "required": ["project_id"],
+            },
+        },
+    },
     # ---- UI block tools (rich interactive messages) ----
     {
         "type": "function",
@@ -2714,6 +2755,7 @@ from .tools_split.project import (  # noqa: E402,F401
     _tool_report_issue,
     _tool_update_issue,
     _tool_list_issues,
+    _tool_project_state,
     _auto_report_issue,
 )
 
@@ -2837,6 +2879,8 @@ _TOOL_FUNCS: dict[str, callable] = {
     "report_issue": _tool_report_issue,
     "update_issue": _tool_update_issue,
     "list_issues": _tool_list_issues,
+    # L2 (2026-05-06) — structured state query, replaces glob_files for status
+    "project_state": _tool_project_state,
     "mcp_call": _tool_mcp_call,
     # Experience persistence + skill generation
     "save_experience": _tool_save_experience,
