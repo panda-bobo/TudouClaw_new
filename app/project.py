@@ -21,6 +21,68 @@ import logging
 logger = logging.getLogger("tudou.project")
 
 
+def _rule_engine_check_task_assign(project: Any, *, title: str,
+                                     description: str, assigned_to: str,
+                                     created_by: str, priority: int) -> str:
+    """PEP for ``before_task_assign``. Returns deny message if any rule
+    blocks; empty string otherwise.
+
+    Context exposed to rules:
+      - task: title, description, assigned_to, created_by, priority
+      - assignee: {id, name, role, status, current_task_count}
+      - project: id, name
+      - scope: project
+    """
+    try:
+        from .rule_engine import get_engine
+    except Exception:
+        return ""
+    eng = get_engine()
+    if eng is None:
+        return ""
+    assignee_info = {"id": assigned_to or "", "name": "", "role": "",
+                     "status": ""}
+    if assigned_to:
+        try:
+            from .hub import get_hub as _get_hub
+            hub = _get_hub()
+            a = hub.agents.get(assigned_to)
+            if a:
+                assignee_info["name"] = a.name
+                assignee_info["role"] = a.role
+                assignee_info["status"] = a.status
+        except Exception:
+            pass
+    # Count current in-progress tasks for the assignee (capacity rules)
+    try:
+        assignee_info["current_task_count"] = sum(
+            1 for t in (project.tasks or [])
+            if t.assigned_to == assigned_to
+            and t.status.value in ("in_progress", "todo"))
+    except Exception:
+        assignee_info["current_task_count"] = 0
+    ctx = {
+        "task": {
+            "title": title or "",
+            "description": description or "",
+            "assigned_to": assigned_to or "",
+            "created_by": created_by or "",
+            "priority": int(priority or 0),
+        },
+        "assignee": assignee_info,
+        "project": {"id": project.id, "name": project.name or ""},
+        "scope": {"kind": "project", "project_id": project.id},
+    }
+    try:
+        decisions = eng.evaluate("before_task_assign", ctx)
+    except Exception:
+        return ""
+    for d in decisions:
+        if d.matched and d.action == "deny":
+            return f"rule '{d.rule_name}': {d.message}"
+    return ""
+
+
 def _rule_engine_check_milestone_done(project: Any, milestone: Any,
                                        by: str) -> str:
     """PEP for ``before_milestone_done`` — module-level helper called
@@ -1404,6 +1466,18 @@ class Project:
     def add_task(self, title: str, description: str = "",
                  assigned_to: str = "", created_by: str = "user",
                  priority: int = 0) -> ProjectTask:
+        # ── PEP: before_task_assign ──
+        # Engine hook so PM/admin rules ("don't assign to a coder
+        # currently in 'busy' status", "tester role can't be assigned
+        # creative-writing tasks") can deny task assignment before it
+        # lands. Returning None signals the rule denied; caller (UI/
+        # tool) should show the message back to the requester.
+        deny = _rule_engine_check_task_assign(
+            self, title=title, description=description,
+            assigned_to=assigned_to, created_by=created_by, priority=priority,
+        )
+        if deny:
+            raise ValueError(f"task assign denied: {deny}")
         task = ProjectTask(
             title=title, description=description,
             assigned_to=assigned_to, created_by=created_by,

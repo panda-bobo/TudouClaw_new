@@ -1944,6 +1944,33 @@ class Hub:
         new_status = status_map.get(status)
         if not new_status:
             return
+
+        # ── PEP: before_step_complete ──
+        # Engine hook fires BEFORE the workflow status flips downstream.
+        # Rules can deny ("step ID X requires evidence of file Y") or
+        # log/warn. Failures isolated.
+        try:
+            from ..rule_engine import get_engine
+            eng = get_engine()
+            if eng is not None:
+                ctx = {
+                    "step": {
+                        "template_id": template_id,
+                        "step_id": step_id,
+                        "step_index": step_index,
+                        "status": status,
+                    },
+                    "scope": {"kind": "global"},
+                }
+                decisions = eng.evaluate("before_step_complete", ctx)
+                for d in decisions:
+                    if d.matched and d.action == "deny":
+                        logger.warning(
+                            "step_complete denied by rule '%s': %s",
+                            d.rule_name, d.message)
+                        return
+        except Exception as _re_err:
+            logger.debug("rule_engine before_step_complete skipped: %s", _re_err)
         agent_id_for_consolidate = ""
         with self._lock:
             for proj in self.projects.values():

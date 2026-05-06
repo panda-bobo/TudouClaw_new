@@ -432,6 +432,43 @@ def can_authorize(authorizer_priority: int, target_priority: int) -> bool:
     return False
 
 
+def _rule_engine_check_approval_decide(approval: Any, action: str,
+                                        decided_by: str, scope: str) -> bool:
+    """PEP for ``before_approval_decide``. Returns True if the engine
+    DENIES this approve/deny call (caller short-circuits with False).
+    Returns False (= allow) on engine miss or empty rule set."""
+    try:
+        from .rule_engine import get_engine
+    except Exception:
+        return False
+    eng = get_engine()
+    if eng is None:
+        return False
+    ctx = {
+        "approval": {
+            "id": getattr(approval, "approval_id", ""),
+            "tool_name": getattr(approval, "tool_name", ""),
+            "agent_id": getattr(approval, "agent_id", ""),
+            "agent_name": getattr(approval, "agent_name", ""),
+            "reason": getattr(approval, "reason", ""),
+            "age_seconds": time.time() - float(getattr(approval, "created_at", 0) or 0),
+        },
+        "action": action,        # "approve" | "deny"
+        "decided_by": decided_by or "",
+        "scope": {"kind": "global"},
+        "approval_scope": scope or "once",
+        "agent": {"id": decided_by or ""},
+    }
+    try:
+        decisions = eng.evaluate("before_approval_decide", ctx)
+    except Exception:
+        return False
+    for d in decisions:
+        if d.matched and d.action == "deny":
+            return True
+    return False
+
+
 @dataclass
 class PendingApproval:
     """A tool execution waiting for human approval."""
@@ -889,6 +926,14 @@ class ToolPolicy:
             approval = self.pending.get(approval_id)
             if not approval:
                 return False
+            # ── PEP: before_approval_decide ──
+            # Engine hook so admin can author "no after-hours auto-approve"
+            # / "deny if decided_by is impersonating" / etc. Failures
+            # isolated; engine deny here means the approval call is rejected
+            # but the request stays pending (admin can retry).
+            if _rule_engine_check_approval_decide(approval, "approve",
+                                                    decided_by, scope):
+                return False
             approval.status = "approved"
             approval.decided_by = decided_by
             approval.decided_at = time.time()
@@ -1286,6 +1331,10 @@ class ToolPolicy:
         with self._lock:
             approval = self.pending.get(approval_id)
             if not approval:
+                return False
+            # PEP: before_approval_decide (deny path)
+            if _rule_engine_check_approval_decide(approval, "deny",
+                                                    decided_by, ""):
                 return False
             approval.status = "denied"
             approval.decided_by = decided_by

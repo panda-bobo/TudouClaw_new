@@ -237,6 +237,29 @@ class Meeting:
         with self._lock:
             if agent_id in self.participants:
                 return False
+            # ── PEP: before_meeting_join ──
+            # Engine hook so admin/host can author "max participants",
+            # "no agent X in meeting Y", etc. Failures isolated.
+            try:
+                from .rule_engine import get_engine
+                eng = get_engine()
+                if eng is not None:
+                    ctx = {
+                        "meeting": {
+                            "id": self.id,
+                            "title": getattr(self, "title", ""),
+                            "current_participants": len(self.participants),
+                        },
+                        "agent": {"id": agent_id},
+                        "scope": {"kind": "meeting", "meeting_id": self.id,
+                                  "agent_id": agent_id},
+                    }
+                    decisions = eng.evaluate("before_meeting_join", ctx)
+                    for d in decisions:
+                        if d.matched and d.action == "deny":
+                            return False
+            except Exception:
+                pass
             self.participants.append(agent_id)
             return True
 
