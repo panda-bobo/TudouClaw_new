@@ -3087,6 +3087,16 @@ class ProjectChatEngine:
         logger.info("WF Step auto-completed: %s by %s in project %s",
                      task.title, agent_id, project.id)
 
+        # Milestone bridge — match WF task to a milestone by name and
+        # flip it to "done". Without this, Milestones tab stays at all
+        # "pending" forever because the chat-based completion-detection
+        # path was missing the bridge call (only the explicit-run path
+        # had it).
+        try:
+            self._bridge_task_to_milestone(project, task)
+        except Exception as _ms_err:
+            logger.debug("milestone bridge skipped (chat path): %s", _ms_err)
+
         # L3 extraction trigger — fire on transition to DONE
         self._fire_l3_task_done_hook(task)
 
@@ -3174,6 +3184,14 @@ class ProjectChatEngine:
                 logger.info(
                     "milestone bridge: task %s → milestone %s (%s)",
                     task.id, ms.id, ms_name)
+                # Goal auto-derive — for any goal that links this
+                # milestone via linked_milestone_ids, recompute progress
+                # from (done linked / total linked). Goals without
+                # linkage stay manually controlled (no clobber).
+                try:
+                    self._recompute_linked_goals(project, ms.id)
+                except Exception as _g_err:
+                    logger.debug("goal recompute skipped: %s", _g_err)
                 # Also persist immediately so the UI sees the update.
                 try:
                     hub = getattr(self, "hub", None) or getattr(self, "_hub", None)
@@ -3182,6 +3200,64 @@ class ProjectChatEngine:
                 except Exception:
                     pass
                 break
+
+    def _recompute_linked_goals(self, project: Project, milestone_id: str) -> None:
+        """When a milestone flips to done, find goals that include it in
+        linked_milestone_ids and recompute progress from (done_linked /
+        total_linked). Only touches percent/count metric goals — boolean
+        and text goals stay owner-managed.
+
+        Goals without linked_milestone_ids set are skipped — they remain
+        fully manual (agents call update_goal_progress explicitly).
+        """
+        if not project or not milestone_id:
+            return
+        ms_status = {ms.id: ms.status for ms in (project.milestones or [])}
+        all_ms_ids = list(ms_status.keys())
+        goals_list = list(project.goals or [])
+        # Implicit linkage shortcut: if a project has exactly one goal
+        # with no explicit linked_milestone_ids, treat all milestones as
+        # linked. Common shape: "complete project X" goal + per-step
+        # milestones. Without this, the single-goal project stays at 0%
+        # forever because UI has no "link milestone" entry point yet.
+        single_goal_implicit = (len(goals_list) == 1
+                                and not (goals_list[0].linked_milestone_ids))
+        changed = False
+        for g in goals_list:
+            linked = list(g.linked_milestone_ids or [])
+            if not linked and single_goal_implicit:
+                linked = list(all_ms_ids)
+            if not linked or milestone_id not in linked:
+                continue
+            total = len(linked)
+            done_count = sum(
+                1 for mid in linked
+                if ms_status.get(mid) in ("done", "confirmed")
+            )
+            ratio = done_count / total if total else 0.0
+            new_val = g.current_value  # default: no change
+            if g.metric == "percent":
+                # target_value typically 100; scale ratio to it
+                target = g.target_value if g.target_value > 0 else 100.0
+                new_val = round(ratio * target, 1)
+            elif g.metric == "count":
+                new_val = float(done_count)
+            # Only-bump-up semantics: never reduce a manually-set value.
+            # User can always lower via update_goal_progress; auto-derive
+            # only ratchets forward as milestones complete.
+            bumped = new_val > g.current_value
+            if bumped:
+                g.current_value = new_val
+            if done_count >= total and total > 0:
+                g.done = True
+            g.updated_at = time.time()
+            changed = True
+            logger.info(
+                "goal recomputed: %s → %s (%d/%d linked milestones done, %s)",
+                g.id, g.current_value, done_count, total,
+                "bumped" if bumped else "kept (would reduce)")
+        if changed:
+            project.updated_at = time.time()
 
     def _fire_l3_task_done_hook(self, task: ProjectTask) -> None:
         """Trigger L3 fact extraction when a project task transitions to DONE.
