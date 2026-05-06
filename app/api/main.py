@@ -28,6 +28,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .middleware.security import SecurityHeadersMiddleware
+from .middleware.ratelimit import RateLimitMiddleware
 from .deps.hub import init_hub, shutdown_hub
 
 logger = logging.getLogger("tudouclaw.api")
@@ -406,6 +407,16 @@ def create_app() -> FastAPI:
 
     # ── Security headers ──────────────────────────────────────────────
     app.add_middleware(SecurityHeadersMiddleware)
+
+    # ── Rate limiter (2026-05-06) ─────────────────────────────────────
+    # Defensive cap on per-(ip, path) request rate. Frontend bugs (a
+    # poller without an off-switch) used to hammer /api/portal/agent/
+    # <id>/events ~6×/15s heartbeat, plus /plans every 3s — taking the
+    # backend down on agents with long histories. Default 10 req/5s
+    # per (ip, path) is generous for legitimate UI but trips runaway
+    # loops. Tuned via TUDOU_RATELIMIT_MAX / TUDOU_RATELIMIT_WINDOW;
+    # TUDOU_RATELIMIT_OFF=1 to disable.
+    app.add_middleware(RateLimitMiddleware)
 
     # ── Gzip compression (2026-05-06) ─────────────────────────────────
     # portal_bundle.js is ~1.9 MB uncompressed; gzip cuts it to ~600 KB

@@ -600,6 +600,10 @@ class ToolPolicy:
         # "plan only" role — DBA / security / SRE etc.
         self.command_patterns: list[dict] = []
         self._command_patterns_file: str = ""   # set by set_persist_path()
+        # Pending + history persistence (so approvals queue + audit log
+        # survive restart). Without this, restarting the server loses
+        # both in-flight requests and the decision history.
+        self._pending_history_file: str = ""   # set by set_persist_path()
         # Agent approval authority: agent_id → set of risk levels they can approve
         # Populated from agent priority + DEFAULT_AGENT_APPROVAL_AUTHORITY
         self.agent_approval_authority: dict[str, list[str]] = {}
@@ -857,6 +861,7 @@ class ToolPolicy:
         )
         with self._lock:
             self.pending[approval.approval_id] = approval
+        self._save_pending_history()
         return approval
 
     def wait_for_approval(self, approval: PendingApproval) -> str:
@@ -867,12 +872,14 @@ class ToolPolicy:
             with self._lock:
                 self.pending.pop(approval.approval_id, None)
                 self.history.append(approval)
+            self._save_pending_history()
             return "denied"
         with self._lock:
             self.pending.pop(approval.approval_id, None)
             self.history.append(approval)
             if len(self.history) > 5000:
                 self.history = self.history[-3000:]
+        self._save_pending_history()
         return approval.status
 
     def approve(self, approval_id: str, decided_by: str = "",
@@ -892,6 +899,7 @@ class ToolPolicy:
                 # facing semantics: "until an admin revokes it."
                 self._save_session_approvals()
         approval._event.set()
+        self._save_pending_history()
         return True
 
     # ── persistence for session_approvals + global_denylist ────────
@@ -909,9 +917,13 @@ class ToolPolicy:
         self._command_patterns_file = os.path.join(
             os.path.dirname(path) or ".", "command_patterns.json"
         )
+        self._pending_history_file = os.path.join(
+            os.path.dirname(path) or ".", "approvals_log.json"
+        )
         self._load_session_approvals()
         self._load_global_denylist()
         self._load_command_patterns()
+        self._load_pending_history()
 
     def _load_global_denylist(self) -> None:
         p = self._global_denylist_file
@@ -1177,6 +1189,81 @@ class ToolPolicy:
             logging.getLogger("tudou.auth").warning(
                 "failed to save tool_approvals.json: %s", e)
 
+    def _load_pending_history(self) -> None:
+        """Restore pending + history from disk on startup. Pending items
+        whose creation time is past the approval timeout are demoted to
+        history with status='expired' (the in-process waiter is gone)."""
+        p = self._pending_history_file
+        if not p or not os.path.isfile(p):
+            return
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            logging.getLogger("tudou.auth").warning(
+                "failed to load approvals_log.json: %s", e)
+            return
+        now = time.time()
+
+        def _from_dict(d: dict) -> PendingApproval:
+            a = PendingApproval(
+                approval_id=d.get("approval_id", "") or uuid.uuid4().hex[:10],
+                agent_id=d.get("agent_id", ""),
+                agent_name=d.get("agent_name", ""),
+                tool_name=d.get("tool_name", ""),
+                arguments=d.get("arguments") or {},
+                reason=d.get("reason", ""),
+                created_at=float(d.get("created_at") or 0.0),
+                status=d.get("status", "pending"),
+                decided_by=d.get("decided_by", ""),
+                decided_at=float(d.get("decided_at") or 0.0),
+            )
+            return a
+
+        with self._lock:
+            for d in data.get("history") or []:
+                try:
+                    a = _from_dict(d)
+                    a._event.set()  # already decided
+                    self.history.append(a)
+                except Exception:
+                    continue
+            for d in data.get("pending") or []:
+                try:
+                    a = _from_dict(d)
+                    if (now - a.created_at) > self.approval_timeout:
+                        a.status = "expired"
+                        a._event.set()
+                        self.history.append(a)
+                    else:
+                        # Surface to admin UI; the original waiter is
+                        # gone, so a decision now will not unblock any
+                        # caller — but the record stays auditable.
+                        self.pending[a.approval_id] = a
+                except Exception:
+                    continue
+            if len(self.history) > 5000:
+                self.history = self.history[-3000:]
+
+    def _save_pending_history(self) -> None:
+        p = self._pending_history_file
+        if not p:
+            return
+        try:
+            with self._lock:
+                data = {
+                    "pending": [a.to_dict() for a in self.pending.values()],
+                    "history": [a.to_dict() for a in self.history[-3000:]],
+                }
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            tmp = p + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, p)
+        except Exception as e:
+            logging.getLogger("tudou.auth").warning(
+                "failed to save approvals_log.json: %s", e)
+
     def revoke_session_approval(self, agent_id: str, tool_name: str) -> bool:
         """Admin action: undo a previously granted session approval.
         Returns True if it was present, False otherwise."""
@@ -1203,9 +1290,11 @@ class ToolPolicy:
             approval.decided_by = decided_by
             approval.decided_at = time.time()
         approval._event.set()
+        self._save_pending_history()
         return True
 
     def list_pending(self) -> list[dict]:
+        expired_any = False
         with self._lock:
             # Expire old ones
             now = time.time()
@@ -1216,7 +1305,11 @@ class ToolPolicy:
                 a.status = "expired"
                 a._event.set()
                 self.history.append(a)
-            return [a.to_dict() for a in self.pending.values()]
+                expired_any = True
+            result = [a.to_dict() for a in self.pending.values()]
+        if expired_any:
+            self._save_pending_history()
+        return result
 
     def list_history(self, limit: int = 100) -> list[dict]:
         with self._lock:
