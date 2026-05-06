@@ -574,7 +574,7 @@
 .tc-grid-2     { grid-template-columns: repeat(2, 1fr); }
 .tc-grid-3     { grid-template-columns: repeat(3, 1fr); }
 .tc-grid-4     { grid-template-columns: repeat(4, 1fr); }
-.tc-grid-auto  { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+.tc-grid-auto  { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
 .tc-stack      { display: flex; flex-direction: column; gap: var(--s-md); }
 .tc-stack-sm   { display: flex; flex-direction: column; gap: var(--s-sm); }
 .tc-stack-lg   { display: flex; flex-direction: column; gap: var(--s-lg); }

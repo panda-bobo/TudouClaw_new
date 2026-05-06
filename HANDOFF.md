@@ -9,6 +9,63 @@
 
 ---
 
+## 📋 Session 2026-05-06 末尾状态(下次 pick up 用)
+
+### 这一天 commit (按时间倒序)
+```
+[未 commit] CSS .tc-grid-auto: minmax 280→220 (dashboard 一行装更多 agent 卡)
+92ce49d  refactor(ui): drop redundant Approval Policy sub-tabs (now in 规则引擎)
+9070bca  refactor(agent): allow-only tool visibility — drop denied_tools, keep allowed + CORE bypass
+b007d5c  feat(tools): add 9 coordination/read primitives to CORE_TOOLS
+72a98c3  fix(ui): hide tier-3 shared-portrait roles from avatar picker
+308d71a  docs(handoff): note Project Memory deferral
+dcff0ff  feat(tools+rules): expand CORE_TOOLS + upgrade glob warn → deny
+15362e0  feat(ui): 快速模板 — Recipes layer over Rule Engine for ops
+2b2c918  fix(ui)+feat(rules): edit button on migrated rules + 6 default project rules
+eb1c400  feat(llm): DSMLParser — rescue tool calls from DeepSeek flash variants
+e9f9546  feat(ui): visual condition builder for Rule Engine (L4)
+ec55035  feat(skill): define_project_blueprint — PM one-shot rule generator (L3)
+4e55234  feat(rule-engine): migrate 3 more old rule systems → engine rules
+ac229e2  feat(rule-engine): wire 4 final PEPs (approval_decide · task_assign · step_complete · meeting_join)
+3e5b0ad  feat(rule-engine): migrators — workflow_catalog contracts → engine rules
+a866169  feat(ui): Settings → Rule Engine tab — list, CRUD, audit log viewer
+06f9dd6  feat(api): /api/portal/rules — CRUD + audit endpoints for Rule Engine
+eff519f  feat(rule-engine): 4 more PEPs (after_tool_call · message_send · dispatch_task · milestone_done)
+dbc3e55  feat(project): L0 status sync — Deliverable submit/approve auto-updates Milestone
+e6b74a0  feat(skill): project_state — structured query, replaces glob_files for status
+cbd6181  feat(rule-engine): wire 3 PEPs (before_tool_call · file_write · task_done)
+eeba747  feat(rule-engine): core PDP + JSON-DSL evaluator + versioned store + audit log
+876985e  feat(system-settings): extend store + RateLimit hot-reload + admin gate
++ 之前 frontend perf / approvals 持久化 / workflow contracts / 等等
+```
+
+### 系统当前能力栈
+- **Rule Engine**: 11/12 PEPs · 5 个 migrator (workflow_catalog 13 条 + global_denylist 2 + tool_risk 5 + command_patterns 13 + default_project_rules 6 = 39 条 boot rules) · 5-tab UI + 7 个 Recipes 模板 + 可视化 condition builder + Audit Log viewer
+- **Tool 可见性**: allow-only (干掉 denied_tools per-agent) + CORE_TOOLS 33 个永远可见 + capability filter for specialty
+- **Approval Policy 页**: 子 tab 砍到 3 (Pending/MCP/Audit),Tool Denylist + Risk Policy 重定向到 Rule Engine
+- **Tool/skill 调用救援**: DSMLParser 接 deepseek-v4-flash
+- **Avatar**: picker 17 张唯一 (隐藏 6 张共享美术的 tier-3) · agent 列表 dedup helper
+
+### ⏸ 当前 session 末尾 OPEN ITEMS
+
+1. **Dashboard agent grid "显示不全" 用户反馈** — DOM 实测 7 张全在 (1213px 高,7 cards),但用户说 "导航回来后下面挤上面"。9091 复现不出来。**未 commit 的 CSS 220px 可能解决一半**(更紧凑,减少滚动)。**没找到根因**。下次先在 9090 复现:打开 dashboard → 进 agent → 退回 → 数 cards。
+
+2. **PM tool_budget 5 太低被封顶** — 用户截图 PM 一回合做了 12 件事被 cap=5 截断,`blocked_by: "per-response cap (12 tools/5 max)"`。`agent.py:8692` 里 `_per_resp_cap` 默认 5,可通过 `os.getenv("TUDOU_PER_RESP_TOOL_CAP")` 或 `agent.per_response_tool_cap` 调高。**没改**。建议改成读 `system_settings.agent_guardrails.tool_budget_per_turn` (字段已经有,默认 5,改成 12-15 合理)。
+
+3. **stats 统计** (用户两轮前问的): 工具/skill 调用持续化统计。设计在对话里写过 (路径 A: ~390 行,聚合 audit_log + events,加 Settings → 调用统计 sub-tab)。**没动**。
+
+4. **project/meeting system_prompt** (用户问的): 各场景独立 prompt,solo 不需要。设计 ~300 行 (project/meeting 加字段 + 拼装 + 2 个 PM skill + UI)。**没动**。
+
+5. **Project Memory (L3 共享)** — 见下条 Deferred 区块。**没动**。
+
+### 下次 session 开头建议
+
+1. 先 commit 那 1 行 CSS 改动 (220px),不然 git 不干净
+2. 让用户在 9090 复现 "agent 显示不全",拿截图 + 控制台 console 输出
+3. 顺便把 #2 (tool_budget 5→12) 改了,这个最阻塞 agent 实际工作
+
+---
+
 ## ⏸ Deferred — 2026-05-06
 
 **Project Memory (shared L3)** — proposed but explicitly deferred by user.
