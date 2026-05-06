@@ -109,11 +109,17 @@ class Hub:
         # Rule Engine (PDP). Init early so PEPs across the codebase can
         # call get_engine() without timing concerns. Empty rule set on
         # first boot; admin/PM populate via Settings → Rule Engine UI.
+        # Migrators lift catalog/policy data into engine rules at boot
+        # so the engine starts with sensible defaults rather than a
+        # blank slate. Re-runnable via API for catalog updates.
         try:
             from ..rule_engine import init_engine as _init_rule_engine
-            _init_rule_engine(self._data_dir)
+            from ..rule_engine.migrators import run_all_migrations as _migrate
+            _eng = _init_rule_engine(self._data_dir)
+            _summary = _migrate(_eng)
+            logger.info("rule_engine: migrators ran %s", _summary)
         except Exception as _e:
-            logger.warning("rule_engine init failed (non-fatal): %s", _e)
+            logger.warning("rule_engine init/migrate failed (non-fatal): %s", _e)
         # SQLite database (primary store)
         try:
             from ..infra.database import init_database

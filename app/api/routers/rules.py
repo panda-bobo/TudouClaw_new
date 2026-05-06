@@ -169,3 +169,17 @@ async def toggle_rule(
     if not ok:
         raise HTTPException(404, f"rule not found: {rule_id}")
     return {"rule_id": rule_id, "enabled": enabled}
+
+
+@router.post("/rules/migrate")
+async def re_run_migrators(
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Re-run the rule migrators. Use after editing a workflow catalog
+    or other source-of-truth — purges old migrated rules and regenerates
+    fresh ones. Admin-authored rules (source='admin') are untouched."""
+    _check_admin(user)
+    eng = _engine_or_503()
+    from ...rule_engine.migrators import run_all_migrations
+    summary = run_all_migrations(eng)
+    return {"summary": summary}
