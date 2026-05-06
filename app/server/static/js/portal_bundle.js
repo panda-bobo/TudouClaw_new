@@ -3365,14 +3365,18 @@ window.renderRolesSkillsHubTech = renderRolesSkillsHubTech;
 
 
 // ── renderToolsApprovalsHub — tech port ──
+// 2026-05-06: removed 'denylist' + 'policy' sub-tabs. Their data
+// (global_denylist, DEFAULT_TOOL_RISK) was migrated into the Rule
+// Engine via migrators (see rule_engine/migrators.py); keeping them
+// as separate UIs caused user-facing "页面叠在一起" — same data,
+// two edit surfaces, easy to make divergent. Now the only tool-policy
+// UI is Settings → 规则引擎. Old sub-tab clicks redirect there with
+// a one-line explanation.
 function renderToolsApprovalsHubTech() {
   var c = document.getElementById('content');
   if (!c) return;
-  // Match legacy hub: approvals / denylist / mcpconfig + extras (policy, audit)
   var tabs = [
     { id: 'approvals', label: 'Pending Requests',  icon: 'verified_user' },
-    { id: 'denylist',  label: 'Tool Denylist',     icon: 'block' },
-    { id: 'policy',    label: 'Risk Policy',       icon: 'shield' },
     { id: 'mcpconfig', label: 'MCP Servers',       icon: 'hub' },
     { id: 'audit',     label: 'Audit Trail',       icon: 'history' },
   ];
@@ -3386,14 +3390,13 @@ function renderToolsApprovalsHubTech() {
     if (r.current === 'approvals') {
       if (typeof renderApprovalsTech === 'function') renderApprovalsTech();
       else if (typeof renderApprovals === 'function') renderApprovals();
-    } else if (r.current === 'denylist') {
-      if (typeof renderToolDenylist === 'function') renderToolDenylist();
-    } else if (r.current === 'policy') {
-      if (typeof renderPolicyConfig === 'function') renderPolicyConfig(sc);
     } else if (r.current === 'mcpconfig') {
       if (typeof renderMCPConfig === 'function') renderMCPConfig(sc);
     } else if (r.current === 'audit') {
       if (typeof renderAudit === 'function') renderAudit();
+    } else if (r.current === 'denylist' || r.current === 'policy') {
+      // Old deep-links land here — render a redirect card.
+      sc.innerHTML = _renderRuleEngineRedirectCard(r.current);
     } else {
       sc.innerHTML = '<div class="tc-card tc-text-dim" style="padding:var(--s-lg)">Tab not yet implemented.</div>';
     }
@@ -3405,6 +3408,25 @@ function renderToolsApprovalsHubTech() {
   }
 }
 window.renderToolsApprovalsHubTech = renderToolsApprovalsHubTech;
+
+function _renderRuleEngineRedirectCard(oldTab) {
+  var label = oldTab === 'denylist' ? 'Tool Denylist' : 'Risk Policy';
+  return ''
+    + '<div class="tc-card" style="padding:24px;text-align:center;max-width:560px;margin:24px auto">'
+    + '  <span class="material-symbols-outlined" style="font-size:36px;color:var(--primary)">gavel</span>'
+    + '  <h3 style="margin:8px 0 6px;font-size:16px;font-weight:700">'
+    + esc(label) + ' moved to 规则引擎</h3>'
+    + '  <div class="tc-text-dim" style="font-size:12px;line-height:1.6;margin-bottom:16px">'
+    + '    工具拒绝 / 风险审批的规则统一在 <strong>Settings → 规则引擎</strong> 管理 — '
+    + '    这里以前的列表已经被自动迁移到引擎,'
+    + '    在 <em>Global</em> sub-tab 看 source=migrator:* 的规则。'
+    + '  </div>'
+    + '  <button class="tc-btn tc-btn-primary" '
+    + '          onclick="_settingsSubTab=\'rules\';showView(\'settings\',null)">'
+    + '    <span class="material-symbols-outlined" style="font-size:16px">arrow_forward</span>'
+    + '    去 规则引擎</button>'
+    + '</div>';
+}
 
 
 // ── renderKnowledgeMemoryHub — tech port ──
