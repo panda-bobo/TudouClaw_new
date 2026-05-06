@@ -6671,11 +6671,16 @@ Write only the summary body. Do not include any preamble or prefix."""
                     return kb
 
         allowed = list(self.profile.allowed_tools or [])
-        denied = set(self.profile.denied_tools)
 
-        # ── resolve the effective allow-list ──
+        # ── 2026-05-06: allow-only model ──
+        # User chose: keep per-agent allowed_tools as the SOLE per-agent
+        # visibility gate. Remove denied_tools (per-agent blacklist).
+        # Anything NOT in allowed_tools (∪ CORE_TOOLS ∪ INFRA bypass)
+        # simply isn't visible. Cleaner intent than "default-allow,
+        # explicit-deny" — admin reads the list to know what an agent
+        # can do, no need to chase a separate deny table.
+        # Fallback chain: profile.allowed_tools → role preset → minimal.
         if not allowed:
-            # Tier 1: inherit from role_preset.allowed_tools if configured.
             try:
                 preset = getattr(self, "_role_preset_v2", None)
                 if preset is None:
@@ -6686,7 +6691,6 @@ Write only the summary body. Do not include any preamble or prefix."""
             except Exception:
                 pass
         if not allowed:
-            # Tier 2: hard fallback to the minimal safe set.
             allowed = list(self._MINIMAL_DEFAULT_TOOLS)
             logger.debug(
                 "agent %s has no allowed_tools and no role preset defaults; "
@@ -6694,48 +6698,24 @@ Write only the summary body. Do not include any preamble or prefix."""
                 self.id, len(allowed),
             )
 
-        # Add infra tools to allowed set so their schemas also ship to LLM
-        # (otherwise LLM doesn't know they exist and never calls them).
-        # Matches the bypass in _execute_tool_with_policy above.
-        # Phase 3 (2026-05-06): added dispatch_task / accept_task /
-        # report_back / inbox_assignments — structured handoff tools
-        # MUST be available to all agents (PM dispatches, Coder accepts,
-        # Coder reports back). Without this, the LLM doesn't see the
-        # schemas → emits "DSML" pseudo-tool-call markup as text → no
-        # actual dispatch happens.
-        _INFRA_TOOLS_SCHEMA = frozenset({
-            "memory_recall", "knowledge_lookup", "save_experience",
-            "get_skill_guide", "plan_update", "complete_step",
-            "dispatch_task", "accept_task", "report_back",
-            "inbox_assignments",
-            # Phase 3 (2026-05-06): goal/milestone primitives also
-            # universally available (otherwise PM with goal_owner can
-            # see goal in prompt but can't update it).
-            "update_goal_progress", "create_goal",
-            "update_milestone_status", "update_milestone_responsibility",
-            # Phase 3 issue tracking
-            "report_issue", "update_issue", "list_issues",
-            # L2 (2026-05-06): structured state query, replaces grep
-            "project_state",
-            # L3 (2026-05-06): PM blueprint
-            "define_project_blueprint",
-            # 2026-05-06: keep in sync with CORE_TOOLS additions in
-            # tool_capabilities.py — coordination + read primitives.
-            "submit_deliverable", "create_milestone",
-            "send_message", "check_inbox", "ack_message", "reply_message",
-            "task_update",
-            "sc_query", "sc_get_artifact", "sc_handoff",
-            "sc_register_artifact", "sc_register_link",
-            "query_team_status", "query_agent_status",
-            "memory_recall", "knowledge_lookup",
-        })
+        # Infrastructure tool bypass: tools every agent universally
+        # needs (coordination, state query, memory recall, etc.) skip
+        # the allowed_tools intersection. Source of truth is
+        # tool_capabilities.CORE_TOOLS — keep this set in sync (or
+        # better: import directly).
+        try:
+            from .tool_capabilities import CORE_TOOLS as _CORE
+            _INFRA_TOOLS_SCHEMA = frozenset(_CORE)
+        except Exception:
+            _INFRA_TOOLS_SCHEMA = frozenset()
+
         allowed_set = set(allowed) | _INFRA_TOOLS_SCHEMA
         all_tools = [t for t in all_tools
                      if t["function"]["name"] in allowed_set]
-
-        if denied:
-            all_tools = [t for t in all_tools
-                         if t["function"]["name"] not in denied]
+        # NOTE: profile.denied_tools no longer consulted (user 2026-05-06).
+        # Field stays on AgentProfile for back-compat; admin should now
+        # express "don't let X use this tool" by REMOVING it from
+        # allowed_tools, not by adding to denied_tools.
 
         # Global denylist — admin-level deny that affects every agent.
         # Lives on AuthManager.tool_policy.global_denylist (ToolPolicy).
@@ -7198,49 +7178,18 @@ Write only the summary body. Do not include any preamble or prefix."""
         except Exception as _re_err:
             logger.debug("rule_engine before_tool_call check skipped: %s", _re_err)
 
-        # Check agent-level denied tools (legacy agents may have None;
-        # defend with `or ()` so `in` doesn't trip NoneType iteration)
-        if tool_name in (self.profile.denied_tools or ()):
-            return f"DENIED: Tool '{tool_name}' is not permitted for this agent."
-
-        # ── Infrastructure tools always available ──
-        # 记忆 / 技能查询类工具不消耗副作用,不涉及写操作,属于"自查"范畴。
-        # 老的 role preset (code_reviewer/researcher) 没在 allowed_tools 里
-        # 列它们,但我们希望所有 agent 都能自查记忆 —— 否则 agent 会反复
-        # 重新学,也无法 save_experience 沉淀经验。除非 denied_tools 显式禁。
-        # Phase 3 (2026-05-06): keep this set identical to
-        # _INFRA_TOOLS_SCHEMA in _get_effective_tools — schema visibility
-        # and execution gating must agree, else the LLM sees a tool but
-        # gets DENIED on call.
-        _INFRA_TOOLS = frozenset({
-            "memory_recall", "knowledge_lookup", "save_experience",
-            "get_skill_guide", "plan_update", "complete_step",
-            "dispatch_task", "accept_task", "report_back",
-            "inbox_assignments",
-            # Phase 3 (2026-05-06): keep in sync with _INFRA_TOOLS_SCHEMA
-            "update_goal_progress", "create_goal",
-            "update_milestone_status", "update_milestone_responsibility",
-            "report_issue", "update_issue", "list_issues",
-            # L2 (2026-05-06): structured state query, replaces grep
-            "project_state",
-            # L3 (2026-05-06): PM blueprint
-            "define_project_blueprint",
-            # 2026-05-06: keep in sync with CORE_TOOLS additions in
-            # tool_capabilities.py — coordination + read primitives.
-            "submit_deliverable", "create_milestone",
-            "send_message", "check_inbox", "ack_message", "reply_message",
-            "task_update",
-            "sc_query", "sc_get_artifact", "sc_handoff",
-            "sc_register_artifact", "sc_register_link",
-            "query_team_status", "query_agent_status",
-            "memory_recall", "knowledge_lookup",
-        })
-
-        # Check agent-level allowed tools (empty list = all allowed;
-        # infra tools bypass this check since they're universally safe)
+        # ── 2026-05-06: allow-only execution gate ──
+        # Visibility (schema shipping) handled by _get_effective_tools.
+        # Here we just re-check: if the tool isn't in the agent's allow
+        # set ∪ CORE bypass, refuse. denied_tools is no longer consulted
+        # (admin: remove from allowed_tools instead).
+        try:
+            from .tool_capabilities import CORE_TOOLS as _CORE
+        except Exception:
+            _CORE = frozenset()
         if (self.profile.allowed_tools
                 and tool_name not in self.profile.allowed_tools
-                and tool_name not in _INFRA_TOOLS):
+                and tool_name not in _CORE):
             return f"DENIED: Tool '{tool_name}' is not in this agent's allowed list."
 
         # Scheduled / background task: skip approval (already authorized at creation)
