@@ -4203,6 +4203,8 @@ def _postprocess_xml_tool_calls(result: dict, *, model: str = "") -> dict:
         "<tool_call>" in content
         or ("<arg_key>" in content and "<arg_value>" in content)
         or ("<function" in content and "<parameter" in content)
+        # DeepSeek flash variants emit DSML markup
+        or "DSML" in content
     )
     if not needs_parse:
         return result

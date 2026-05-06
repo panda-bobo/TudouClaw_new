@@ -76,7 +76,20 @@ parsers:
       name_key: "function_call.name"
       args_key: "function_call.arguments"
 
-  # ── DeepSeek Coder / V3 (already emits OpenAI shape via its API) ─
+  # ── DeepSeek v4-flash (and other 'flash' variants) — DSML markup ─
+  # Flash models retreat to <｜｜DSML｜｜tool_calls>...</...> markup
+  # under stress (long context, complex tool schema, retry after a
+  # failed structured call). DSMLParser runs OpenAI passthrough first
+  # so API-level tool_calls aren't lost; falls through to DSML
+  # extraction only when content carries the markup. Listed BEFORE
+  # the broader "deepseek*" rule so flash matches the more specific
+  # parser first.
+  - match: "deepseek*flash*"
+    class: DSMLParser
+  - match: "*v4-flash*"
+    class: DSMLParser
+
+  # ── DeepSeek Coder / V3 / pro (emits OpenAI shape via its API) ──
   # Listed explicitly so diagnostics show a specific parser choice.
   - match: "deepseek*"
     class: OpenAIPassthroughParser

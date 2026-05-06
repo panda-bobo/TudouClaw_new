@@ -319,6 +319,120 @@ class GLMArgKVParser(ToolCallParser):
         return out.strip()
 
 
+# ── 5. DSMLParser ─────────────────────────────────────────────────────
+
+
+# Pipe character class — DSML uses full-width "｜" (U+FF5C) but some
+# clients normalize to regular "|", so accept both. One bar OR more
+# (the format in the wild varies between ｜ and ｜｜).
+_DSML_BAR = r"[\|｜]+"
+
+
+@dataclass
+class DSMLParser(ToolCallParser):
+    """Parse DeepSeek's "DSML" tool-call markup.
+
+    DeepSeek's flash / chat variants sometimes emit tool calls as text
+    using a custom XML-like dialect rather than the OpenAI tool_calls
+    array, especially when the standard function-calling pathway gets
+    stressed (long context, complex tool schema, retry after error).
+    Format observed in the wild::
+
+        <｜｜DSML｜｜tool_calls>
+        <｜｜DSML｜｜invoke name="glob_files">
+        <｜｜DSML｜｜parameter name="pattern" string="true">**/*</｜｜DSML｜｜parameter>
+        <｜｜DSML｜｜parameter name="path" string="true">/foo</｜｜DSML｜｜parameter>
+        </｜｜DSML｜｜invoke>
+        </｜｜DSML｜｜tool_calls>
+
+    Bar character is full-width U+FF5C in practice; we accept both that
+    and ASCII "|" with one-or-more occurrences. First runs OpenAI
+    passthrough so any provider-supplied tool_calls aren't lost; only
+    extracts DSML when content contains the markup AND no native
+    tool_calls came back.
+    """
+
+    name: str = "dsml"
+    strip_content: bool = True
+
+    _wrapper_pat: re.Pattern = field(init=False, repr=False, compare=False)
+    _invoke_pat:  re.Pattern = field(init=False, repr=False, compare=False)
+    _param_pat:   re.Pattern = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self):
+        bar = _DSML_BAR
+        # Outer tool_calls wrapper (optional — invokes can appear unwrapped)
+        self._wrapper_pat = re.compile(
+            rf"<{bar}DSML{bar}tool_calls>(.*?)</{bar}DSML{bar}tool_calls>",
+            re.DOTALL,
+        )
+        # Each invoke block: name="X" with inner parameters
+        self._invoke_pat = re.compile(
+            rf"<{bar}DSML{bar}invoke\s+name=\"([^\"]+)\">(.*?)</{bar}DSML{bar}invoke>",
+            re.DOTALL,
+        )
+        # Each parameter: name="key" [string="true"]>value</...>
+        self._param_pat = re.compile(
+            rf"<{bar}DSML{bar}parameter\s+name=\"([^\"]+)\"[^>]*>(.*?)</{bar}DSML{bar}parameter>",
+            re.DOTALL,
+        )
+
+    def parse(self, raw_message: dict) -> NormalizedMessage:
+        base = OpenAIPassthroughParser().parse(raw_message)
+        content = base.content or ""
+        if "DSML" not in content:
+            return base
+        # Find every invoke block (whether or not wrapped). Use the
+        # wrapper-aware path first so we know which spans to strip; the
+        # invoke pattern works at the top level too because invokes
+        # carry their own opening/closing markers.
+        invoke_matches = list(self._invoke_pat.finditer(content))
+        if not invoke_matches:
+            return base
+
+        tcs: list[dict] = list(base.tool_calls)
+        for m in invoke_matches:
+            tool_name = m.group(1).strip()
+            inner = m.group(2)
+            args: dict = {}
+            for pname, pval in self._param_pat.findall(inner):
+                key = pname.strip()
+                val = pval.strip()
+                # DSML doesn't carry types — try light parsing so numeric
+                # arguments don't reach the tool as strings. JSON parse
+                # for objects/arrays/numbers/bools, fall back to string.
+                if val and val[0] in '[{':
+                    parsed = _robust_json_loads(val)
+                    if parsed is not None:
+                        args[key] = parsed
+                        continue
+                if val.lower() in ("true", "false"):
+                    args[key] = (val.lower() == "true")
+                    continue
+                try:
+                    if "." in val:
+                        args[key] = float(val)
+                    else:
+                        args[key] = int(val)
+                    continue
+                except (ValueError, TypeError):
+                    pass
+                args[key] = val
+            tcs.append(_coerce_tool_call(name=tool_name, arguments=args))
+
+        cleaned = content
+        if self.strip_content:
+            # Remove wrapper + standalone invoke blocks
+            cleaned = self._wrapper_pat.sub("", cleaned)
+            cleaned = self._invoke_pat.sub("", cleaned)
+            # Tidy up any leftover blank lines
+            cleaned = re.sub(r"\n\s*\n+", "\n\n", cleaned).strip()
+
+        return NormalizedMessage(
+            role=base.role, content=cleaned, tool_calls=tcs,
+        )
+
+
 # ── registry of parser classes by name ────────────────────────────────
 
 
@@ -327,6 +441,7 @@ BUILTIN_CLASSES: dict[str, type] = {
     "XMLTagJSONParser":        XMLTagJSONParser,
     "JSONOnlyParser":          JSONOnlyParser,
     "GLMArgKVParser":          GLMArgKVParser,
+    "DSMLParser":              DSMLParser,
 }
 
 
@@ -335,5 +450,6 @@ __all__ = [
     "XMLTagJSONParser",
     "JSONOnlyParser",
     "GLMArgKVParser",
+    "DSMLParser",
     "BUILTIN_CLASSES",
 ]
