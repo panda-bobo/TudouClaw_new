@@ -461,6 +461,7 @@ def create_app() -> FastAPI:
         branding as branding_router,
         system_settings as system_settings_router,
         prompt_amplifier as prompt_amplifier_router,
+        rules as rules_router,
     )
 
     # ── API routers ──────────────────────────────────────────────────
@@ -498,6 +499,7 @@ def create_app() -> FastAPI:
     app.include_router(branding_router.router)
     app.include_router(system_settings_router.router)
     app.include_router(prompt_amplifier_router.router)
+    app.include_router(rules_router.router)
 
     # ── Static files (JS/CSS used by portal templates) ───────────────
     server_static = os.path.join(os.path.dirname(__file__), "..", "server", "static")
