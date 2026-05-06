@@ -4217,10 +4217,21 @@ def _postprocess_xml_tool_calls(result: dict, *, model: str = "") -> dict:
         return result
     try:
         from .v2.bridges.tool_parsers import get_registry
+        from .v2.bridges.tool_parsers.builtin import DSMLParser
     except Exception:
         return result
     registry = get_registry()
     parser = registry.resolve(model or "")
+    # Content-override: if DSML markup is in the response but the
+    # model-name-resolved parser doesn't extend DSMLParser, force
+    # DSMLParser. Catches non-flash DeepSeek variants ("deepseek-chat",
+    # "deepseek-coder", etc.) that occasionally emit DSML under stress —
+    # tool_parsers.yaml maps "deepseek*" to OpenAIPassthrough which
+    # silently passes the markup through as text. Trusting content over
+    # model name avoids the whack-a-mole game of patching yaml every
+    # time a new vendor variant retreats to DSML.
+    if "DSML" in content and not isinstance(parser, DSMLParser):
+        parser = DSMLParser()
     try:
         normalized = parser.parse(msg)
     except Exception as _e:
