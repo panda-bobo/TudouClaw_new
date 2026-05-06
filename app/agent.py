@@ -6719,6 +6719,15 @@ Write only the summary body. Do not include any preamble or prefix."""
             "project_state",
             # L3 (2026-05-06): PM blueprint
             "define_project_blueprint",
+            # 2026-05-06: keep in sync with CORE_TOOLS additions in
+            # tool_capabilities.py — coordination + read primitives.
+            "submit_deliverable", "create_milestone",
+            "send_message", "check_inbox", "ack_message", "reply_message",
+            "task_update",
+            "sc_query", "sc_get_artifact", "sc_handoff",
+            "sc_register_artifact", "sc_register_link",
+            "query_team_status", "query_agent_status",
+            "memory_recall", "knowledge_lookup",
         })
         allowed_set = set(allowed) | _INFRA_TOOLS_SCHEMA
         all_tools = [t for t in all_tools
@@ -7216,6 +7225,15 @@ Write only the summary body. Do not include any preamble or prefix."""
             "project_state",
             # L3 (2026-05-06): PM blueprint
             "define_project_blueprint",
+            # 2026-05-06: keep in sync with CORE_TOOLS additions in
+            # tool_capabilities.py — coordination + read primitives.
+            "submit_deliverable", "create_milestone",
+            "send_message", "check_inbox", "ack_message", "reply_message",
+            "task_update",
+            "sc_query", "sc_get_artifact", "sc_handoff",
+            "sc_register_artifact", "sc_register_link",
+            "query_team_status", "query_agent_status",
+            "memory_recall", "knowledge_lookup",
         })
 
         # Check agent-level allowed tools (empty list = all allowed;

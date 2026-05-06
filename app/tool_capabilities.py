@@ -130,6 +130,24 @@ CORE_TOOLS: frozenset[str] = frozenset({
     # task_update was behind 'scheduling' — every agent that has work
     # in flight needs to mark progress.
     "task_update",
+    # 2026-05-06 (user feedback "有一些常见的tools都放白名单里"):
+    # Coordination + read-only state primitives. Without these in
+    # CORE, agents hit the visibility gate (allowed_tools intersection)
+    # and surface as "DENIED: not permitted for this agent" — even
+    # though risk tier is "low". Risk only governs the approval gate,
+    # not visibility — they're independent.
+    #
+    # Shared-context (SC) protocol — coordination read/write,
+    # cross-agent cheap queries instead of dumping content via chat.
+    "sc_query", "sc_get_artifact", "sc_handoff",
+    "sc_register_artifact", "sc_register_link",
+    # Status queries on team / single agent — read-only, cheap.
+    "query_team_status", "query_agent_status",
+    # Memory + knowledge recall — universally useful so an agent can
+    # check "did I/we figure this out before" without admin grant.
+    # Write paths (save_experience, share_knowledge) STAY behind the
+    # memory-ops bundle — write needs intent, read is reflex.
+    "memory_recall", "knowledge_lookup",
 })
 
 
