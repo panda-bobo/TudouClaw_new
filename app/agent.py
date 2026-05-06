@@ -7610,6 +7610,207 @@ Write only the summary body. Do not include any preamble or prefix."""
             except Exception as _e:
                 logger.debug("auto-issue from deliv-fail skipped: %s", _e)
 
+    def _build_pep_workflow_enrichment(self) -> dict:
+        """Tier-2 enrichment for Rule Engine PEP context.
+
+        Returns a dict with three top-level keys (caller merges into its
+        hook-specific ctx):
+
+          agent: {recent_writes, recent_tool_calls}
+            - recent_writes: list[{name, path}] for last ≤10
+              write_file/edit_file calls in the agent's recent message
+              history
+            - recent_tool_calls: list[{name}] for last ≤20 tool calls
+              regardless of kind — lets a rule check "did the agent run
+              tests in this turn before submit_deliverable?"
+
+          project: {id, has_design_doc, has_plan_md, workspace_files}
+            - has_design_doc: True iff any .md exists under
+              docs/superpowers/specs/, docs/specs/, or docs/design/
+            - has_plan_md: True iff any .md exists under
+              docs/superpowers/plans/ or docs/plans/
+            - workspace_files: top-level entries in the project's
+              shared workspace, capped at 50 (dir entries get a
+              trailing "/")
+
+          task: {id, title, status}
+            - the agent's current in_progress ProjectTask in the
+              active project (if any) — empty strings if none
+
+        Used by before_tool_call / after_tool_call / before_dispatch_task
+        PEPs so author-tunable rules can express "coder must have
+        design doc before writing impl code", "must run tests before
+        submit_deliverable", etc.
+
+        Workspace scan is cached for 5s on the agent (key = ws path)
+        to avoid re-globbing on every tool call within a turn.
+        """
+        recent_calls: list[dict] = []
+        recent_writes: list[dict] = []
+        try:
+            msgs = list(getattr(self, "messages", []) or [])[-50:]
+            for msg in msgs:
+                if not isinstance(msg, dict):
+                    continue
+                tcs = msg.get("tool_calls") or []
+                for tc in tcs:
+                    fn = tc.get("function") or {}
+                    name = fn.get("name") or ""
+                    if not name:
+                        continue
+                    args_raw = fn.get("arguments")
+                    args_dict: dict = {}
+                    if isinstance(args_raw, str):
+                        try:
+                            import json as _j_pep
+                            args_dict = _j_pep.loads(args_raw) or {}
+                            if not isinstance(args_dict, dict):
+                                args_dict = {}
+                        except Exception:
+                            args_dict = {}
+                    elif isinstance(args_raw, dict):
+                        args_dict = args_raw
+                    recent_calls.append({"name": name})
+                    if name in ("write_file", "edit_file"):
+                        path = (args_dict.get("path")
+                                or args_dict.get("file_path") or "")
+                        if path:
+                            recent_writes.append({"name": name, "path": str(path)})
+        except Exception:
+            pass
+        recent_calls = recent_calls[-20:]
+        recent_writes = recent_writes[-10:]
+
+        proj_id = getattr(self, "project_id", "") or ""
+        project_state = {
+            "id": proj_id,
+            "has_design_doc": False,
+            "has_plan_md": False,
+            "workspace_files": [],
+        }
+        task_state = {"id": "", "title": "", "status": ""}
+        if proj_id:
+            try:
+                ws_path = self.get_active_shared_workspace() if hasattr(
+                    self, "get_active_shared_workspace") else ""
+                if ws_path:
+                    scanned = self._scan_project_workspace_for_pep(ws_path)
+                    project_state.update(scanned)
+            except Exception:
+                pass
+            try:
+                import sys as _sys_pep
+                _llm_mod_pep = (_sys_pep.modules.get(__package__ + ".llm")
+                                if __package__ else None)
+                _hub_pep = (getattr(_llm_mod_pep, "_active_hub", None)
+                            if _llm_mod_pep else None)
+                _project_pep = (_hub_pep.projects.get(proj_id)
+                                if _hub_pep and hasattr(_hub_pep, "projects")
+                                else None)
+                if _project_pep is not None:
+                    from .project import ProjectTaskStatus as _PTS
+                    chosen = None
+                    for _t in (_project_pep.tasks or []):
+                        if _t.assigned_to != self.id:
+                            continue
+                        if _t.status == _PTS.IN_PROGRESS:
+                            chosen = _t
+                            break
+                        if chosen is None and _t.status != _PTS.DONE:
+                            chosen = _t
+                    if chosen is not None:
+                        task_state = {
+                            "id": chosen.id,
+                            "title": chosen.title or "",
+                            "status": str(getattr(chosen.status, "value",
+                                                  chosen.status) or ""),
+                        }
+            except Exception:
+                pass
+
+        # Parallel string-list fields for DSL-friendly matching (the
+        # ``contains`` operator only works on list-of-strings, not list-
+        # of-dicts). Lets rules express e.g.
+        #   {"field": "agent.recent_tool_call_names", "contains": "run_tests"}
+        recent_call_names = [c.get("name", "") for c in recent_calls]
+        recent_write_paths = [w.get("path", "") for w in recent_writes]
+        return {
+            "agent": {
+                "recent_writes": recent_writes,
+                "recent_tool_calls": recent_calls,
+                "recent_tool_call_names": recent_call_names,
+                "recent_write_paths": recent_write_paths,
+            },
+            "project": project_state,
+            "task": task_state,
+        }
+
+    def _scan_project_workspace_for_pep(self, ws_path: str) -> dict:
+        """Cheap scan of project workspace for PEP context. Cached per
+        agent on ``_pep_ws_scan_cache`` (key=ws_path → (ts, dict)) for
+        5s to avoid re-globbing on every tool call."""
+        import time as _t_pep
+        import os as _os_pep
+        cache = getattr(self, "_pep_ws_scan_cache", None)
+        if cache is None:
+            cache = {}
+            try:
+                self._pep_ws_scan_cache = cache
+            except Exception:
+                cache = None
+        now = _t_pep.time()
+        if cache is not None:
+            hit = cache.get(ws_path)
+            if hit and (now - hit[0]) < 5.0:
+                return dict(hit[1])
+        out: dict = {
+            "has_design_doc": False,
+            "has_plan_md": False,
+            "workspace_files": [],
+        }
+        try:
+            design_dirs = ("docs/superpowers/specs", "docs/specs", "docs/design")
+            plan_dirs = ("docs/superpowers/plans", "docs/plans")
+            for d in design_dirs:
+                full = _os_pep.path.join(ws_path, d)
+                if _os_pep.path.isdir(full):
+                    try:
+                        for f in _os_pep.listdir(full):
+                            if f.endswith(".md") and _os_pep.path.isfile(
+                                    _os_pep.path.join(full, f)):
+                                out["has_design_doc"] = True
+                                break
+                    except OSError:
+                        pass
+                if out["has_design_doc"]:
+                    break
+            for d in plan_dirs:
+                full = _os_pep.path.join(ws_path, d)
+                if _os_pep.path.isdir(full):
+                    try:
+                        for f in _os_pep.listdir(full):
+                            if f.endswith(".md") and _os_pep.path.isfile(
+                                    _os_pep.path.join(full, f)):
+                                out["has_plan_md"] = True
+                                break
+                    except OSError:
+                        pass
+                if out["has_plan_md"]:
+                    break
+            try:
+                top = []
+                for f in sorted(_os_pep.listdir(ws_path))[:50]:
+                    fp = _os_pep.path.join(ws_path, f)
+                    top.append(f + ("/" if _os_pep.path.isdir(fp) else ""))
+                out["workspace_files"] = top
+            except OSError:
+                pass
+        except Exception:
+            pass
+        if cache is not None:
+            cache[ws_path] = (now, out)
+        return out
+
     def _rule_engine_check_tool_call(self, tool_name: str, arguments: dict) -> str:
         """PEP for ``before_tool_call``. Build context, call engine.evaluate,
         return a denial message if any matched rule's action is "deny",
@@ -7640,6 +7841,12 @@ Write only the summary body. Do not include any preamble or prefix."""
         else:
             scope_kind = "solo"
             scope_extra["agent_id"] = self.id
+        # Tier-2 enrichment: recent_writes, recent_tool_calls,
+        # project.has_design_doc/has_plan_md/workspace_files, task.status.
+        # Lets author-tunable rules express superpowers-style methodology
+        # (no impl write before design, no submit before tests, etc.).
+        enrichment = self._build_pep_workflow_enrichment()
+        agent_extra = enrichment.get("agent", {})
         ctx = {
             "tool_name": tool_name,
             "args": dict(arguments or {}),
@@ -7647,7 +7854,10 @@ Write only the summary body. Do not include any preamble or prefix."""
                 "id": self.id,
                 "name": self.name,
                 "role": self.role,
+                **agent_extra,
             },
+            "project": enrichment.get("project", {"id": proj_id}),
+            "task": enrichment.get("task", {"id": "", "title": "", "status": ""}),
             "scope": {"kind": scope_kind, **scope_extra},
         }
         decisions = eng.evaluate("before_tool_call", ctx)
@@ -7703,13 +7913,21 @@ Write only the summary body. Do not include any preamble or prefix."""
         truncated = result if isinstance(result, str) else str(result)
         if len(truncated) > 4096:
             truncated = truncated[:4096] + "...(truncated)"
+        # Tier-2 enrichment shared with before_tool_call PEP.
+        _enrich = self._build_pep_workflow_enrichment()
+        _agent_extra = _enrich.get("agent", {})
         ctx = {
             "tool_name": tool_name,
             "args": dict(arguments or {}),
             "result": truncated,
             "result_length": len(result) if isinstance(result, str) else 0,
             "is_error": isinstance(result, str) and result.lstrip().lower().startswith(("error", "denied")),
-            "agent": {"id": self.id, "name": self.name, "role": self.role},
+            "agent": {
+                "id": self.id, "name": self.name, "role": self.role,
+                **_agent_extra,
+            },
+            "project": _enrich.get("project", {"id": proj_id}),
+            "task": _enrich.get("task", {"id": "", "title": "", "status": ""}),
             "scope": {"kind": scope_kind, **scope_extra},
         }
         decisions = eng.evaluate("after_tool_call", ctx)

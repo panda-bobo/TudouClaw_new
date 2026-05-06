@@ -56,6 +56,17 @@ def _rule_engine_check_dispatch_task(*, from_agent_id: str, to_agent_id: str,
         scope = {"kind": "project", "project_id": project_id}
     else:
         scope = {"kind": "global"}
+    # Tier-2 enrichment from the dispatching agent — recent_writes,
+    # recent_tool_calls, project.has_design_doc/has_plan_md/workspace_files,
+    # task.status. Lets rules express e.g. "PM cannot dispatch a coding
+    # task until project.has_design_doc==true".
+    enrich: dict = {}
+    try:
+        if from_a is not None and hasattr(from_a, "_build_pep_workflow_enrichment"):
+            enrich = from_a._build_pep_workflow_enrichment() or {}
+    except Exception:
+        enrich = {}
+    agent_extra = enrich.get("agent", {})
     ctx = {
         "from_agent": {
             "id": from_agent_id,
@@ -75,7 +86,10 @@ def _rule_engine_check_dispatch_task(*, from_agent_id: str, to_agent_id: str,
             "id": from_agent_id,
             "name": getattr(from_a, "name", "") if from_a else "",
             "role": getattr(from_a, "role", "") if from_a else "",
+            **agent_extra,
         },
+        "project": enrich.get("project", {"id": project_id}),
+        "task": enrich.get("task", {"id": "", "title": "", "status": ""}),
         "scope": scope,
     }
     try:

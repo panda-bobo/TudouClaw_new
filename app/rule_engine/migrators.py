@@ -454,6 +454,150 @@ def migrate_default_project_rules(engine: Any) -> dict:
     return {"removed": removed, "added": added}
 
 
+def migrate_default_coder_rules(engine: Any) -> dict:
+    """Seed coder-role methodology rules using Tier-2 PEP enrichment
+    (recent_tool_call_names, recent_write_paths, project.has_design_doc /
+    has_plan_md, task.status). These nudge coder agents toward the
+    superpowers-engineering flow (brainstorm → plan → TDD → verify).
+
+    Defaults are WARNS (educational); admin can flip to deny via the
+    Settings → 规则引擎 UI when ready to harden.
+
+    Source tag: "migrator:default_coder_rules" — re-run purges +
+    re-adds. Admin-edited copies (source != this) untouched.
+    """
+    source = "migrator:default_coder_rules"
+    removed = _purge_source(engine.store, source)
+
+    rules = [
+        # 1. coder writes impl code without a design doc → warn
+        Rule(
+            name="coder: write impl without design doc",
+            description=(
+                "[default] coder 写实现代码(src/ app/ lib/ 下的 .py/.js/"
+                ".ts/.go/.rs)前,项目内应先有设计文档(docs/superpowers/"
+                "specs/ 或 docs/specs/ 下的 .md)。superpowers 流程要求 "
+                "brainstorm → plan → TDD → verify。"
+            ),
+            scope=RuleScope("project", ["*"]),
+            trigger="before_tool_call",
+            condition={
+                "all": [
+                    {"field": "agent.role", "eq": "coder"},
+                    {"field": "tool_name", "in": ["write_file", "edit_file"]},
+                    {"field": "args.path",
+                     "matches": r"^(src|app|lib|server|client)/.*\.(py|js|ts|jsx|tsx|go|rs|java|cpp|cc|c)$"},
+                    {"field": "project.has_design_doc", "eq": False},
+                ],
+            },
+            actions=[{
+                "type": "warn",
+                "message": ("Coder methodology: 写实现代码前先 brainstorm 设计 + "
+                            "保存到 docs/superpowers/specs/<topic>-design.md。"
+                            "见 superpowers-engineering skill。"),
+            }],
+            priority=10,
+            source=source, created_by="default",
+        ),
+
+        # 2. coder writes impl code without a plan doc → warn
+        Rule(
+            name="coder: write impl without plan",
+            description=(
+                "[default] coder 设计批准后,实现前应先有 plan 文档(docs/"
+                "superpowers/plans/ 或 docs/plans/)。plan 包含目标、任务"
+                "清单(checkbox)、每步验证标准。"
+            ),
+            scope=RuleScope("project", ["*"]),
+            trigger="before_tool_call",
+            condition={
+                "all": [
+                    {"field": "agent.role", "eq": "coder"},
+                    {"field": "tool_name", "in": ["write_file", "edit_file"]},
+                    {"field": "args.path",
+                     "matches": r"^(src|app|lib|server|client)/.*\.(py|js|ts|jsx|tsx|go|rs|java|cpp|cc|c)$"},
+                    {"field": "project.has_plan_md", "eq": False},
+                ],
+            },
+            actions=[{
+                "type": "warn",
+                "message": ("Coder methodology: 设计已批准的话,先把实施计划"
+                            "写到 docs/superpowers/plans/YYYY-MM-DD-<feature>.md "
+                            "(含 checkbox 任务清单)再开始实现。"),
+            }],
+            priority=10,
+            source=source, created_by="default",
+        ),
+
+        # 3. coder calls submit_deliverable without running tests → warn
+        Rule(
+            name="coder: submit without verification",
+            description=(
+                "[default] coder 调 submit_deliverable 前,本轮应跑过测试 / "
+                "lint / smoke 验证(run_tests 或 bash 跑 pytest/jest/...)。"
+                "verification-before-completion 是 superpowers 的硬关卡。"
+            ),
+            scope=RuleScope("project", ["*"]),
+            trigger="before_tool_call",
+            condition={
+                "all": [
+                    {"field": "agent.role", "eq": "coder"},
+                    {"field": "tool_name", "eq": "submit_deliverable"},
+                    {"not": {"field": "agent.recent_tool_call_names",
+                              "contains": "run_tests"}},
+                    {"not": {"field": "agent.recent_tool_call_names",
+                              "contains": "bash"}},
+                ],
+            },
+            actions=[{
+                "type": "warn",
+                "message": ("Coder methodology: 提交前先跑测试 / lint / smoke "
+                            "验证,把结果贴到 deliverable description 里 "
+                            "(verification-before-completion)。"),
+            }],
+            priority=12,
+            source=source, created_by="default",
+        ),
+
+        # 4. coder writes impl code AHEAD of any test file (TDD violation)
+        Rule(
+            name="coder: TDD — tests should come first",
+            description=(
+                "[default] TDD 是 superpowers 硬规则:实现 src/foo.py 之前,"
+                "应先有 tests/test_foo.py 或类似测试存在。本轮如果之前没有"
+                "写过测试文件就开始写实现属于 anti-pattern。"
+            ),
+            scope=RuleScope("project", ["*"]),
+            trigger="before_tool_call",
+            condition={
+                "all": [
+                    {"field": "agent.role", "eq": "coder"},
+                    {"field": "tool_name", "in": ["write_file", "edit_file"]},
+                    {"field": "args.path",
+                     "matches": r"^(src|app|lib|server|client)/.*\.(py|js|ts|jsx|tsx|go|rs)$"},
+                    {"field": "agent.recent_write_paths", "length_lt": 1},
+                ],
+            },
+            actions=[{
+                "type": "warn",
+                "message": ("Coder methodology: TDD 测试先行 — 实现前确保"
+                            "本轮已写过对应的 test_*.py / *.test.ts。"
+                            "看不到测试就直接写实现,补回去。"),
+            }],
+            priority=8,
+            source=source, created_by="default",
+        ),
+    ]
+
+    added = 0
+    for r in rules:
+        engine.store.add(r, by="migrator")
+        added += 1
+    logger.info("default_coder_rules migration: removed=%d added=%d",
+                removed, added)
+    return {"removed": removed, "added": added}
+
+
 def run_all_migrations(engine: Any) -> dict:
     """Convenience: run every implemented migrator. Returns aggregate
     summary {migrator_name: {removed, added}}."""
@@ -464,6 +608,7 @@ def run_all_migrations(engine: Any) -> dict:
         ("tool_risk", migrate_tool_risk),
         ("command_patterns", migrate_command_patterns),
         ("default_project_rules", migrate_default_project_rules),
+        ("default_coder_rules", migrate_default_coder_rules),
     ):
         try:
             out[name] = fn(engine)
