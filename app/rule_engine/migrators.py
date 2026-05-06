@@ -305,20 +305,25 @@ def migrate_default_project_rules(engine: Any) -> dict:
     removed = _purge_source(engine.store, source)
 
     rules = [
-        # 1. agent 用 glob_files 查项目状态 → 推荐 project_state
+        # 1. agent 用 glob_files 查项目状态 → 强制走 project_state
+        # 2026-05-06: 升级为 deny。warn 不够 — 实测 agent 会无视提示,
+        # 死循环 glob_files **/* 4+ 次 (用户反馈截图)。改 deny 后,
+        # agent 第一次就拿到 error,只能转去用 project_state。
         Rule(
-            name="prefer project_state over glob in project chat",
+            name="no glob in project chat — use project_state",
             description=(
-                "[default] 在项目聊天里查状态请用 project_state(scope=my, "
-                "project_id=...) — 结构化存储是真值,grep 是回退。"
+                "[default] 项目内禁止 glob_files / search_files 查状态。"
+                "用 project_state(scope=my, project_id=...) — "
+                "Milestone/Deliverable/Task 才是真值。"
             ),
             scope=RuleScope("project", ["*"]),
             trigger="before_tool_call",
             condition={"field": "tool_name", "in": ["glob_files", "search_files"]},
             actions=[{
-                "type": "warn",
-                "message": ("项目内查状态优先用 project_state — "
-                            "Milestone/Deliverable/Task 是真值,不是文件系统"),
+                "type": "deny",
+                "message": ("项目内禁止 grep — 用 project_state(scope='my', "
+                            "project_id='<id>') 查自己的任务/产出/缺什么。"
+                            "看具体 step 用 project_state(scope='step', step_id='...')。"),
             }],
             priority=5,
             source=source, created_by="default",

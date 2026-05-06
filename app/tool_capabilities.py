@@ -115,6 +115,21 @@ CORE_TOOLS: frozenset[str] = frozenset({
     "project_state",
     # L3 (2026-05-06): PM one-shot blueprint that generates engine rules
     "define_project_blueprint",
+    # 2026-05-06 (user feedback): submit_deliverable + create_milestone
+    # were behind the project-management capability skill — meaning
+    # workers couldn't submit their work without admin granting that
+    # bundle. Anti-pattern: agent finishes a doc, has no way to
+    # register it, gives up or loops on glob_files looking for
+    # confirmation. Moving to CORE so every project-context agent can
+    # close the loop on their own work.
+    "submit_deliverable",
+    "create_milestone",
+    # send_message / check_inbox were behind 'messaging' bundle. Agents
+    # in a project NEED to talk to teammates without admin grant.
+    "send_message", "check_inbox", "ack_message", "reply_message",
+    # task_update was behind 'scheduling' — every agent that has work
+    # in flight needs to mark progress.
+    "task_update",
 })
 
 
