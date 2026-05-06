@@ -284,6 +284,171 @@ def migrate_command_patterns(engine: Any) -> dict:
     return {"removed": removed, "added": added}
 
 
+def migrate_default_project_rules(engine: Any) -> dict:
+    """Seed sensible Project-scope defaults for the issues that surfaced
+    during multi-agent observability work. Each rule applies to every
+    project (scope.targets=["*"]) but only inside project chat scope —
+    they don't fire on solo or meeting paths.
+
+    Defaults are mostly WARNS (educational nudge), not denies — so
+    existing flows aren't broken. Admin can toggle to deny via the
+    Settings → 规则引擎 UI when ready to enforce harder.
+
+    Source tag: "migrator:default_project_rules" — re-running purges
+    and regenerates (idempotent). Admin-edited copies (source="admin")
+    are untouched. Disabling a default rule via UI also persists across
+    re-runs (the migrator deletes by source, then re-adds with
+    enabled=True; so admin's "disabled" state is reset on re-run —
+    that's by design: re-run = "give me the factory defaults again").
+    """
+    source = "migrator:default_project_rules"
+    removed = _purge_source(engine.store, source)
+
+    rules = [
+        # 1. agent 用 glob_files 查项目状态 → 推荐 project_state
+        Rule(
+            name="prefer project_state over glob in project chat",
+            description=(
+                "[default] 在项目聊天里查状态请用 project_state(scope=my, "
+                "project_id=...) — 结构化存储是真值,grep 是回退。"
+            ),
+            scope=RuleScope("project", ["*"]),
+            trigger="before_tool_call",
+            condition={"field": "tool_name", "in": ["glob_files", "search_files"]},
+            actions=[{
+                "type": "warn",
+                "message": ("项目内查状态优先用 project_state — "
+                            "Milestone/Deliverable/Task 是真值,不是文件系统"),
+            }],
+            priority=5,
+            source=source, created_by="default",
+        ),
+
+        # 2. 写文件散落在共享 workspace 根目录 (没在 agent 自己的子目录)
+        Rule(
+            name="file should be in agent subdir, not shared root",
+            description=(
+                "[default] 文件请写到自己的 <role>-<name>/ 子目录,"
+                "不要散落在 shared/ 根。便于追踪归属 + 验收。"
+            ),
+            scope=RuleScope("project", ["*"]),
+            trigger="before_file_write",
+            condition={
+                "all": [
+                    {"field": "args.path", "contains": "/workspaces/shared/"},
+                    {"not": {"field": "args.path",
+                              "matches": "/(coder|reviewer|pm|tester|general|researcher|admin|architect|devops|designer)-[^/]+/"}},
+                ],
+            },
+            actions=[{
+                "type": "warn",
+                "message": ("文件写在共享 root 不便于追踪,"
+                            "请写到 coder-小新/ 这种子目录里"),
+            }],
+            priority=8,
+            source=source, created_by="default",
+        ),
+
+        # 3. workflow 任务标 done 但 0 输出文件
+        Rule(
+            name="workflow task needs output_files to mark done",
+            description=(
+                "[default] workflow step 标 done 之前必须至少有 1 个 "
+                "output_file (auto-tracked from write_file/edit_file)。"
+            ),
+            scope=RuleScope("project", ["*"]),
+            trigger="before_task_done",
+            condition={
+                "all": [
+                    {"field": "task.created_by", "eq": "workflow"},
+                    {"field": "task.output_files", "length_lt": 1},
+                ],
+            },
+            actions=[{
+                "type": "deny",
+                "message": ("workflow 任务必须留下产物。"
+                            "调 write_file 写出至少一个文件,再标 done"),
+            }],
+            priority=15,
+            source=source, created_by="default",
+        ),
+
+        # 4. 测试任务标 done 但没有 test-report 命名的文件
+        Rule(
+            name="reviewer/tester step needs a *report* file",
+            description=(
+                "[default] 测试/审查类任务的 done 应该附带一份 report 文件"
+                "(test-report.md / review-report.md 等)。否则容易出现 "
+                "「大卫无报告标完成」的情况。"
+            ),
+            scope=RuleScope("project", ["*"]),
+            trigger="before_task_done",
+            condition={
+                "all": [
+                    {"any": [
+                        {"field": "task.title", "contains": "测试"},
+                        {"field": "task.title", "contains": "审查"},
+                        {"field": "task.title", "contains": "review"},
+                        {"field": "task.title", "contains": "test"},
+                    ]},
+                    {"not": {"field": "task.output_files", "matches": "report"}},
+                ],
+            },
+            actions=[{
+                "type": "warn",
+                "message": ("测试/审查任务建议产出 ...-report.md/json,"
+                            "便于其他 agent 验收"),
+            }],
+            priority=12,
+            source=source, created_by="default",
+        ),
+
+        # 5. milestone 标 done 但 evidence 字段太短 (没写清楚做了什么)
+        Rule(
+            name="milestone confirmation needs ≥50 chars evidence",
+            description=(
+                "[default] PM 确认 milestone 之前,evidence 字段至少 50 字符 — "
+                "写清楚交付了什么、谁做的、在哪。"
+            ),
+            scope=RuleScope("project", ["*"]),
+            trigger="before_milestone_done",
+            condition={"field": "milestone.evidence_length", "lt": 50},
+            actions=[{
+                "type": "warn",
+                "message": ("milestone evidence 太短,写清楚交付物 + 验收线索"),
+            }],
+            priority=10,
+            source=source, created_by="default",
+        ),
+
+        # 6. 单 agent 在一个项目里同时进行的任务 > 3 → 提醒
+        Rule(
+            name="agent shouldn't carry > 3 in-flight tasks",
+            description=(
+                "[default] 单 agent 在同一项目里同时承担超过 3 个任务,"
+                "通常意味着分配过载,质量会受影响。"
+            ),
+            scope=RuleScope("project", ["*"]),
+            trigger="before_task_assign",
+            condition={"field": "assignee.current_task_count", "gt": 3},
+            actions=[{
+                "type": "warn",
+                "message": ("该 agent 当前任务已 4+,建议先消化再派新的"),
+            }],
+            priority=7,
+            source=source, created_by="default",
+        ),
+    ]
+
+    added = 0
+    for r in rules:
+        engine.store.add(r, by="migrator")
+        added += 1
+    logger.info("default_project_rules migration: removed=%d added=%d",
+                removed, added)
+    return {"removed": removed, "added": added}
+
+
 def run_all_migrations(engine: Any) -> dict:
     """Convenience: run every implemented migrator. Returns aggregate
     summary {migrator_name: {removed, added}}."""
@@ -293,6 +458,7 @@ def run_all_migrations(engine: Any) -> dict:
         ("global_denylist", migrate_global_denylist),
         ("tool_risk", migrate_tool_risk),
         ("command_patterns", migrate_command_patterns),
+        ("default_project_rules", migrate_default_project_rules),
     ):
         try:
             out[name] = fn(engine)

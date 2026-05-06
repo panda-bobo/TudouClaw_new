@@ -33108,7 +33108,7 @@ function _renderRuleCard(r) {
     + '        actions: ' + esc(actSummary)
     + '      </div>'
     + '    </div>'
-    + '    <button class="tc-btn tc-btn-ghost tc-btn-sm" onclick=\'_openRuleEditor(' + JSON.stringify(r) + ')\'>'
+    + '    <button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="_openRuleEditor(\'' + esc(r.id) + '\')" title="Edit">'
     + '      <span class="material-symbols-outlined" style="font-size:14px">edit</span></button>'
     + '    <button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="_deleteRule(\'' + r.id + '\')"'
     + '      style="color:var(--error)">'
@@ -33142,6 +33142,16 @@ window._openRuleEditor = function(existing) {
   var scopeKinds = meta.scope_kinds || ['global', 'project', 'meeting', 'solo'];
   var actionTypes = meta.action_types || ['deny', 'warn', 'log', 'rewrite_arg', 'require_approval', 'side_effect'];
   var defaultScope = (window._ruleEngineState || {}).sub || 'global';
+
+  // existing can be (a) null → new rule, (b) a rule_id string from
+  // the edit button (cards pass the id, not the whole object, because
+  // embedding the JSON inline broke on apostrophes in migrated rule
+  // descriptions), or (c) a full object (for backwards compat with
+  // any external caller).
+  if (typeof existing === 'string') {
+    var rules = (window._ruleEngineState || {}).rules || [];
+    existing = rules.find(function(x){ return x.id === existing; }) || null;
+  }
 
   var r = existing || {
     name: '', description: '', trigger: triggers[0] || 'before_tool_call',
