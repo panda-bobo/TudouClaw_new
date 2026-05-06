@@ -37,6 +37,34 @@ DEFAULTS: dict[str, Any] = {
         # Agent.delegate_parallel.
         "max_parallel_children": 6,
     },
+    # ── API rate limiting (RateLimitMiddleware reads here at request time) ──
+    "rate_limit": {
+        "enabled": True,
+        # Sliding-window cap per (client_ip, path).
+        "max_requests": 10,
+        "window_seconds": 5.0,
+    },
+    # ── Agent runtime guardrails (read by tools_split + agent.py) ──
+    "agent_guardrails": {
+        # Soft warn / hard deny thresholds for project-scoped glob_files
+        # usage per (agent, project) per hour. Soft = inject system
+        # message but allow; hard = refuse the call, return error.
+        "glob_soft_warn_per_hour": 5,
+        "glob_hard_deny_per_hour": 15,
+        # Per-response tool budget — agent must finalize after N tool
+        # calls in one assistant turn (prevents runaway loops).
+        "tool_budget_per_turn": 5,
+        # "strict" → all deliverable contract failures block DONE.
+        # "lenient" → only output_files presence checked, content rules
+        # demoted to system warnings.
+        "deliverable_strictness": "strict",
+    },
+    # ── UI polling cadence (read by portal_bundle.js via /system-settings) ──
+    "ui_polling": {
+        "heartbeat_seconds": 15,
+        "plans_busy_seconds": 3,
+        "runtime_stats_busy_seconds": 8,
+    },
 }
 
 

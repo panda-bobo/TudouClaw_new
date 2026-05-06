@@ -98,6 +98,14 @@ class Hub:
         self.self_url: str = os.environ.get("TUDOU_NODE_URL", "").rstrip("/")
         self._agents_file = os.path.join(self._data_dir, "agents.json")
         self._nodes_file = os.path.join(self._data_dir, "nodes.json")
+        # System settings store (admin-tunable runtime knobs).
+        # Initialized here so any later import that calls get_store() finds
+        # an initialized singleton. Settings file: <data_dir>/system_settings.json.
+        try:
+            from ..system_settings import init_store as _init_settings_store
+            _init_settings_store(self._data_dir)
+        except Exception as _e:
+            logger.warning("system_settings init failed (non-fatal): %s", _e)
         # SQLite database (primary store)
         try:
             from ..infra.database import init_database

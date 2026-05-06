@@ -37,15 +37,36 @@ class RateLimitMiddleware:
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
-        self.max_requests = int(os.environ.get("TUDOU_RATELIMIT_MAX", "10"))
-        self.window_s = float(os.environ.get("TUDOU_RATELIMIT_WINDOW", "5.0"))
-        self.disabled = os.environ.get("TUDOU_RATELIMIT_OFF", "0") == "1"
         # key = (ip, path) → deque[timestamp]
         self._buckets: dict[tuple[str, str], deque[float]] = {}
         # Rough cap on bucket dict size to prevent memory growth.
         self._max_buckets = 2048
         # Recent 429-emit log to avoid spamming the same warning.
         self._last_warned: dict[tuple[str, str], float] = {}
+        # Env-only kill switch (the "I broke production, need to disable
+        # NOW without HTTP" escape). All tunables otherwise come from the
+        # SystemSettingsStore so admin can change them via Settings UI
+        # at runtime.
+        self._env_off = os.environ.get("TUDOU_RATELIMIT_OFF", "0") == "1"
+
+    def _live_settings(self) -> tuple[bool, int, float]:
+        """Read (enabled, max_requests, window_s) from the store on every
+        request. Cheap — one dict.get per call. Lets admin tune from the
+        Settings UI without restart. Falls back to factory defaults if
+        the store isn't initialized yet (e.g. very early startup)."""
+        try:
+            from ...system_settings import get_store, DEFAULTS
+        except Exception:
+            return True, 10, 5.0
+        store = get_store()
+        if store is None:
+            d = DEFAULTS["rate_limit"]
+            return bool(d["enabled"]), int(d["max_requests"]), float(d["window_seconds"])
+        return (
+            bool(store.get("rate_limit.enabled", True)),
+            int(store.get("rate_limit.max_requests", 10)),
+            float(store.get("rate_limit.window_seconds", 5.0)),
+        )
 
     @staticmethod
     def _exempt(path: str) -> bool:
@@ -64,7 +85,13 @@ class RateLimitMiddleware:
         return str(client[0])
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if self.disabled or scope["type"] != "http":
+        if self._env_off or scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        # Live read so admin Settings UI changes take effect on next request.
+        enabled, max_requests, window_s = self._live_settings()
+        if not enabled:
             await self.app(scope, receive, send)
             return
 
@@ -83,24 +110,24 @@ class RateLimitMiddleware:
             self._buckets[key] = bucket
             # GC old buckets if we hit the cap.
             if len(self._buckets) > self._max_buckets:
-                cutoff = now - self.window_s * 4
+                cutoff = now - window_s * 4
                 stale = [k for k, b in self._buckets.items() if not b or b[-1] < cutoff]
                 for k in stale[: self._max_buckets // 4]:
                     self._buckets.pop(k, None)
 
         # Drop timestamps outside the window.
-        cutoff = now - self.window_s
+        cutoff = now - window_s
         while bucket and bucket[0] < cutoff:
             bucket.popleft()
 
-        if len(bucket) >= self.max_requests:
+        if len(bucket) >= max_requests:
             # Throttle — 429 with a short Retry-After hint.
-            retry = max(1.0, self.window_s - (now - bucket[0]))
+            retry = max(1.0, window_s - (now - bucket[0]))
             # Log at most once every 10s per key to avoid noise.
             if (now - self._last_warned.get(key, 0)) > 10:
                 logger.warning(
                     "ratelimit: %s %s — %d req in %.1fs window (cap=%d)",
-                    ip, path, len(bucket), self.window_s, self.max_requests,
+                    ip, path, len(bucket), window_s, max_requests,
                 )
                 self._last_warned[key] = now
 
@@ -108,8 +135,8 @@ class RateLimitMiddleware:
                 "error": "rate_limited",
                 "detail": (
                     f"Too many requests to {path} from {ip}: "
-                    f"{len(bucket)} in last {self.window_s}s "
-                    f"(cap={self.max_requests}). Retry in ~{retry:.1f}s."
+                    f"{len(bucket)} in last {window_s}s "
+                    f"(cap={max_requests}). Retry in ~{retry:.1f}s."
                 ),
                 "retry_after_s": round(retry, 1),
             }).encode("utf-8")
