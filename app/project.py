@@ -2328,6 +2328,18 @@ class ProjectChatEngine:
                     ok = False
                     missing = ["(workflow task produced no output files)"]
 
+                # ── PEP: before_task_done ──
+                # Rule Engine hook — PM-authored "milestone needs file X"
+                # rules land here as deny actions on missing-file
+                # conditions. Failures isolated.
+                try:
+                    re_deny = self._rule_engine_check_task_done(project, task)
+                    if re_deny:
+                        ok = False
+                        missing = list(missing) + [re_deny]
+                except Exception as _re_err:
+                    logger.debug("rule_engine before_task_done check skipped: %s", _re_err)
+
                 if not ok:
                     # Block completion. Push back to IN_PROGRESS with a
                     # message the agent will see on its next turn.
@@ -2865,6 +2877,51 @@ class ProjectChatEngine:
 
         # Auto-progress: trigger next step's agent
         self._auto_progress_next_step(project, task)
+
+    def _rule_engine_check_task_done(self, project: Project,
+                                       task: ProjectTask) -> str:
+        """PEP for ``before_task_done``. Returns a denial reason string
+        if any matched engine rule says "deny", else empty.
+
+        Context exposed to rules:
+          - task: id, title, status, output_files, must_contain, etc.
+          - project: id, name
+          - agent: assignee id (lookup name/role from hub if needed)
+          - scope: kind=project, project_id=<...>
+        """
+        try:
+            from .rule_engine import get_engine
+        except Exception:
+            return ""
+        eng = get_engine()
+        if eng is None:
+            return ""
+        ctx = {
+            "task": {
+                "id": task.id,
+                "title": task.title or "",
+                "status": str(getattr(task.status, "value", task.status)),
+                "output_files": list(task.output_files or []),
+                "must_contain": list(task.must_contain or []),
+                "min_lines": int(task.min_lines or 0),
+                "created_by": getattr(task, "created_by", ""),
+                "assigned_to": task.assigned_to or "",
+            },
+            "project": {
+                "id": project.id,
+                "name": project.name or "",
+            },
+            "agent": {"id": task.assigned_to or ""},
+            "scope": {"kind": "project", "project_id": project.id},
+        }
+        try:
+            decisions = eng.evaluate("before_task_done", ctx)
+        except Exception:
+            return ""
+        for d in decisions:
+            if d.matched and d.action == "deny":
+                return f"rule '{d.rule_name}': {d.message}"
+        return ""
 
     def _bridge_task_to_milestone(self, project: Project, task: ProjectTask) -> None:
         """Mark the matching project milestone as 'done' when a workflow

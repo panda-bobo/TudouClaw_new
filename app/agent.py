@@ -7164,6 +7164,17 @@ Write only the summary body. Do not include any preamble or prefix."""
             arguments["_agent_profile"] = self.profile
             arguments["agent_id"] = self.id
 
+        # ── PEP: before_tool_call ──
+        # Rule Engine policy decision point. Lets admin/PM-authored rules
+        # deny / warn on tool invocations declaratively. Failures here are
+        # isolated — engine.evaluate never raises into this hot path.
+        try:
+            denial_msg = self._rule_engine_check_tool_call(tool_name, arguments)
+            if denial_msg:
+                return denial_msg
+        except Exception as _re_err:
+            logger.debug("rule_engine before_tool_call check skipped: %s", _re_err)
+
         # Check agent-level denied tools (legacy agents may have None;
         # defend with `or ()` so `in` doesn't trip NoneType iteration)
         if tool_name in (self.profile.denied_tools or ()):
@@ -7613,6 +7624,69 @@ Write only the summary body. Do not include any preamble or prefix."""
                             n, active.id[:8])
             except Exception as _e:
                 logger.debug("auto-issue from deliv-fail skipped: %s", _e)
+
+    def _rule_engine_check_tool_call(self, tool_name: str, arguments: dict) -> str:
+        """PEP for ``before_tool_call``. Build context, call engine.evaluate,
+        return a denial message if any matched rule's action is "deny",
+        else empty string. Warns get injected as system messages so the
+        agent sees them on its next turn.
+
+        Returns: empty string if call may proceed, denial-message string
+        if engine says deny.
+        """
+        try:
+            from .rule_engine import get_engine
+        except Exception:
+            return ""
+        eng = get_engine()
+        if eng is None:
+            return ""
+        # Build context shape that condition DSL expects.
+        scope_kind = "global"
+        scope_extra: dict = {}
+        proj_id = getattr(self, "project_id", "") or ""
+        meeting_id = getattr(self, "meeting_id", "") or ""
+        if proj_id:
+            scope_kind = "project"
+            scope_extra["project_id"] = proj_id
+        elif meeting_id:
+            scope_kind = "meeting"
+            scope_extra["meeting_id"] = meeting_id
+        else:
+            scope_kind = "solo"
+            scope_extra["agent_id"] = self.id
+        ctx = {
+            "tool_name": tool_name,
+            "args": dict(arguments or {}),
+            "agent": {
+                "id": self.id,
+                "name": self.name,
+                "role": self.role,
+            },
+            "scope": {"kind": scope_kind, **scope_extra},
+        }
+        decisions = eng.evaluate("before_tool_call", ctx)
+        deny_msg = ""
+        for d in decisions:
+            if not d.matched:
+                continue
+            if d.action == "deny":
+                deny_msg = (
+                    f"DENIED by rule '{d.rule_name}': {d.message or 'no message'}"
+                )
+                break
+            elif d.action == "warn":
+                # Inject system message so the agent sees the warning on
+                # its next turn. Idempotent against repeat fires within
+                # a short window via the dedup ring already in messages.
+                try:
+                    self.messages.append({
+                        "role": "system",
+                        "content": f"⚠️ Rule '{d.rule_name}': {d.message}",
+                    })
+                except Exception:
+                    pass
+        return deny_msg
 
     def _check_active_task_deliverables(self, arguments: dict) -> str:
         """Re-verify deliverables for this agent's active WF task after a

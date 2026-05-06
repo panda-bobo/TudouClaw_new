@@ -28,6 +28,68 @@ _GLOB_MAX_RESULTS = 500
 _SKIP_DIRS = frozenset({"node_modules", "__pycache__", ".git"})
 
 
+def _rule_engine_check_file_write(resolved_path: str, content: str,
+                                   kwargs: dict) -> str:
+    """PEP for ``before_file_write``. Returns deny message if any rule
+    refused the write, else empty string. Caller short-circuits on
+    non-empty return.
+
+    Context fields exposed to rules:
+      - args.path           — resolved absolute path
+      - args.basename       — just the file name
+      - args.size_bytes     — len(content)
+      - agent.id/name/role  — caller (from kwargs._caller_*)
+      - scope.kind          — project / meeting / solo / global
+      - scope.project_id?   — when in project chat
+      - scope.workspace?    — agent's effective workspace root
+    """
+    try:
+        from ..rule_engine import get_engine
+    except Exception:
+        return ""
+    eng = get_engine()
+    if eng is None:
+        return ""
+    caller_id = ""
+    caller_name = ""
+    caller_role = ""
+    project_id = ""
+    meeting_id = ""
+    workspace = ""
+    if isinstance(kwargs, dict):
+        caller_id = str(kwargs.get("_caller_agent_id") or "")
+        caller_name = str(kwargs.get("_caller_agent_name") or "")
+        caller_role = str(kwargs.get("_caller_agent_role") or "")
+        project_id = str(kwargs.get("_project_id") or "")
+        meeting_id = str(kwargs.get("_meeting_id") or "")
+        workspace = str(kwargs.get("_workspace") or "")
+    if project_id:
+        scope = {"kind": "project", "project_id": project_id, "workspace": workspace}
+    elif meeting_id:
+        scope = {"kind": "meeting", "meeting_id": meeting_id, "workspace": workspace}
+    elif caller_id:
+        scope = {"kind": "solo", "agent_id": caller_id, "workspace": workspace}
+    else:
+        scope = {"kind": "global"}
+    ctx = {
+        "args": {
+            "path": resolved_path,
+            "basename": os.path.basename(resolved_path),
+            "size_bytes": len(content or ""),
+        },
+        "agent": {"id": caller_id, "name": caller_name, "role": caller_role},
+        "scope": scope,
+    }
+    try:
+        decisions = eng.evaluate("before_file_write", ctx)
+    except Exception:
+        return ""
+    for d in decisions:
+        if d.matched and d.action == "deny":
+            return f"Error: write_file denied by rule '{d.rule_name}': {d.message}"
+    return ""
+
+
 # ── read_file ────────────────────────────────────────────────────────
 #
 # Per-turn dedup: agents (especially under heavy history compression)
@@ -223,6 +285,15 @@ def _tool_write_file(path: str, content: str, **_: Any) -> str:
         p = pol.safe_path(path, for_write=True)
     except _sandbox.SandboxViolation as e:
         return f"Error: {e}"
+
+    # ── PEP: before_file_write ──
+    # Rule Engine policy hook for file writes (PM-authored path/naming
+    # rules land here). Failures isolated — no engine = no policy =
+    # behavior unchanged. Caller passes _caller_agent_id /
+    # _project_id via kwargs (set by the dispatcher in tools_split/_common).
+    deny_msg = _rule_engine_check_file_write(str(p), content, _ if isinstance(_, dict) else {})
+    if deny_msg:
+        return deny_msg
 
     # QA gate (HANDOFF [C]) — block obviously-broken writes (binary
     # extension via text mode, empty/placeholder markdown, drawio with
