@@ -106,6 +106,14 @@ class Hub:
             _init_settings_store(self._data_dir)
         except Exception as _e:
             logger.warning("system_settings init failed (non-fatal): %s", _e)
+        # Rule Engine (PDP). Init early so PEPs across the codebase can
+        # call get_engine() without timing concerns. Empty rule set on
+        # first boot; admin/PM populate via Settings → Rule Engine UI.
+        try:
+            from ..rule_engine import init_engine as _init_rule_engine
+            _init_rule_engine(self._data_dir)
+        except Exception as _e:
+            logger.warning("rule_engine init failed (non-fatal): %s", _e)
         # SQLite database (primary store)
         try:
             from ..infra.database import init_database
