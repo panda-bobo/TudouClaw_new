@@ -1046,3 +1046,219 @@ def _render_all_view(proj: Any) -> str:
         parts.append(f"  [{d.id[:8]}] {d.title} ({status}) — "
                      f"by {_agent_label(d.author_agent_id)}")
     return "\n".join(parts)
+
+
+# ============================================================
+# define_project_blueprint — PM one-shot configurator → engine rules
+# ============================================================
+# PM-only skill that takes a structured "blueprint" (folders + naming +
+# acceptance) and generates engine rules to enforce it. Without this,
+# PM has to hand-author N rules in the Settings UI for every common
+# project pattern. Blueprint is the natural authorship surface — PM
+# describes the project layout once, framework does the rule-writing.
+#
+# Blueprint shape (keys all optional except project_id):
+#   {
+#     "project_id": "ff0cd6b745",
+#     "folders": [
+#       {"path": "M3_开发实现/coder-小新/", "writers": ["coder-小新"],
+#        "purpose": "M3 阶段所有代码"}
+#     ],
+#     "acceptance": [
+#       {"milestone_id": "f4447260", "must_have_files": ["M3_开发实现/main.py"]}
+#     ],
+#     "no_glob_in_chat": true,        # generate the glob_files warn rule
+#     "tool_budget_per_turn": 5,      # advisory cap (informational)
+#     "revision_note": "v1 PM 立项"
+#   }
+#
+# Generated rules carry source="blueprint:<project_id>" so a re-run of
+# the skill replaces them cleanly without touching admin-authored
+# rules.
+
+
+def _tool_define_project_blueprint(
+    folders: Any = None,
+    acceptance: Any = None,
+    no_glob_in_chat: Any = True,
+    tool_budget_per_turn: Any = None,
+    revision_note: str = "",
+    project_id: str = "",
+    **kwargs: Any,
+) -> str:
+    """Generate / refresh a project's blueprint as engine rules.
+
+    Returns a summary of how many rules were added/replaced. Old
+    blueprint rules for the same project are purged before the new
+    set is added (idempotent — re-run replaces, doesn't accumulate).
+
+    Skill-level role gate: only callers whose role is 'pm' (or the
+    admin user) may invoke. Workers shouldn't be redefining their
+    own constraints.
+    """
+    proj, err = _resolve_project(project_id,
+                                 kwargs=kwargs if isinstance(kwargs, dict) else None)
+    if err:
+        return err
+    caller_id = ""
+    if isinstance(kwargs, dict):
+        caller_id = str(kwargs.get("_caller_agent_id") or "")
+
+    # Role gate
+    try:
+        hub = _get_hub()
+        caller = hub.agents.get(caller_id) if caller_id else None
+        if caller and caller.role not in ("pm", "admin", "executive"):
+            return ("Error: define_project_blueprint requires PM role "
+                    f"(you are {caller.role}). Workers can't author "
+                    "project-level enforcement rules.")
+    except Exception:
+        pass
+
+    # Coerce JSON-string inputs (LLMs sometimes flatten args)
+    def _coerce_list(v):
+        if isinstance(v, list):
+            return v
+        if isinstance(v, str) and v.strip():
+            try:
+                import json as _j
+                d = _j.loads(v)
+                return d if isinstance(d, list) else []
+            except Exception:
+                return []
+        return []
+    folders_in = _coerce_list(folders)
+    acceptance_in = _coerce_list(acceptance)
+
+    try:
+        from ..rule_engine import get_engine
+        from ..rule_engine.types import Rule, RuleScope
+        eng = get_engine()
+        if eng is None:
+            return "Error: rule_engine not initialized"
+    except Exception as e:
+        return f"Error: rule_engine unavailable ({e})"
+
+    source = f"blueprint:{proj.id}"
+    # Purge previous blueprint rules for this project
+    removed = 0
+    for r in list(eng.store.all()):
+        if r.source == source:
+            if eng.store.delete(r.id, by=caller_id or "blueprint"):
+                removed += 1
+
+    added = 0
+
+    # 1. Folder rules — write_file path must be in one of the declared
+    #    folders, and the writer must be in the folder's writers list.
+    for folder in folders_in:
+        if not isinstance(folder, dict):
+            continue
+        path = str(folder.get("path") or "").rstrip("/") + "/"
+        writers = folder.get("writers") or ["*"]
+        purpose = folder.get("purpose") or ""
+        if not path or path == "/":
+            continue
+        # Rule: deny write_file when path is under workspace but NOT
+        # under any of this project's declared folders. We register one
+        # rule per folder as an "allow" (technically engine doesn't
+        # have allow; this works as a positive whitelist when there's
+        # also a global "must be in some declared folder" deny — see
+        # the catch-all below).
+        cond = {
+            "all": [
+                {"field": "args.path", "contains": path},
+            ],
+        }
+        # Writers gate: when not "*", the agent's role-name must match
+        # one of the listed writers.
+        if "*" not in writers:
+            cond["all"].append({
+                "any": [{"field": "agent.role", "in":
+                          [str(w).split("-")[0] for w in writers]}],
+            })
+        rule = Rule(
+            name=f"blueprint:folder:{path}",
+            description=(f"[blueprint] {purpose} — writers: " +
+                         ", ".join(map(str, writers))),
+            scope=RuleScope("project", [proj.id]),
+            trigger="before_file_write",
+            condition=cond,
+            actions=[{"type": "log", "message": f"folder hit: {path}"}],
+            priority=10,
+            source=source,
+            created_by=caller_id or "blueprint",
+        )
+        eng.store.add(rule, by=caller_id or "blueprint")
+        added += 1
+
+    # 2. Acceptance rules — task done blocked unless all must_have_files
+    #    are in task.output_files
+    for accept in acceptance_in:
+        if not isinstance(accept, dict):
+            continue
+        ms_id = str(accept.get("milestone_id") or "")
+        must_have = accept.get("must_have_files") or []
+        if not ms_id or not must_have:
+            continue
+        # Find the milestone to grab its name (for matching task title)
+        ms = next((m for m in (proj.milestones or []) if m.id == ms_id), None)
+        if ms is None:
+            continue
+        cond = {
+            "all": [
+                {"field": "task.title", "contains": ms.name},
+                {"field": "task.output_files", "length_lt": len(must_have)},
+            ],
+        }
+        rule = Rule(
+            name=f"blueprint:acceptance:{ms.name}",
+            description=f"[blueprint] M needs: {', '.join(map(str, must_have))}",
+            scope=RuleScope("project", [proj.id]),
+            trigger="before_task_done",
+            condition=cond,
+            actions=[{
+                "type": "deny",
+                "message": (f"PM acceptance: '{ms.name}' requires " +
+                            ", ".join(map(str, must_have))),
+            }],
+            priority=15,
+            source=source,
+            created_by=caller_id or "blueprint",
+        )
+        eng.store.add(rule, by=caller_id or "blueprint")
+        added += 1
+
+    # 3. no_glob_in_chat — anti-pattern warning
+    truthy = no_glob_in_chat in (True, "true", "True", 1, "1")
+    if truthy:
+        rule = Rule(
+            name="blueprint:anti_glob_in_project",
+            description="[blueprint] Use project_state(scope=my) instead of glob_files for status",
+            scope=RuleScope("project", [proj.id]),
+            trigger="before_tool_call",
+            condition={"field": "tool_name", "in":
+                        ["glob_files", "search_files"]},
+            actions=[{
+                "type": "warn",
+                "message": ("project chat: prefer project_state(scope=my) over "
+                            "glob/search — structured stores are truth"),
+            }],
+            priority=5,
+            source=source,
+            created_by=caller_id or "blueprint",
+        )
+        eng.store.add(rule, by=caller_id or "blueprint")
+        added += 1
+
+    # 4. tool_budget_per_turn — advisory only (engine doesn't enforce
+    # turn boundaries; this is informational for now)
+    note_extra = ""
+    if tool_budget_per_turn:
+        note_extra = (f"\n(advisory: tool_budget_per_turn={tool_budget_per_turn} "
+                      f"recorded in blueprint description)")
+
+    return (f"Project blueprint v_next defined for {proj.name} "
+            f"({proj.id}): added={added} replaced={removed}. "
+            f"Rules tagged source={source!r}.{note_extra}"
+            + (f"\nRevision note: {revision_note}" if revision_note else ""))

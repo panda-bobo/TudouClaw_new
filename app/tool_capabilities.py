@@ -113,6 +113,8 @@ CORE_TOOLS: frozenset[str] = frozenset({
     # mine". CORE so the eventual Rule Engine deny on glob_files in
     # project context has a guaranteed alternative.
     "project_state",
+    # L3 (2026-05-06): PM one-shot blueprint that generates engine rules
+    "define_project_blueprint",
 })
 
 

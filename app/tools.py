@@ -2523,6 +2523,54 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "define_project_blueprint",
+            "description": (
+                "PM one-shot configurator: declare folder layout, milestone acceptance, "
+                "and anti-pattern rules — framework auto-generates engine rules to enforce.\n"
+                "USE WHEN: starting a new project, restructuring an existing one, or codifying "
+                "team conventions. Replaces hand-authoring N rules in the Settings → Rule Engine UI.\n"
+                "GOTCHA: re-running with the same project_id REPLACES the prior blueprint's rules "
+                "(idempotent). Admin-authored rules in the Settings UI are untouched. Only PM/admin/"
+                "executive role can call — workers can't redefine their own constraints."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string",
+                                    "description": "The project this blueprint applies to."},
+                    "folders": {
+                        "type": "array",
+                        "description": ("Per-folder rules. Each item: "
+                                         "{path, writers (list of role-name like 'coder-小新' or '*'), "
+                                         "purpose}. Generated as before_file_write rules."),
+                    },
+                    "acceptance": {
+                        "type": "array",
+                        "description": ("Per-milestone acceptance criteria. Each item: "
+                                         "{milestone_id, must_have_files (list of relative paths)}. "
+                                         "Generated as before_task_done deny rules."),
+                    },
+                    "no_glob_in_chat": {
+                        "type": "boolean",
+                        "description": ("Generate a warn rule discouraging glob_files / search_files "
+                                         "in this project's chat (default: true)."),
+                    },
+                    "tool_budget_per_turn": {
+                        "type": "integer",
+                        "description": "Advisory cap noted in blueprint description (informational).",
+                    },
+                    "revision_note": {
+                        "type": "string",
+                        "description": "Why you made this change (audit trail).",
+                    },
+                },
+                "required": ["project_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "project_state",
             "description": (
                 "Snapshot of structured project state — replaces glob_files for status checks.\n"
@@ -2756,6 +2804,7 @@ from .tools_split.project import (  # noqa: E402,F401
     _tool_update_issue,
     _tool_list_issues,
     _tool_project_state,
+    _tool_define_project_blueprint,
     _auto_report_issue,
 )
 
@@ -2881,6 +2930,8 @@ _TOOL_FUNCS: dict[str, callable] = {
     "list_issues": _tool_list_issues,
     # L2 (2026-05-06) — structured state query, replaces glob_files for status
     "project_state": _tool_project_state,
+    # L3 (2026-05-06) — PM one-shot blueprint that generates engine rules
+    "define_project_blueprint": _tool_define_project_blueprint,
     "mcp_call": _tool_mcp_call,
     # Experience persistence + skill generation
     "save_experience": _tool_save_experience,

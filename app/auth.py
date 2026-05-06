@@ -143,6 +143,7 @@ DEFAULT_TOOL_RISK: dict[str, str] = {
     "update_issue":       "low",    # Update issue status
     "list_issues":        "low",    # Read project issues
     "project_state":      "low",    # Structured state query (read-only)
+    "define_project_blueprint": "moderate",  # PM authoring rules
     "query_team_status":  "low",    # Read team_dashboard
     "query_agent_status": "low",    # Read single agent status
     # ── Shared-context (SC) protocol — coordination only, no execution ──

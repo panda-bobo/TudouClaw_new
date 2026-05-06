@@ -6717,6 +6717,8 @@ Write only the summary body. Do not include any preamble or prefix."""
             "report_issue", "update_issue", "list_issues",
             # L2 (2026-05-06): structured state query, replaces grep
             "project_state",
+            # L3 (2026-05-06): PM blueprint
+            "define_project_blueprint",
         })
         allowed_set = set(allowed) | _INFRA_TOOLS_SCHEMA
         all_tools = [t for t in all_tools
@@ -7212,6 +7214,8 @@ Write only the summary body. Do not include any preamble or prefix."""
             "report_issue", "update_issue", "list_issues",
             # L2 (2026-05-06): structured state query, replaces grep
             "project_state",
+            # L3 (2026-05-06): PM blueprint
+            "define_project_blueprint",
         })
 
         # Check agent-level allowed tools (empty list = all allowed;
