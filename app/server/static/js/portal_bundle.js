@@ -3447,6 +3447,7 @@ function renderSettingsHubTech() {
   // providers / mcp / nodeconfig / nodes / audit / permissions / tokens
   var tabs = [
     { id: 'branding',    label: 'Branding',     icon: 'palette' },
+    { id: 'rules',       label: 'Rule Engine',  icon: 'gavel' },
     { id: 'system',      label: 'System',       icon: 'tune' },
     { id: 'config',      label: 'Global Config',icon: 'settings' },
     { id: 'providers',   label: 'LLM Providers',icon: 'cloud_queue' },
@@ -3471,6 +3472,8 @@ function renderSettingsHubTech() {
     if (r.current === 'branding') {
       if (typeof renderBrandingSettingsTech === 'function') renderBrandingSettingsTech(sc);
       else if (typeof renderBrandingSettings === 'function') renderBrandingSettings(sc);
+    } else if (r.current === 'rules') {
+      if (typeof renderRuleEngine === 'function') renderRuleEngine(sc);
     } else if (r.current === 'system') {
       if (typeof renderSystemSettings === 'function') renderSystemSettings(sc);
     } else if (r.current === 'config') {
@@ -32809,6 +32812,7 @@ function renderSettingsPage() {
   var c = document.getElementById('content');
   var tabs = [
     { id: 'branding',   label: window.t('tab.settings.branding',     '品牌'),          icon: 'workspaces' },
+    { id: 'rules',      label: window.t('tab.settings.rules',        '规则引擎'),     icon: 'gavel' },
     { id: 'system',     label: window.t('tab.settings.system',       '系统配置'),     icon: 'tune' },
     { id: 'providers',  label: window.t('tab.settings.providers',    'LLM Providers'), icon: 'dns' },
     // 'llm_tiers' tab hidden — replaced by per-agent LLM Router
@@ -32844,6 +32848,7 @@ function renderSettingsPage() {
   if (actionsEl) actionsEl.innerHTML = _tabActions[_settingsSubTab] || '';
   switch(_settingsSubTab) {
     case 'branding': renderBrandingSettings(sc); break;
+    case 'rules': renderRuleEngine(sc); break;
     case 'system': renderSystemSettings(sc); break;
     case 'providers': renderProviders(sc); break;
     case 'llm_tiers': renderLLMTiers(sc); break;
@@ -32982,6 +32987,307 @@ window._brandingReset = async function() {
     _toast('Reset failed:' + e, 'error');
   }
 };
+
+// ============ Rule Engine ============
+// Settings → Rule Engine tab. 5 sub-tabs by scope (global/project/
+// meeting/solo) + Audit Log viewer. Reads /api/portal/rules and lets
+// admin CRUD rules with a JSON condition editor (full visual builder
+// is a follow-up; JSON works for MVP).
+window._ruleEngineState = window._ruleEngineState || {
+  sub: 'global',           // active sub-tab
+  rules: [],
+  meta: null,
+};
+
+async function renderRuleEngine(container) {
+  var c = container || document.getElementById('content');
+  if (!c) return;
+  c.innerHTML = '<div style="padding:24px;color:var(--text3);font-size:13px">Loading rules…</div>';
+  try {
+    var data = await api('GET', '/api/portal/rules');
+    window._ruleEngineState.rules = (data && data.rules) || [];
+    window._ruleEngineState.meta = (data && data.meta) || {};
+  } catch (e) {
+    c.innerHTML = '<div style="padding:24px;color:var(--error)">Load failed: '
+      + esc(String(e)) + '</div>';
+    return;
+  }
+  _renderRuleEngineBody(c);
+}
+window.renderRuleEngine = renderRuleEngine;
+
+function _renderRuleEngineBody(c) {
+  var state = window._ruleEngineState;
+  var rules = state.rules || [];
+  var meta = state.meta || {};
+  var subs = [
+    { id: 'global',  label: 'Global',  icon: 'public' },
+    { id: 'project', label: 'Project', icon: 'folder_special' },
+    { id: 'meeting', label: 'Meeting', icon: 'groups' },
+    { id: 'solo',    label: 'Solo',    icon: 'person' },
+    { id: 'audit',   label: 'Audit Log', icon: 'history' },
+  ];
+  var subTabs = subs.map(function(s){
+    var active = (s.id === state.sub);
+    return '<button onclick="_setRuleEngineSub(\'' + s.id + '\')"'
+      + ' class="tc-chip' + (active ? ' tc-chip-primary' : '') + '"'
+      + ' style="cursor:pointer;font-size:12px;padding:6px 14px">'
+      + '<span class="material-symbols-outlined" style="font-size:14px;margin-right:4px">' + s.icon + '</span>'
+      + esc(s.label) + '</button>';
+  }).join('');
+
+  var bodyHtml = '';
+  if (state.sub === 'audit') {
+    bodyHtml = '<div id="rule-audit-body" style="font-family:var(--font-mono,monospace);font-size:11px">Loading…</div>';
+  } else {
+    var scoped = rules.filter(function(r){
+      return r.scope && r.scope.kind === state.sub;
+    });
+    bodyHtml = ''
+      + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">'
+      + '  <span class="tc-text-dim" style="font-size:12px">' + scoped.length + ' rule(s) in this scope</span>'
+      + '  <button class="tc-btn tc-btn-primary tc-btn-sm" onclick="_openRuleEditor(null)">'
+      + '    <span class="material-symbols-outlined" style="font-size:16px">add</span> New Rule</button>'
+      + '</div>';
+    if (scoped.length === 0) {
+      bodyHtml += '<div class="tc-card tc-text-dim" style="padding:24px;text-align:center;font-size:13px">'
+        + 'No rules at ' + esc(state.sub) + ' scope. Click "New Rule" to author one.</div>';
+    } else {
+      bodyHtml += '<div style="display:flex;flex-direction:column;gap:8px">';
+      scoped.forEach(function(r){
+        bodyHtml += _renderRuleCard(r);
+      });
+      bodyHtml += '</div>';
+    }
+  }
+
+  c.innerHTML = ''
+    + '<div style="padding:0">'
+    + '  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--outline-variant)">'
+    +      subTabs
+    + '  </div>'
+    +    bodyHtml
+    + '</div>';
+
+  if (state.sub === 'audit') _loadRuleEngineAudit();
+}
+
+function _setRuleEngineSub(sub) {
+  window._ruleEngineState.sub = sub;
+  // Re-fetch on tab switch — rules may have changed (admin authored
+  // a rule on another tab, or another browser tab edited). Cheap
+  // (rules.json reads in-memory dict).
+  var c = document.getElementById('content') || document.getElementById('content-outer');
+  if (c) renderRuleEngine(c);
+}
+window._setRuleEngineSub = _setRuleEngineSub;
+
+function _renderRuleCard(r) {
+  var actSummary = (r.actions || []).map(function(a){ return a.type; }).join(' + ') || 'log';
+  var trigBadge = '<span class="tc-chip" style="font-size:10px;padding:2px 8px">' + esc(r.trigger || '?') + '</span>';
+  var enableTitle = r.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable';
+  return ''
+    + '<div class="tc-card" style="padding:12px 14px">'
+    + '  <div style="display:flex;align-items:center;gap:10px">'
+    + '    <button onclick="_toggleRule(\'' + r.id + '\',' + (!r.enabled) + ')"'
+    + '      title="' + enableTitle + '"'
+    + '      style="background:none;border:none;cursor:pointer;font-size:18px;color:'
+    + (r.enabled ? 'var(--success,#22c55e)' : 'var(--outline)') + '">'
+    + '      <span class="material-symbols-outlined">' + (r.enabled ? 'toggle_on' : 'toggle_off') + '</span>'
+    + '    </button>'
+    + '    <div style="flex:1;min-width:0">'
+    + '      <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px">'
+    + '        <span style="font-weight:600;font-size:13px">' + esc(r.name || '(unnamed)') + '</span>'
+    +          trigBadge
+    + '        <span class="tc-text-dim" style="font-size:10px">v' + (r.revision || 1) + '</span>'
+    + '      </div>'
+    + '      <div class="tc-text-dim" style="font-size:11px">'
+    + (r.description ? esc(r.description) : '(no description)')
+    + '      </div>'
+    + '      <div class="tc-text-dim" style="font-size:10px;font-family:var(--font-mono,monospace);margin-top:4px">'
+    + '        actions: ' + esc(actSummary)
+    + '      </div>'
+    + '    </div>'
+    + '    <button class="tc-btn tc-btn-ghost tc-btn-sm" onclick=\'_openRuleEditor(' + JSON.stringify(r) + ')\'>'
+    + '      <span class="material-symbols-outlined" style="font-size:14px">edit</span></button>'
+    + '    <button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="_deleteRule(\'' + r.id + '\')"'
+    + '      style="color:var(--error)">'
+    + '      <span class="material-symbols-outlined" style="font-size:14px">delete</span></button>'
+    + '  </div>'
+    + '</div>';
+}
+
+window._toggleRule = async function(rule_id, enabled) {
+  try {
+    await api('POST', '/api/portal/rules/' + rule_id + '/toggle', { enabled: enabled });
+    await renderRuleEngine();
+  } catch (e) {
+    _toast('Toggle failed: ' + e, 'error');
+  }
+};
+
+window._deleteRule = async function(rule_id) {
+  if (!confirm('Delete this rule? (cannot undo)')) return;
+  try {
+    await api('DELETE', '/api/portal/rules/' + rule_id);
+    await renderRuleEngine();
+  } catch (e) {
+    _toast('Delete failed: ' + e, 'error');
+  }
+};
+
+window._openRuleEditor = function(existing) {
+  var meta = (window._ruleEngineState || {}).meta || {};
+  var triggers = meta.triggers || [];
+  var scopeKinds = meta.scope_kinds || ['global', 'project', 'meeting', 'solo'];
+  var actionTypes = meta.action_types || ['deny', 'warn', 'log', 'rewrite_arg', 'require_approval', 'side_effect'];
+  var defaultScope = (window._ruleEngineState || {}).sub || 'global';
+
+  var r = existing || {
+    name: '', description: '', trigger: triggers[0] || 'before_tool_call',
+    scope: { kind: defaultScope === 'audit' ? 'global' : defaultScope, targets: ['*'] },
+    condition: {}, actions: [{ type: 'warn', message: '' }],
+    enabled: true, priority: 0,
+  };
+
+  var trigOpts = triggers.map(function(t){
+    return '<option value="' + t + '"' + (t === r.trigger ? ' selected' : '') + '>' + t + '</option>';
+  }).join('');
+  var scopeOpts = scopeKinds.map(function(s){
+    return '<option value="' + s + '"' + (s === r.scope.kind ? ' selected' : '') + '>' + s + '</option>';
+  }).join('');
+  var actOpts = actionTypes.map(function(a){
+    return '<option value="' + a + '">' + a + '</option>';
+  }).join('');
+  var actionsJson = JSON.stringify(r.actions || [], null, 2);
+  var conditionJson = JSON.stringify(r.condition || {}, null, 2);
+
+  var modal = document.createElement('div');
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px';
+  modal.innerHTML = ''
+    + '<div class="tc-card" style="max-width:680px;width:100%;max-height:90vh;overflow-y:auto;padding:20px">'
+    + '  <h3 style="margin:0 0 16px;font-size:16px;font-weight:700">'
+    + (existing ? 'Edit Rule' : 'New Rule') + '</h3>'
+    + '  <div style="display:flex;flex-direction:column;gap:10px">'
+    + '    <label class="tc-text-dim" style="font-size:11px">Name'
+    + '      <input id="re-name" value="' + esc(r.name || '') + '" '
+    + '        style="display:block;width:100%;padding:6px 8px;background:var(--surface3);border:1px solid var(--outline-variant);border-radius:4px;color:var(--on-surface);margin-top:4px"></label>'
+    + '    <label class="tc-text-dim" style="font-size:11px">Description'
+    + '      <input id="re-desc" value="' + esc(r.description || '') + '" '
+    + '        style="display:block;width:100%;padding:6px 8px;background:var(--surface3);border:1px solid var(--outline-variant);border-radius:4px;color:var(--on-surface);margin-top:4px"></label>'
+    + '    <div style="display:flex;gap:8px">'
+    + '      <label class="tc-text-dim" style="font-size:11px;flex:1">Trigger'
+    + '        <select id="re-trigger" style="display:block;width:100%;padding:6px 8px;background:var(--surface3);border:1px solid var(--outline-variant);border-radius:4px;color:var(--on-surface);margin-top:4px">'
+    +            trigOpts + '</select></label>'
+    + '      <label class="tc-text-dim" style="font-size:11px;flex:1">Scope'
+    + '        <select id="re-scope" style="display:block;width:100%;padding:6px 8px;background:var(--surface3);border:1px solid var(--outline-variant);border-radius:4px;color:var(--on-surface);margin-top:4px">'
+    +            scopeOpts + '</select></label>'
+    + '      <label class="tc-text-dim" style="font-size:11px;flex:1">Priority'
+    + '        <input id="re-priority" type="number" value="' + (r.priority || 0) + '" '
+    + '          style="display:block;width:100%;padding:6px 8px;background:var(--surface3);border:1px solid var(--outline-variant);border-radius:4px;color:var(--on-surface);margin-top:4px"></label>'
+    + '    </div>'
+    + '    <label class="tc-text-dim" style="font-size:11px">Scope targets (comma-separated, * for all)'
+    + '      <input id="re-targets" value="' + esc((r.scope.targets || ['*']).join(',')) + '" '
+    + '        style="display:block;width:100%;padding:6px 8px;background:var(--surface3);border:1px solid var(--outline-variant);border-radius:4px;color:var(--on-surface);margin-top:4px"></label>'
+    + '    <label class="tc-text-dim" style="font-size:11px">Condition (JSON DSL — empty = always match)'
+    + '      <textarea id="re-condition" rows="4" '
+    + '        style="display:block;width:100%;padding:6px 8px;background:var(--surface3);border:1px solid var(--outline-variant);border-radius:4px;color:var(--on-surface);margin-top:4px;font-family:var(--font-mono,monospace);font-size:11px">'
+    +        esc(conditionJson) + '</textarea></label>'
+    + '    <label class="tc-text-dim" style="font-size:11px">Actions (JSON array)'
+    + '      <textarea id="re-actions" rows="5" '
+    + '        style="display:block;width:100%;padding:6px 8px;background:var(--surface3);border:1px solid var(--outline-variant);border-radius:4px;color:var(--on-surface);margin-top:4px;font-family:var(--font-mono,monospace);font-size:11px">'
+    +        esc(actionsJson) + '</textarea></label>'
+    + '    <div style="font-size:10px;color:var(--text-dim)">'
+    + '      Action types: ' + actionTypes.join(', ') + ' &middot; '
+    + '      Condition ops: eq, ne, in, not_in, exists, missing, matches, gt, lt, gte, lte, starts_with, ends_with, contains, length_*'
+    + '    </div>'
+    + '  </div>'
+    + '  <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;padding-top:12px;border-top:1px solid var(--outline-variant)">'
+    + '    <button class="tc-btn tc-btn-ghost" onclick="this.closest(\'.re-modal\').remove()">Cancel</button>'
+    + '    <button class="tc-btn tc-btn-primary" onclick="_saveRuleFromModal(this' + (existing ? ',\'' + r.id + '\'' : '') + ')">Save</button>'
+    + '  </div>'
+    + '</div>';
+  modal.className = 're-modal';
+  document.body.appendChild(modal);
+};
+
+window._saveRuleFromModal = async function(btn, ruleId) {
+  var modal = btn.closest('.re-modal');
+  var name = document.getElementById('re-name').value.trim();
+  var desc = document.getElementById('re-desc').value.trim();
+  var trigger = document.getElementById('re-trigger').value;
+  var scopeKind = document.getElementById('re-scope').value;
+  var priority = parseInt(document.getElementById('re-priority').value || '0', 10);
+  var targets = document.getElementById('re-targets').value.split(',')
+    .map(function(s){ return s.trim(); })
+    .filter(function(s){ return s; });
+  if (targets.length === 0) targets = ['*'];
+
+  var condition, actions;
+  try { condition = JSON.parse(document.getElementById('re-condition').value || '{}'); }
+  catch (e) { _toast('Condition JSON invalid: ' + e.message, 'error'); return; }
+  try { actions = JSON.parse(document.getElementById('re-actions').value || '[]'); }
+  catch (e) { _toast('Actions JSON invalid: ' + e.message, 'error'); return; }
+
+  var body = {
+    name: name || '(unnamed)',
+    description: desc,
+    trigger: trigger,
+    scope: { kind: scopeKind, targets: targets },
+    condition: condition,
+    actions: actions,
+    priority: priority,
+  };
+
+  try {
+    if (ruleId) {
+      await api('PATCH', '/api/portal/rules/' + ruleId, body);
+    } else {
+      await api('POST', '/api/portal/rules', body);
+    }
+    modal.remove();
+    await renderRuleEngine();
+    _toast(ruleId ? 'Rule updated' : 'Rule created', 'success');
+  } catch (e) {
+    _toast('Save failed: ' + e, 'error');
+  }
+};
+
+async function _loadRuleEngineAudit() {
+  var el = document.getElementById('rule-audit-body');
+  if (!el) return;
+  try {
+    var data = await api('GET', '/api/portal/rules/audit?n=200');
+    var entries = (data && data.entries) || [];
+    if (entries.length === 0) {
+      el.innerHTML = '<div class="tc-text-dim" style="padding:16px">No audit entries yet — rules need to fire to populate this log.</div>';
+      return;
+    }
+    // Newest first
+    var rev = entries.slice().reverse();
+    el.innerHTML = '<div style="display:flex;flex-direction:column;gap:4px">'
+      + rev.map(function(e){
+        var when = e.ts ? new Date(e.ts * 1000).toLocaleTimeString() : '';
+        var color = e.decision === 'deny' ? 'var(--error)'
+                  : e.decision === 'warn' ? 'var(--warning,#ff9800)'
+                  : 'var(--text-dim)';
+        return '<div class="tc-card" style="padding:6px 10px;border-left:3px solid ' + color + '">'
+          + '<div style="display:flex;gap:6px;flex-wrap:wrap;font-size:10px">'
+          + '  <span style="color:var(--text-dim)">' + esc(when) + '</span>'
+          + '  <span style="color:' + color + ';font-weight:600">' + esc(e.decision || '?') + '</span>'
+          + '  <span style="color:var(--text-dim)">' + esc(e.trigger || '?') + '</span>'
+          + '  <span style="color:var(--primary)">' + esc(e.rule_name || e.rule_id || '?') + '</span>'
+          + '  <span style="color:var(--text-dim)">→</span>'
+          + '  <span>' + esc((e.agent || {}).name || (e.agent || {}).id || '?') + '</span>'
+          + '</div>'
+          + (e.message ? '<div style="font-size:10px;color:var(--text-dim);margin-top:2px">' + esc(e.message) + '</div>' : '')
+          + '</div>';
+      }).join('') + '</div>';
+  } catch (e) {
+    el.innerHTML = '<div style="color:var(--error);padding:16px">Audit load failed: ' + esc(String(e)) + '</div>';
+  }
+}
+
 
 // ============ System Settings (系统配置) ============
 async function renderSystemSettings(container) {
