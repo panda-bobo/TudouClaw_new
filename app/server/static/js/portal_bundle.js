@@ -15859,10 +15859,16 @@ function eaRenderExtraLlms() {
 var _AVATAR_ROLES = [
   // Tier 1 — 9 stitch_34 archetypes with own portraits
   'ceo','cto','coder','reviewer','tester','pm','marketing','developer','data',
-  // Tier 2 — 5 specialist roles with own portrait
+  // Tier 2 — 5 specialist roles with own portrait + 3 stitch_34 distinct
   'security','researcher','designer','support','general',
-  // Tier 3 — 6 stitch_34 archetypes that share an existing portrait
-  'linguist','optimizer','observer','legal','memory','forecaster',
+  'executor','auditor','analyst',
+  // Tier 3 (HIDDEN from picker until real images land — they share
+  // portraits with Tier 1/2 entries which makes the grid look like
+  // it has duplicates. Still selectable programmatically (agents
+  // created before this can keep their existing robot_avatar value),
+  // just not offered as a fresh choice. Re-add when each gets a real
+  // unique portrait file:
+  //   'linguist','optimizer','observer','legal','memory','forecaster',
 ];
 
 // Archetype + headline + blurb per role. Mirrors stitch_34's grid.
