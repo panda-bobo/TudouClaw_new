@@ -7144,11 +7144,21 @@ Write only the summary body. Do not include any preamble or prefix."""
         """
         result = tools.execute_tool(tool_name, arguments)
         guard = self._get_login_guard()
-        return guard.guard(
+        final = guard.guard(
             self, tool_name, arguments, result,
             retry_fn=lambda: tools.execute_tool(tool_name, arguments),
             on_event=on_event,
         )
+        # ── PEP: after_tool_call ──
+        # Side-effect hook: rules can log, auto-register deliverables on
+        # write_file success, increment counters, etc. Cannot deny (call
+        # already happened) — only "log" / "side_effect" / "warn" actions
+        # make sense. Failures isolated.
+        try:
+            self._rule_engine_check_after_tool_call(tool_name, arguments, final)
+        except Exception as _re_err:
+            logger.debug("rule_engine after_tool_call hook skipped: %s", _re_err)
+        return final
 
     def _execute_tool_with_policy(self, tool_name: str, arguments: dict,
                                    on_event: Any = None) -> str:
@@ -7691,6 +7701,104 @@ Write only the summary body. Do not include any preamble or prefix."""
                 except Exception:
                     pass
         return deny_msg
+
+    def _rule_engine_check_after_tool_call(self, tool_name: str,
+                                             arguments: dict,
+                                             result: str) -> None:
+        """PEP for ``after_tool_call``. Result-aware hook — rules can
+        log, side-effect, or warn but cannot deny (call already
+        happened). Truncates result to 4 KB before exposing to context
+        so an enormous tool output doesn't bloat the audit log."""
+        try:
+            from .rule_engine import get_engine
+        except Exception:
+            return
+        eng = get_engine()
+        if eng is None:
+            return
+        scope_kind = "global"
+        scope_extra: dict = {}
+        proj_id = getattr(self, "project_id", "") or ""
+        meeting_id = getattr(self, "meeting_id", "") or ""
+        if proj_id:
+            scope_kind = "project"
+            scope_extra["project_id"] = proj_id
+        elif meeting_id:
+            scope_kind = "meeting"
+            scope_extra["meeting_id"] = meeting_id
+        else:
+            scope_kind = "solo"
+            scope_extra["agent_id"] = self.id
+        truncated = result if isinstance(result, str) else str(result)
+        if len(truncated) > 4096:
+            truncated = truncated[:4096] + "...(truncated)"
+        ctx = {
+            "tool_name": tool_name,
+            "args": dict(arguments or {}),
+            "result": truncated,
+            "result_length": len(result) if isinstance(result, str) else 0,
+            "is_error": isinstance(result, str) and result.lstrip().lower().startswith(("error", "denied")),
+            "agent": {"id": self.id, "name": self.name, "role": self.role},
+            "scope": {"kind": scope_kind, **scope_extra},
+        }
+        decisions = eng.evaluate("after_tool_call", ctx)
+        # Only "warn" affects the agent's view — the others (log, side_effect)
+        # are accounted for by the audit log already.
+        for d in decisions:
+            if d.matched and d.action == "warn":
+                try:
+                    self.messages.append({
+                        "role": "system",
+                        "content": f"⚠️ Rule '{d.rule_name}' (post-call): {d.message}",
+                    })
+                except Exception:
+                    pass
+
+    def _rule_engine_check_message_send(self, content: str,
+                                          target: str = "") -> str:
+        """PEP for ``before_message_send``. Returns deny message string
+        if any rule blocks; empty otherwise. Caller (chat send path)
+        short-circuits on non-empty.
+
+        Rules see content + target + agent + scope so authors can
+        moderate keywords, throttle by counter, restrict cross-agent
+        broadcasts, etc.
+        """
+        try:
+            from .rule_engine import get_engine
+        except Exception:
+            return ""
+        eng = get_engine()
+        if eng is None:
+            return ""
+        scope_kind = "global"
+        scope_extra: dict = {}
+        proj_id = getattr(self, "project_id", "") or ""
+        meeting_id = getattr(self, "meeting_id", "") or ""
+        if proj_id:
+            scope_kind = "project"
+            scope_extra["project_id"] = proj_id
+        elif meeting_id:
+            scope_kind = "meeting"
+            scope_extra["meeting_id"] = meeting_id
+        else:
+            scope_kind = "solo"
+            scope_extra["agent_id"] = self.id
+        ctx = {
+            "content": content or "",
+            "content_length": len(content or ""),
+            "target": target or "",
+            "agent": {"id": self.id, "name": self.name, "role": self.role},
+            "scope": {"kind": scope_kind, **scope_extra},
+        }
+        try:
+            decisions = eng.evaluate("before_message_send", ctx)
+        except Exception:
+            return ""
+        for d in decisions:
+            if d.matched and d.action == "deny":
+                return f"Message blocked by rule '{d.rule_name}': {d.message}"
+        return ""
 
     def _check_active_task_deliverables(self, arguments: dict) -> str:
         """Re-verify deliverables for this agent's active WF task after a

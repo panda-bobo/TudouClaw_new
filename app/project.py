@@ -21,6 +21,58 @@ import logging
 logger = logging.getLogger("tudou.project")
 
 
+def _rule_engine_check_milestone_done(project: Any, milestone: Any,
+                                       by: str) -> str:
+    """PEP for ``before_milestone_done`` — module-level helper called
+    from Project.confirm_milestone. Returns deny message string if any
+    matched rule says deny, else empty.
+
+    Context fields exposed to rules:
+      - milestone: id, name, status, evidence, responsible_agent_id
+      - project: id, name
+      - actor: who's confirming (by — admin or agent id)
+      - linked_deliverables: count + how many APPROVED
+      - scope: project
+    """
+    try:
+        from .rule_engine import get_engine
+    except Exception:
+        return ""
+    eng = get_engine()
+    if eng is None:
+        return ""
+    try:
+        linked = [d for d in (project.deliverables or [])
+                  if getattr(d, "milestone_id", "") == milestone.id]
+        approved = sum(1 for d in linked
+                       if str(getattr(d.status, "value", d.status)) == "approved")
+    except Exception:
+        linked, approved = [], 0
+    ctx = {
+        "milestone": {
+            "id": milestone.id,
+            "name": milestone.name or "",
+            "status": milestone.status,
+            "evidence": (milestone.evidence or "")[:1000],
+            "responsible_agent_id": milestone.responsible_agent_id or "",
+            "evidence_length": len(milestone.evidence or ""),
+        },
+        "project": {"id": project.id, "name": project.name or ""},
+        "actor": by or "admin",
+        "linked_deliverables_count": len(linked),
+        "linked_deliverables_approved": approved,
+        "scope": {"kind": "project", "project_id": project.id},
+    }
+    try:
+        decisions = eng.evaluate("before_milestone_done", ctx)
+    except Exception:
+        return ""
+    for d in decisions:
+        if d.matched and d.action == "deny":
+            return f"rule '{d.rule_name}': {d.message}"
+    return ""
+
+
 # ─────────────────────────────────────────────────────────────
 # 项目任务
 # ─────────────────────────────────────────────────────────────
@@ -925,6 +977,16 @@ class Project:
         with self._lock:
             for m in self.milestones:
                 if m.id == milestone_id:
+                    # ── PEP: before_milestone_done ──
+                    # Engine hook so PM-authored "must have evidence",
+                    # "all linked deliverables approved", etc. fire on
+                    # the explicit confirm path. Failures isolated.
+                    deny = _rule_engine_check_milestone_done(self, m, by)
+                    if deny:
+                        # Don't flip status; surface error via
+                        # rejected_reason so admin sees it on next read.
+                        m.rejected_reason = f"engine: {deny}"
+                        return None
                     m.status = "confirmed"
                     m.confirmed_by = by
                     m.confirmed_at = time.time()

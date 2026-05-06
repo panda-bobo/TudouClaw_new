@@ -19,6 +19,75 @@ from ._common import _get_hub
 logger = logging.getLogger(__name__)
 
 
+def _rule_engine_check_dispatch_task(*, from_agent_id: str, to_agent_id: str,
+                                       brief: str, priority: int,
+                                       deadline: str, project_id: str) -> str:
+    """PEP for ``before_dispatch_task``. Returns deny message string
+    if any matched rule says deny, else empty string.
+
+    Context exposed:
+      - from_agent / to_agent: {id, name, role} (resolved via hub)
+      - brief, priority, deadline, project_id
+      - to_agent_inflight: count of in-flight assignments to to_agent
+      - scope: project (when project_id set) else solo (caller view)
+    """
+    try:
+        from ..rule_engine import get_engine
+    except Exception:
+        return ""
+    eng = get_engine()
+    if eng is None:
+        return ""
+    hub = _get_hub()
+    from_a = hub.agents.get(from_agent_id) if from_agent_id else None
+    to_a = hub.agents.get(to_agent_id) if to_agent_id else None
+    # Count in-flight assignments to the target — useful for capacity rules.
+    inflight = 0
+    try:
+        from ..core.task_assignment import get_store as _get_ta_store
+        ts = _get_ta_store()
+        if ts and hasattr(ts, "list_for_agent"):
+            for a in ts.list_for_agent(to_agent_id):
+                if getattr(a, "status", "") in ("dispatched", "accepted", "in_progress"):
+                    inflight += 1
+    except Exception:
+        pass
+    if project_id:
+        scope = {"kind": "project", "project_id": project_id}
+    else:
+        scope = {"kind": "global"}
+    ctx = {
+        "from_agent": {
+            "id": from_agent_id,
+            "name": getattr(from_a, "name", "") if from_a else "",
+            "role": getattr(from_a, "role", "") if from_a else "",
+        },
+        "to_agent": {
+            "id": to_agent_id,
+            "name": getattr(to_a, "name", "") if to_a else "",
+            "role": getattr(to_a, "role", "") if to_a else "",
+            "inflight": inflight,
+        },
+        "brief": brief or "",
+        "priority": int(priority or 0),
+        "deadline": deadline or "",
+        "agent": {
+            "id": from_agent_id,
+            "name": getattr(from_a, "name", "") if from_a else "",
+            "role": getattr(from_a, "role", "") if from_a else "",
+        },
+        "scope": scope,
+    }
+    try:
+        decisions = eng.evaluate("before_dispatch_task", ctx)
+    except Exception:
+        return ""
+    for d in decisions:
+        if d.matched and d.action == "deny":
+            return f"Error: dispatch_task denied by rule '{d.rule_name}': {d.message}"
+    return ""
+
+
 # task_update result preview cap — we store completed task results on
 # the parent task but truncate so a chatty worker doesn't blow up the
 # agent-list JSON payload.
@@ -812,6 +881,22 @@ def _tool_dispatch_task(
     if len(brief) > 500:
         return (f"Error: brief is too long ({len(brief)} chars). "
                 f"Max 500 — be concise. Put detail in deliverables.")
+
+    # ── PEP: before_dispatch_task ──
+    # Rule Engine hook for PM dispatch — rules can deny based on
+    # workload (assignee already has N in-flight), role mismatch
+    # (e.g. "tester can't be assigned coder tasks"), or content
+    # filters on brief. Failures isolated.
+    deny_msg = _rule_engine_check_dispatch_task(
+        from_agent_id=str(kwargs.get("_caller_agent_id") or ""),
+        to_agent_id=to_agent,
+        brief=brief,
+        priority=priority,
+        deadline=deadline,
+        project_id=project_id or str(kwargs.get("_project_id") or ""),
+    )
+    if deny_msg:
+        return deny_msg
     # Coerce JSON-string args (LLMs sometimes pass arrays as strings)
     def _coerce_list(v):
         if isinstance(v, list):

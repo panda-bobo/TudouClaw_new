@@ -117,3 +117,95 @@ def test_before_file_write_global_rule_fires_in_project(fresh_engine):
         {"_project_id": "proj_a", "_workspace": "/workspace"},
     )
     assert "no_huge_files" in msg
+
+
+# ── before_dispatch_task PEP ─────────────────────────────────────────
+
+def test_before_dispatch_task_capacity_rule(fresh_engine, monkeypatch):
+    """Capacity rule denying when target agent has too much in-flight."""
+    fresh_engine.store.add(Rule(
+        name="overload_protection",
+        trigger="before_dispatch_task",
+        scope=RuleScope("global"),
+        condition={"field": "to_agent.inflight", "gt": 2},
+        actions=[{"type": "deny", "message": "agent already at capacity"}],
+    ))
+    from app.tools_split import coordination as _coord
+    # Stub hub + task store
+    class _A: id="a"; name="alice"; role="coder"
+    class _Hub:
+        agents = {"target": _A()}
+    monkeypatch.setattr(_coord, "_get_hub", lambda: _Hub())
+    class _TaskStore:
+        def list_for_agent(self, aid):
+            return [type("X", (), {"status": "in_progress"})() for _ in range(3)]
+    import app.core.task_assignment as ta
+    monkeypatch.setattr(ta, "get_store", lambda: _TaskStore())
+    msg = _coord._rule_engine_check_dispatch_task(
+        from_agent_id="pm1", to_agent_id="target",
+        brief="do thing", priority=0, deadline="", project_id="p1",
+    )
+    assert "overload_protection" in msg
+    assert "capacity" in msg
+
+
+def test_before_dispatch_task_no_engine_returns_empty(monkeypatch):
+    """When engine isn't initialized, dispatch passes through."""
+    import app.rule_engine.engine as eng_mod
+    saved = eng_mod._ENGINE
+    eng_mod._ENGINE = None
+    try:
+        from app.tools_split import coordination as _coord
+        # Stub hub even though engine is off (resolution still runs)
+        class _Hub: agents = {}
+        monkeypatch.setattr(_coord, "_get_hub", lambda: _Hub())
+        msg = _coord._rule_engine_check_dispatch_task(
+            from_agent_id="x", to_agent_id="y",
+            brief="b", priority=0, deadline="", project_id="",
+        )
+        assert msg == ""
+    finally:
+        eng_mod._ENGINE = saved
+
+
+# ── before_milestone_done PEP ────────────────────────────────────────
+
+def test_before_milestone_done_requires_evidence(fresh_engine):
+    """Rule blocking milestone confirmation when evidence is empty."""
+    fresh_engine.store.add(Rule(
+        name="evidence_required",
+        trigger="before_milestone_done",
+        scope=RuleScope("global"),
+        condition={"field": "milestone.evidence_length", "lt": 10},
+        actions=[{"type": "deny", "message": "evidence too short"}],
+    ))
+    # Build minimal mock objects rather than spinning up a Project
+    class _MS:
+        id = "m1"; name = "M1"; status = "in_progress"
+        evidence = ""; responsible_agent_id = ""
+    class _Proj:
+        id = "p1"; name = "P1"
+        deliverables = []
+    from app.project import _rule_engine_check_milestone_done
+    deny = _rule_engine_check_milestone_done(_Proj(), _MS(), "admin")
+    assert "evidence_required" in deny
+
+
+def test_before_milestone_done_passes_when_evidence_long_enough(fresh_engine):
+    """Same rule, but milestone has enough evidence — no deny."""
+    fresh_engine.store.add(Rule(
+        name="evidence_required",
+        trigger="before_milestone_done",
+        scope=RuleScope("global"),
+        condition={"field": "milestone.evidence_length", "lt": 10},
+        actions=[{"type": "deny", "message": "evidence too short"}],
+    ))
+    class _MS:
+        id = "m1"; name = "M1"; status = "in_progress"
+        evidence = "x" * 100; responsible_agent_id = ""
+    class _Proj:
+        id = "p1"; name = "P1"
+        deliverables = []
+    from app.project import _rule_engine_check_milestone_done
+    deny = _rule_engine_check_milestone_done(_Proj(), _MS(), "admin")
+    assert deny == ""
