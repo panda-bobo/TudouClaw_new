@@ -2634,7 +2634,7 @@ async function _loadRagProviders() {
   } catch(e) { console.debug('load rag providers:', e); }
 }
 
-function _renderAgentCard(a) {
+function _renderAgentCard(a, usedSet) {
   var statusColor = a.status === 'idle' ? '#3fb950' : a.status === 'busy' ? '#f0883e' : a.status === 'error' ? '#f85149' : 'var(--text3)';
   var statusLabel = a.status === 'idle' ? 'Idle' : a.status === 'busy' ? 'Busy' : a.status === 'error' ? 'Error' : (a.status || 'Unknown');
   var modelShort = (a.model || 'default').split('/').pop().substring(0, 20);
@@ -2645,10 +2645,17 @@ function _renderAgentCard(a) {
   // string so callers concatenating it still work.
   var v2Badge = '';
   // Agent-card avatar: prefer the operator-picked robot_avatar PNG.
-  // Falls back to material-symbols ``smart_toy`` only if image fails
-  // to load (e.g. file missing) — the onerror swap matches what the
-  // chat / sidebar paths do, so we degrade consistently.
-  var _avatarUrl = _robotIconUrl(a.robot_avatar || ('robot_' + (a.role || 'general')));
+  // When usedSet is passed, route through _aetherAvatarForUnique so a
+  // batch render across many agents doesn't show duplicates (legacy
+  // _robotIconUrl path falls back to the underlying file regardless of
+  // alias collisions). onerror swaps to material-symbols smart_toy so
+  // missing files don't show broken-image — matches chat/sidebar.
+  var _avatarUrl;
+  if (usedSet && typeof _aetherAvatarForUnique === 'function') {
+    _avatarUrl = _aetherAvatarForUnique(a, usedSet);
+  } else {
+    _avatarUrl = _robotIconUrl(a.robot_avatar || ('robot_' + (a.role || 'general')));
+  }
   return '<div onclick="showAgentView(\''+a.id+'\')" style="background:var(--surface);border-radius:12px;padding:14px 16px;border:1px solid var(--border-light);cursor:pointer;transition:all 0.15s;display:flex;align-items:center;gap:14px" onmouseenter="this.style.borderColor=\'var(--primary)\';this.style.transform=\'translateY(-1px)\'" onmouseleave="this.style.borderColor=\'var(--border-light)\';this.style.transform=\'none\'">' +
     '<div style="width:40px;height:40px;border-radius:10px;background:var(--surface3);display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden">' +
       '<img src="'+_avatarUrl+'" alt="" style="width:40px;height:40px;object-fit:cover" onerror="this.outerHTML=\'<span class=material-symbols-outlined style=&quot;font-size:22px;color:var(--primary)&quot;>smart_toy</span>\'">' +
@@ -2904,15 +2911,26 @@ function _aetherAvatarFor(agent) {
 }
 window._aetherAvatarFor = _aetherAvatarFor;
 
-function _renderAgentCardTech(a) {
+function _renderAgentCardTech(a, usedSet) {
   var role = (a.role || 'general').toLowerCase();
   var statusKey = (a.status || 'offline').toLowerCase();
   var sm = _STATUS_META[statusKey] || _STATUS_META.offline;
   var prof = a.profile || {};
   // Prefer realistic aether portrait; fall back to pixel-art robot.
-  var aether = _aetherAvatarFor(a);
-  var avatarUrl = aether || _robotIconUrl(a.robot_avatar || ('robot_' + (a.role || 'general')));
-  var isAether = !!aether;
+  // When a usedSet is passed (caller is rendering a list of agents in
+  // one pass), route through _aetherAvatarForUnique so duplicates rotate
+  // to the next available portrait by stable agent.id hash. Without the
+  // set, two agents whose role/alias resolves to the same aether file
+  // (e.g. linguist + meeting both → support) render identically and the
+  // user sees twin cards.
+  var avatarUrl;
+  if (usedSet && typeof _aetherAvatarForUnique === 'function') {
+    avatarUrl = _aetherAvatarForUnique(a, usedSet);
+  } else {
+    var aether = _aetherAvatarFor(a);
+    avatarUrl = aether || _robotIconUrl(a.robot_avatar || ('robot_' + (a.role || 'general')));
+  }
+  var isAether = avatarUrl && avatarUrl.indexOf('/aether/') !== -1;
 
   // Persona archetype label (stitch_agent_10 uses STRATEGIST/ARCHITECT/
   // EXECUTOR/AUDITOR — short uppercase mono labels above the title).
@@ -3119,8 +3137,9 @@ function renderAgentsListTech() {
         '</button>' +
       '</div>';
   } else {
+    var _agentsListAvatarUsed = new Set();
     listHtml = '<div class="tc-grid" style="grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:var(--s-md)">' +
-               visible.map(function(a) { return _renderAgentCardTech(a); }).join('') +
+               visible.map(function(a) { return _renderAgentCardTech(a, _agentsListAvatarUsed); }).join('') +
                '</div>';
   }
 
@@ -4089,9 +4108,10 @@ function renderAgentsList() {
 
       // Expanded agent cards
       if (isExpanded) {
+        var _nodeAvatarUsed = new Set();
         html += '<div style="padding:12px 16px;background:var(--surface);border:1px solid '+ meta.color +';border-top:none;border-radius:0 0 10px 10px">'
           + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:10px">'
-          + nodeAgents.map(function(a){ return _renderAgentCard(a); }).join('')
+          + nodeAgents.map(function(a){ return _renderAgentCard(a, _nodeAvatarUsed); }).join('')
           + '</div></div>';
       }
 
@@ -4613,6 +4633,7 @@ function renderDashboard() {
           if (visible.length === 0) {
             return '<div style="color:var(--text3);padding:20px;grid-column:1/-1;font-size:13px">No agents match this filter.</div>';
           }
+          var _legacyDashAvatarUsed = new Set();
           return visible.map(function(a){
             var tu = a.cost_summary || {};
             var aIn = tu.input_tokens || 0;
@@ -4630,7 +4651,7 @@ function renderDashboard() {
                 ' onmouseleave="this.style.borderColor=\'var(--border-light)\';this.style.transform=\'none\'">' +
               '<!-- Top row: avatar + name+role + status -->' +
               '<div style="display:flex;align-items:center;gap:10px">' +
-                '<img src="'+robotSrc(a)+'" style="width:36px;height:36px;border-radius:8px;flex-shrink:0;background:var(--surface3)" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\'" alt="">' +
+                '<img src="'+(typeof _aetherAvatarForUnique === 'function' ? _aetherAvatarForUnique(a, _legacyDashAvatarUsed) : robotSrc(a))+'" style="width:36px;height:36px;border-radius:8px;flex-shrink:0;background:var(--surface3)" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\'" alt="">' +
                 '<div style="width:36px;height:36px;border-radius:8px;background:var(--surface3);display:none;align-items:center;justify-content:center;flex-shrink:0">' +
                   '<span class="material-symbols-outlined" style="font-size:20px;color:var(--primary)">smart_toy</span>' +
                 '</div>' +
