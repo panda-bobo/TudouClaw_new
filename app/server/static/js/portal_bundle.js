@@ -33189,17 +33189,24 @@ window._openRuleEditor = function(existing) {
     + '    <label class="tc-text-dim" style="font-size:11px">Scope targets (comma-separated, * for all)'
     + '      <input id="re-targets" value="' + esc((r.scope.targets || ['*']).join(',')) + '" '
     + '        style="display:block;width:100%;padding:6px 8px;background:var(--surface3);border:1px solid var(--outline-variant);border-radius:4px;color:var(--on-surface);margin-top:4px"></label>'
-    + '    <label class="tc-text-dim" style="font-size:11px">Condition (JSON DSL — empty = always match)'
+    + '    <label class="tc-text-dim" style="font-size:11px">Condition'
+    + '      <div style="display:flex;gap:8px;align-items:center;margin-top:4px;margin-bottom:6px">'
+    + '        <button type="button" id="re-mode-builder" onclick="_setRuleEditorMode(\'builder\')" '
+    + '          class="tc-btn tc-btn-sm" style="font-size:10px;padding:3px 10px">Visual builder</button>'
+    + '        <button type="button" id="re-mode-json" onclick="_setRuleEditorMode(\'json\')" '
+    + '          class="tc-btn tc-btn-ghost tc-btn-sm" style="font-size:10px;padding:3px 10px">JSON</button>'
+    + '      </div>'
+    + '      <div id="re-condition-builder" style="display:block"></div>'
     + '      <textarea id="re-condition" rows="4" '
-    + '        style="display:block;width:100%;padding:6px 8px;background:var(--surface3);border:1px solid var(--outline-variant);border-radius:4px;color:var(--on-surface);margin-top:4px;font-family:var(--font-mono,monospace);font-size:11px">'
+    + '        style="display:none;width:100%;padding:6px 8px;background:var(--surface3);border:1px solid var(--outline-variant);border-radius:4px;color:var(--on-surface);margin-top:4px;font-family:var(--font-mono,monospace);font-size:11px">'
     +        esc(conditionJson) + '</textarea></label>'
-    + '    <label class="tc-text-dim" style="font-size:11px">Actions (JSON array)'
-    + '      <textarea id="re-actions" rows="5" '
-    + '        style="display:block;width:100%;padding:6px 8px;background:var(--surface3);border:1px solid var(--outline-variant);border-radius:4px;color:var(--on-surface);margin-top:4px;font-family:var(--font-mono,monospace);font-size:11px">'
+    + '    <label class="tc-text-dim" style="font-size:11px">Actions'
+    + '      <div id="re-actions-builder" style="margin-top:4px;margin-bottom:6px"></div>'
+    + '      <textarea id="re-actions" rows="3" '
+    + '        style="display:none;width:100%;padding:6px 8px;background:var(--surface3);border:1px solid var(--outline-variant);border-radius:4px;color:var(--on-surface);margin-top:4px;font-family:var(--font-mono,monospace);font-size:11px">'
     +        esc(actionsJson) + '</textarea></label>'
     + '    <div style="font-size:10px;color:var(--text-dim)">'
-    + '      Action types: ' + actionTypes.join(', ') + ' &middot; '
-    + '      Condition ops: eq, ne, in, not_in, exists, missing, matches, gt, lt, gte, lte, starts_with, ends_with, contains, length_*'
+    + '      Visual builder writes JSON for you. Switch to JSON view for advanced (nested all/any/not).'
     + '    </div>'
     + '  </div>'
     + '  <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;padding-top:12px;border-top:1px solid var(--outline-variant)">'
@@ -33209,7 +33216,199 @@ window._openRuleEditor = function(existing) {
     + '</div>';
   modal.className = 're-modal';
   document.body.appendChild(modal);
+  // Initialize the visual builders with the current rule's data
+  window._reBuilderState = {
+    condition: r.condition && Object.keys(r.condition).length ? _conditionToBuilder(r.condition) : [],
+    actions: (r.actions && r.actions.length) ? r.actions.map(function(a){ return Object.assign({}, a); }) : [{ type: 'warn', message: '' }],
+    mode: 'builder',
+  };
+  _renderConditionBuilder();
+  _renderActionsBuilder();
 };
+
+// ── Visual builder ↔ JSON conversion ─────────────────────────────────
+// Builder state: list of {field, op, value} clauses ANDed together.
+// Power users switch to JSON for nested all/any/not — that path stays
+// available via the textarea.
+function _conditionToBuilder(cond) {
+  // Flatten {all: [{...}, {...}]} → array of clauses
+  if (cond && Array.isArray(cond.all)) {
+    return cond.all.map(_clauseFromJson).filter(function(c){ return c; });
+  }
+  // Single op clause
+  var single = _clauseFromJson(cond);
+  return single ? [single] : [];
+}
+
+function _clauseFromJson(cond) {
+  if (!cond || typeof cond !== 'object') return null;
+  var keys = Object.keys(cond);
+  // Find op (anything that isn't 'field')
+  var fld = cond.field;
+  if (typeof fld !== 'string') return null;
+  var op = keys.find(function(k){ return k !== 'field'; });
+  if (!op) return null;
+  return { field: fld, op: op, value: cond[op] };
+}
+
+function _builderToCondition(clauses) {
+  if (!clauses || !clauses.length) return {};
+  if (clauses.length === 1) {
+    var c = clauses[0];
+    var out = { field: c.field };
+    out[c.op] = _coerceValue(c.value, c.op);
+    return out;
+  }
+  return {
+    all: clauses.map(function(c){
+      var out = { field: c.field };
+      out[c.op] = _coerceValue(c.value, c.op);
+      return out;
+    }),
+  };
+}
+
+function _coerceValue(v, op) {
+  if (op === 'in' || op === 'not_in') {
+    if (Array.isArray(v)) return v;
+    if (typeof v === 'string') {
+      try { var parsed = JSON.parse(v); if (Array.isArray(parsed)) return parsed; } catch(_){}
+      return v.split(',').map(function(x){ return x.trim(); }).filter(Boolean);
+    }
+    return [];
+  }
+  if (op === 'exists' || op === 'missing') {
+    return (v === true || v === 'true' || v === 1 || v === '1');
+  }
+  if (['gt','lt','gte','lte','length_eq','length_gt','length_lt'].indexOf(op) >= 0) {
+    var n = Number(v);
+    return isNaN(n) ? 0 : n;
+  }
+  return String(v == null ? '' : v);
+}
+
+window._setRuleEditorMode = function(mode) {
+  var builderEl = document.getElementById('re-condition-builder');
+  var jsonEl = document.getElementById('re-condition');
+  var actBuilder = document.getElementById('re-actions-builder');
+  var actJson = document.getElementById('re-actions');
+  var btnBuilder = document.getElementById('re-mode-builder');
+  var btnJson = document.getElementById('re-mode-json');
+  if (!builderEl || !jsonEl) return;
+  if (mode === 'json') {
+    // Sync builder → json before swapping
+    var cond = _builderToCondition(window._reBuilderState.condition);
+    jsonEl.value = JSON.stringify(cond, null, 2);
+    actJson.value = JSON.stringify(window._reBuilderState.actions, null, 2);
+    builderEl.style.display = 'none';
+    actBuilder.style.display = 'none';
+    jsonEl.style.display = 'block';
+    actJson.style.display = 'block';
+    btnJson.classList.remove('tc-btn-ghost');
+    btnBuilder.classList.add('tc-btn-ghost');
+  } else {
+    // json → builder: re-parse the textarea
+    try {
+      window._reBuilderState.condition = _conditionToBuilder(JSON.parse(jsonEl.value || '{}'));
+      var parsedActs = JSON.parse(actJson.value || '[]');
+      if (Array.isArray(parsedActs) && parsedActs.length) window._reBuilderState.actions = parsedActs;
+    } catch (e) { _toast('JSON invalid; switch back to JSON to fix: ' + e.message, 'error'); return; }
+    builderEl.style.display = 'block';
+    actBuilder.style.display = 'block';
+    jsonEl.style.display = 'none';
+    actJson.style.display = 'none';
+    btnBuilder.classList.remove('tc-btn-ghost');
+    btnJson.classList.add('tc-btn-ghost');
+    _renderConditionBuilder();
+    _renderActionsBuilder();
+  }
+  window._reBuilderState.mode = mode;
+};
+
+function _renderConditionBuilder() {
+  var el = document.getElementById('re-condition-builder');
+  if (!el) return;
+  var clauses = window._reBuilderState.condition;
+  var ops = ['eq','ne','in','not_in','exists','missing','matches','gt','lt','gte','lte','starts_with','ends_with','contains','length_eq','length_gt','length_lt'];
+  var commonFields = ['tool_name','args.path','args.size_bytes','agent.role','agent.id','scope.kind','scope.project_id','task.title','task.output_files','milestone.name','milestone.evidence_length'];
+  var html = '<div style="display:flex;flex-direction:column;gap:6px">';
+  if (!clauses.length) {
+    html += '<div class="tc-text-dim" style="font-size:11px;padding:8px;background:var(--surface3);border-radius:4px">No clauses — rule matches every event. Click "+" to add.</div>';
+  }
+  clauses.forEach(function(c, idx){
+    var fldOpts = commonFields.map(function(f){
+      return '<option value="'+f+'"'+(f===c.field?' selected':'')+'>'+f+'</option>';
+    }).join('') + '<option value="__custom__"'+(commonFields.indexOf(c.field)<0?' selected':'')+'>(custom…)</option>';
+    var opOpts = ops.map(function(o){ return '<option value="'+o+'"'+(o===c.op?' selected':'')+'>'+o+'</option>'; }).join('');
+    html += '<div data-clause-idx="'+idx+'" style="display:flex;gap:6px;align-items:center;padding:6px;background:var(--surface3);border-radius:4px">'
+      + (idx > 0 ? '<span class="tc-text-dim" style="font-size:10px;font-weight:600;width:24px">AND</span>' : '<span style="width:24px"></span>')
+      + '<select onchange="_updateClause('+idx+',\'field\',this.value)" style="flex:1;padding:3px 6px;background:var(--surface);border:1px solid var(--outline-variant);border-radius:3px;color:var(--on-surface);font-size:11px">'+fldOpts+'</select>'
+      + (commonFields.indexOf(c.field) < 0 ? '<input value="'+esc(c.field)+'" onchange="_updateClause('+idx+',\'field\',this.value)" placeholder="custom field" style="flex:1;padding:3px 6px;background:var(--surface);border:1px solid var(--outline-variant);border-radius:3px;color:var(--on-surface);font-size:11px">' : '')
+      + '<select onchange="_updateClause('+idx+',\'op\',this.value)" style="width:100px;padding:3px 6px;background:var(--surface);border:1px solid var(--outline-variant);border-radius:3px;color:var(--on-surface);font-size:11px">'+opOpts+'</select>'
+      + '<input value="'+esc(typeof c.value === 'object' ? JSON.stringify(c.value) : (c.value == null ? '' : String(c.value)))+'" onchange="_updateClause('+idx+',\'value\',this.value)" placeholder="value" style="flex:1;padding:3px 6px;background:var(--surface);border:1px solid var(--outline-variant);border-radius:3px;color:var(--on-surface);font-size:11px">'
+      + '<button onclick="_removeClause('+idx+')" type="button" style="background:none;border:none;color:var(--error);cursor:pointer;font-size:14px">×</button>'
+      + '</div>';
+  });
+  html += '<button onclick="_addClause()" type="button" class="tc-btn tc-btn-ghost tc-btn-sm" style="font-size:11px;align-self:flex-start">+ Add clause</button>'
+       + '</div>';
+  el.innerHTML = html;
+}
+
+window._updateClause = function(idx, field, value) {
+  var c = window._reBuilderState.condition[idx];
+  if (!c) return;
+  if (field === 'field' && value === '__custom__') {
+    c.field = '';
+    _renderConditionBuilder();
+    return;
+  }
+  c[field] = value;
+  if (field === 'field' || field === 'op') _renderConditionBuilder();
+};
+
+window._addClause = function() {
+  window._reBuilderState.condition.push({ field: 'tool_name', op: 'eq', value: '' });
+  _renderConditionBuilder();
+};
+
+window._removeClause = function(idx) {
+  window._reBuilderState.condition.splice(idx, 1);
+  _renderConditionBuilder();
+};
+
+function _renderActionsBuilder() {
+  var el = document.getElementById('re-actions-builder');
+  if (!el) return;
+  var actions = window._reBuilderState.actions;
+  var actionTypes = ((window._ruleEngineState || {}).meta || {}).action_types || ['deny','warn','log','rewrite_arg','require_approval','side_effect'];
+  var html = '<div style="display:flex;flex-direction:column;gap:6px">';
+  actions.forEach(function(a, idx){
+    var typeOpts = actionTypes.map(function(t){ return '<option value="'+t+'"'+(t===a.type?' selected':'')+'>'+t+'</option>'; }).join('');
+    html += '<div style="display:flex;gap:6px;align-items:center;padding:6px;background:var(--surface3);border-radius:4px">'
+      + '<select onchange="_updateAction('+idx+',\'type\',this.value)" style="width:130px;padding:3px 6px;background:var(--surface);border:1px solid var(--outline-variant);border-radius:3px;color:var(--on-surface);font-size:11px">'+typeOpts+'</select>'
+      + '<input value="'+esc(a.message || '')+'" onchange="_updateAction('+idx+',\'message\',this.value)" placeholder="message shown to agent" style="flex:1;padding:3px 6px;background:var(--surface);border:1px solid var(--outline-variant);border-radius:3px;color:var(--on-surface);font-size:11px">'
+      + '<button onclick="_removeAction('+idx+')" type="button" style="background:none;border:none;color:var(--error);cursor:pointer;font-size:14px">×</button>'
+      + '</div>';
+  });
+  html += '<button onclick="_addAction()" type="button" class="tc-btn tc-btn-ghost tc-btn-sm" style="font-size:11px;align-self:flex-start">+ Add action</button>'
+       + '</div>';
+  el.innerHTML = html;
+}
+
+window._updateAction = function(idx, field, value) {
+  var a = window._reBuilderState.actions[idx];
+  if (!a) return;
+  a[field] = value;
+};
+window._addAction = function() {
+  window._reBuilderState.actions.push({ type: 'warn', message: '' });
+  _renderActionsBuilder();
+};
+window._removeAction = function(idx) {
+  window._reBuilderState.actions.splice(idx, 1);
+  _renderActionsBuilder();
+};
+
 
 window._saveRuleFromModal = async function(btn, ruleId) {
   var modal = btn.closest('.re-modal');
@@ -33224,10 +33423,24 @@ window._saveRuleFromModal = async function(btn, ruleId) {
   if (targets.length === 0) targets = ['*'];
 
   var condition, actions;
-  try { condition = JSON.parse(document.getElementById('re-condition').value || '{}'); }
-  catch (e) { _toast('Condition JSON invalid: ' + e.message, 'error'); return; }
-  try { actions = JSON.parse(document.getElementById('re-actions').value || '[]'); }
-  catch (e) { _toast('Actions JSON invalid: ' + e.message, 'error'); return; }
+  // Builder mode (default) → reads from in-memory state. JSON mode →
+  // reads from the textarea. The mode flag is on _reBuilderState.
+  var inBuilderMode = window._reBuilderState && window._reBuilderState.mode === 'builder';
+  if (inBuilderMode) {
+    try {
+      condition = _builderToCondition(window._reBuilderState.condition);
+      actions = window._reBuilderState.actions || [];
+      if (!actions.length) {
+        _toast('Add at least one action', 'error');
+        return;
+      }
+    } catch (e) { _toast('Builder error: ' + e.message, 'error'); return; }
+  } else {
+    try { condition = JSON.parse(document.getElementById('re-condition').value || '{}'); }
+    catch (e) { _toast('Condition JSON invalid: ' + e.message, 'error'); return; }
+    try { actions = JSON.parse(document.getElementById('re-actions').value || '[]'); }
+    catch (e) { _toast('Actions JSON invalid: ' + e.message, 'error'); return; }
+  }
 
   var body = {
     name: name || '(unnamed)',
