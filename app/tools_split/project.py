@@ -775,17 +775,34 @@ def _auto_report_issue(project: Any, *, title: str, description: str,
                        severity: str, related_task_id: str = "",
                        reporter: str = "", source: str = "auto") -> str:
     """Called from Watcher / report_back / deliverable hook. Dedups by
-    title + related_task_id within the last hour to avoid spam."""
+    title + related_task_id.
+
+    Window depends on source:
+    - "watcher": 24h, also matches resolved/won't_fix issues. Resolving
+      or marking won't_fix is the user saying "I've seen this, give me
+      a break" — a server restart shouldn't blast them with the same
+      stuck-agent alerts. Deletion (record removed) still allows
+      re-fire since dedup has nothing to match against.
+    - other sources (report_back, deliverable hooks): 1h, open/investigating
+      only — original behavior preserved.
+    """
     import time as _time
     if project is None:
         return ""
     now = _time.time()
+    is_watcher = (source == "watcher")
+    if is_watcher:
+        dedup_statuses = ("open", "investigating", "resolved", "won't_fix")
+        dedup_window = 24 * 3600  # 24h
+    else:
+        dedup_statuses = ("open", "investigating")
+        dedup_window = 3600  # 1h
     try:
         for iss in (project.issues or []):
             if (iss.title == title
                     and iss.related_task_id == related_task_id
-                    and iss.status in ("open", "investigating")
-                    and (now - iss.created_at) < 3600):
+                    and iss.status in dedup_statuses
+                    and (now - iss.created_at) < dedup_window):
                 return f"(deduped existing issue {iss.id})"
         iss = project.add_issue(
             title=title[:200], description=description,

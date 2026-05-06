@@ -113,6 +113,15 @@ class ProjectWatcher:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._interventions_emitted = 0
+        # Warmup window (seconds) — after the watcher boots, suppress
+        # ALL interventions for this many seconds. Gives agents a
+        # buffer to organically resume work after a server restart
+        # before the watcher starts judging them as "stuck". Without
+        # this, every restart of a project with persisted in_progress
+        # tasks would dump a fresh batch of "Agent stuck" issues into
+        # the Issues/Risks tab the moment the first poll fires.
+        self._boot_at = time.time()
+        self.warmup_seconds = 120  # 2 min
 
     # ── lifecycle ──
 
@@ -201,6 +210,11 @@ class ProjectWatcher:
         """
         now = time.time()
         emitted: list[dict] = []
+
+        # Warmup — silence the watcher for the first warmup_seconds
+        # after boot to absorb post-restart noise.
+        if (now - self._boot_at) < self.warmup_seconds:
+            return emitted
 
         # Fetch the set of agent_ids currently in_progress on this project
         active_agent_ids: set[str] = set()
