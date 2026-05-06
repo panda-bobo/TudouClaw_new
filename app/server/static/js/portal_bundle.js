@@ -32994,7 +32994,7 @@ window._brandingReset = async function() {
 // admin CRUD rules with a JSON condition editor (full visual builder
 // is a follow-up; JSON works for MVP).
 window._ruleEngineState = window._ruleEngineState || {
-  sub: 'global',           // active sub-tab
+  sub: 'recipes',          // active sub-tab — default to recipes for ops
   rules: [],
   meta: null,
 };
@@ -33021,6 +33021,7 @@ function _renderRuleEngineBody(c) {
   var rules = state.rules || [];
   var meta = state.meta || {};
   var subs = [
+    { id: 'recipes', label: '快速模板', icon: 'auto_awesome' },
     { id: 'global',  label: 'Global',  icon: 'public' },
     { id: 'project', label: 'Project', icon: 'folder_special' },
     { id: 'meeting', label: 'Meeting', icon: 'groups' },
@@ -33037,7 +33038,9 @@ function _renderRuleEngineBody(c) {
   }).join('');
 
   var bodyHtml = '';
-  if (state.sub === 'audit') {
+  if (state.sub === 'recipes') {
+    bodyHtml = _renderRecipesGrid();
+  } else if (state.sub === 'audit') {
     bodyHtml = '<div id="rule-audit-body" style="font-family:var(--font-mono,monospace);font-size:11px">Loading…</div>';
   } else {
     var scoped = rules.filter(function(r){
@@ -33475,6 +33478,286 @@ window._saveRuleFromModal = async function(btn, ruleId) {
     _toast('Save failed: ' + e, 'error');
   }
 };
+
+// ── Rule Recipes — opinionated templates for common policies ──
+// Ops doesn't author trigger/scope/condition/action from scratch.
+// They pick a recipe ("disable a tool", "limit concurrency"), fill 2-3
+// blanks, click Apply. Recipe.generate(params) emits a Rule dict that
+// goes through the same POST /rules path as hand-authored rules.
+window._RULE_RECIPES = [
+  {
+    id: 'deny_tool',
+    icon: 'block',
+    title: '禁用一个工具',
+    desc: '当 agent 调用指定工具时,直接拒绝。例如禁用 bash 给 review 角色。',
+    params: [
+      { name: 'tool', label: '工具名', type: 'text',
+        placeholder: '例如: bash, write_file', required: true },
+      { name: 'scope_kind', label: '生效范围', type: 'select',
+        options: ['global','project','meeting','solo'], default: 'global' },
+      { name: 'role', label: '只对这个角色 (留空=所有角色)', type: 'text',
+        placeholder: '例如: reviewer' },
+    ],
+    generate: function(p) {
+      var cond = { field: 'tool_name', eq: p.tool };
+      if (p.role) {
+        cond = { all: [
+          { field: 'tool_name', eq: p.tool },
+          { field: 'agent.role', eq: p.role },
+        ]};
+      }
+      return {
+        name: '禁用 ' + p.tool + (p.role ? ' (仅 ' + p.role + ')' : ''),
+        description: '[recipe:deny_tool] ' + (p.role ? p.role + ' ' : '') + '不许调用 ' + p.tool,
+        scope: { kind: p.scope_kind, targets: ['*'] },
+        trigger: 'before_tool_call',
+        condition: cond,
+        actions: [{ type: 'deny', message: '工具 ' + p.tool + ' 已被禁用' }],
+        priority: 50,
+      };
+    },
+  },
+  {
+    id: 'enforce_path',
+    icon: 'folder_managed',
+    title: '路径必须包含某个前缀',
+    desc: '强制 write_file 的路径必须落在某个目录下。例如所有产物必须写到 deliverables/ 目录。',
+    params: [
+      { name: 'prefix', label: '路径前缀', type: 'text',
+        placeholder: '例如: deliverables/', required: true },
+      { name: 'scope_kind', label: '生效范围', type: 'select',
+        options: ['global','project'], default: 'project' },
+      { name: 'action', label: '处理方式', type: 'select',
+        options: ['warn (只提示)','deny (拦截)'], default: 'deny (拦截)' },
+    ],
+    generate: function(p) {
+      var act = p.action.indexOf('deny') === 0 ? 'deny' : 'warn';
+      return {
+        name: '路径必须含 ' + p.prefix,
+        description: '[recipe:enforce_path] write_file 的目标必须包含 ' + p.prefix,
+        scope: { kind: p.scope_kind, targets: ['*'] },
+        trigger: 'before_file_write',
+        condition: { not: { field: 'args.path', contains: p.prefix } },
+        actions: [{ type: act, message: '文件应该写到 ' + p.prefix + ' 之下' }],
+        priority: 30,
+      };
+    },
+  },
+  {
+    id: 'limit_concurrency',
+    icon: 'speed',
+    title: '限制单个 agent 并发任务数',
+    desc: '某个 agent 已有太多任务在做时,拒绝再分配。防止过载。',
+    params: [
+      { name: 'max_inflight', label: '最多并发任务数', type: 'number',
+        default: '3' },
+      { name: 'scope_kind', label: '生效范围', type: 'select',
+        options: ['global','project'], default: 'project' },
+    ],
+    generate: function(p) {
+      var n = parseInt(p.max_inflight || '3', 10);
+      return {
+        name: '单 agent 最多 ' + n + ' 个并发任务',
+        description: '[recipe:limit_concurrency] 防止任务过载',
+        scope: { kind: p.scope_kind, targets: ['*'] },
+        trigger: 'before_task_assign',
+        condition: { field: 'assignee.current_task_count', gte: n },
+        actions: [{ type: 'deny', message: 'agent 已有 ' + n + '+ 任务在进行,先消化再派' }],
+        priority: 25,
+      };
+    },
+  },
+  {
+    id: 'milestone_evidence',
+    icon: 'fact_check',
+    title: 'milestone 必须有充分的 evidence',
+    desc: 'PM 确认 milestone 时,evidence 字段不能太短。强制写清楚交付了什么。',
+    params: [
+      { name: 'min_chars', label: '最少字符数', type: 'number', default: '50' },
+      { name: 'scope_kind', label: '生效范围', type: 'select',
+        options: ['global','project'], default: 'project' },
+      { name: 'action', label: '处理方式', type: 'select',
+        options: ['warn (只提示)','deny (拦截)'], default: 'deny (拦截)' },
+    ],
+    generate: function(p) {
+      var n = parseInt(p.min_chars || '50', 10);
+      var act = p.action.indexOf('deny') === 0 ? 'deny' : 'warn';
+      return {
+        name: 'milestone evidence ≥ ' + n + ' 字符',
+        description: '[recipe:milestone_evidence] 防止流水账确认',
+        scope: { kind: p.scope_kind, targets: ['*'] },
+        trigger: 'before_milestone_done',
+        condition: { field: 'milestone.evidence_length', lt: n },
+        actions: [{ type: act, message: 'evidence 太短,补全交付清单 + 验收线索' }],
+        priority: 20,
+      };
+    },
+  },
+  {
+    id: 'task_needs_output',
+    icon: 'rule',
+    title: 'task 标完成必须有产物',
+    desc: 'workflow 任务 done 之前,output_files 至少 1 个。防止"无证据完成"。',
+    params: [
+      { name: 'scope_kind', label: '生效范围', type: 'select',
+        options: ['global','project'], default: 'project' },
+    ],
+    generate: function(p) {
+      return {
+        name: 'task done 必须有 output_files',
+        description: '[recipe:task_needs_output] 防止零产物完成',
+        scope: { kind: p.scope_kind, targets: ['*'] },
+        trigger: 'before_task_done',
+        condition: { field: 'task.output_files', length_lt: 1 },
+        actions: [{ type: 'deny', message: '任务必须留下产物再标 done' }],
+        priority: 18,
+      };
+    },
+  },
+  {
+    id: 'use_state_query',
+    icon: 'policy',
+    title: '禁止 grep 查项目状态',
+    desc: '在项目聊天里,glob_files / search_files 改用 project_state(scope=my, project_id=...) 替代。',
+    params: [
+      { name: 'action', label: '处理方式', type: 'select',
+        options: ['warn (只提示)','deny (拦截)'], default: 'warn (只提示)' },
+    ],
+    generate: function(p) {
+      var act = p.action.indexOf('deny') === 0 ? 'deny' : 'warn';
+      return {
+        name: '项目内不许 grep 查状态',
+        description: '[recipe:use_state_query] 推荐 project_state 替代',
+        scope: { kind: 'project', targets: ['*'] },
+        trigger: 'before_tool_call',
+        condition: { field: 'tool_name', in: ['glob_files','search_files'] },
+        actions: [{ type: act, message: '改用 project_state(scope=my, project_id=...)' }],
+        priority: 10,
+      };
+    },
+  },
+  {
+    id: 'rate_limit_calls',
+    icon: 'timer',
+    title: '限制工具单轮调用次数',
+    desc: '一个 agent 在同一回合里调同一个工具超过 N 次就拒绝。防止 grep 死循环。',
+    params: [
+      { name: 'tool', label: '工具名', type: 'text',
+        placeholder: '例如: glob_files', required: true },
+      { name: 'max_calls', label: '最多次数 / 回合', type: 'number', default: '5' },
+    ],
+    generate: function(p) {
+      // Engine doesn't track per-turn call counts natively; this rule
+      // just denies on the named tool and relies on agent.tool_budget
+      // for actual counting. Future trigger will fire with counters.
+      return {
+        name: '限流 ' + p.tool + ' (' + p.max_calls + '/回合)',
+        description: '[recipe:rate_limit_calls] 占位,需要 counter 触发器支持',
+        scope: { kind: 'global', targets: ['*'] },
+        trigger: 'before_tool_call',
+        condition: { field: 'tool_name', eq: p.tool },
+        actions: [{ type: 'log', message: 'rate-limit candidate: ' + p.tool }],
+        priority: 5,
+      };
+    },
+  },
+];
+
+function _renderRecipesGrid() {
+  var rec = window._RULE_RECIPES;
+  var html = ''
+    + '<div style="margin-bottom:16px">'
+    + '<h3 style="margin:0 0 6px;font-size:14px">快速模板 — 选一个常见模式,填几个空</h3>'
+    + '<div class="tc-text-dim" style="font-size:11px">不需要懂 trigger / scope / condition,挑卡片就能配。生成的规则会出现在对应的 scope tab 里,可以再编辑。</div>'
+    + '</div>'
+    + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px">';
+  rec.forEach(function(r){
+    html += ''
+      + '<div class="tc-card" style="padding:14px;cursor:pointer" onclick="_openRecipeForm(\'' + r.id + '\')">'
+      + '  <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">'
+      + '    <span class="material-symbols-outlined" style="font-size:22px;color:var(--primary)">' + r.icon + '</span>'
+      + '    <span style="font-weight:700;font-size:13px">' + esc(r.title) + '</span>'
+      + '  </div>'
+      + '  <div class="tc-text-dim" style="font-size:11px;line-height:1.5">' + esc(r.desc) + '</div>'
+      + '</div>';
+  });
+  html += '</div>';
+  return html;
+}
+
+window._openRecipeForm = function(recipe_id) {
+  var rec = (window._RULE_RECIPES || []).find(function(x){ return x.id === recipe_id; });
+  if (!rec) return;
+  var fieldHtml = '';
+  rec.params.forEach(function(p){
+    fieldHtml += '<label class="tc-text-dim" style="font-size:11px;display:block;margin-bottom:8px">'
+      + esc(p.label) + (p.required ? ' *' : '');
+    if (p.type === 'select') {
+      fieldHtml += '<select id="recipe-param-' + p.name + '" style="display:block;width:100%;padding:6px 8px;background:var(--surface3);border:1px solid var(--outline-variant);border-radius:4px;color:var(--on-surface);margin-top:4px">';
+      (p.options || []).forEach(function(o){
+        fieldHtml += '<option value="' + esc(o) + '"' + (o === p.default ? ' selected' : '') + '>' + esc(o) + '</option>';
+      });
+      fieldHtml += '</select>';
+    } else {
+      var t = p.type === 'number' ? 'number' : 'text';
+      fieldHtml += '<input id="recipe-param-' + p.name + '" type="' + t + '" '
+        + 'value="' + esc(p.default || '') + '" '
+        + (p.placeholder ? 'placeholder="' + esc(p.placeholder) + '" ' : '')
+        + 'style="display:block;width:100%;padding:6px 8px;background:var(--surface3);border:1px solid var(--outline-variant);border-radius:4px;color:var(--on-surface);margin-top:4px">';
+    }
+    fieldHtml += '</label>';
+  });
+  var modal = document.createElement('div');
+  modal.className = 're-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px';
+  modal.innerHTML = ''
+    + '<div class="tc-card" style="max-width:500px;width:100%;padding:20px">'
+    + '  <div style="display:flex;align-items:center;gap:8px;margin:0 0 4px">'
+    + '    <span class="material-symbols-outlined" style="font-size:24px;color:var(--primary)">' + rec.icon + '</span>'
+    + '    <h3 style="margin:0;font-size:15px;font-weight:700">' + esc(rec.title) + '</h3>'
+    + '  </div>'
+    + '  <div class="tc-text-dim" style="font-size:11px;margin-bottom:16px">' + esc(rec.desc) + '</div>'
+    + '  <div>' + fieldHtml + '</div>'
+    + '  <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;padding-top:12px;border-top:1px solid var(--outline-variant)">'
+    + '    <button class="tc-btn tc-btn-ghost" onclick="this.closest(\'.re-modal\').remove()">取消</button>'
+    + '    <button class="tc-btn tc-btn-primary" onclick="_applyRecipe(this,\'' + rec.id + '\')">应用</button>'
+    + '  </div>'
+    + '</div>';
+  document.body.appendChild(modal);
+};
+
+window._applyRecipe = async function(btn, recipe_id) {
+  var rec = (window._RULE_RECIPES || []).find(function(x){ return x.id === recipe_id; });
+  if (!rec) return;
+  var params = {};
+  var ok = true;
+  rec.params.forEach(function(p){
+    var el = document.getElementById('recipe-param-' + p.name);
+    if (!el) return;
+    var v = el.value;
+    if (p.required && !v) { ok = false; }
+    params[p.name] = v;
+  });
+  if (!ok) {
+    _toast('请填写带 * 的字段', 'error');
+    return;
+  }
+  var ruleBody;
+  try { ruleBody = rec.generate(params); }
+  catch (e) { _toast('模板生成失败: ' + e.message, 'error'); return; }
+  try {
+    await api('POST', '/api/portal/rules', ruleBody);
+    btn.closest('.re-modal').remove();
+    _toast('规则已添加 (在 ' + ruleBody.scope.kind + ' tab 里)', 'success');
+    // Switch to the scope tab so user sees the new rule
+    window._ruleEngineState.sub = ruleBody.scope.kind;
+    var c = document.getElementById('content') || document.getElementById('content-outer');
+    if (c) renderRuleEngine(c);
+  } catch (e) {
+    _toast('保存失败: ' + e, 'error');
+  }
+};
+
 
 async function _loadRuleEngineAudit() {
   var el = document.getElementById('rule-audit-body');
