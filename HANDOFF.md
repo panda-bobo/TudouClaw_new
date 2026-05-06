@@ -9,6 +9,22 @@
 
 ---
 
+## ⏸ Deferred — 2026-05-06
+
+**Project Memory (shared L3)** — proposed but explicitly deferred by user.
+Each agent has its own L3 memory; project-level shared memory pool
+(ChromaDB-backed, accessible by all agents in the project, persists
+across agent replacement) doesn't exist yet. Workarounds in use today:
+chat_history (recent N), `share_knowledge`/`learn_from_peers` skills,
+agent's L3 with project_id scope filter (only writer reads).
+
+When picked up: ~540 lines for full version (data model + 3 skills +
+ChromaDB collection + UI tab + rule-engine action handler), or ~250
+for minimal (no UI, no auto-extract). See conversation 2026-05-06 for
+the full design.
+
+---
+
 ## 0. Update — 2026-05-05 (post-handoff state)
 
 The ~30 commits between `7aebcfb` (2026-05-04 stitch-theme handoff)
