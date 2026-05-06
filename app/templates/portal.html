@@ -13,11 +13,19 @@
 <link href="/static/css/theme-tech.css" rel="stylesheet">
 <script>
   /* Apply data-theme attribute as early as possible to avoid flash of
-   * old-theme styles when "tech" is enabled. Reads from localStorage. */
+   * old-theme styles. tech is the default (2026-05-06); legacy users
+   * can still opt out by setting tudou_theme to anything other than
+   * 'tech' / empty (e.g. 'classic'). */
   (function () {
     try {
       var t = localStorage.getItem('tudou_theme');
-      if (t === 'tech') document.documentElement.setAttribute('data-theme', 'tech');
+      if (t === null || t === '' || t === 'tech') {
+        // Default → tech. Persist so the rest of the JS that does
+        // localStorage.getItem('tudou_theme') === 'tech' branches
+        // correctly without 200 sites needing a default rewrite.
+        if (t !== 'tech') localStorage.setItem('tudou_theme', 'tech');
+        document.documentElement.setAttribute('data-theme', 'tech');
+      }
     } catch (e) {}
   })();
 </script>

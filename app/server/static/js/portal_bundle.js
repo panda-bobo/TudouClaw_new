@@ -2248,19 +2248,26 @@ async function refreshSidebar() {
       var projCount = document.getElementById('project-count');
       if (projCount && pData) projCount.textContent = projects.length;
     } catch(e){}
-    // Update event log and task count, and append any chat bubbles for
-    // late-arriving messages (another agent's @-mention, watchdog wake,
-    // scheduled task) that aren't from the user's own current turn.
-    // _pollChatNewMessages is a no-op when an active stream is in flight.
+    // Per-agent heartbeat refreshers. Previously fired every 15s
+    // unconditionally → /api/portal/agent/<id>/events was hit 3× per
+    // tick (loadAgentEventLog + _pollChatNewMessages + the artifact
+    // refresh inside loadAgentEventLog), each pulling 80–400 KB +
+    // doing markdown re-renders for agents with long histories. On
+    // 小新 (coder, 500+ events) this stacked into a multi-second
+    // freeze every 15s. Now: skip entirely when the agent is idle —
+    // there's nothing new to surface. Re-enabled when the agent goes
+    // busy (active task pushes new events worth showing).
+    // Initial load (showAgentView → renderAgentChatTech) still fires
+    // these once on entry; that's where freshness comes from.
     if (currentAgent) {
-      loadAgentEventLog(currentAgent);
-      try { _pollChatNewMessages(currentAgent); } catch(e) {}
-      // Also refresh the state-machine task queue so failed tasks drop
-      // off the UI within the 15s heartbeat instead of sticking around
-      // until the user navigates away and back. Without this, a task
-      // that flipped to failed/cancelled after its row was rendered
-      // appeared to "stay running forever" — its DOM was only cleared
-      // when renderCurrentView ran, which refreshSidebar doesn't trigger.
+      var _ag = (agents || []).find(function(a){ return a.id === currentAgent; });
+      var _isBusy = _ag && (_ag.status === 'busy' || _ag.status === 'running');
+      if (_isBusy) {
+        loadAgentEventLog(currentAgent);
+        try { _pollChatNewMessages(currentAgent); } catch(e) {}
+      }
+      // Task queue refresh stays — it doesn't hit /events and is
+      // needed so failed tasks drop off without navigating away.
       try {
         if (typeof window.isV2Mode === 'function' && window.isV2Mode() &&
             typeof window.loadConversationTasksIntoQueue === 'function') {
@@ -2771,56 +2778,103 @@ var _STATUS_META = {
 var _AETHER_PORTRAITS = new Set([
   'ceo',         // STRATEGIST
   'cto',         // ARCHITECT
-  'coder',       // EXECUTOR
-  'reviewer',    // AUDITOR
-  'tester',      // VALIDATOR (stitch_33 new)
-  'pm',          // ORCHESTRATOR (stitch_33 new)
-  'marketing',   // EVANGELIST (stitch_33 new)
-  'developer',   // BUILDER (stitch_33 new)
-  'data',        // ANALYST (stitch_33 new)
-  'designer',    // own role
-  'security',    // own role
-  'support',     // own role
-  'researcher',  // own role
-  'general',     // catch-all
+  'coder',       // EXECUTOR (legacy)
+  'reviewer',    // AUDITOR (legacy)
+  'tester',     // VALIDATOR (stitch_33)
+  'pm',         // ORCHESTRATOR (stitch_33)
+  'marketing',  // EVANGELIST (stitch_33)
+  'developer',  // BUILDER (stitch_33)
+  'data',       // ANALYST (legacy)
+  'designer',
+  'security',
+  'support',
+  'researcher',
+  'general',
+  // stitch_34 portraits that are visually distinct from their legacy
+  // role-named twins. Adding them to the pool lets aliases spread out
+  // instead of collapsing onto a small set.
+  'executor',
+  'auditor',
+  'analyst',
 ]);
 
 // Alias map: persona archetype names + legacy role names → canonical
 // portrait. Stitch_33's 9 archetypes get FIRST-CLASS unique portraits;
 // legacy/synthetic role names share the nearest archetype.
 var _AETHER_ALIASES = {
-  // ── Stitch_33 archetype names (capitalised forms also map here) ──
-  strategist:        'ceo',         // → STRATEGIST
-  architect:         'cto',         // → ARCHITECT (stitch_33: ARCHITECT = The CTO)
-  executor:          'coder',       // → EXECUTOR
-  auditor:           'reviewer',    // → AUDITOR
-  validator:         'tester',      // → VALIDATOR (NEW)
-  orchestrator:      'pm',          // → ORCHESTRATOR (NEW)
-  evangelist:        'marketing',   // → EVANGELIST (NEW)
-  builder:           'developer',   // → BUILDER (NEW)
-  analyst:           'data',        // → ANALYST (NEW)
+  // ── Stitch_33 archetype names ──
+  // executor / auditor / analyst now have their own portraits in the
+  // pool (added 2026-05-06), so don't collapse them onto coder/reviewer/data.
+  strategist:        'ceo',
+  architect:         'cto',
+  validator:         'tester',
+  orchestrator:      'pm',
+  evangelist:        'marketing',
+  builder:           'developer',
 
-  // ── Stitch_34 archetypes that share existing portraits ──
-  linguist:          'support',     // translator → support helper face
-  optimizer:         'coder',       // efficiency tuner → coder face
-  observer:          'reviewer',    // monitor → reviewer face
-  legal:             'security',    // compliance → security face
-  memory:            'researcher',  // historian → researcher face
-  network:           'marketing',   // connector → marketing face
-  trainer:           'pm',          // coach → pm face
-  forecaster:        'data',        // prophet → data face
+  // ── Stitch_34 archetypes (spread across the 17-portrait pool so
+  // aliases that previously collided don't land on the same image) ──
+  linguist:          'evangelist',  // was 'support' (collided w/ meeting)
+  optimizer:         'executor',    // was 'coder' (collided w/ executor)
+  observer:          'auditor',     // was 'reviewer' (collided w/ auditor)
+  legal:             'security',
+  memory:            'researcher',
+  network:           'analyst',     // was 'marketing' (collided w/ evangelist)
+  trainer:           'orchestrator',
+  forecaster:        'analyst',
 
-  // ── Legacy role names (share with closest archetype) ──
-  devops:            'security',    // shares with `security` base role
-  product_architect: 'pm',          // shares with ORCHESTRATOR/pm
-  tech_expert:       'researcher',  // shares with `researcher` base role
-  specialist:        'researcher',  // shares with `researcher` base role
-  media:             'marketing',   // shares with EVANGELIST/marketing
-  meeting:           'support',     // shares with `support` base role
-  qa:                'reviewer',    // shares with AUDITOR/reviewer
-  ops:               'security',    // shares with `devops`/`security`
-  researcher_v2:     'researcher',  // synthetic alias
+  // ── Legacy role names ──
+  devops:            'security',
+  product_architect: 'cto',         // was 'pm' (collided w/ orchestrator)
+  tech_expert:       'researcher',
+  specialist:        'researcher',
+  media:             'marketing',
+  meeting:           'support',
+  qa:                'reviewer',
+  ops:               'security',
+  researcher_v2:     'researcher',
 };
+
+// Render-time dedup. Some agent lists (dashboard cards, project member
+// lists) want each visible agent to have a visually distinct portrait
+// even when the role/alias picks the same image. This helper resolves
+// each agent's portrait against an in-flight Set of already-used URLs
+// and rotates to the next pool entry on collision. Pass the same Set
+// across all agents in one render pass.
+var _AETHER_POOL = null;
+function _aetherPool() {
+  if (_AETHER_POOL) return _AETHER_POOL;
+  _AETHER_POOL = Array.from(_AETHER_PORTRAITS).map(function(r){
+    return '/static/robots/aether/aether_' + r + '.png';
+  });
+  return _AETHER_POOL;
+}
+
+function _aetherAvatarForUnique(agent, usedSet) {
+  var natural = _aetherAvatarFor(agent);
+  if (!usedSet) return natural;
+  if (!usedSet.has(natural)) {
+    usedSet.add(natural);
+    return natural;
+  }
+  // Collision: rotate through the pool starting from a stable hash of
+  // the agent's id so the picked alternate is deterministic per agent.
+  var pool = _aetherPool();
+  var idStr = String(agent && (agent.id || agent.agent_id) || '');
+  var h = 0;
+  for (var i = 0; i < idStr.length; i++) h = ((h << 5) - h + idStr.charCodeAt(i)) | 0;
+  var start = Math.abs(h) % pool.length;
+  for (var k = 0; k < pool.length; k++) {
+    var pick = pool[(start + k) % pool.length];
+    if (!usedSet.has(pick)) {
+      usedSet.add(pick);
+      return pick;
+    }
+  }
+  // Pool exhausted (more agents than portraits): fall back to natural.
+  return natural;
+}
+window._aetherAvatarForUnique = _aetherAvatarForUnique;
 
 function _aetherAvatarUrl(roleOrAvatar) {
   // Accepts either a bare role ("designer") or the robot_avatar form
@@ -4931,6 +4985,7 @@ function renderDashboardTech() {
   var visible = (_dashFilterRole === 'all')
     ? agents
     : agents.filter(function(a){ return (a.role || 'general') === _dashFilterRole; });
+  var _dashAvatarUsed = new Set();
   var agentCardsHtml = visible.length === 0
     ? '<div class="tc-text-dim" style="padding:24px;grid-column:1/-1;font-size:13px">No agents match this filter.</div>'
     : visible.map(function(a){
@@ -4942,11 +4997,14 @@ function renderDashboardTech() {
         var aTokens = (tu.input_tokens || 0) + (tu.output_tokens || 0);
         var ts = a.tasks_summary || { todo: 0, in_progress: 0, done: 0 };
         var totalTasks = (ts.todo || 0) + (ts.in_progress || 0) + (ts.done || 0);
+        var avatarSrc = (typeof _aetherAvatarForUnique === 'function')
+          ? _aetherAvatarForUnique(a, _dashAvatarUsed)
+          : robotSrc(a);
         return '<div class="tc-card tc-card-clickable tc-stack-sm"' +
                ' onclick="showAgentView(\'' + a.id + '\',null)" style="padding:14px">' +
                  // top: avatar + name/role + status
                  '<div class="tc-row" style="gap:10px">' +
-                   '<img class="tc-avatar tc-avatar-sm" src="' + robotSrc(a) + '"' +
+                   '<img class="tc-avatar tc-avatar-sm" src="' + avatarSrc + '"' +
                         ' onerror="this.style.display=\'none\'" alt="">' +
                    '<div style="flex:1;min-width:0">' +
                      '<div style="font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(a.name) + '</div>' +
@@ -5059,6 +5117,110 @@ function renderDashboardTech() {
   } catch (e) { console.warn('[dashboard-tech] data loader hooks failed:', e); }
 }
 window.renderDashboardTech = renderDashboardTech;
+
+// ── Dashboard data loaders (referenced by renderDashboardTech) ──
+// These were called by name via `typeof === 'function'` checks but
+// never actually defined, leaving Project Count stuck at "-" and
+// Activity Feed / Task Queue stuck at "Loading…". Each loader is
+// idempotent: it looks up its target by id (legacy or tech-mirrored),
+// hits a portal API, and replaces the body.
+async function _loadDashProjectCount() {
+  var el = document.getElementById('dash-project-count') || document.getElementById('dash-tech-project-count');
+  if (!el) return;
+  try {
+    var data = await api('GET', '/api/portal/projects');
+    var list = (data && (data.projects || data)) || [];
+    el.textContent = String(list.length);
+  } catch (e) { el.textContent = '?'; }
+}
+window._loadDashProjectCount = _loadDashProjectCount;
+
+async function _loadDashActivityFeed() {
+  var el = document.getElementById('dash-activity-feed') || document.getElementById('dash-tech-activity-feed');
+  if (!el) return;
+  try {
+    var data = await api('GET', '/api/portal/projects');
+    var list = (data && (data.projects || data)) || [];
+    var items = [];
+    for (var i = 0; i < list.length; i++) {
+      var p = list[i];
+      var tasks = (p.tasks || []).filter(function(t){ return t.status === 'done'; });
+      for (var j = 0; j < tasks.length; j++) {
+        items.push({
+          ts: tasks[j].updated_at || tasks[j].completed_at || tasks[j].created_at || 0,
+          project: p.name || '',
+          name: tasks[j].name || tasks[j].title || '(untitled)',
+          assignee: tasks[j].assigned_to_name || tasks[j].assigned_to || '',
+        });
+      }
+    }
+    items.sort(function(a, b){ return (b.ts || 0) - (a.ts || 0); });
+    items = items.slice(0, 10);
+    if (items.length === 0) {
+      el.innerHTML = '<div class="tc-text-dim" style="font-size:12px">No recent completions.</div>';
+      return;
+    }
+    el.innerHTML = items.map(function(it){
+      var when = it.ts ? new Date(it.ts * 1000).toLocaleString() : '';
+      return '<div style="padding:8px 0;border-bottom:1px solid var(--outline-variant)">'
+        + '<div style="font-size:12px;color:var(--on-surface)">' + esc(it.name) + '</div>'
+        + '<div class="tc-mono-label" style="font-size:10px;color:var(--text-dim);margin-top:2px">'
+          + esc(it.project) + (it.assignee ? ' · ' + esc(it.assignee) : '') + ' · ' + esc(when)
+        + '</div>'
+        + '</div>';
+    }).join('');
+  } catch (e) {
+    el.innerHTML = '<div class="tc-text-dim" style="font-size:12px">Could not load.</div>';
+  }
+}
+window._loadDashActivityFeed = _loadDashActivityFeed;
+
+async function _loadDashTaskQueue() {
+  var el = document.getElementById('dash-task-queue') || document.getElementById('dash-tech-task-queue');
+  if (!el) return;
+  try {
+    var data = await api('GET', '/api/portal/projects');
+    var list = (data && (data.projects || data)) || [];
+    var items = [];
+    for (var i = 0; i < list.length; i++) {
+      var p = list[i];
+      var tasks = (p.tasks || []).filter(function(t){ return t.status === 'in_progress' || t.status === 'todo'; });
+      for (var j = 0; j < tasks.length; j++) {
+        items.push({
+          status: tasks[j].status,
+          ts: tasks[j].updated_at || tasks[j].created_at || 0,
+          project: p.name || '',
+          name: tasks[j].name || tasks[j].title || '(untitled)',
+          assignee: tasks[j].assigned_to_name || tasks[j].assigned_to || '',
+        });
+      }
+    }
+    items.sort(function(a, b){
+      if (a.status !== b.status) return a.status === 'in_progress' ? -1 : 1;
+      return (b.ts || 0) - (a.ts || 0);
+    });
+    items = items.slice(0, 10);
+    if (items.length === 0) {
+      el.innerHTML = '<div class="tc-text-dim" style="font-size:12px">Queue empty.</div>';
+      return;
+    }
+    el.innerHTML = items.map(function(it){
+      var dotColor = it.status === 'in_progress' ? 'var(--cyber-lime, #adff2f)' : 'var(--outline, #888)';
+      return '<div style="padding:8px 0;border-bottom:1px solid var(--outline-variant);display:flex;align-items:center;gap:8px">'
+        + '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + dotColor + ';flex-shrink:0"></span>'
+        + '<div style="flex:1;min-width:0">'
+          + '<div style="font-size:12px;color:var(--on-surface);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(it.name) + '</div>'
+          + '<div class="tc-mono-label" style="font-size:10px;color:var(--text-dim);margin-top:2px">'
+            + esc(it.project) + (it.assignee ? ' · ' + esc(it.assignee) : '') + ' · ' + esc(it.status)
+          + '</div>'
+        + '</div>'
+        + '</div>';
+    }).join('');
+  } catch (e) {
+    el.innerHTML = '<div class="tc-text-dim" style="font-size:12px">Could not load.</div>';
+  }
+}
+window._loadDashTaskQueue = _loadDashTaskQueue;
 
 
 // ============ Agent Chat ============
@@ -5313,9 +5475,12 @@ function renderAgentChat(agentId) {
   // targeted was deleted along with the "普通 vs 状态机" UX dichotomy.
   populateQuickModelSwitch(agentId);
   loadAgentRuntimeStats(agentId);
-  // 周期刷新 token / memory 统计（每 8 秒一次）
+  // 周期刷新 token / memory 统计（每 8 秒一次） — 但 idle agent 跳过
+  // 网络往返,只在 busy 时拉取(stats 不变化的时候轮询是浪费)。
   if (window._agentRuntimeStatsTimer) clearInterval(window._agentRuntimeStatsTimer);
   window._agentRuntimeStatsTimer = setInterval(function(){
+    var ag = (agents || []).find(function(a){ return a.id === agentId; });
+    if (!ag || (ag.status !== 'busy' && ag.status !== 'running')) return;
     loadAgentRuntimeStats(agentId);
   }, 8000);
   // Reconnect to active task stream if agent is busy
@@ -5901,6 +6066,10 @@ async function loadExecutionSteps(agentId) {
     }
     var ag = agents.find(function(a){ return a.id === agentId; });
     if (!ag) return;
+    // Skip the network round-trip when the agent is idle. Idle agents
+    // can't be making plan progress, so polling /plans every 3s just
+    // burns bandwidth and blocks the rate-limit-less backend.
+    if (ag.status !== 'busy' && ag.status !== 'running') return;
     try {
       var d = await api('GET', '/api/portal/agent/' + agentId + '/plans');
       if (!d || !d.current_plan) return;
@@ -6249,6 +6418,32 @@ async function loadAgentChat(agentId, _retryCount) {
 
     if (!hasMessages) {
       el.innerHTML = '';
+      // Render cap: agents with long histories (e.g. coder with 500+ events)
+      // froze the browser by creating one bubble synchronously per event on
+      // first open. Cap to the most recent N message events; memory_refs
+      // that follow them in the stream still attach correctly.
+      // 20 (was 50) — even 50 long markdown-rendered bubbles still blocked
+      // the main thread for ~5s in stress tests. 20 is fast enough that
+      // the page stays interactive.
+      var MSG_RENDER_CAP = 20;
+      var _allEvents = data.events || [];
+      var _msgPositions = [];
+      for (var _ei = 0; _ei < _allEvents.length; _ei++) {
+        if (_allEvents[_ei].kind === 'message') _msgPositions.push(_ei);
+      }
+      var _startIdx = 0;
+      var _hiddenCount = 0;
+      if (_msgPositions.length > MSG_RENDER_CAP) {
+        _startIdx = _msgPositions[_msgPositions.length - MSG_RENDER_CAP];
+        _hiddenCount = _msgPositions.length - MSG_RENDER_CAP;
+      }
+      if (_hiddenCount > 0) {
+        var _notice = document.createElement('div');
+        _notice.className = 'chat-history-notice';
+        _notice.style.cssText = 'text-align:center;padding:8px 12px;margin:4px 0 8px;color:var(--muted-foreground,#888);font-size:12px;border-bottom:1px dashed var(--border-color,#444);';
+        _notice.textContent = '↑ ' + _hiddenCount + (window._t ? ' ' + (window._t('chat.olderHidden') || 'earlier messages hidden') : ' earlier messages hidden');
+        el.appendChild(_notice);
+      }
       // GLOBAL dedup of assistant messages in one history load.
       //
       // Consecutive-only dedup isn't enough — when the agent retries a
@@ -6260,30 +6455,62 @@ async function loadAgentChat(agentId, _retryCount) {
       // templated bridge lines and true replays.
       var _seenAssistant = new Set();
       var _lastAssistantContentDiv = null;
-      for(const evt of (data.events||[])) {
-        if(evt.kind==='message') {
-          const role = evt.data.role||'assistant';
-          if(role==='system') continue;
-          var content = evt.data.content||'';
-          if(role==='assistant' && !content.trim()) continue;
-          if(role==='assistant') {
-            var trimmed = content.trim();
-            if(_seenAssistant.has(trimmed)) continue;
-            _seenAssistant.add(trimmed);
+      // Bulk-render optimization: addChatBubble does `el.scrollTop =
+      // el.scrollHeight` at the end of every call, which forces a layout
+      // recalc. With 50 long markdown-rendered assistant messages, that's
+      // 50 forced reflows × ~50-150ms each = the multi-second freeze
+      // users see on agents with deep histories. We temporarily override
+      // scrollHeight to return 0 (and scrollTop to no-op) so the loop
+      // appends without triggering layout, then do ONE final scroll
+      // afterwards for the visual "scrolled to bottom" effect.
+      var _origScrollHeightDesc = Object.getOwnPropertyDescriptor(
+        Element.prototype, 'scrollHeight');
+      try {
+        Object.defineProperty(el, 'scrollHeight', { configurable: true, get: function(){ return 0; } });
+        Object.defineProperty(el, 'scrollTop', { configurable: true, get: function(){ return 0; }, set: function(){} });
+        var _bubbleCount = 0;
+        for (var _ix = _startIdx; _ix < _allEvents.length; _ix++) {
+          const evt = _allEvents[_ix];
+          if(evt.kind==='message') {
+            const role = evt.data.role||'assistant';
+            if(role==='system') continue;
+            var content = evt.data.content||'';
+            if(role==='assistant' && !content.trim()) continue;
+            if(role==='assistant') {
+              var trimmed = content.trim();
+              if(_seenAssistant.has(trimmed)) continue;
+              _seenAssistant.add(trimmed);
+            }
+            var _ret = addChatBubble(agentId, role, content, evt.timestamp||0);
+            if (role === 'assistant' && _ret) {
+              _lastAssistantContentDiv = _ret;
+            }
+            _bubbleCount++;
+            // Yield to main thread every 5 bubbles so click/scroll/key events
+            // can dispatch even during large initial loads. Without this,
+            // 20 markdown-rendered Chinese assistant bubbles run as one
+            // long sync task and the page is unresponsive for ~2s.
+            if (_bubbleCount % 5 === 0) {
+              await new Promise(function(r){ setTimeout(r, 0); });
+            }
+          } else if (evt.kind === 'memory_refs') {
+            // 新 A.10: attach 🧠 badge + per-ref delete buttons to the
+            // most recent assistant bubble in the stream.
+            var refs = (evt.data || {}).refs || [];
+            if (refs.length && _lastAssistantContentDiv) {
+              _attachMemoryRefsBadge(_lastAssistantContentDiv, refs);
+            }
           }
-          var _ret = addChatBubble(agentId, role, content, evt.timestamp||0);
-          if (role === 'assistant' && _ret) {
-            _lastAssistantContentDiv = _ret;
-          }
-        } else if (evt.kind === 'memory_refs') {
-          // 新 A.10: attach 🧠 badge + per-ref delete buttons to the
-          // most recent assistant bubble in the stream.
-          var refs = (evt.data || {}).refs || [];
-          if (refs.length && _lastAssistantContentDiv) {
-            _attachMemoryRefsBadge(_lastAssistantContentDiv, refs);
-          }
+          // tool_call and tool_result are hidden from chat — only shown in Execution Log
         }
-        // tool_call and tool_result are hidden from chat — only shown in Execution Log
+      } finally {
+        // Restore the real scrollHeight/scrollTop and do ONE final scroll
+        // to bottom (the visual "jump to latest" affordance).
+        try {
+          delete el.scrollHeight;
+          delete el.scrollTop;
+        } catch (_) {}
+        try { el.scrollTop = el.scrollHeight; } catch (_) {}
       }
     }
   } catch(e) {
@@ -6341,7 +6568,20 @@ async function _pollChatNewMessages(agentId) {
 
     var data = await api('GET', '/api/portal/agent/' + agentId + '/events');
     if (!data || !data.events) return;
-    for (var j = 0; j < data.events.length; j++) {
+    // Cap to last N message events (mirrors loadAgentChat MSG_RENDER_CAP).
+    // Without this, when loadAgentChat hides 450 older messages, every
+    // heartbeat tick sees those 450 as "missing from DOM" and re-adds
+    // them — defeating the cap and freezing the main thread on agents
+    // with long histories.
+    var POLL_MSG_CAP = 50;
+    var msgPositions = [];
+    for (var p = 0; p < data.events.length; p++) {
+      if (data.events[p].kind === 'message') msgPositions.push(p);
+    }
+    var pollStart = msgPositions.length > POLL_MSG_CAP
+      ? msgPositions[msgPositions.length - POLL_MSG_CAP]
+      : 0;
+    for (var j = pollStart; j < data.events.length; j++) {
       var ev = data.events[j];
       if (ev.kind !== 'message') continue;
       var d = ev.data || {};
@@ -18007,6 +18247,22 @@ async function renderProjectDetail(projId) {
         (proj.workflow_binding.step_assignments||[]).forEach(function(sa){
           stepAgentMap[sa.step_index] = sa.agent_id;
         });
+        // Phase 3 fix D (2026-05-06): build a step-name → milestone map
+        // so we can show milestone state alongside each WF step. Match
+        // on substring either direction (handles "测试验证" ↔
+        // "M4 — 测试验证"). First match wins.
+        var _msList = (proj.milestones || []);
+        function _msForStepName(stepName) {
+          if (!stepName) return null;
+          for (var i = 0; i < _msList.length; i++) {
+            var msName = (_msList[i].name || '').trim();
+            if (!msName) continue;
+            if (msName.indexOf(stepName) >= 0 || stepName.indexOf(msName) >= 0) {
+              return _msList[i];
+            }
+          }
+          return null;
+        }
         wfStepsEl.innerHTML = wfTasks.map(function(t) {
           var isDone = t.status === 'done';
           var isInProgress = t.status === 'in_progress';
@@ -18036,10 +18292,29 @@ async function renderProjectDetail(projId) {
               '</div>'
             : '';
           var borderExtra = pendingApproval ? ';border-color:rgba(59,130,246,0.4)' : '';
+          // Milestone badge — shows whether the corresponding milestone
+          // has been auto-bridged (project.py _bridge_task_to_milestone).
+          // Helps spot the "WF done but milestone still pending" gap.
+          var _ms = _msForStepName(stepName);
+          var msBadge = '';
+          if (_ms) {
+            var msColor, msIcon, msLabel;
+            if (_ms.status === 'done' || _ms.status === 'confirmed') {
+              msColor = 'var(--success, #4caf50)'; msIcon = '🎯'; msLabel = 'M done';
+            } else if (_ms.status === 'in_progress') {
+              msColor = 'var(--warning, #ff9800)'; msIcon = '🎯'; msLabel = 'M wip';
+            } else {
+              msColor = 'var(--text3)'; msIcon = '🎯'; msLabel = 'M ' + (_ms.status || 'pending');
+            }
+            msBadge = '<span title="Milestone: '+esc(_ms.name)+' ('+esc(_ms.status||'pending')+')" '
+              + 'style="font-size:9px;padding:1px 5px;border-radius:8px;border:1px solid '+msColor+';color:'+msColor+';white-space:nowrap;font-family:var(--font-mono,monospace)">'
+              + msIcon + ' ' + esc(msLabel) + '</span>';
+          }
           return '<div style="background:var(--surface);border-radius:8px;padding:8px 10px;border:1px solid var(--overlay-5)'+borderExtra+';font-size:11px;border-left:3px solid '+barColor+'">' +
             '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px">' +
               toggleBtn +
               '<span style="flex:1;font-weight:600;color:'+(isDone?'var(--text3)':'var(--text)')+';'+(isDone?'text-decoration:line-through':'')+'">' +esc(stepName)+'</span>' +
+              msBadge +
               reopenBtn +
               '<span style="font-size:10px;color:var(--primary);white-space:nowrap">'+esc(agentName)+'</span>' +
             '</div>' +
