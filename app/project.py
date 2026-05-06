@@ -1024,6 +1024,30 @@ class Project:
                     dv.submitted_at = time.time()
                     dv.updated_at = time.time()
                     self.updated_at = time.time()
+                    # ── L0 status sync (2026-05-06) ──
+                    # Auto-append this submission as evidence on the
+                    # linked milestone, so PM/admin sees the trail
+                    # without an extra tool call. Idempotent: re-submit
+                    # of the same deliverable bumps the version note
+                    # rather than duplicating evidence lines.
+                    if dv.milestone_id:
+                        for ms in self.milestones:
+                            if ms.id != dv.milestone_id:
+                                continue
+                            line = (f"[deliverable] {dv.title} "
+                                    f"(v{dv.version}, by "
+                                    f"{dv.author_agent_id[:8]}) "
+                                    f"submitted at "
+                                    f"{time.strftime('%Y-%m-%d %H:%M:%S')}")
+                            existing = ms.evidence or ""
+                            if line not in existing:
+                                ms.evidence = (existing + ("\n" if existing else "") + line)
+                            # If the milestone is still pending and
+                            # any deliverable submitted, bump it to
+                            # in_progress (there's clearly activity).
+                            if ms.status == "pending":
+                                ms.status = "in_progress"
+                            break
                     return dv
         return None
 
@@ -1046,6 +1070,29 @@ class Project:
                         })
                         dv.version += 1
                     self.updated_at = time.time()
+                    # ── L0 status sync: when ALL deliverables linked to
+                    # a milestone are approved, auto-flip the milestone
+                    # to done. PM still has explicit "confirm_milestone"
+                    # for cases where they want manual sign-off, but
+                    # this catches the common case where approving the
+                    # last deliverable IS the sign-off.
+                    if approved and dv.milestone_id:
+                        ms = next((m for m in self.milestones
+                                   if m.id == dv.milestone_id), None)
+                        if ms and ms.status not in ("done", "confirmed"):
+                            linked = [d for d in self.deliverables
+                                      if d.milestone_id == ms.id]
+                            all_approved = (
+                                bool(linked) and
+                                all(d.status == DeliverableStatus.APPROVED for d in linked)
+                            )
+                            if all_approved:
+                                ms.status = "done"
+                                ms.evidence = (ms.evidence or "") + (
+                                    "\n" if ms.evidence else ""
+                                ) + (f"[auto] all linked deliverables "
+                                     f"approved at "
+                                     f"{time.strftime('%Y-%m-%d %H:%M:%S')}")
                     return dv
         return None
 
