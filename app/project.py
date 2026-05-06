@@ -2316,6 +2316,18 @@ class ProjectChatEngine:
                     logger.debug("deliverable gate skipped: %s", _dv_err)
                     ok, missing = True, []
 
+                # Phase 3 fix B (2026-05-06): generic fallback for
+                # workflow tasks that ship without an explicit contract.
+                # If the agent claims done but produced ZERO output files
+                # (auto-tracked from write_file/edit_file), refuse —
+                # workflow steps must leave behind some artifact.
+                # Skips: non-workflow tasks (chat-driven dispatch, etc.)
+                # which legitimately may not write files.
+                if ok and getattr(task, "created_by", "") == "workflow" \
+                        and not (task.output_files or []):
+                    ok = False
+                    missing = ["(workflow task produced no output files)"]
+
                 if not ok:
                     # Block completion. Push back to IN_PROGRESS with a
                     # message the agent will see on its next turn.
@@ -2348,6 +2360,15 @@ class ProjectChatEngine:
                     msg_type="task_update",
                     task_id=task.id,
                 )
+                # Phase 3 fix (2026-05-06): bridge workflow → milestone.
+                # Workflow tasks and project milestones are parallel
+                # stores. Without this, WF Step N done leaves the
+                # matching milestone stuck at "pending" forever.
+                # Match by name substring after the [WF Step N] prefix.
+                try:
+                    self._bridge_task_to_milestone(project, task)
+                except Exception as _ms_err:
+                    logger.debug("milestone bridge skipped: %s", _ms_err)
                 # L3 extraction trigger — fire on transition to DONE.
                 # Wrapped to never break the task completion flow on errors.
                 self._fire_l3_task_done_hook(task)
@@ -2844,6 +2865,51 @@ class ProjectChatEngine:
 
         # Auto-progress: trigger next step's agent
         self._auto_progress_next_step(project, task)
+
+    def _bridge_task_to_milestone(self, project: Project, task: ProjectTask) -> None:
+        """Mark the matching project milestone as 'done' when a workflow
+        task transitions to DONE.
+
+        Match strategy: strip the '[WF Step N] ' prefix from the task
+        title, then find a milestone whose name contains the remainder
+        (case-insensitive, substring both ways). First match wins.
+        Idempotent — only flips milestones that aren't already done.
+        Records the task id as evidence so admin can trace provenance.
+        """
+        if not task or not project:
+            return
+        title = (task.title or "").strip()
+        if not title:
+            return
+        import re as _re
+        m = _re.match(r"^\[WF\s*Step\s*\d+\]\s*(.+)$", title, _re.IGNORECASE)
+        core = (m.group(1) if m else title).strip()
+        if not core:
+            return
+        for ms in project.milestones:
+            if ms.status == "done" or ms.status == "confirmed":
+                continue
+            ms_name = (ms.name or "").strip()
+            if not ms_name:
+                continue
+            # Substring either direction (handles "测试验证" ↔ "M4 — 测试验证")
+            if core in ms_name or ms_name in core:
+                ms.status = "done"
+                ms.evidence = (ms.evidence or "") + (
+                    "\n" if ms.evidence else ""
+                ) + f"[auto] WF task {task.id} done at {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                project.updated_at = time.time()
+                logger.info(
+                    "milestone bridge: task %s → milestone %s (%s)",
+                    task.id, ms.id, ms_name)
+                # Also persist immediately so the UI sees the update.
+                try:
+                    hub = getattr(self, "hub", None) or getattr(self, "_hub", None)
+                    if hub and hasattr(hub, "_save_projects"):
+                        hub._save_projects()
+                except Exception:
+                    pass
+                break
 
     def _fire_l3_task_done_hook(self, task: ProjectTask) -> None:
         """Trigger L3 fact extraction when a project task transitions to DONE.

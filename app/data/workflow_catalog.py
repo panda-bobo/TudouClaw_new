@@ -78,6 +78,16 @@ WORKFLOW_CATALOG: list[dict[str, Any]] = [
                 "output_spec": "项目立项文档（含目标、范围、计划、风险）",
                 "suggested_role": "pm",
                 "depends_on": [],
+                # Phase 3 backfill (2026-05-06): every step now carries
+                # an explicit deliverable contract so the gate at
+                # project.py:_check_active_task_deliverables actually
+                # fires (it short-circuits when output_files is empty).
+                "output_files": ["initiation-doc.md"],
+                "must_contain": [
+                    "## 项目目标", "## 范围", "## 干系人",
+                    "## 里程碑", "## 风险",
+                ],
+                "min_lines": 30,
             },
             {
                 "id": "s_requirements",
@@ -97,6 +107,12 @@ WORKFLOW_CATALOG: list[dict[str, Any]] = [
                 "output_spec": "PRD (Product Requirements Document)",
                 "suggested_role": "pm",
                 "depends_on": ["s_initiation"],
+                "output_files": ["requirements-prd.md"],
+                "must_contain": [
+                    "## 用户故事", "## 功能需求",
+                    "## 非功能需求", "## 验收标准",
+                ],
+                "min_lines": 50,
             },
             {
                 "id": "s_architecture",
@@ -197,6 +213,12 @@ WORKFLOW_CATALOG: list[dict[str, Any]] = [
                 "output_spec": "部署文档 + 发布检查清单 + 回滚方案",
                 "suggested_role": "devops",
                 "depends_on": ["s_testing"],
+                "output_files": ["deployment-plan.md"],
+                "must_contain": [
+                    "## 发布检查", "## 部署步骤",
+                    "## 回滚", "## 监控",
+                ],
+                "min_lines": 30,
             },
             {
                 "id": "s_retrospective",
@@ -217,6 +239,12 @@ WORKFLOW_CATALOG: list[dict[str, Any]] = [
                 "output_spec": "复盘报告（KIT 格式）",
                 "suggested_role": "pm",
                 "depends_on": ["s_deploy"],
+                "output_files": ["retrospective-report.md"],
+                "must_contain": [
+                    "## 目标达成", "## Keep",
+                    "## Improve", "## Try", "## 行动项",
+                ],
+                "min_lines": 30,
             },
         ],
     },
