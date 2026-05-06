@@ -7921,6 +7921,33 @@ Write only the summary body. Do not include any preamble or prefix."""
                 readonly_dirs.append(_skills_root)
         except Exception:
             pass
+        # Member-project shared workspaces — readonly fallback so that
+        # an agent who is a project member can always READ that project's
+        # deliverables, even when _active_context_id wasn't switched to
+        # the project (e.g. admin DMs the agent in solo mode while it
+        # has unfinished WF Step work, or the active context drifted
+        # mid-turn). Writes still gated by the project being the
+        # current active context (which makes the path land in
+        # allowed_dirs above instead of just readonly_dirs here).
+        try:
+            import sys as _sys_mp
+            _llm_mod_mp = _sys_mp.modules.get(__package__ + ".llm") if __package__ else None
+            _hub_mp = getattr(_llm_mod_mp, "_active_hub", None) if _llm_mod_mp else None
+            _projects_mp = getattr(_hub_mp, "projects", None) if _hub_mp else None
+            if _projects_mp and hasattr(_projects_mp, "items"):
+                for _pid_mp, _proj_mp in _projects_mp.items():
+                    _members_mp = getattr(_proj_mp, "members", []) or []
+                    if any(getattr(_m, "agent_id", "") == self.id
+                           for _m in _members_mp):
+                        _pwd_mp = self.get_shared_workspace_path(_pid_mp)
+                        if (_pwd_mp
+                                and _pwd_mp not in readonly_dirs
+                                and _pwd_mp not in allowed_dirs):
+                            readonly_dirs.append(_pwd_mp)
+        except Exception:
+            # Non-fatal — member-project read fallback is a defense in
+            # depth, not a primary access path.
+            pass
 
         policy = _sandbox.SandboxPolicy(
             root=root, mode=mode, allow_list=allow_list,
