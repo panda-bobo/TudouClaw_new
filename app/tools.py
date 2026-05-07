@@ -377,22 +377,71 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "bash",
             "description": (
-                "Execute a shell command with configurable timeout and sandbox policy enforcement.\n"
-                "Use when: running a compile/test/format command, git operations, quick system queries, any task that is naturally a CLI invocation.\n"
-                "Not for: file reads (use read_file), file searches (use search_files/glob_files), pip installs (use pip_install for clear intent), date math (use datetime_calc).\n"
-                "Output: stdout + stderr (labeled) + exit code. Commands run in the sandbox root (agent's working_dir).\n"
-                "GOTCHA: dangerous commands may be blocked by sandbox policy. Max timeout 600s. Avoid long-running commands that buffer output — no stdout is returned until the process exits or the timeout fires."
+                "Execute a shell command. Two modes: foreground (default, sync, blocks until exit/timeout) and background (run_in_background=true, returns immediately with a process_id).\n"
+                "Use when: running a compile/test/format command, git operations, quick system queries; or — with run_in_background=true — starting a long-running dev server / build watch / file watcher / daemon.\n"
+                "Not for: file reads (use read_file), file searches (use search_files/glob_files), pip installs (use pip_install for clear intent), date math (use datetime_calc). Avoid `bash cd <dir>` as a standalone call — each bash is a fresh shell, cd doesn't persist; chain with && (e.g. `cd /path && ls`) instead.\n"
+                "Output: foreground returns stdout + stderr + exit code. Background returns 🟢 status line with pid + first log slice; use bash_logs(process_id) for incremental output, bash_kill(process_id) to terminate.\n"
+                "GOTCHA: foreground max timeout 600s. For dev servers / `npx http-server` / `npm run dev` etc. — ALWAYS pass run_in_background=true; they never exit, so foreground will timeout and kill them. Use chain (`cmd1 && cmd2`) when you need cwd to persist across steps."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "Shell command to execute"},
+                    "command": {"type": "string", "description": "Shell command to execute. Chain multi-step shell work with && or ; in a single call rather than issuing several bash calls. cd is per-call (doesn't persist across calls)."},
                     "timeout": {
                         "type": "integer",
-                        "description": "Timeout in seconds (default 30)",
+                        "description": "Timeout in seconds for foreground mode (default 30, max 600). Ignored when run_in_background=true.",
+                    },
+                    "run_in_background": {
+                        "type": "boolean",
+                        "description": "Start the command in the background without blocking. Returns a process_id. Use for dev servers / watchers / daemons. Pull output later with bash_logs.",
+                    },
+                    "background_log_lines": {
+                        "type": "integer",
+                        "description": "When run_in_background=true: how many initial log lines to return in the response (default 30, max 500).",
                     },
                 },
                 "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "bash_logs",
+            "description": (
+                "Pull recent log lines from a background bash process started via bash(run_in_background=true).\n"
+                "Use when: you started a dev server / long-running command in the background and want to see what it's printing. Repeated calls return the latest tail (no offset / no incremental cursor — just the last N lines).\n"
+                "Not for: foreground commands (their output is already in the bash result). Not as a polling loop substitute for waiting — if you just want to wait for a server to be ready, prefer one or two calls separated by other work.\n"
+                "Output: status line (running / exited with code) + last N log lines. Records GC'd ~1 hour after exit.\n"
+                "GOTCHA: process_id must be one returned by an earlier bash(run_in_background=true). Stale or wrong pids return an error."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "process_id": {"type": "integer", "description": "The pid returned by bash(run_in_background=true)."},
+                    "lines": {"type": "integer", "description": "How many log lines to return (default 30, max 500)."},
+                },
+                "required": ["process_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "bash_kill",
+            "description": (
+                "Terminate a background bash process started via bash(run_in_background=true). SIGTERM first, SIGKILL if it doesn't exit within 2s.\n"
+                "Use when: cleaning up a dev server / watcher you started and no longer need; or when a background process is misbehaving / wrong-config and needs a restart.\n"
+                "Not for: foreground commands (they always exit on their own). Not as a way to abort a still-running unrelated agent task — that's the host's responsibility.\n"
+                "Output: ⏹ confirmation with final exit code. Idempotent — calling on an already-finished pid returns its final status without erroring.\n"
+                "GOTCHA: process_id must be one returned by an earlier bash(run_in_background=true)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "process_id": {"type": "integer", "description": "The pid returned by bash(run_in_background=true)."},
+                },
+                "required": ["process_id"],
             },
         },
     },
@@ -2950,6 +2999,8 @@ from .tools_split.fs import (  # noqa: E402,F401
 # coherence. Schemas still in TOOL_DEFINITIONS above.
 from .tools_split.system import (  # noqa: E402,F401
     _tool_bash,
+    _tool_bash_logs,
+    _tool_bash_kill,
     _tool_pip_install,
     _tool_desktop_screenshot,
 )
@@ -3093,6 +3144,8 @@ _TOOL_FUNCS: dict[str, callable] = {
     "write_file": _tool_write_file,
     "edit_file": _tool_edit_file,
     "bash": _tool_bash,
+    "bash_logs": _tool_bash_logs,
+    "bash_kill": _tool_bash_kill,
     "run_tests": _tool_run_tests,
     "search_files": _tool_search_files,
     "glob_files": _tool_glob_files,

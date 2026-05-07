@@ -2,6 +2,12 @@
 
 Grouped together because all three shell out (subprocess) or touch
 the host system beyond the normal tool sandbox.
+
+Bash supports two modes:
+  - foreground (default): synchronous, returns stdout/stderr/exit_code
+  - background (run_in_background=True): Popen + return immediately
+    with a process_id; logs streamed to a tmp file. Use bash_logs(pid)
+    to pull incremental output, bash_kill(pid) to terminate.
 """
 from __future__ import annotations
 
@@ -9,6 +15,9 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 from typing import Any
 
 from .. import sandbox as _sandbox
@@ -21,6 +30,16 @@ _BASH_TIMEOUT_MIN_S = 1
 _BASH_TIMEOUT_MAX_S = 600
 _BASH_TIMEOUT_DEFAULT_S = 30
 
+# Background-job registry. process_id → record. Records persist for
+# 1 hour past process exit so the agent can still pull logs after
+# completion. {pid: {cmd, log_path, started_at, proc, exit_code,
+#                    finished_at, last_read_offset}}
+_BACKGROUND_JOBS: dict[int, dict] = {}
+_BACKGROUND_JOBS_LOCK = threading.Lock()
+_BG_RETAIN_SECONDS = 3600
+_BG_LOG_DEFAULT_LINES = 30
+_BG_LOG_MAX_LINES = 500
+
 # pip install: give it 5 minutes — first-time installs of heavy wheels
 # (numpy, torch, pptx) can genuinely take that long on slow networks.
 _PIP_TIMEOUT_S = 300
@@ -32,11 +51,22 @@ _DESKTOP_CAPTURE_TIMEOUT_S = 10
 # ── bash ─────────────────────────────────────────────────────────────
 
 def _tool_bash(command: str, timeout: int = _BASH_TIMEOUT_DEFAULT_S,
+               run_in_background: bool = False,
+               background_log_lines: int = _BG_LOG_DEFAULT_LINES,
                **kwargs: Any) -> str:
     pol = _sandbox.get_current_policy()
     ok, err = pol.check_command(command)
     if not ok:
         return f"Error: {err}"
+    # Background mode short-circuits the normal sync path. We still
+    # apply sandbox check above (bg jobs shouldn't bypass restricted-
+    # mode rules), but skip the read-counter (that's for sync reads
+    # the LLM is *waiting* on).
+    if run_in_background:
+        return _bash_start_background(
+            command, pol, kwargs,
+            log_lines_to_return=background_log_lines,
+        )
     # Day 3 AM (2026-05-05): cross-tool read counter. If the bash
     # command is a read primitive (cat / head / tail / less / sed -n
     # / awk on a file), share the read-valve counter with read_file.
@@ -193,6 +223,243 @@ def _tool_bash(command: str, timeout: int = _BASH_TIMEOUT_DEFAULT_S,
         return "\n".join(output_parts)
     except Exception as e:
         return f"Error executing command: {e}"
+
+
+# ── bash background helpers ────────────────────────────────────────
+
+def _bash_start_background(command: str, pol, kwargs: dict,
+                            *, log_lines_to_return: int) -> str:
+    """Start the command in the background, return immediately with the
+    process id + first slice of log. Process keeps running; agent uses
+    bash_logs(pid) / bash_kill(pid) to interact further.
+    """
+    jailed = pol.mode in ("restricted", "strict")
+    cwd = str(pol.root) if getattr(pol, "root", None) else os.getcwd()
+    env = pol.scrub_env() if jailed else None
+    # Single log file gets stdout+stderr merged; matches what dev-server
+    # output looks like in a normal terminal (where stderr goes to the
+    # same TTY).
+    fd, log_path = tempfile.mkstemp(prefix="tudou_bash_bg_", suffix=".log")
+    os.close(fd)
+    try:
+        log_fh = open(log_path, "w")
+    except OSError as e:
+        return f"Error: could not open background log file: {e}"
+    try:
+        proc = subprocess.Popen(
+            command,
+            shell=True,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            text=True,
+            cwd=cwd,
+            env=env,
+            start_new_session=True,
+        )
+    except Exception as e:
+        log_fh.close()
+        try:
+            os.remove(log_path)
+        except OSError:
+            pass
+        return f"Error starting background command: {e}"
+    # Track in abort registry — same kill-power as foreground bash.
+    try:
+        from .. import abort_registry
+        task_key = abort_registry.current_key()
+        if task_key:
+            abort_registry.track_pid(task_key, proc.pid)
+    except Exception:
+        task_key = None
+    # Register
+    record = {
+        "command": command,
+        "pid": proc.pid,
+        "log_path": log_path,
+        "log_fh": log_fh,
+        "proc": proc,
+        "started_at": time.time(),
+        "finished_at": None,
+        "exit_code": None,
+        "task_key": task_key,
+        "cwd": cwd,
+    }
+    with _BACKGROUND_JOBS_LOCK:
+        _BACKGROUND_JOBS[proc.pid] = record
+        _gc_finished_jobs_unlocked()
+
+    # Give the process a brief head-start to emit initial output (or
+    # crash on startup) before we read the log.
+    time.sleep(0.6)
+    # If the process already exited (typo, immediate crash) — surface
+    # the failure right here instead of returning a pid for a dead
+    # process the agent will then have to bash_logs() to discover.
+    rc = proc.poll()
+    if rc is not None:
+        record["exit_code"] = rc
+        record["finished_at"] = time.time()
+        log_excerpt = _read_log_tail(log_path, log_lines_to_return)
+        prefix = ("❌ Background process EXITED IMMEDIATELY "
+                  f"(exit code {rc}). Likely a typo or startup error.")
+        return (
+            f"{prefix}\n"
+            f"[pid {proc.pid} · log {log_path}]\n"
+            f"--- log (last {log_lines_to_return} lines) ---\n"
+            f"{log_excerpt}"
+        )
+    log_excerpt = _read_log_tail(log_path, log_lines_to_return)
+    return (
+        f"🟢 Background process started · pid={proc.pid}\n"
+        f"command: {command[:160]}\n"
+        f"log: {log_path}\n"
+        f"Use bash_logs(process_id={proc.pid}) to pull more output, "
+        f"bash_kill(process_id={proc.pid}) to terminate.\n"
+        f"--- log (first {log_lines_to_return} lines, if any) ---\n"
+        f"{log_excerpt or '(no output yet)'}"
+    )
+
+
+def _read_log_tail(path: str, max_lines: int) -> str:
+    try:
+        with open(path, "r", errors="replace") as fh:
+            data = fh.read()
+    except OSError:
+        return ""
+    lines = data.splitlines()
+    if len(lines) <= max_lines:
+        return data
+    return "\n".join(lines[-max_lines:])
+
+
+def _gc_finished_jobs_unlocked() -> None:
+    """Drop background-job records older than _BG_RETAIN_SECONDS past
+    finish. Caller must hold _BACKGROUND_JOBS_LOCK.
+    """
+    now = time.time()
+    to_drop: list[int] = []
+    for pid, rec in _BACKGROUND_JOBS.items():
+        finished_at = rec.get("finished_at")
+        if finished_at and (now - finished_at) > _BG_RETAIN_SECONDS:
+            to_drop.append(pid)
+    for pid in to_drop:
+        rec = _BACKGROUND_JOBS.pop(pid, None)
+        if rec:
+            try:
+                fh = rec.get("log_fh")
+                if fh and not fh.closed:
+                    fh.close()
+            except Exception:
+                pass
+            try:
+                lp = rec.get("log_path")
+                if lp and os.path.exists(lp):
+                    os.remove(lp)
+            except OSError:
+                pass
+
+
+def _refresh_job_status(rec: dict) -> None:
+    """Poll the subprocess; if it exited, mark finished_at + exit_code
+    and close the log file handle."""
+    if rec.get("finished_at"):
+        return
+    proc = rec.get("proc")
+    if proc is None:
+        return
+    rc = proc.poll()
+    if rc is not None:
+        rec["exit_code"] = rc
+        rec["finished_at"] = time.time()
+        try:
+            fh = rec.get("log_fh")
+            if fh and not fh.closed:
+                fh.close()
+        except Exception:
+            pass
+
+
+def _tool_bash_logs(process_id: int = 0, lines: int = _BG_LOG_DEFAULT_LINES,
+                     **_: Any) -> str:
+    """Pull recent log lines from a background bash process started
+    via bash(run_in_background=True). lines clamped to [1, 500].
+    """
+    if not process_id:
+        return "Error: process_id is required."
+    try:
+        process_id = int(process_id)
+        lines = max(1, min(int(lines), _BG_LOG_MAX_LINES))
+    except Exception:
+        return "Error: process_id and lines must be integers."
+    with _BACKGROUND_JOBS_LOCK:
+        rec = _BACKGROUND_JOBS.get(process_id)
+        if rec is None:
+            return (f"Error: no background process with pid {process_id} "
+                    f"(it may have been GC'd; jobs are kept ~1 hour after exit).")
+        _refresh_job_status(rec)
+        snapshot = dict(rec)  # shallow copy for use outside lock
+    log_excerpt = _read_log_tail(snapshot["log_path"], lines)
+    finished_at = snapshot.get("finished_at")
+    if finished_at:
+        rc = snapshot.get("exit_code")
+        status = (f"⏹ Process EXITED with code {rc}"
+                  + (f" {time.strftime('%H:%M:%S', time.localtime(finished_at))}" if finished_at else ""))
+    else:
+        elapsed = time.time() - snapshot["started_at"]
+        status = f"🟢 Still running ({elapsed:.0f}s elapsed)"
+    return (
+        f"{status} · pid={process_id}\n"
+        f"command: {snapshot['command'][:160]}\n"
+        f"--- log (last {lines} lines) ---\n"
+        f"{log_excerpt or '(empty)'}"
+    )
+
+
+def _tool_bash_kill(process_id: int = 0, **_: Any) -> str:
+    """Terminate a background bash process. SIGTERM first, SIGKILL if
+    it doesn't exit within 2s. Idempotent — calling on an already-
+    finished pid returns its final status without erroring.
+    """
+    if not process_id:
+        return "Error: process_id is required."
+    try:
+        process_id = int(process_id)
+    except Exception:
+        return "Error: process_id must be an integer."
+    with _BACKGROUND_JOBS_LOCK:
+        rec = _BACKGROUND_JOBS.get(process_id)
+        if rec is None:
+            return (f"Error: no background process with pid {process_id} "
+                    f"(may have been GC'd or never started).")
+        _refresh_job_status(rec)
+        if rec.get("finished_at"):
+            rc = rec.get("exit_code")
+            return f"Process {process_id} already exited with code {rc}."
+        proc = rec["proc"]
+    # Out of lock for the actual signalling — kill can take time.
+    try:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except Exception:
+            proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                proc.kill()
+            proc.wait(timeout=2)
+    except Exception as e:
+        return f"Error killing process {process_id}: {e}"
+    # Final refresh
+    with _BACKGROUND_JOBS_LOCK:
+        rec = _BACKGROUND_JOBS.get(process_id)
+        if rec:
+            _refresh_job_status(rec)
+            rc = rec.get("exit_code")
+        else:
+            rc = "unknown"
+    return f"⏹ Process {process_id} terminated (final exit code {rc})."
 
 
 # ── pip_install ──────────────────────────────────────────────────────
