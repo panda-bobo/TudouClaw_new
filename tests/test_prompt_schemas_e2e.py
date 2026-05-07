@@ -277,6 +277,59 @@ def test_workspace_files_schema_caps_top_level_entries():
 # ─── 7. Rate-limit loopback bypass ─────────────────────────────────
 
 
+def test_tool_schema_preserves_oneof_anyof_complex_schemas():
+    """Regression test for the 2026-05-07 mcp_call DeepSeek 400.
+
+    mcp_call's `arguments` parameter uses `oneOf: [{type: object},
+    {type: string}]` — no top-level type. The earlier round-trip
+    flattened it to {"type": "any"}, which DeepSeek strictly rejects:
+        Invalid schema for function 'mcp_call':
+        "any" is not valid under any of the schemas listed in 'anyOf'
+
+    The fix preserves the original property dict in ParamSpec.raw_schema
+    and re-emits it verbatim from to_openai_payload(). This test catches
+    any future regression that drops oneOf / anyOf / allOf / $ref / not.
+    """
+    from app.core.prompt_schemas import from_tool_definition
+
+    td = {
+        "type": "function",
+        "function": {
+            "name": "mcp_call",
+            "description": "MCP bridge",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "arguments": {
+                        "oneOf": [{"type": "object"}, {"type": "string"}],
+                        "description": "Arguments — object or JSON string.",
+                    },
+                    "list_mcps": {
+                        "type": "boolean",
+                        "description": "List MCPs",
+                    },
+                },
+            },
+        },
+    }
+    ts = from_tool_definition(td)
+    out = ts.to_openai_payload()
+    args_prop = out["function"]["parameters"]["properties"]["arguments"]
+
+    # oneOf preserved
+    assert "oneOf" in args_prop, "oneOf dropped"
+    assert args_prop["oneOf"] == [{"type": "object"}, {"type": "string"}]
+    # No type:any leak
+    assert args_prop.get("type") != "any", "type=any leaked"
+    # description preserved
+    assert "Arguments" in args_prop.get("description", "")
+
+    # Simple param still flat-rendered (no raw_schema needed)
+    list_prop = out["function"]["parameters"]["properties"]["list_mcps"]
+    assert list_prop["type"] == "boolean"
+    assert "description" in list_prop
+
+
 def test_ratelimit_loopback_bypass():
     """Same-machine traffic (127.0.0.1 / ::1 / 127.x / ::ffff:127.x)
     skips the rate limiter entirely. LAN clients still get throttled."""

@@ -116,6 +116,14 @@ class ParamSpec:
     """One parameter of a callable tool. ALL fields sent to LLM —
     parameters without descriptions are useless to the model, so we
     always include them and never strip.
+
+    For parameters that use complex JSON-Schema constructs (``oneOf`` /
+    ``anyOf`` / ``allOf`` / ``$ref``), the round-trip can't be fully
+    expressed via simple ``type``+default+enum fields. ``raw_schema``
+    holds the original property dict so ``to_openai_payload`` can
+    re-emit it byte-for-byte; this preserves valid JSON Schema for
+    strict providers (DeepSeek rejects ``{"type": "any"}`` even though
+    OpenAI tolerates it).
     """
 
     name: str
@@ -125,6 +133,10 @@ class ParamSpec:
     default: Any = None
     enum_values: list = field(default_factory=list)
     example: str = ""
+    # When original schema used oneOf/anyOf/allOf or other constructs
+    # we can't losslessly round-trip via the flat fields above, this
+    # holds the original property dict. to_openai_payload prefers it.
+    raw_schema: dict = field(default_factory=dict)
 
     def to_llm_dict(self) -> dict:
         out: dict = {
@@ -252,6 +264,16 @@ class ToolSchema(LLMVisibleSchema):
         required: list = []
         for p in self.params:
             if not isinstance(p, ParamSpec):
+                continue
+            # If the original schema had complex constructs (oneOf /
+            # anyOf / allOf / $ref / not / no top-level type), use the
+            # raw schema dict directly — strict providers like
+            # DeepSeek reject {"type":"any"} but accept oneOf with
+            # explicit member types.
+            if p.raw_schema:
+                properties[p.name] = dict(p.raw_schema)
+                if p.required:
+                    required.append(p.name)
                 continue
             prop: dict = {"type": p.type or "string"}
             if p.description:
@@ -420,14 +442,27 @@ def from_tool_definition(td: dict) -> ToolSchema:
                 continue
             if not isinstance(pdef, dict):
                 continue
+            # Detect complex JSON-Schema constructs that flat fields
+            # can't round-trip — preserve the raw property dict so
+            # to_openai_payload can re-emit it verbatim.
+            _is_complex = any(
+                k in pdef for k in ("oneOf", "anyOf", "allOf", "$ref", "not")
+            )
+            ptype = pdef.get("type", "")
+            if not ptype:
+                # No top-level type → must be a complex schema (or
+                # legacy "any"). Mark as complex so we keep raw.
+                ptype = "any" if not _is_complex else "object"
+                _is_complex = True
             params.append(ParamSpec(
                 name=pname,
-                type=pdef.get("type", "any"),
+                type=ptype,
                 required=pname in required,
                 description=str(pdef.get("description") or "").strip(),
                 default=pdef.get("default"),
                 enum_values=list(pdef.get("enum") or []),
                 example=str(pdef.get("example") or ""),
+                raw_schema=dict(pdef) if _is_complex else {},
             ))
     return ToolSchema(
         name=fn.get("name", ""),
