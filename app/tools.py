@@ -2815,6 +2815,51 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "agent_todo",
+            "description": (
+                "Maintain YOUR OWN private todo list across the next few turns. In-memory only (not persisted across process restarts). Cap 20 items.\n"
+                "Use when: you're juggling multiple sub-tasks within one assignment and want to remember progress across turns; before context-compaction events; whenever you'd otherwise paragraph-write 'I still need to do A, then B, then C'.\n"
+                "Not for: project-level steps (use plan_update). Not for milestones (use create_milestone). Not for tasks assigned to other agents (use dispatch_task). NEVER use it as a chat reply substitute — emit text in your reply too.\n"
+                "Output: formatted list with status icons (○ pending · ◐ in_progress · ● completed) and ids.\n"
+                "GOTCHA: at most ONE item may be in_progress at a time — setting a second errors out. Use action='set' for the initial plan or major pivot, action='update_one' for routine status flips (cheaper, doesn't re-emit the whole list)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "get | set | update_one | clear (default 'get').",
+                    },
+                    "todos": {
+                        "type": "array",
+                        "description": "For action='set': the FULL replacement list (max 20). Each item has fields below.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string", "description": "Short id you choose (e.g. 't1', 'fix-cors'). Auto-numbered if omitted."},
+                                "content": {"type": "string", "description": "What to do (≤200 chars). REQUIRED."},
+                                "status": {"type": "string", "description": "pending | in_progress | completed (default pending)."},
+                                "activeForm": {"type": "string", "description": "Gerund display form, e.g. 'Implementing X' vs 'Implement X'."},
+                            },
+                            "required": ["content"],
+                        },
+                    },
+                    "todo_id": {
+                        "type": "string",
+                        "description": "For action='update_one': which item's status to change.",
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "For action='update_one': new status (pending | in_progress | completed).",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "project_state",
             "description": (
                 "Snapshot of structured project state — replaces glob_files for status checks.\n"
@@ -3064,6 +3109,11 @@ from .tools_split.finalize import (  # noqa: E402,F401
     _tool_bootstrap_project,
 )
 
+# Agent's private todo list (Claude-Code-style TodoWrite). In-memory,
+# per-agent, not persisted. Complements plan_update (project-step
+# level) and create_milestone (project checkpoint level).
+from .tools_split.agent_todo import _tool_agent_todo  # noqa: E402,F401
+
 # MCP call + builtin audio TTS/STT handler moved to
 # app/tools_split/mcp.py. That module registers the builtin handler
 # with the dispatcher at import time — keep this import unconditional
@@ -3199,6 +3249,8 @@ _TOOL_FUNCS: dict[str, callable] = {
     # PM composite — define blueprint + create milestones / goals +
     # dispatch initial tasks in one call.
     "bootstrap_project": _tool_bootstrap_project,
+    # Per-agent private todo list (Claude-Code-style TodoWrite).
+    "agent_todo": _tool_agent_todo,
     "mcp_call": _tool_mcp_call,
     # Experience persistence + skill generation
     "save_experience": _tool_save_experience,
