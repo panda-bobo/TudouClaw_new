@@ -4743,40 +4743,77 @@ class Agent:
             except Exception:
                 pass
 
-        # 0.7 Workspace state — surface project shared dir state so the
-        # LLM knows in advance whether a design doc / plan exists.
-        # Reuses the Tier-2 PEP enrichment (_build_pep_workflow_enrichment),
-        # so what the LLM sees here is byte-for-byte the same view that
-        # Rule Engine evaluates against. Without this, LLM has to glob
-        # to discover state — wasteful and often denied by the
-        # "no glob in project" rule.
-        # Only fires when agent has an active project context; solo
-        # agents skip silently (workspace_root will be empty).
+        # 0.7 Consolidated <env> block — borrowed from Claude Code's
+        # pattern of folding cwd / project / date / workspace flags
+        # into ONE stable region near the top of the system prompt.
+        # Replaces the previous WorkspaceFilesSchema injection (which
+        # only carried workspace flags + top_level entries); now the
+        # same block also surfaces cwd, project name/id, date, and
+        # the workspace fields it always had — in a more compact form.
+        #
+        # Cache impact: <env> contents change slowly within a session
+        # (cwd / project rarely flip mid-turn), so a single stable
+        # block hits the prefix cache more reliably than scattered
+        # schemas each carrying their own preamble.
+        #
+        # Git stays in its own GitContextSchema below — it's richer
+        # (branch + log + diff_stat) and worth a dedicated section.
         try:
-            from .core.prompt_schemas import (
-                WorkspaceFilesSchema, render_block,
-            )
+            from .core.prompt_schemas import EnvSchema, render_block
             _ws_root_path = ""
             try:
                 if hasattr(self, "get_active_shared_workspace"):
                     _ws_root_path = self.get_active_shared_workspace() or ""
             except Exception:
                 _ws_root_path = ""
-            if _ws_root_path:
-                _enrich = self._build_pep_workflow_enrichment()
-                _proj_state = _enrich.get("project", {}) or {}
-                _ws_schema = WorkspaceFilesSchema(
-                    workspace_root=_ws_root_path,
-                    has_design_doc=bool(_proj_state.get("has_design_doc", False)),
-                    has_plan_md=bool(_proj_state.get("has_plan_md", False)),
-                    top_level_entries=list(_proj_state.get("workspace_files", []) or []),
-                )
-                _ws_md = render_block(_ws_schema)
-                if _ws_md:
-                    _try_add(_ws_md, "workspace_state")
-        except Exception as _ws_err:
+            _proj_id = getattr(self, "project_id", "") or ""
+            _proj_name = ""
+            if _proj_id:
+                try:
+                    import sys as _sys_pn
+                    _llm_mod_pn = _sys_pn.modules.get(__package__ + ".llm") if __package__ else None
+                    _hub_pn = getattr(_llm_mod_pn, "_active_hub", None) if _llm_mod_pn else None
+                    if _hub_pn is not None and hasattr(_hub_pn, "get_project"):
+                        _p = _hub_pn.get_project(_proj_id)
+                        _proj_name = getattr(_p, "name", "") or "" if _p else ""
+                except Exception:
+                    _proj_name = ""
+            _enrich_project: dict = {}
+            if _ws_root_path or _proj_id:
+                try:
+                    _enrich_project = (
+                        self._build_pep_workflow_enrichment().get("project", {}) or {}
+                    )
+                except Exception:
+                    _enrich_project = {}
+            _cwd_path = ""
             try:
-                logger.debug("workspace state injection skipped: %s", _ws_err)
+                _cwd_path = str(self._effective_working_dir())
+            except Exception:
+                _cwd_path = ""
+            _date_iso = ""
+            try:
+                _date_iso = time.strftime("%Y-%m-%d", time.localtime())
+            except Exception:
+                _date_iso = ""
+            _env_schema = EnvSchema(
+                cwd=_cwd_path,
+                project_id=_proj_id,
+                project_name=_proj_name,
+                workspace_root=_ws_root_path,
+                date_iso=_date_iso,
+                has_design_doc=bool(_enrich_project.get("has_design_doc", False)),
+                has_plan_md=bool(_enrich_project.get("has_plan_md", False)),
+                top_level_entries=list(
+                    _enrich_project.get("workspace_files", []) or []),
+            )
+            if not _env_schema.is_empty():
+                _env_md = render_block(_env_schema)
+                if _env_md:
+                    _try_add(_env_md, "env")
+        except Exception as _env_err:
+            try:
+                logger.debug("env block injection skipped: %s", _env_err)
             except Exception:
                 pass
 
@@ -9871,6 +9908,24 @@ Write only the summary body. Do not include any preamble or prefix."""
                             })
                         except Exception:
                             pass
+                        # Mirror to ephemeral reminder queue. The
+                        # next-iteration system message (line ~9478)
+                        # already explains the situation, but the
+                        # reminder queue surfaces a one-line nudge at
+                        # the user-message edge — useful when the LLM
+                        # is rushing through tools and may skip past
+                        # the system message in the same turn.
+                        if hasattr(self, "queue_reminder"):
+                            try:
+                                self.queue_reminder(
+                                    f"Tool budget reached "
+                                    f"({_response_tool_count}/{_per_resp_cap} "
+                                    f"this turn). Stop calling tools — "
+                                    f"summarize what you have, then either "
+                                    f"finalize the step or hand back to the user."
+                                )
+                            except Exception:
+                                pass
 
                     # ── Block list: signature dedup + per-tool cap ──
                     # Both guards funnel into _blocked_calls so the

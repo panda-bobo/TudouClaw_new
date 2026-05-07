@@ -223,6 +223,21 @@ def _tool_read_file(path: str, offset: int = 0, limit: int | None = None,
                     f"your tool args, not the file**. Stop reading and check "
                     f"the LAST tool error.\n\n"
                 )
+                # Also push to ephemeral reminder queue — anchors at
+                # the LAST user message of the next LLM call so the
+                # warning is visible at the prompt edge, not buried in
+                # tool_result history. dedupe makes repeat reads in
+                # the same turn collapse to one queued message.
+                if hasattr(agent, "queue_reminder"):
+                    try:
+                        agent.queue_reminder(
+                            f"You've read {path_str!r} {_path_n} times this turn "
+                            f"(cap={hard_cap}). One more read of this exact path "
+                            f"will be refused. Use what you already have, or "
+                            f"finalize/fail the step instead of re-reading."
+                        )
+                    except Exception:
+                        pass
             return (
                 warn_prefix
                 + f"[REPEAT-READ #{hit_count + 1}] You already read this file "
@@ -264,6 +279,18 @@ def _tool_read_file(path: str, offset: int = 0, limit: int | None = None,
                     f"failing, the issue is your tool call — not the file.\n\n"
                     + body
                 )
+                # Mirror to the ephemeral reminder channel so the
+                # nudge surfaces at the next user-message edge rather
+                # than only buried inside this tool_result.
+                if hasattr(agent, "queue_reminder"):
+                    try:
+                        agent.queue_reminder(
+                            f"You've read {path_str!r} {n} times this turn "
+                            f"(cap={hard_cap}). Stop re-reading; use what you "
+                            f"have or finalize the step."
+                        )
+                    except Exception:
+                        pass
 
     # Stash for next call's dedup hit.
     if agent is not None:
