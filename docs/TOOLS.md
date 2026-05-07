@@ -1,6 +1,6 @@
 # TudouClaw — Tools Reference
 
-**Total tools registered**: 63
+**Total tools registered**: 65
 _(Generated from `app.tools.TOOL_DEFINITIONS` — keep regenerating when tools change.)_
 
 ## How visibility works
@@ -18,6 +18,10 @@ layers (see [`tool_capabilities.py`](../app/tool_capabilities.py)):
 Every tool's schema also receives a universal `_reason: string ≤100 chars`
 required field (toggle in System Configuration → "Tool Reason Required")
 forcing the LLM to articulate WHY before each call.
+
+**Composite tools** (`finalize_step`, `submit_review`, `bootstrap_project`)
+fold multi-step rituals into ONE LLM round-trip — listed under their
+respective groups below; details in their `Use when` / `GOTCHA` sections.
 
 ---
 
@@ -943,6 +947,29 @@ Receiver-side tool: pop a task assignment from your inbox and get its structured
 |------|------|----------|-------------|
 | `ta_id` | string | — | Specific assignment id (optional — defaults to highest-priority pending). |
 
+### `bootstrap_project`
+
+Atomic project skeleton creation: declare folder layout + acceptance, create N milestones, create N goals, dispatch N initial tasks — all in ONE call.
+
+**Use when**: PM (or orchestrator role) is starting a new project and wants to set up the full structure in one shot. Replaces the typical 15+ atomic call ritual (define_project_blueprint + create_milestone × N + create_goal × N + dispatch_task × N).
+
+**Not for**: incremental project edits mid-way through (use the singular create_milestone / create_goal / dispatch_task tools to avoid disturbing existing structure). Not for solo agents — needs a project context.
+
+**Output**: 🚀 header + ✅ per-section confirmations (blueprint registered / N milestones / N goals / N tasks) + ⚠️ partial-failure list.
+
+**GOTCHA**: each list section is independent — passing only goals (or only tasks) works. Per-list-item failures are reported but don't abort the rest. assigned_to in tasks is REQUIRED per task (look up agent_id from the team list at the top of your prompt). dispatch_task auto-fires the @-mention notification path so assigned agents pick up work immediately.
+
+**Parameters**:
+
+| name | type | required | description |
+|------|------|----------|-------------|
+| `project_id` | string | ✓ | Project to bootstrap (REQUIRED). |
+| `blueprint` | object | — | Optional blueprint dict — keys: folders, acceptance, no_glob_in_chat, tool_budget_per_turn (see define_project_blueprint). |
+| `milestones` | array | — | List of milestone specs. |
+| `goals` | array | — | List of goal specs. |
+| `tasks` | array | — | List of task-dispatch specs. |
+| `revision_note` | string | — | Audit-trail note (forwarded to define_project_blueprint). |
+
 ### `define_project_blueprint`
 
 PM one-shot configurator: declare folder layout, milestone acceptance, and anti-pattern rules — framework auto-generates engine rules to enforce.
@@ -1227,6 +1254,31 @@ Record a workspace file as a sharable artifact reference so other agents can fin
 | `token_count` | integer | — | Approximate token count of the full file (helps consumers budget) |
 | `project_id` | string | — | Optional; inferred from chat context |
 
+### `submit_review`
+
+Atomic milestone-review closure: register the review report as a deliverable, batch-file any issues found, transition the milestone status in ONE call.
+
+**Use when**: you (typically a reviewer-role agent) finished evaluating a milestone's deliverables and want to close out the review. Replaces the typical read_file × N + write report + submit_deliverable + report_issue × M + update_milestone_status ritual.
+
+**Not for**: filing a single ad-hoc bug not tied to a milestone (use report_issue). Not for in-progress drafts of the review (wait until decision is final). Not in solo mode without a project context.
+
+**Output**: 📋 decision summary line + ✅ confirmations per sub-step (review report registered / issues filed / milestone transitioned), with ⚠️ list of any partial failures.
+
+**GOTCHA**: decision controls the milestone target status — approve→done, request_changes→blocked, reject→cancelled. issues are batch-filed AND auto-linked to this milestone (no need to set milestone_id on each one). If you provide deliverable_content without deliverable_path, the content is materialised into the project shared dir automatically (submit_deliverable handles the write+copy).
+
+**Parameters**:
+
+| name | type | required | description |
+|------|------|----------|-------------|
+| `milestone_id` | string | ✓ | The milestone being reviewed (REQUIRED). |
+| `decision` | string | ✓ | Decision: approve \| request_changes \| reject. Maps to milestone status done / blocked / cancelled. |
+| `summary` | string | — | Short review summary (≤200 chars). Stamped on the milestone evidence; used as deliverable title fallback. |
+| `issues` | array | — | Optional list of issues to file alongside the review. |
+| `deliverable_path` | string | — | Optional path to a pre-written review report (registered as kind='analysis'). |
+| `deliverable_title` | string | — | Title for the review-report deliverable. Defaults to 'Review · <milestone_id>'. |
+| `deliverable_content` | string | — | Inline review report content; written into the shared dir if no deliverable_path given. |
+| `project_id` | string | — | Project id (optional; inferred from chat context). |
+
 ### `submit_skill`
 
 Submit a hand-written skill package from your workspace directory for admin approval. Requires manifest.yaml + SKILL.md in the dir.
@@ -1321,5 +1373,6 @@ Get teammate ids from the [项目群聊] team list at the top of your prompt: ea
 
 - Definitions: `app/tools.py` (`TOOL_DEFINITIONS` at module top, dispatch table `_TOOL_FUNCS`)
 - Per-tool implementations: `app/tools_split/<category>.py`
+- Composite tools: `app/tools_split/finalize.py`
 - Capability gating: `app/tool_capabilities.py`
 - Schema layer: `app/core/prompt_schemas.py` (`ToolSchema`, `from_tool_definition`)

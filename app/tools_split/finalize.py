@@ -181,3 +181,312 @@ def _tool_finalize_step(
         return "No-op (no files submitted, no step / milestone closed)."
 
     return "\n".join(lines)
+
+
+# ── submit_review ─────────────────────────────────────────────────────
+# Reviewer's standard ritual: write review report + register it as a
+# deliverable + batch-report any issues found + transition the
+# milestone based on the decision. Replaces the 8-12 atomic call ritual
+# (read_file × N + write report + submit_deliverable + report_issue × M
+# + update_milestone_status) with a single call.
+
+# Decision → milestone target status mapping. Conservative choices:
+# request_changes parks the milestone at "blocked" so the responsible
+# agent has to address evidence; reject leaves it cancelled. Approved
+# milestones go to done.
+_REVIEW_DECISION_STATUS = {
+    "approve": "done",
+    "approved": "done",
+    "request_changes": "blocked",
+    "changes_requested": "blocked",
+    "needs_changes": "blocked",
+    "reject": "cancelled",
+    "rejected": "cancelled",
+}
+
+
+def _tool_submit_review(
+    milestone_id: str = "",
+    decision: str = "",
+    summary: str = "",
+    issues: list = None,
+    deliverable_path: str = "",
+    deliverable_title: str = "",
+    deliverable_content: str = "",
+    project_id: str = "",
+    **_: Any,
+) -> str:
+    """Atomic review closure for a milestone.
+
+    milestone_id        — REQUIRED. The milestone being reviewed.
+    decision            — REQUIRED. One of: approve | request_changes |
+                          reject. Maps to milestone status (done /
+                          blocked / cancelled respectively).
+    summary             — Short review summary (≤200 chars recommended).
+                          Used as evidence on the milestone status
+                          update + as the deliverable title fallback.
+    issues              — Optional list of issues to file alongside
+                          the review. Each item is a dict:
+                            {title, severity?, description?, milestone_id?}
+                          severity defaults to "medium". milestone_id
+                          defaults to the top-level milestone_id so
+                          issues are auto-linked.
+    deliverable_path    — Optional path to a pre-written review report.
+                          Submitted as a deliverable kind='analysis'.
+                          submit_deliverable copies it into the shared
+                          dir if it lives elsewhere.
+    deliverable_title   — Title for the review-report deliverable.
+                          Defaults to "Review · <milestone_id>".
+    deliverable_content — If provided WITHOUT deliverable_path, the
+                          content is written into the shared dir
+                          automatically (uses submit_deliverable's
+                          content_text path).
+    project_id          — Optional; inferred from chat context.
+    """
+    if not milestone_id:
+        return "Error: 'milestone_id' is required for submit_review."
+    decision_norm = (decision or "").strip().lower()
+    target_status = _REVIEW_DECISION_STATUS.get(decision_norm)
+    if not target_status:
+        return (
+            "Error: 'decision' must be one of approve / request_changes / reject. "
+            f"Got: {decision!r}"
+        )
+
+    summary_clean = (summary or "").strip()
+    if not summary_clean:
+        summary_clean = f"Review decision: {decision_norm}"
+    submitted_review = False
+    issues_filed: list[str] = []
+    errors: list[str] = []
+
+    # 1. Submit the review report as a deliverable (if any provided).
+    if deliverable_path or deliverable_content:
+        title = (deliverable_title or "").strip() or f"Review · {milestone_id}"
+        sub_args = {
+            "title": title,
+            "kind": "analysis",
+            "milestone_id": milestone_id,
+            "project_id": project_id,
+        }
+        if deliverable_path:
+            sub_args["file_path"] = deliverable_path
+        if deliverable_content and not deliverable_path:
+            sub_args["content_text"] = deliverable_content
+        ok, sub_result = _safe_call_tool("submit_deliverable", sub_args)
+        if ok:
+            submitted_review = True
+        else:
+            errors.append(f"submit review report: {sub_result[:200]}")
+
+    # 2. File each issue (if any). Issues default to severity=medium and
+    # auto-link to this milestone.
+    for idx, issue in enumerate(issues or []):
+        if not isinstance(issue, dict):
+            errors.append(f"issue[{idx}]: not a dict")
+            continue
+        ititle = (issue.get("title") or "").strip()
+        if not ititle:
+            errors.append(f"issue[{idx}]: missing 'title'")
+            continue
+        severity = (issue.get("severity") or "medium").strip().lower()
+        idesc = (issue.get("description") or "").strip()
+        i_milestone = (issue.get("milestone_id") or milestone_id).strip()
+        ok, ires = _safe_call_tool("report_issue", {
+            "title": ititle,
+            "description": idesc,
+            "severity": severity,
+            "milestone_id": i_milestone,
+            "project_id": project_id,
+        })
+        if ok:
+            issues_filed.append(ititle)
+        else:
+            errors.append(f"issue '{ititle}': {ires[:200]}")
+
+    # 3. Transition the milestone to the decided status.
+    milestone_updated = False
+    ms_evidence = summary_clean
+    if issues_filed:
+        ms_evidence += f" (filed {len(issues_filed)} issue(s))"
+    ok, ms_result = _safe_call_tool("update_milestone_status", {
+        "milestone_id": milestone_id,
+        "status": target_status,
+        "evidence": ms_evidence,
+        "project_id": project_id,
+    })
+    if ok:
+        milestone_updated = True
+    else:
+        errors.append(f"milestone status update: {ms_result[:200]}")
+
+    # Format result
+    lines: list[str] = []
+    lines.append(f"📋 Review decision: **{decision_norm}** → milestone status `{target_status}`")
+    if submitted_review:
+        lines.append("✅ Review report registered as deliverable")
+    if issues_filed:
+        lines.append(f"✅ Filed {len(issues_filed)} issue(s): " + ", ".join(issues_filed[:5])
+                      + (f" (+{len(issues_filed) - 5} more)" if len(issues_filed) > 5 else ""))
+    if milestone_updated:
+        lines.append(f"✅ Milestone {milestone_id} → {target_status}")
+    if errors:
+        lines.append("⚠️ Issues encountered:")
+        for err in errors:
+            lines.append(f"  - {err}")
+    return "\n".join(lines)
+
+
+# ── bootstrap_project ─────────────────────────────────────────────────
+# PM's "first-day ritual" — define the blueprint, create milestones,
+# create goals, dispatch initial tasks. Currently 15+ separate tool
+# calls; this folds them into a single intent.
+
+def _tool_bootstrap_project(
+    project_id: str = "",
+    blueprint: dict = None,
+    milestones: list = None,
+    goals: list = None,
+    tasks: list = None,
+    revision_note: str = "",
+    **_: Any,
+) -> str:
+    """One-shot project skeleton creation.
+
+    project_id     — REQUIRED. Project to bootstrap.
+    blueprint      — Optional dict passed straight through to
+                     define_project_blueprint. Keys: folders, acceptance,
+                     no_glob_in_chat, tool_budget_per_turn.
+    milestones     — Optional list of milestone dicts:
+                       {name, responsible_agent_id?, description?, due_date?}
+    goals          — Optional list of goal dicts:
+                       {name, description?, metric?, target_value?,
+                        target_text?, owner_agent_id?}
+    tasks          — Optional list of task-dispatch dicts:
+                       {title, assigned_to, milestone_id?, description?,
+                        priority?, due_date?, llm_label?}
+    revision_note  — Audit-trail note (forwarded to define_project_blueprint).
+
+    Each list section is independent: passing only goals (or only tasks)
+    works fine. All sections are best-effort — partial failure is
+    reported, not aborted.
+    """
+    if not project_id:
+        return "Error: 'project_id' is required for bootstrap_project."
+
+    blueprint_done = False
+    milestones_created: list[str] = []
+    goals_created: list[str] = []
+    tasks_dispatched: list[str] = []
+    errors: list[str] = []
+
+    # 1. Blueprint (if provided) — generates rules + sets folder/acceptance contracts.
+    if isinstance(blueprint, dict) and blueprint:
+        bp_args = {"project_id": project_id, "revision_note": revision_note}
+        for k in ("folders", "acceptance", "no_glob_in_chat", "tool_budget_per_turn"):
+            if k in blueprint:
+                bp_args[k] = blueprint[k]
+        ok, bp_result = _safe_call_tool("define_project_blueprint", bp_args)
+        if ok:
+            blueprint_done = True
+        else:
+            errors.append(f"blueprint: {bp_result[:200]}")
+
+    # 2. Milestones — pass through with best-effort responsible_agent_id.
+    for idx, ms in enumerate(milestones or []):
+        if not isinstance(ms, dict):
+            errors.append(f"milestone[{idx}]: not a dict")
+            continue
+        name = (ms.get("name") or "").strip()
+        if not name:
+            errors.append(f"milestone[{idx}]: missing 'name'")
+            continue
+        ms_args = {"name": name, "project_id": project_id}
+        for k in ("responsible_agent_id", "description", "due_date"):
+            v = ms.get(k)
+            if v:
+                ms_args[k] = v
+        ok, ms_result = _safe_call_tool("create_milestone", ms_args)
+        if ok:
+            milestones_created.append(name)
+        else:
+            errors.append(f"milestone '{name}': {ms_result[:200]}")
+
+    # 3. Goals — count/percent/text metrics handled by create_goal itself.
+    for idx, g in enumerate(goals or []):
+        if not isinstance(g, dict):
+            errors.append(f"goal[{idx}]: not a dict")
+            continue
+        gname = (g.get("name") or "").strip()
+        if not gname:
+            errors.append(f"goal[{idx}]: missing 'name'")
+            continue
+        g_args = {"name": gname, "project_id": project_id}
+        for k in ("description", "metric", "target_value",
+                   "target_text", "owner_agent_id"):
+            v = g.get(k)
+            if v is not None and v != "":
+                g_args[k] = v
+        ok, g_result = _safe_call_tool("create_goal", g_args)
+        if ok:
+            goals_created.append(gname)
+        else:
+            errors.append(f"goal '{gname}': {g_result[:200]}")
+
+    # 4. Initial task dispatch — assigns each task to a teammate. The
+    # dispatch_task tool also fires the @-mention notification path so
+    # the assigned agent picks up the work.
+    for idx, t in enumerate(tasks or []):
+        if not isinstance(t, dict):
+            errors.append(f"task[{idx}]: not a dict")
+            continue
+        tt = (t.get("title") or "").strip()
+        assigned_to = (t.get("assigned_to") or "").strip()
+        if not tt:
+            errors.append(f"task[{idx}]: missing 'title'")
+            continue
+        if not assigned_to:
+            errors.append(f"task '{tt}': missing 'assigned_to' agent_id")
+            continue
+        t_args = {
+            "title": tt,
+            "assigned_to": assigned_to,
+            "project_id": project_id,
+        }
+        for k in ("milestone_id", "description", "priority",
+                   "due_date", "llm_label"):
+            v = t.get(k)
+            if v is not None and v != "":
+                t_args[k] = v
+        ok, t_result = _safe_call_tool("dispatch_task", t_args)
+        if ok:
+            tasks_dispatched.append(tt)
+        else:
+            errors.append(f"task '{tt}': {t_result[:200]}")
+
+    # Format result
+    lines: list[str] = [f"🚀 Project {project_id} bootstrap:"]
+    if blueprint_done:
+        lines.append("✅ Blueprint registered")
+    if milestones_created:
+        lines.append(f"✅ Created {len(milestones_created)} milestone(s): "
+                      + ", ".join(milestones_created[:5])
+                      + (f" (+{len(milestones_created) - 5})"
+                         if len(milestones_created) > 5 else ""))
+    if goals_created:
+        lines.append(f"✅ Created {len(goals_created)} goal(s): "
+                      + ", ".join(goals_created[:5])
+                      + (f" (+{len(goals_created) - 5})"
+                         if len(goals_created) > 5 else ""))
+    if tasks_dispatched:
+        lines.append(f"✅ Dispatched {len(tasks_dispatched)} task(s): "
+                      + ", ".join(tasks_dispatched[:5])
+                      + (f" (+{len(tasks_dispatched) - 5})"
+                         if len(tasks_dispatched) > 5 else ""))
+    if errors:
+        lines.append("⚠️ Issues encountered:")
+        for err in errors:
+            lines.append(f"  - {err}")
+    if len(lines) == 1:
+        return "Error: nothing to bootstrap — provide blueprint / milestones / goals / tasks."
+    return "\n".join(lines)

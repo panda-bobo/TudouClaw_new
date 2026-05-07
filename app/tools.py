@@ -2627,6 +2627,145 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "submit_review",
+            "description": (
+                "Atomic milestone-review closure: register the review report as a deliverable, batch-file any issues found, transition the milestone status in ONE call.\n"
+                "Use when: you (typically a reviewer-role agent) finished evaluating a milestone's deliverables and want to close out the review. Replaces the typical read_file × N + write report + submit_deliverable + report_issue × M + update_milestone_status ritual.\n"
+                "Not for: filing a single ad-hoc bug not tied to a milestone (use report_issue). Not for in-progress drafts of the review (wait until decision is final). Not in solo mode without a project context.\n"
+                "Output: 📋 decision summary line + ✅ confirmations per sub-step (review report registered / issues filed / milestone transitioned), with ⚠️ list of any partial failures.\n"
+                "GOTCHA: decision controls the milestone target status — approve→done, request_changes→blocked, reject→cancelled. issues are batch-filed AND auto-linked to this milestone (no need to set milestone_id on each one). If you provide deliverable_content without deliverable_path, the content is materialised into the project shared dir automatically (submit_deliverable handles the write+copy)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "milestone_id": {
+                        "type": "string",
+                        "description": "The milestone being reviewed (REQUIRED).",
+                    },
+                    "decision": {
+                        "type": "string",
+                        "description": "Decision: approve | request_changes | reject. Maps to milestone status done / blocked / cancelled.",
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "Short review summary (≤200 chars). Stamped on the milestone evidence; used as deliverable title fallback.",
+                    },
+                    "issues": {
+                        "type": "array",
+                        "description": "Optional list of issues to file alongside the review.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string", "description": "Issue title (REQUIRED)."},
+                                "severity": {"type": "string", "description": "low | medium | high | critical (default medium)."},
+                                "description": {"type": "string", "description": "Issue body / repro steps."},
+                                "milestone_id": {"type": "string", "description": "Per-issue milestone link (defaults to top-level milestone_id)."},
+                            },
+                            "required": ["title"],
+                        },
+                    },
+                    "deliverable_path": {
+                        "type": "string",
+                        "description": "Optional path to a pre-written review report (registered as kind='analysis').",
+                    },
+                    "deliverable_title": {
+                        "type": "string",
+                        "description": "Title for the review-report deliverable. Defaults to 'Review · <milestone_id>'.",
+                    },
+                    "deliverable_content": {
+                        "type": "string",
+                        "description": "Inline review report content; written into the shared dir if no deliverable_path given.",
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Project id (optional; inferred from chat context).",
+                    },
+                },
+                "required": ["milestone_id", "decision"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "bootstrap_project",
+            "description": (
+                "Atomic project skeleton creation: declare folder layout + acceptance, create N milestones, create N goals, dispatch N initial tasks — all in ONE call.\n"
+                "Use when: PM (or orchestrator role) is starting a new project and wants to set up the full structure in one shot. Replaces the typical 15+ atomic call ritual (define_project_blueprint + create_milestone × N + create_goal × N + dispatch_task × N).\n"
+                "Not for: incremental project edits mid-way through (use the singular create_milestone / create_goal / dispatch_task tools to avoid disturbing existing structure). Not for solo agents — needs a project context.\n"
+                "Output: 🚀 header + ✅ per-section confirmations (blueprint registered / N milestones / N goals / N tasks) + ⚠️ partial-failure list.\n"
+                "GOTCHA: each list section is independent — passing only goals (or only tasks) works. Per-list-item failures are reported but don't abort the rest. assigned_to in tasks is REQUIRED per task (look up agent_id from the team list at the top of your prompt). dispatch_task auto-fires the @-mention notification path so assigned agents pick up work immediately."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "description": "Project to bootstrap (REQUIRED).",
+                    },
+                    "blueprint": {
+                        "type": "object",
+                        "description": "Optional blueprint dict — keys: folders, acceptance, no_glob_in_chat, tool_budget_per_turn (see define_project_blueprint).",
+                    },
+                    "milestones": {
+                        "type": "array",
+                        "description": "List of milestone specs.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string", "description": "Milestone name (REQUIRED)."},
+                                "responsible_agent_id": {"type": "string", "description": "Agent id from team roster — the responsible owner."},
+                                "description": {"type": "string", "description": "Longer milestone description."},
+                                "due_date": {"type": "string", "description": "ISO date string."},
+                            },
+                            "required": ["name"],
+                        },
+                    },
+                    "goals": {
+                        "type": "array",
+                        "description": "List of goal specs.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string", "description": "Goal name (REQUIRED)."},
+                                "description": {"type": "string", "description": "Goal description."},
+                                "metric": {"type": "string", "description": "count | percent | text (default count)."},
+                                "target_value": {"type": "number", "description": "Target for count/percent metrics."},
+                                "target_text": {"type": "string", "description": "Target text for text metrics."},
+                                "owner_agent_id": {"type": "string", "description": "Owner agent id (default: calling agent)."},
+                            },
+                            "required": ["name"],
+                        },
+                    },
+                    "tasks": {
+                        "type": "array",
+                        "description": "List of task-dispatch specs.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string", "description": "Task title (REQUIRED)."},
+                                "assigned_to": {"type": "string", "description": "Agent id from team roster (REQUIRED)."},
+                                "milestone_id": {"type": "string", "description": "Optional milestone link."},
+                                "description": {"type": "string", "description": "Task description / acceptance criteria."},
+                                "priority": {"type": "string", "description": "low | normal | high | urgent."},
+                                "due_date": {"type": "string", "description": "ISO date string."},
+                                "llm_label": {"type": "string", "description": "Optional LLM-router slot hint."},
+                            },
+                            "required": ["title", "assigned_to"],
+                        },
+                    },
+                    "revision_note": {
+                        "type": "string",
+                        "description": "Audit-trail note (forwarded to define_project_blueprint).",
+                    },
+                },
+                "required": ["project_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "project_state",
             "description": (
                 "Snapshot of structured project state — replaces glob_files for status checks.\n"
@@ -2864,11 +3003,15 @@ from .tools_split.project import (  # noqa: E402,F401
     _auto_report_issue,
 )
 
-# Composite step closure — finalize_step. Folds submit_deliverable × N
-# + plan_update + update_milestone_status into ONE LLM round-trip,
-# eliminating the typical 6-9-call ritual at the end of a coder /
-# researcher step.
-from .tools_split.finalize import _tool_finalize_step  # noqa: E402,F401
+# Composite tools — fold multi-step rituals into a single LLM round-trip.
+#   finalize_step      — coder/researcher step closure
+#   submit_review      — reviewer milestone closure
+#   bootstrap_project  — PM project skeleton creation
+from .tools_split.finalize import (  # noqa: E402,F401
+    _tool_finalize_step,
+    _tool_submit_review,
+    _tool_bootstrap_project,
+)
 
 # MCP call + builtin audio TTS/STT handler moved to
 # app/tools_split/mcp.py. That module registers the builtin handler
@@ -2997,6 +3140,12 @@ _TOOL_FUNCS: dict[str, callable] = {
     # Composite step closure — submit_deliverable × N + plan_update +
     # update_milestone_status in one call (Claude-Code-style macro).
     "finalize_step": _tool_finalize_step,
+    # Reviewer composite — submit review report + report issues +
+    # transition milestone in one call.
+    "submit_review": _tool_submit_review,
+    # PM composite — define blueprint + create milestones / goals +
+    # dispatch initial tasks in one call.
+    "bootstrap_project": _tool_bootstrap_project,
     "mcp_call": _tool_mcp_call,
     # Experience persistence + skill generation
     "save_experience": _tool_save_experience,
