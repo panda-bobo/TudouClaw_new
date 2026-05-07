@@ -1247,6 +1247,65 @@ class AgentLLMMixin:
             except Exception:
                 pass
 
+        # 0.6 Rule Engine — surface applicable rules so the LLM knows
+        # IN ADVANCE what will be enforced. Without this, agents try
+        # an action → get denied → retry → eat budget. Showing the
+        # rules upfront is much cheaper than the deny-retry loop.
+        # Trigger filter: only the action-time hooks the agent itself
+        # can trip (file_write, message_send, dispatch_task, task_done,
+        # tool_call). Per-tick / per-handover hooks (after_*, on_wake)
+        # don't help the LLM decide what to do next.
+        try:
+            from .rule_engine import get_engine as _get_rule_engine
+            from .core.prompt_schemas import (
+                from_rule_engine_rule, render_rules_block,
+            )
+            _rule_eng = _get_rule_engine()
+            if _rule_eng is not None and _rule_eng.store is not None:
+                _proj_id_re = getattr(self, "project_id", "") or ""
+                _meeting_id_re = getattr(self, "source_meeting_id", "") or ""
+                if _proj_id_re:
+                    _rule_scope = {"kind": "project",
+                                   "project_id": _proj_id_re}
+                elif _meeting_id_re:
+                    _rule_scope = {"kind": "meeting",
+                                   "meeting_id": _meeting_id_re}
+                else:
+                    _rule_scope = {"kind": "solo", "agent_id": self.id}
+                _action_triggers = (
+                    "before_tool_call",
+                    "before_file_write",
+                    "before_dispatch_task",
+                    "before_task_done",
+                    "before_message_send",
+                )
+                _seen_ids: set = set()
+                _rule_schemas: list = []
+                for _trig in _action_triggers:
+                    for _r in _rule_eng.store.for_trigger(_trig, _rule_scope):
+                        if _r.id in _seen_ids:
+                            continue
+                        _seen_ids.add(_r.id)
+                        _rule_schemas.append(from_rule_engine_rule(_r))
+                # Cap to keep prompt budget sane — surface the highest-
+                # priority rules first (store.for_trigger already orders
+                # by priority desc). 12 ≈ 1-2 paragraphs of LLM input.
+                _rule_schemas = _rule_schemas[:12]
+                if _rule_schemas:
+                    _rules_block = render_rules_block(
+                        _rule_schemas,
+                        heading=("## 当前生效的规则 (Rule Engine) — "
+                                 "动作前先看,违反会被硬拦或警告"),
+                    )
+                    if _rules_block:
+                        _try_add(_rules_block)
+        except Exception as _re_err:
+            try:
+                logger.debug("rule engine system_prompt injection skipped: %s",
+                             _re_err)
+            except Exception:
+                pass
+
         # 1. Shared Knowledge Wiki (lightweight title list)
         try:
             from . import knowledge as _kb
