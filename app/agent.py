@@ -8567,6 +8567,22 @@ Write only the summary body. Do not include any preamble or prefix."""
             # and write `self.messages`, which now points at the bucket
             # for this context.
             self._switch_context(context_id)
+            # Strip stale per-turn ephemeral system messages from the
+            # previous turn — these are flagged with _source markers
+            # and were meant to nudge the model for ONE iteration only,
+            # but they leak into self.messages and survive across turns,
+            # making the LLM still believe (e.g.) "tool budget exhausted
+            # 40/20" on a fresh turn that has its own fresh budget.
+            # Drop them at chat() entry so each new turn starts clean.
+            try:
+                _EPHEMERAL_SOURCES = {"per_response_cap"}
+                self.messages = [
+                    m for m in (self.messages or [])
+                    if not (m.get("role") == "system"
+                            and m.get("_source") in _EPHEMERAL_SOURCES)
+                ]
+            except Exception:
+                pass
             self.status = AgentStatus.BUSY
             # Reset streaming buffer at the start of every turn so a
             # previous turn's text doesn't bleed into the "typing"
