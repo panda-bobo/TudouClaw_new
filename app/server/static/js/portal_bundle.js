@@ -34278,6 +34278,16 @@ async function renderSystemSettings(container) {
   var globHardDeny        = ag.glob_hard_deny_per_hour || agDefault.glob_hard_deny_per_hour || 15;
   var globHardDenyDefault = agDefault.glob_hard_deny_per_hour || 15;
 
+  // Tool _reason injection — boolean toggle.
+  var tr = settings.tool_reason || {};
+  var trDefault = defaults.tool_reason || {};
+  var toolReasonEnabled = (typeof tr.enabled === 'boolean')
+                          ? tr.enabled
+                          : (typeof trDefault.enabled === 'boolean'
+                             ? trDefault.enabled : true);
+  var toolReasonEnabledDefault = (typeof trDefault.enabled === 'boolean')
+                                 ? trDefault.enabled : true;
+
   var anyDiverged = (canvasMax !== canvasDefault)
                  || (delegateMax !== delegateDefault)
                  || (toolBudget !== toolBudgetDefault)
@@ -34286,7 +34296,8 @@ async function renderSystemSettings(container) {
                  || (bashSoftCap !== bashSoftCapDefault)
                  || (readValveCap !== readValveCapDefault)
                  || (globSoftWarn !== globSoftWarnDefault)
-                 || (globHardDeny !== globHardDenyDefault);
+                 || (globHardDeny !== globHardDenyDefault)
+                 || (toolReasonEnabled !== toolReasonEnabledDefault);
 
   var _techSs2 = false;
   try { _techSs2 = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
@@ -34436,6 +34447,56 @@ async function renderSystemSettings(container) {
             path: 'agent_guardrails.glob_hard_deny_per_hour',
             controlLabel: 'DENY / HOUR',
           })
+      +   (function(){
+            // Tool _reason toggle card. Same visual frame as configCard
+            // but the bottom control is a checkbox (boolean) instead of
+            // a numeric select. CURRENT/DEFAULT show ON/OFF strings.
+            var diverged = toolReasonEnabled !== toolReasonEnabledDefault;
+            var statusColor = diverged ? 'var(--warning, #ff9800)' : 'var(--secondary)';
+            var statusLabel = diverged ? 'CUSTOMIZED' : 'DEFAULT';
+            var curStr = toolReasonEnabled ? 'ON' : 'OFF';
+            var defStr = toolReasonEnabledDefault ? 'ON' : 'OFF';
+            var checked = toolReasonEnabled ? 'checked' : '';
+            return '<div class="tc-card-glass" style="' +
+                     'padding:var(--s-lg);display:flex;flex-direction:column;gap:14px;' +
+                     'position:relative;overflow:hidden;border-top:1px solid rgba(255,255,255,0.15);' +
+                     (diverged ? 'box-shadow:0 0 15px -3px rgba(255,152,0,0.20);' : 'box-shadow:0 0 15px -3px rgba(137,206,255,0.10);') +
+                   '">' +
+                     '<div style="position:absolute;top:0;right:0;padding:14px;pointer-events:none">' +
+                       '<span class="material-symbols-outlined" style="font-size:64px;color:rgba(192,193,255,0.18);margin:-12px -12px 0 0">psychology</span>' +
+                     '</div>' +
+                     '<div style="display:flex;justify-content:space-between;align-items:flex-start;position:relative">' +
+                       '<div style="padding:8px;background:rgba(192,193,255,0.10);border:1px solid rgba(192,193,255,0.20);border-radius:var(--r-md);display:inline-flex">' +
+                         '<span class="material-symbols-outlined" style="font-size:22px;color:var(--primary);font-variation-settings:\'FILL\' 1">psychology_alt</span>' +
+                       '</div>' +
+                       '<div style="display:flex;align-items:center;gap:6px;background:var(--surface-container-high);padding:4px 10px;border-radius:9999px;border:1px solid rgba(255,255,255,0.05)">' +
+                         '<span style="width:6px;height:6px;border-radius:50%;background:' + statusColor + ';animation:pulse-dot 2s infinite ease-in-out;box-shadow:0 0 6px ' + statusColor + '"></span>' +
+                         '<span class="tc-mono-label" style="font-size:10px;color:var(--on-surface);letter-spacing:0.05em">' + statusLabel + '</span>' +
+                       '</div>' +
+                     '</div>' +
+                     '<div style="position:relative">' +
+                       '<h3 style="font-family:var(--font-display);font-size:18px;font-weight:600;color:var(--on-surface);margin:0;letter-spacing:-0.01em;line-height:1.3">Tool Reason Required</h3>' +
+                       '<p class="tc-text-dim" style="font-size:12px;line-height:1.5;margin:6px 0 0">Inject a required <code style="font-family:var(--font-mono);font-size:11px;background:rgba(255,255,255,0.06);padding:1px 4px;border-radius:3px">_reason</code> param (≤100 chars) into every tool schema. LLM must explain WHY before each call — strong self-check against repeat-read loops. Stripped before dispatch; logged for debugging. Cost ~50 tok/tool in tools[] payload.</p>' +
+                     '</div>' +
+                     '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:12px 0;border-top:1px solid rgba(255,255,255,0.05);border-bottom:1px solid rgba(255,255,255,0.05)">' +
+                       '<div>' +
+                         '<p class="tc-mono-label" style="font-size:10px;color:var(--outline);margin:0 0 4px">CURRENT</p>' +
+                         '<p style="font-family:var(--font-mono);font-size:18px;font-weight:600;color:' + (diverged ? 'var(--warning, #ff9800)' : 'var(--secondary)') + ';margin:0">' + curStr + '</p>' +
+                       '</div>' +
+                       '<div>' +
+                         '<p class="tc-mono-label" style="font-size:10px;color:var(--outline);margin:0 0 4px">DEFAULT</p>' +
+                         '<p style="font-family:var(--font-mono);font-size:18px;color:var(--outline);margin:0">' + defStr + '</p>' +
+                       '</div>' +
+                     '</div>' +
+                     '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:auto">' +
+                       '<span class="tc-mono-label" style="font-size:10px;color:var(--on-surface-variant)">SCHEMA INJECTION</span>' +
+                       '<label style="display:inline-flex;align-items:center;cursor:pointer;gap:8px;padding:6px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg)">' +
+                         '<input type="checkbox" ' + checked + ' onchange="_systemSettingsPatch(\'tool_reason.enabled\', this.checked)" style="width:18px;height:18px;cursor:pointer;accent-color:var(--primary)">' +
+                         '<span class="tc-mono-label" style="font-size:11px;color:var(--text);letter-spacing:0.05em">' + curStr + '</span>' +
+                       '</label>' +
+                     '</div>' +
+                   '</div>';
+          })()
       + '</div>'
       + '<div style="margin-top:var(--s-xl)">'
       +   '<button class="tc-mono-label" onclick="_systemSettingsResetDefaults()" '

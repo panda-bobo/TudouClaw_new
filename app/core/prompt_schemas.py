@@ -187,12 +187,43 @@ class ParamSpec:
 class ToolSchema(LLMVisibleSchema):
     name: str = field(default="", metadata={"llm": True})
     description: str = field(default="", metadata={"llm": True})
+    # Optional structured-description sections (Claude Code-style).
+    # When populated, to_openai_payload merges them into the
+    # description string the LLM sees, in a stable order. Existing
+    # tools can leave these blank — description is the fallback.
+    # use_when     : 1-2 sentences on when to call this tool
+    # not_for      : when NOT to use it (cross-tool guidance)
+    # output_format: what the result looks like / how to read it
+    # gotcha       : non-obvious pitfalls / 1-based vs 0-based / encoding
+    use_when: str = field(default="", metadata={"llm": True})
+    not_for: str = field(default="", metadata={"llm": True})
+    output_format: str = field(default="", metadata={"llm": True})
+    gotcha: str = field(default="", metadata={"llm": True})
     params: list = field(default_factory=list, metadata={"llm": True})  # list[ParamSpec]
     aliases: list = field(default_factory=list, metadata={"llm": False})
     handler_name: str = field(default="", metadata={"llm": False})
     risk_level: str = field(default="", metadata={"llm": False})  # safe|risky|dangerous
     category: str = field(default="", metadata={"llm": False})
     audit_tags: list = field(default_factory=list, metadata={"llm": False})
+
+    def composite_description(self) -> str:
+        """Merge the base description + the 4 structured sections in
+        a stable order. Used by to_openai_payload to ship a single
+        ``description`` string to the LLM that carries the richer
+        guidance when authors filled it in.
+        """
+        parts: list[str] = []
+        if self.description:
+            parts.append(self.description.strip())
+        if self.use_when:
+            parts.append(f"Use when: {self.use_when.strip()}")
+        if self.not_for:
+            parts.append(f"Not for: {self.not_for.strip()}")
+        if self.output_format:
+            parts.append(f"Output: {self.output_format.strip()}")
+        if self.gotcha:
+            parts.append(f"GOTCHA: {self.gotcha.strip()}")
+        return "\n".join(parts)
 
     @property
     def required_params(self) -> list[str]:
@@ -211,16 +242,42 @@ class ToolSchema(LLMVisibleSchema):
               path: string [REQUIRED]  # absolute or workspace-relative file path
               offset: integer = 0  # 0-indexed starting line
               limit: integer = -1  # -1 = read entire file
+              _reason: string [REQUIRED]  # 为什么这次需要调用…
             )
 
         ``multiline=False`` → one-line compact form.
+
+        Same _reason injection as ``to_openai_payload`` — keeps the
+        error-signature renderer and the tools[] payload in lockstep
+        (test_tool_payload_and_error_signature_single_source).
         """
-        if not self.params:
-            return f"{self.name}()"
         segs = [
             p.to_signature_segment(with_desc=with_desc)
             for p in self.params if isinstance(p, ParamSpec)
         ]
+        # Mirror the _reason injection from to_openai_payload so the
+        # error message the LLM sees on a validation failure carries
+        # the same required-set as the schema it was given. Reads the
+        # same setting so disabling one disables the other.
+        try:
+            from ..system_settings import get_store
+            _ss = get_store()
+            _enabled = bool(_ss.get("tool_reason.enabled", True)) if _ss else True
+        except Exception:
+            _enabled = True
+        if _enabled and not any(
+                isinstance(p, ParamSpec) and p.name == self.REASON_PARAM_NAME
+                for p in self.params):
+            reason_seg = (
+                f"{self.REASON_PARAM_NAME}: string [REQUIRED]  "
+                f"# Why this specific call is needed (<={self.REASON_MAX_CHARS} chars). "
+                f"No filler like 'continue'/'check'."
+                if with_desc else
+                f"{self.REASON_PARAM_NAME}: string [REQUIRED]"
+            )
+            segs.append(reason_seg)
+        if not segs:
+            return f"{self.name}()"
         if multiline:
             # Drop the comma separator in multi-line — descriptions
             # often end at the line boundary and a trailing "," after
@@ -230,7 +287,13 @@ class ToolSchema(LLMVisibleSchema):
 
     def to_llm_markdown(self) -> str:
         lines = [f"### `{self.name}`"]
-        if self.description:
+        # Prefer the composite description (base + 4 structured
+        # sections) over the bare description so the markdown view
+        # stays in sync with what the LLM sees in tools[] payload.
+        composite = self.composite_description()
+        if composite:
+            lines.append(composite.strip())
+        elif self.description:
             lines.append(self.description.strip())
         if self.params:
             lines.append("")
@@ -249,6 +312,20 @@ class ToolSchema(LLMVisibleSchema):
                 lines.append(line)
         return "\n".join(lines)
 
+    # Universal "_reason" param injected into every tool's schema.
+    # Forces the LLM to articulate WHY before calling — strong
+    # self-check against the "read same file 5 times" loop and similar
+    # wandering. Stripped server-side before reaching the underlying
+    # tool function (prefix-underscore convention; see agent dispatch).
+    REASON_PARAM_NAME: ClassVar[str] = "_reason"
+    REASON_MAX_CHARS: ClassVar[int] = 100
+    REASON_DESCRIPTION: ClassVar[str] = (
+        "Why this specific call is needed right now (<=100 chars). "
+        "State the concrete unknown or sub-task this resolves; do NOT "
+        "write filler like 'continue' or 'check'. If you just made the "
+        "same call, give a substantively different reason or switch tools."
+    )
+
     def to_openai_payload(self) -> dict:
         """Render this ToolSchema as an OpenAI tools[] entry — the
         ``{"type": "function", "function": {...}}`` shape consumed by
@@ -259,6 +336,12 @@ class ToolSchema(LLMVisibleSchema):
         sent to the LLM and the signature shown in error messages will
         come from the SAME object (no chance for tools[] schema and
         validation-error schema to drift apart).
+
+        Universal _reason param: every tool gets a required ``_reason``
+        string (≤100 chars) so the LLM must articulate WHY before
+        calling. Stripped server-side before dispatch — never reaches
+        the underlying tool function. Underscore prefix is the
+        long-standing convention for server-injected params.
         """
         properties: dict = {}
         required: list = []
@@ -285,9 +368,41 @@ class ToolSchema(LLMVisibleSchema):
             properties[p.name] = prop
             if p.required:
                 required.append(p.name)
+        # Inject universal _reason param (always last in property
+        # order; required). Skip if:
+        #   - source tool already declared it explicitly (let the
+        #     tool's own description win), OR
+        #   - admin disabled the feature in System Settings
+        #     (system_settings.tool_reason.enabled = false).
+        # Setting lookup is best-effort — if the store isn't ready
+        # (very early boot, tests), fall through to the default-on path.
+        _reason_enabled = True
+        _reason_max_chars = self.REASON_MAX_CHARS
+        try:
+            from ..system_settings import get_store
+            _ss = get_store()
+            if _ss is not None:
+                _reason_enabled = bool(
+                    _ss.get("tool_reason.enabled", True))
+                _reason_max_chars = int(
+                    _ss.get("tool_reason.max_chars", self.REASON_MAX_CHARS))
+        except Exception:
+            pass
+        if _reason_enabled and self.REASON_PARAM_NAME not in properties:
+            properties[self.REASON_PARAM_NAME] = {
+                "type": "string",
+                "description": self.REASON_DESCRIPTION,
+                "maxLength": _reason_max_chars,
+            }
+            required.append(self.REASON_PARAM_NAME)
         fn: dict = {"name": self.name}
-        if self.description:
-            fn["description"] = self.description
+        # Prefer the composite description (description + use_when /
+        # not_for / output / gotcha sections) when any structured field
+        # is filled. Falls back to the plain description when those are
+        # empty so tools that haven't been migrated still ship cleanly.
+        desc = self.composite_description() or self.description
+        if desc:
+            fn["description"] = desc
         params_dict: dict = {"type": "object", "properties": properties}
         if required:
             params_dict["required"] = required
@@ -464,11 +579,76 @@ def from_tool_definition(td: dict) -> ToolSchema:
                 example=str(pdef.get("example") or ""),
                 raw_schema=dict(pdef) if _is_complex else {},
             ))
+    # Best-effort: split a Claude-Code-style description into the
+    # 4 structured sections (use_when / not_for / output / gotcha)
+    # by recognising the common section markers. Falls through on
+    # anything it doesn't match — base description still ships.
+    raw_desc = str(fn.get("description") or "").strip()
+    base_desc, sections = _split_tool_description_sections(raw_desc)
     return ToolSchema(
         name=fn.get("name", ""),
-        description=str(fn.get("description") or "").strip(),
+        description=base_desc,
+        use_when=sections.get("use_when", ""),
+        not_for=sections.get("not_for", ""),
+        output_format=sections.get("output", ""),
+        gotcha=sections.get("gotcha", ""),
         params=params,
     )
+
+
+# Section markers recognised in a tool description string. Order
+# matters — earlier entries are searched first so a Use-when paragraph
+# doesn't get swallowed by a later Not-for. Case-insensitive match on
+# the leading word(s) only.
+_TOOL_DESC_SECTION_MARKERS: tuple = (
+    ("use_when", ("Use when:", "When to use:")),
+    ("not_for",  ("Not for:", "Do NOT use:", "Avoid when:")),
+    ("output",   ("Output:", "Output format:", "Returns:")),
+    ("gotcha",   ("GOTCHA:", "Gotcha:", "Pitfall:", "Caveat:")),
+)
+
+
+def _split_tool_description_sections(desc: str) -> tuple[str, dict]:
+    """Parse a tool description into (base_text, {section: content}).
+
+    Recognises the Claude-Code-style markers (``Use when:`` /
+    ``Not for:`` / ``Output:`` / ``GOTCHA:``). Each section runs from
+    its marker line until the next recognised marker or end-of-string.
+    Anything before the first marker is the ``base_text`` (the
+    summary sentence(s)).
+    """
+    if not desc:
+        return "", {}
+    # Find all marker hits with their positions. Dedupe by (start, key)
+    # — case-insensitive matching can produce two hits at the same
+    # position (e.g. "GOTCHA:" matches both the "GOTCHA:" and "Gotcha:"
+    # variants), and the second one would compute an empty body that
+    # overwrites the first. Keep the first marker variant per (pos, key).
+    import re
+    seen_pos_key: set = set()
+    hits: list = []
+    for key, markers in _TOOL_DESC_SECTION_MARKERS:
+        for m in markers:
+            pat = re.compile(r"(?m)^\s*" + re.escape(m), re.IGNORECASE)
+            for match in pat.finditer(desc):
+                tag = (match.start(), key)
+                if tag in seen_pos_key:
+                    continue
+                seen_pos_key.add(tag)
+                hits.append((match.start(), key, m, match.end()))
+    if not hits:
+        return desc, {}
+    hits.sort(key=lambda t: t[0])
+    base_text = desc[: hits[0][0]].rstrip()
+    sections: dict = {}
+    for i, (start, key, marker, content_start) in enumerate(hits):
+        end = hits[i + 1][0] if i + 1 < len(hits) else len(desc)
+        body = desc[content_start:end].strip()
+        # If a key shows up twice (rare — e.g. someone writes both
+        # "Output:" and "Returns:"), keep the first occurrence.
+        if key not in sections:
+            sections[key] = body
+    return base_text, sections
 
 
 def from_skill_install(install: Any) -> SkillSchema:
@@ -929,6 +1109,93 @@ class ScheduledContextSchema(LLMVisibleSchema):
 
 
 @dataclass
+class EnvSchema(LLMVisibleSchema):
+    """Compact ``<env>`` block consolidating cwd / project context /
+    git status / date / workspace flags into one stable region of
+    the system prompt.
+
+    Borrowed from Claude Code's pattern: rather than scatter cwd in
+    one place, git_branch in another, has_design_doc in a third,
+    fold them all into a single small block at a fixed position.
+    Two wins:
+      1. **Token economy** — fewer redundant labels ("workspace
+         root: ...", "git: branch=...", "Date: ..." each carry
+         their own header chars).
+      2. **Cache friendliness** — the values inside ``<env>`` change
+         slowly within a session (cwd / project rarely flip mid-turn);
+         keeping them in one stable block makes the prefix cache
+         hit more reliably than scattering them across schemas that
+         each render with their own preamble.
+
+    Coexists with WorkspaceFilesSchema and GitContextSchema during
+    the migration — _build_dynamic_context can choose to render
+    EnvSchema instead, or render both for now while we tune the
+    rollout.
+    """
+
+    cwd: str = field(default="", metadata={"llm": True})
+    project_id: str = field(default="", metadata={"llm": True})
+    project_name: str = field(default="", metadata={"llm": True})
+    git_branch: str = field(default="", metadata={"llm": True})
+    git_status_summary: str = field(default="", metadata={"llm": True})
+    date_iso: str = field(default="", metadata={"llm": True})
+    has_design_doc: bool = field(default=False, metadata={"llm": True})
+    has_plan_md: bool = field(default=False, metadata={"llm": True})
+    workspace_root: str = field(default="", metadata={"llm": True})
+    # Top-level entries — capped list (workspace overview at a glance)
+    top_level_entries: list = field(
+        default_factory=list, metadata={"llm": True})
+    top_level_cap: int = field(default=20, metadata={"llm": False})
+
+    def is_empty(self) -> bool:
+        return not (
+            self.cwd or self.project_id or self.project_name
+            or self.git_branch or self.workspace_root
+            or self.top_level_entries or self.date_iso
+        )
+
+    def to_llm_markdown(self) -> str:
+        if self.is_empty():
+            return ""
+        lines = ["<env>"]
+        # cwd / workspace_root: emit whichever is set, prefer cwd if
+        # they differ (cwd is the active working dir, workspace_root
+        # is the project shared dir — both useful when they diverge).
+        if self.cwd:
+            lines.append(f"cwd: {self.cwd}")
+        if self.workspace_root and self.workspace_root != self.cwd:
+            lines.append(f"workspace_root: {self.workspace_root}")
+        if self.project_id or self.project_name:
+            label = self.project_name or self.project_id
+            extra = f" (id={self.project_id})" if self.project_id and self.project_name else ""
+            lines.append(f"project: {label}{extra}")
+        if self.git_branch:
+            git_line = f"git_branch: {self.git_branch}"
+            if self.git_status_summary:
+                git_line += f"  (status: {self.git_status_summary})"
+            lines.append(git_line)
+        if self.date_iso:
+            lines.append(f"date: {self.date_iso}")
+        # Workspace flags only emit if there's a project context — for
+        # a solo agent these flags carry no signal.
+        if self.project_id or self.workspace_root:
+            flag_parts = []
+            flag_parts.append(
+                ("✓" if self.has_design_doc else "✗") + " has_design_doc")
+            flag_parts.append(
+                ("✓" if self.has_plan_md else "✗") + " has_plan_md")
+            lines.append("flags: " + " · ".join(flag_parts))
+        if self.top_level_entries:
+            entries = list(self.top_level_entries)[: self.top_level_cap]
+            extra = ""
+            if len(self.top_level_entries) > self.top_level_cap:
+                extra = f"  (+{len(self.top_level_entries) - self.top_level_cap} more)"
+            lines.append("top_level: " + "  ".join(entries) + extra)
+        lines.append("</env>")
+        return "\n".join(lines)
+
+
+@dataclass
 class AdminInstructionSchema(LLMVisibleSchema):
     """ADMIN messages directed at the agent (project chat). Already
     filtered upstream by @-mention + timestamp (see project.py admin
@@ -941,6 +1208,144 @@ class AdminInstructionSchema(LLMVisibleSchema):
 
     def to_llm_markdown(self) -> str:
         return self.markdown_fallback
+
+
+# ─── Project group-chat scope ────────────────────────────────────────
+
+
+@dataclass
+class TeamMemberSchema:
+    """One project member, surfaced in the system prompt so the LLM
+    knows the agent_id to put into create_milestone /
+    update_milestone_responsibility / send_message / handoff_request.
+    """
+
+    agent_id: str = ""
+    name: str = ""
+    role: str = ""
+    responsibility: str = ""
+
+
+@dataclass
+class ChatTurnSchema:
+    """One past message in the project group chat. Phase-3 (#2)
+    target: render these into messages[] instead of inlining into the
+    user message — for prompt-cache friendliness.
+    """
+
+    sender: str = ""           # display label like "user" / "pm-小明"
+    sender_id: str = ""        # raw agent_id or "" for human user / admin
+    sender_role: str = ""      # "user" | "admin" | agent role
+    content: str = ""
+    timestamp: float = 0.0
+
+
+@dataclass
+class ProjectScopeSchema(LLMVisibleSchema):
+    """Project-chat context handed to an agent during a group-chat
+    turn. Replaces the legacy hand-concatenated string in
+    project.py:_build_chat_prompt with structured fields.
+
+    For now the rendering still emits the same markdown the legacy
+    path produced (so this is a behavior-preserving refactor — diff
+    on the LLM side is byte-equivalent). Phase-3 (#2) will move
+    ``recent_messages`` out of the rendered string into messages[].
+    """
+
+    # Identity
+    project_id: str = field(default="", metadata={"llm": True})
+    project_name: str = field(default="", metadata={"llm": True})
+    paused: bool = field(default=False, metadata={"llm": True})
+
+    # Agent's role within this project
+    responsibility: str = field(default="", metadata={"llm": True})
+
+    # Team roster — structured so LLM sees agent_id alongside name/role
+    members: list = field(default_factory=list, metadata={"llm": True})
+
+    # Pre-rendered markdown sub-blocks. Each one is independently
+    # auditable; later phases can replace any of them with stronger
+    # typed sub-schemas without changing this class's shape.
+    admin_block_md: str = field(default="", metadata={"llm": True})
+    pause_block_md: str = field(default="", metadata={"llm": True})
+    task_lines_md: str = field(default="", metadata={"llm": True})
+    workflow_status_md: str = field(default="", metadata={"llm": True})
+    goals_md: str = field(default="", metadata={"llm": True})
+    milestones_md: str = field(default="", metadata={"llm": True})
+    other_tasks_md: str = field(default="", metadata={"llm": True})
+    save_path_md: str = field(default="", metadata={"llm": True})
+    project_tools_md: str = field(default="", metadata={"llm": True})
+    delegation_rules_md: str = field(default="", metadata={"llm": True})
+
+    # Recent group-chat backlog. Explicit list so #2 can move them
+    # from the rendered user message into messages[].
+    recent_messages: list = field(default_factory=list, metadata={"llm": True})
+
+    # The user message that triggered this turn
+    user_msg: str = field(default="", metadata={"llm": True})
+
+    # Trailer line ("请以你的角色和职责回复…"). Pre-rendered so caller
+    # can swap wording without editing this class.
+    trailer_md: str = field(default="", metadata={"llm": True})
+
+    def _format_team_lines(self) -> str:
+        if not self.members:
+            return ""
+        lines = []
+        for m in self.members:
+            if isinstance(m, TeamMemberSchema):
+                lines.append(
+                    f"  - {m.role}-{m.name} [id={m.agent_id}]: {m.responsibility}"
+                )
+            elif isinstance(m, dict):
+                lines.append(
+                    f"  - {m.get('role','')}-{m.get('name','')} "
+                    f"[id={m.get('agent_id','')}]: {m.get('responsibility','')}"
+                )
+        return "\n".join(lines)
+
+    def _format_recent_messages(self) -> str:
+        if not self.recent_messages:
+            return ""
+        lines = []
+        for t in self.recent_messages:
+            if isinstance(t, ChatTurnSchema):
+                lines.append(f"[{t.sender}]: {t.content}")
+            elif isinstance(t, dict):
+                lines.append(f"[{t.get('sender','')}]: {t.get('content','')}")
+            elif isinstance(t, str):
+                lines.append(t)
+        return "\n".join(lines)
+
+    def to_llm_string(self) -> str:
+        """Render the legacy user-message format. Output is byte-
+        equivalent to the previous _build_chat_prompt concatenation.
+        """
+        team_block = self._format_team_lines()
+        ctx = self._format_recent_messages()
+
+        return (
+            f"{self.admin_block_md}"
+            f"{self.pause_block_md}"
+            f"[项目群聊 — {self.project_name}]\n"
+            f"你的职责: {self.responsibility}\n"
+            f"\n团队成员:\n" + team_block +
+            f"{self.task_lines_md}\n"
+            f"{self.workflow_status_md}"
+            f"{self.goals_md}"
+            f"{self.milestones_md}"
+            f"{self.other_tasks_md}"
+            f"{self.save_path_md}"
+            f"{self.project_tools_md}"
+            f"{self.delegation_rules_md}"
+            f"\n最近聊天记录:\n{ctx}\n"
+            f"\n[User]: {self.user_msg}\n"
+            f"{self.trailer_md}"
+        )
+
+    def to_llm_markdown(self) -> str:
+        """LLMVisibleSchema interface — same content as to_llm_string."""
+        return self.to_llm_string()
 
 
 # ─────────────────────────────────────────────────────────────────────

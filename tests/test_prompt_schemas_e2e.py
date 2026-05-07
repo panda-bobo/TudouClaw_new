@@ -45,16 +45,24 @@ def test_tool_schema_round_trip_all_definitions():
         assert out_fn["name"] == in_fn.get("name", ""), \
             f"name drift on {in_fn.get('name')}"
 
-        # Required set must match
+        # Required set: every input-required param must appear in
+        # output. The output may also include the universal "_reason"
+        # injection (added by ToolSchema for self-reflection — not
+        # part of the source schema). Allow that one extra item.
         in_req = set(in_fn.get("parameters", {}).get("required", []))
         out_req = set(out_fn.get("parameters", {}).get("required", []))
-        assert in_req == out_req, \
-            f"required drift on {in_fn.get('name')}: {in_req} vs {out_req}"
+        extra = out_req - in_req
+        assert in_req <= out_req, \
+            f"required shrink on {in_fn.get('name')}: missing {in_req - out_req}"
+        assert extra <= {"_reason"}, \
+            f"unexpected required extras on {in_fn.get('name')}: {extra}"
 
-        # All visible (non-underscore) properties present in output
+        # All visible (non-underscore) properties present in output;
+        # output additionally has the injected "_reason" param.
         in_props = in_fn.get("parameters", {}).get("properties", {})
         in_visible = {k for k in in_props.keys() if not k.startswith("_")}
-        out_props = set(out_fn.get("parameters", {}).get("properties", {}).keys())
+        out_props_all = set(out_fn.get("parameters", {}).get("properties", {}).keys())
+        out_props = {k for k in out_props_all if k != "_reason"}
         assert in_visible == out_props, \
             f"property drift on {in_fn.get('name')}: in={in_visible} out={out_props}"
 

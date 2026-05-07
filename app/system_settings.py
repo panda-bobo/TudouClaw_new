@@ -96,6 +96,18 @@ DEFAULTS: dict[str, Any] = {
         "plans_busy_seconds": 3,
         "runtime_stats_busy_seconds": 8,
     },
+    # ── Tool _reason injection (read by ToolSchema.to_openai_payload) ──
+    # When enabled, every tool's OpenAI schema gets a required "_reason"
+    # string param (≤max_chars). Forces the LLM to articulate WHY before
+    # each call — strong self-check against repeat-read loops and
+    # wandering tool calls. Stripped server-side before dispatch (never
+    # reaches the underlying tool function); logged to agent events for
+    # debugging. Token cost: ~50 tok/tool in tools[] payload, ~30 tok per
+    # actual tool call. Disable if your model handles wandering well.
+    "tool_reason": {
+        "enabled": True,
+        "max_chars": 100,
+    },
 }
 
 
