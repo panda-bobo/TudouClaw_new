@@ -76,6 +76,24 @@ class RateLimitMiddleware:
             return True
         return False
 
+    # Loopback addresses — clients on the same machine as the server.
+    # Per HANDOFF "single-deployment model" + the practical reality that
+    # the admin's browser hammering its own SPA isn't the abuse case
+    # this middleware was built for. LAN / WAN clients still get
+    # throttled. Set TUDOU_RATELIMIT_LOCALHOST_OFF=0 to disable bypass
+    # (e.g. when stress-testing the limiter itself).
+    _LOOPBACK_IPS = frozenset({
+        "127.0.0.1", "::1", "localhost", "0.0.0.0",
+    })
+
+    def _is_loopback(self, ip: str) -> bool:
+        if ip in self._LOOPBACK_IPS:
+            return True
+        # IPv4-mapped IPv6 loopback like ::ffff:127.0.0.1
+        if ip.startswith("::ffff:127.") or ip.startswith("127."):
+            return True
+        return False
+
     def _client_ip(self, scope: Scope) -> str:
         # Honor X-Forwarded-For if present (single-process dev usually doesn't).
         for k, v in scope.get("headers") or []:
@@ -101,6 +119,13 @@ class RateLimitMiddleware:
             return
 
         ip = self._client_ip(scope)
+        # Loopback bypass — same-machine traffic skips the limiter.
+        # Disable via TUDOU_RATELIMIT_LOCALHOST_OFF=1 for stress tests
+        # of the limiter itself.
+        if (os.environ.get("TUDOU_RATELIMIT_LOCALHOST_OFF", "0") != "1"
+                and self._is_loopback(ip)):
+            await self.app(scope, receive, send)
+            return
         key = (ip, path)
         now = time.monotonic()
 

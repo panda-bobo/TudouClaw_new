@@ -272,3 +272,28 @@ def test_workspace_files_schema_caps_top_level_entries():
     assert "file_0" in md and "file_29" in md
     # Cap notice present
     assert "+20 more" in md
+
+
+# ─── 7. Rate-limit loopback bypass ─────────────────────────────────
+
+
+def test_ratelimit_loopback_bypass():
+    """Same-machine traffic (127.0.0.1 / ::1 / 127.x / ::ffff:127.x)
+    skips the rate limiter entirely. LAN clients still get throttled."""
+    from app.api.middleware.ratelimit import RateLimitMiddleware
+
+    rl = RateLimitMiddleware(app=None)
+    # Loopback IPs
+    assert rl._is_loopback("127.0.0.1") is True
+    assert rl._is_loopback("::1") is True
+    assert rl._is_loopback("localhost") is True
+    assert rl._is_loopback("127.0.0.5") is True  # any 127.0.0.0/8
+    assert rl._is_loopback("::ffff:127.0.0.1") is True  # IPv4-mapped IPv6
+    assert rl._is_loopback("0.0.0.0") is True
+    # Non-loopback (LAN / WAN)
+    assert rl._is_loopback("192.168.1.1") is False
+    assert rl._is_loopback("10.0.0.5") is False
+    assert rl._is_loopback("8.8.8.8") is False
+    assert rl._is_loopback("2001:db8::1") is False
+    assert rl._is_loopback("") is False
+    assert rl._is_loopback("unknown") is False
