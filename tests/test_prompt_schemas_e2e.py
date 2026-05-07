@@ -221,3 +221,54 @@ def test_plan_state_schema_empty_returns_empty_string():
     ps = PlanStateSchema()
     assert ps.is_empty()
     assert render_block(ps) == ""
+
+
+# ─── 6. WorkspaceFilesSchema renders + flags ───────────────────────
+
+
+def test_workspace_files_schema_renders_with_state():
+    """WorkspaceFilesSchema surfaces project shared dir state — design
+    doc / plan md presence + top-level entries — so the LLM doesn't
+    need to glob to discover state.
+    """
+    from app.core.prompt_schemas import WorkspaceFilesSchema, render_block
+
+    ws = WorkspaceFilesSchema(
+        workspace_root="/Users/me/.tudou_claw/workspaces/shared/abc",
+        has_design_doc=True,
+        has_plan_md=False,
+        top_level_entries=["docs/", "src/", "tests/", "README.md"],
+    )
+    md = render_block(ws)
+    assert "## Workspace State" in md
+    assert "/Users/me/.tudou_claw/workspaces/shared/abc" in md
+    assert "✓ has_design_doc" in md
+    assert "✗ has_plan_md" in md
+    assert "docs/" in md
+    assert "README.md" in md
+
+
+def test_workspace_files_schema_empty_returns_empty_string():
+    """No workspace_root (solo agent) → render returns empty so the
+    block is silently skipped from system_prompt."""
+    from app.core.prompt_schemas import WorkspaceFilesSchema, render_block
+
+    ws = WorkspaceFilesSchema()
+    assert ws.is_empty()
+    assert render_block(ws) == ""
+
+
+def test_workspace_files_schema_caps_top_level_entries():
+    """Top-level entries should cap at 30 in the rendered output to
+    keep prompt budget under control."""
+    from app.core.prompt_schemas import WorkspaceFilesSchema, render_block
+
+    ws = WorkspaceFilesSchema(
+        workspace_root="/x",
+        top_level_entries=[f"file_{i}" for i in range(50)],
+    )
+    md = render_block(ws)
+    # All first 30 are present
+    assert "file_0" in md and "file_29" in md
+    # Cap notice present
+    assert "+20 more" in md

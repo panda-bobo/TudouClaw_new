@@ -4650,6 +4650,43 @@ class Agent:
             except Exception:
                 pass
 
+        # 0.7 Workspace state — surface project shared dir state so the
+        # LLM knows in advance whether a design doc / plan exists.
+        # Reuses the Tier-2 PEP enrichment (_build_pep_workflow_enrichment),
+        # so what the LLM sees here is byte-for-byte the same view that
+        # Rule Engine evaluates against. Without this, LLM has to glob
+        # to discover state — wasteful and often denied by the
+        # "no glob in project" rule.
+        # Only fires when agent has an active project context; solo
+        # agents skip silently (workspace_root will be empty).
+        try:
+            from .core.prompt_schemas import (
+                WorkspaceFilesSchema, render_block,
+            )
+            _ws_root_path = ""
+            try:
+                if hasattr(self, "get_active_shared_workspace"):
+                    _ws_root_path = self.get_active_shared_workspace() or ""
+            except Exception:
+                _ws_root_path = ""
+            if _ws_root_path:
+                _enrich = self._build_pep_workflow_enrichment()
+                _proj_state = _enrich.get("project", {}) or {}
+                _ws_schema = WorkspaceFilesSchema(
+                    workspace_root=_ws_root_path,
+                    has_design_doc=bool(_proj_state.get("has_design_doc", False)),
+                    has_plan_md=bool(_proj_state.get("has_plan_md", False)),
+                    top_level_entries=list(_proj_state.get("workspace_files", []) or []),
+                )
+                _ws_md = render_block(_ws_schema)
+                if _ws_md:
+                    _try_add(_ws_md, "workspace_state")
+        except Exception as _ws_err:
+            try:
+                logger.debug("workspace state injection skipped: %s", _ws_err)
+            except Exception:
+                pass
+
         # 1. Shared Knowledge Wiki (lightweight title list) — KnowledgeWikiSchema
         try:
             from . import knowledge as _kb
