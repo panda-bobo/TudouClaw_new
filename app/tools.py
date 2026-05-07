@@ -2571,6 +2571,62 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "finalize_step",
+            "description": (
+                "Atomic step closure: register one-or-more local files as project deliverables, close the plan step, optionally mark a milestone done — all in ONE call.\n"
+                "Use when: you just finished writing code/docs (write_file × N) and want to close out the step. Replaces the typical bash cp + submit_deliverable × N + plan_update + update_milestone_status ritual.\n"
+                "Not for: mid-step interim saves (use submit_deliverable singly). Not for closing a step you haven't actually completed work on (acceptance still applies). Not in solo mode without a project context.\n"
+                "Output: ✅ lines per registered deliverable + step / milestone confirmation, or ⚠️ list of items that failed (partial success is reported, not aborted).\n"
+                "GOTCHA: each file's local_path can be in your agent workspace — submit_deliverable copies it into the project shared dir automatically, no need to bash cp first. Per-file kind defaults to 'code'. step_id and milestone_id are optional; supply step_id when you want to close the plan step in the same call."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "files": {
+                        "type": "array",
+                        "description": ("List of file specs to register as deliverables. "
+                                         "Each item: {local_path (REQUIRED, abs path), title? "
+                                         "(default basename), kind? (default 'code'), "
+                                         "milestone_id? (per-file override of top-level milestone_id)}."),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "local_path": {"type": "string",
+                                                "description": "Absolute path to the file (typically the path you passed to write_file)."},
+                                "title": {"type": "string",
+                                           "description": "Short label for the deliverable; defaults to file basename."},
+                                "kind": {"type": "string",
+                                          "description": "document | code | design | analysis | other (default: code)."},
+                                "milestone_id": {"type": "string",
+                                                  "description": "Per-file milestone link; overrides top-level milestone_id when set."},
+                            },
+                            "required": ["local_path"],
+                        },
+                    },
+                    "step_id": {
+                        "type": "string",
+                        "description": "Plan step id to close on success. Empty = skip plan_update; only register the deliverables.",
+                    },
+                    "milestone_id": {
+                        "type": "string",
+                        "description": "Optional milestone to mark done after deliverables register. Empty = skip update_milestone_status.",
+                    },
+                    "step_summary": {
+                        "type": "string",
+                        "description": "Short one-liner stamped on the closed step / milestone evidence (auto-built from titles when empty).",
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Project id (optional; inferred from chat context).",
+                    },
+                },
+                "required": ["files"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "project_state",
             "description": (
                 "Snapshot of structured project state — replaces glob_files for status checks.\n"
@@ -2808,6 +2864,12 @@ from .tools_split.project import (  # noqa: E402,F401
     _auto_report_issue,
 )
 
+# Composite step closure — finalize_step. Folds submit_deliverable × N
+# + plan_update + update_milestone_status into ONE LLM round-trip,
+# eliminating the typical 6-9-call ritual at the end of a coder /
+# researcher step.
+from .tools_split.finalize import _tool_finalize_step  # noqa: E402,F401
+
 # MCP call + builtin audio TTS/STT handler moved to
 # app/tools_split/mcp.py. That module registers the builtin handler
 # with the dispatcher at import time — keep this import unconditional
@@ -2932,6 +2994,9 @@ _TOOL_FUNCS: dict[str, callable] = {
     "project_state": _tool_project_state,
     # L3 (2026-05-06) — PM one-shot blueprint that generates engine rules
     "define_project_blueprint": _tool_define_project_blueprint,
+    # Composite step closure — submit_deliverable × N + plan_update +
+    # update_milestone_status in one call (Claude-Code-style macro).
+    "finalize_step": _tool_finalize_step,
     "mcp_call": _tool_mcp_call,
     # Experience persistence + skill generation
     "save_experience": _tool_save_experience,
