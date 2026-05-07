@@ -1187,19 +1187,38 @@ class AgentLLMMixin:
         # model gets an authoritative snapshot: current step, its
         # acceptance criterion, what's done, what's pending.
         #
+        # Now goes through PlanStateSchema (prompt_schemas) so the
+        # LLM-visible projection is auditable. Falls back to the legacy
+        # format_plan_state_for_llm() if structured projection comes
+        # up empty (e.g. plan exists but step shapes differ).
         # Kept first in the dynamic context so even aggressive budget
         # truncation can't drop it.
         try:
-            plan_ctx = self.format_plan_state_for_llm()
+            from .core.prompt_schemas import from_execution_plan, render_block
+            _plan = getattr(self, "_current_plan", None)
+            plan_ctx = ""
+            if _plan is not None:
+                _ps = from_execution_plan(_plan)
+                if _ps.is_empty():
+                    _ps.markdown_fallback = self.format_plan_state_for_llm()
+                plan_ctx = render_block(_ps)
             if plan_ctx:
                 _try_add(plan_ctx)
         except Exception as _pe:
+            # Fallback to legacy direct call
+            try:
+                plan_ctx = self.format_plan_state_for_llm()
+                if plan_ctx:
+                    _try_add(plan_ctx)
+            except Exception:
+                pass
             try:
                 logger.debug("plan state injection skipped: %s", _pe)
             except Exception:
                 pass
 
         # 0. Intent-aware context hint (from IntentResolver)
+        # Schema: IntentHintSchema (prompt_schemas).
         _intent = getattr(self, "_last_resolved_intent", None)
         if _intent and _intent.confidence >= 0.6:
             _INTENT_HINTS = {
@@ -1215,31 +1234,45 @@ class AgentLLMMixin:
             }
             hint = _INTENT_HINTS.get(_intent.category, "")
             if hint:
-                # Add extracted slots if any
-                _extracted = {k: v.value for k, v in _intent.slots.items()
-                              if v.extracted and v.value}
-                if _extracted:
-                    slot_info = "; ".join(f"{k}={v}" for k, v in _extracted.items())
-                    hint += f"\n提取参数: {slot_info}"
-                _try_add(f"<intent_hint>\n{hint}\n</intent_hint>")
+                try:
+                    from .core.prompt_schemas import from_intent, render_block
+                    _ih = from_intent(_intent, hint_text=hint)
+                    _ih_md = render_block(_ih)
+                    if _ih_md:
+                        _try_add(_ih_md)
+                except Exception:
+                    # Fallback inline render
+                    _extracted = {k: v.value for k, v in _intent.slots.items()
+                                  if v.extracted and v.value}
+                    if _extracted:
+                        slot_info = "; ".join(f"{k}={v}" for k, v in _extracted.items())
+                        hint += f"\n提取参数: {slot_info}"
+                    _try_add(f"<intent_hint>\n{hint}\n</intent_hint>")
 
         # 0.5 RolePresetV2 Playbook injection —— 岗位做事逻辑 + 场景筛选规则
-        # 只要 agent 的 V2 preset 有 playbook 就注入；Phase 2 核心行为改造点。
+        # Schema: PlaybookSchema (prompt_schemas) wrapping the legacy
+        # playbook_runtime.build_playbook_context output.
         try:
             from .role_preset_registry import get_registry as _get_role_reg
             from .playbook_runtime import build_playbook_context
             from .scope_detector import detect_scopes
+            from .core.prompt_schemas import from_playbook, render_block
             _role_id = getattr(self.profile, "role_preset_id", "") or ""
             if _role_id:
                 _preset = _get_role_reg().get(_role_id)
                 if _preset is not None and not _preset.playbook.is_empty():
                     _scopes = detect_scopes(current_query or "")
-                    # 缓存供 Post-hook 复用
                     self._playbook_active_scopes = _scopes
                     self._playbook_active_preset_id = _role_id
                     _pb_ctx = build_playbook_context(_preset, _scopes)
                     if _pb_ctx:
-                        _try_add(f"<playbook scope=\"{','.join(_scopes)}\">\n{_pb_ctx}\n</playbook>")
+                        _pb_schema = from_playbook(
+                            _role_id, _scopes, _pb_ctx,
+                            preset_version=getattr(_preset, "version", 0),
+                        )
+                        _pb_md = render_block(_pb_schema)
+                        if _pb_md:
+                            _try_add(_pb_md)
         except Exception as _e:
             # playbook 故障不应阻断聊天
             try:
@@ -1307,33 +1340,56 @@ class AgentLLMMixin:
                 pass
 
         # 1. Shared Knowledge Wiki (lightweight title list)
+        # Schema: KnowledgeWikiSchema
         try:
             from . import knowledge as _kb
+            from .core.prompt_schemas import from_knowledge_wiki, render_block
             kb_summary = _kb.get_prompt_summary()
-            _try_add(kb_summary)
+            if kb_summary:
+                _try_add(render_block(from_knowledge_wiki(kb_summary)))
         except Exception:
             pass
 
         # 2. Workspace files (MCP, Tasks, Scheduled — needed for tool usage)
-        sched_ctx = self._get_scheduled_context()
-        _try_add(sched_ctx)
+        # Schema: ScheduledContextSchema
+        try:
+            from .core.prompt_schemas import from_scheduled_context, render_block
+            sched_ctx = self._get_scheduled_context()
+            if sched_ctx:
+                _try_add(render_block(from_scheduled_context(sched_ctx)))
+        except Exception:
+            sched_ctx = self._get_scheduled_context()
+            _try_add(sched_ctx)
 
         # 3. Git context (with cooldown)
+        # Schema: GitContextSchema
         now = time.time()
         if now - self._git_context_ts >= self._GIT_CONTEXT_COOLDOWN:
             self._cached_git_context = self._get_git_context()
             self._git_context_ts = now
-        _try_add(self._cached_git_context)
+        try:
+            from .core.prompt_schemas import from_git_context_markdown, render_block
+            if self._cached_git_context:
+                _try_add(render_block(from_git_context_markdown(self._cached_git_context)))
+        except Exception:
+            _try_add(self._cached_git_context)
 
         # 4. Three-layer memory: L2 + L3 retrieval (query-dependent)
+        # Schema: MemoryRecallSchema
         mm = self._get_memory_manager()
         if mm and current_query and total_chars < max_dynamic_chars:
             try:
+                from .core.prompt_schemas import from_memory_recall, render_block
                 mem_config = self._get_memory_config()
                 memory_context = mm.retrieve_for_prompt(
                     self.id, current_query, config=mem_config,
                 )
-                _try_add(memory_context or "")
+                _mem_md = render_block(from_memory_recall(
+                    memory_context or "",
+                    query=current_query,
+                    budget_chars=max_dynamic_chars,
+                ))
+                _try_add(_mem_md or "")
                 # ── 记录本次记忆注入的体量，供 portal 展示"记忆使用比例" ──
                 try:
                     mem_chars = len(memory_context or "")
