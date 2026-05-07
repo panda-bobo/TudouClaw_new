@@ -15160,6 +15160,17 @@ async function triggerGrowthLearning(agentId) {
 
 // ============ Providers ============
 function renderProviders(container) {
+  // Tech-mode short-circuit: every action handler (delete / edit / save)
+  // calls renderProviders() directly, bypassing the upstream dispatcher
+  // at line ~3543. Without this, deleting a provider card would re-render
+  // with the legacy Plus-Jakarta-Sans CSS even though tech mode is on
+  // (the "刷回去老的方式" symptom).
+  try {
+    if (localStorage.getItem('tudou_theme') === 'tech'
+        && typeof renderProvidersTech === 'function') {
+      return renderProvidersTech(container);
+    }
+  } catch (e) { /* fall through to legacy path */ }
   var c = container || document.getElementById('content');
   if (!container) c.style.padding = '24px';
   var epoch = _renderEpoch;
