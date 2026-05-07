@@ -195,7 +195,24 @@ def _stream_chat_to_response(llm_mod, messages: list[dict],
             msg["tool_calls"] = tool_calls
         if reasoning_parts:
             msg["reasoning_content"] = "".join(reasoning_parts)
-        return {"message": msg, "stop_reason": stop_reason}
+        result = {"message": msg, "stop_reason": stop_reason}
+        # XML-style tool-call recovery (DSML / <tool_call> / <function/>).
+        # Streaming providers occasionally emit tool calls as text inside
+        # the content delta instead of the standard tool_use frames —
+        # notably DeepSeek-flash variants and some custom OpenAI-compat
+        # gateways (e.g. Mimo). Without this, the markup ends up in
+        # msg["content"] verbatim, downstream sees no tool_calls, the
+        # watchdog wakes the agent 5 min later, and the agent re-emits
+        # the same broken markup → loop. The non-stream path
+        # (chat_no_stream) already does this; mirroring here closes the
+        # streaming gap.
+        try:
+            postprocess = getattr(llm_mod, "_postprocess_xml_tool_calls", None)
+            if callable(postprocess):
+                result = postprocess(result, model=model)
+        except Exception as _pe:
+            logger.debug("stream xml-tool postprocess skipped: %s", _pe)
+        return result
 
     except Exception as stream_err:
         # Fall through to non-streaming so streaming is never a new
