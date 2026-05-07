@@ -767,6 +767,162 @@ class SkillStore:
             logger.warning("delete_catalog_entry %s failed: %s", entry_id, e)
             return False
 
+    # ── Edit metadata (in-place rewrite of manifest / SKILL.md) ────
+    #
+    # Editable LLM-facing fields ONLY — id / version / source / spec /
+    # runtime / entry / size_bytes are structural and stay read-only.
+    # The whitelist mirrors SkillSchema.llm_field_names() (minus path /
+    # name / id which the UI shows as read-only or derives from disk).
+    #
+    # 2026-05-07: description hard-capped at 100 chars per project rule
+    # — long blurbs hurt prompt economy and the LLM reads description
+    # to decide WHEN to call the skill, not WHAT it is in the abstract.
+    #
+    # Persistence:
+    #   spec="agent-skills" → SKILL.md frontmatter (YAML between --- ---)
+    #   spec="tudou"        → manifest.yaml top-level keys
+    # Both write atomically (tmp + replace). Comments in source YAML
+    # are lost (PyYAML round-trip limitation) — acceptable trade-off
+    # for a metadata edit form.
+
+    DESCRIPTION_MAX_CHARS = 100
+
+    EDITABLE_FIELDS = (
+        "description",
+        "tags",
+        "applicable_roles",
+        "scenarios",
+        "languages",
+    )
+
+    def update_entry_metadata(self, entry_id: str,
+                                updates: dict) -> tuple[bool, str]:
+        """Edit a catalog entry's LLM-facing metadata in place.
+
+        Returns ``(ok, message)``. On success, message is "" or a
+        diagnostic note (e.g. unknown fields silently dropped). On
+        failure, message explains WHY (caller surfaces to UI).
+        """
+        if not isinstance(updates, dict) or not updates:
+            return False, "no updates supplied"
+        entry = self.get_entry(entry_id)
+        if entry is None:
+            return False, f"entry not found: {entry_id}"
+
+        # Filter to whitelist
+        clean: dict = {}
+        dropped: list[str] = []
+        for k, v in updates.items():
+            if k in self.EDITABLE_FIELDS:
+                clean[k] = v
+            else:
+                dropped.append(k)
+        if not clean:
+            return False, ("nothing editable supplied. "
+                           f"editable: {list(self.EDITABLE_FIELDS)}; "
+                           f"received: {list(updates.keys())}")
+
+        # Validate description length
+        if "description" in clean:
+            desc = clean["description"]
+            if not isinstance(desc, str):
+                return False, "description must be string"
+            desc = desc.strip()
+            if len(desc) > self.DESCRIPTION_MAX_CHARS:
+                return False, (
+                    f"description must be ≤ {self.DESCRIPTION_MAX_CHARS} "
+                    f"chars (got {len(desc)})"
+                )
+            clean["description"] = desc
+
+        # Coerce list fields to clean string lists
+        for list_field in ("tags", "applicable_roles", "scenarios", "languages"):
+            if list_field in clean:
+                v = clean[list_field]
+                if isinstance(v, str):
+                    v = [s.strip() for s in v.split(",") if s.strip()]
+                elif isinstance(v, (list, tuple)):
+                    v = [str(s).strip() for s in v if str(s).strip()]
+                else:
+                    return False, f"{list_field} must be string or list"
+                clean[list_field] = v
+
+        # Locate source file
+        from pathlib import Path
+        base = Path(entry.catalog_path or "")
+        if not base.is_dir():
+            return False, f"catalog path missing on disk: {base}"
+        spec = (entry.spec or "tudou").lower()
+        if spec == "agent-skills":
+            target = base / "SKILL.md"
+        elif spec == "tudou":
+            target = base / "manifest.yaml"
+        else:
+            # Try both — older entries may have ambiguous spec
+            target = base / "manifest.yaml"
+            if not target.is_file():
+                target = base / "SKILL.md"
+        if not target.is_file():
+            return False, f"source file not found: {target.name} under {base}"
+
+        try:
+            if target.name == "SKILL.md":
+                ok, msg = self._update_skill_md_frontmatter(target, clean)
+            else:
+                ok, msg = self._update_manifest_yaml(target, clean)
+        except Exception as e:
+            logger.exception("update_entry_metadata write failed")
+            return False, f"write failed: {e}"
+        if not ok:
+            return False, msg
+
+        # Update in-memory entry so the next /skill-store GET reflects
+        # the change without forcing a full rescan round-trip
+        for k, v in clean.items():
+            setattr(entry, k, v)
+        entry.last_updated = time.time()
+
+        note = ""
+        if dropped:
+            note = f"ignored non-editable fields: {dropped}"
+        return True, note
+
+    @staticmethod
+    def _update_skill_md_frontmatter(path: Path, updates: dict) -> tuple[bool, str]:
+        """Rewrite SKILL.md YAML frontmatter with updates merged in."""
+        if yaml is None:
+            return False, "PyYAML not installed"
+        text = path.read_text(encoding="utf-8")
+        meta, body = _parse_frontmatter(text)
+        if not isinstance(meta, dict):
+            meta = {}
+        meta.update(updates)
+        new_fm = yaml.safe_dump(meta, allow_unicode=True, sort_keys=False).strip()
+        new_text = f"---\n{new_fm}\n---\n{body if body.startswith(chr(10)) else chr(10) + body}"
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(new_text, encoding="utf-8")
+        os.replace(tmp, path)
+        return True, ""
+
+    @staticmethod
+    def _update_manifest_yaml(path: Path, updates: dict) -> tuple[bool, str]:
+        """Rewrite manifest.yaml with updates merged in."""
+        if yaml is None:
+            return False, "PyYAML not installed"
+        text = path.read_text(encoding="utf-8")
+        try:
+            data = yaml.safe_load(text) or {}
+        except Exception as e:
+            return False, f"manifest YAML parse failed: {e}"
+        if not isinstance(data, dict):
+            data = {}
+        data.update(updates)
+        new_text = yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(new_text, encoding="utf-8")
+        os.replace(tmp, path)
+        return True, ""
+
     # ── Grant/revoke (with independent-agent pointer file) ──
 
     def grant(self, installed_id: str, agent_id: str,

@@ -41,7 +41,7 @@ Tool parameters need their description alongside (per-param doc), so
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields as dc_fields
-from typing import Any
+from typing import Any, ClassVar
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -264,6 +264,13 @@ class SkillSchema(LLMVisibleSchema):
         the LLM's choice within those roles.
     """
 
+    # 100-char cap on description (matches Skill Store edit form +
+    # backend validation in SkillStore.update_entry_metadata). Long
+    # blurbs hurt prompt economy and the LLM uses description to decide
+    # WHEN to call the skill, not WHAT it is in detail.
+    # ClassVar so it stays a class constant, not a dataclass field.
+    DESCRIPTION_MAX_CHARS: ClassVar[int] = 100
+
     name: str = field(default="", metadata={"llm": True})
     id: str = field(default="", metadata={"llm": True})
     path: str = field(default="", metadata={"llm": True})
@@ -286,10 +293,14 @@ class SkillSchema(LLMVisibleSchema):
         # Header — name + id
         lines = [f"### `{self.name}`" + (f" (id: `{self.id}`)" if self.id else "")]
         # WHEN to call — lead with "何时调用:" so the LLM treats the
-        # description as a trigger, not a passive blurb.
-        when = self.summary_zh or self.description
+        # description as a trigger, not a passive blurb. Defensive
+        # truncate at DESCRIPTION_MAX_CHARS — backend validates on save
+        # but legacy / external imports may exceed.
+        when = (self.summary_zh or self.description).strip()
         if when:
-            lines.append(f"**何时调用:** {when.strip()}")
+            if len(when) > self.DESCRIPTION_MAX_CHARS:
+                when = when[: self.DESCRIPTION_MAX_CHARS - 1].rstrip() + "…"
+            lines.append(f"**何时调用:** {when}")
         # Tag list of scenarios (complements the sentence above)
         if self.scenarios:
             lines.append(f"**典型场景:** {', '.join(self.scenarios)}")

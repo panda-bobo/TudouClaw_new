@@ -83,12 +83,17 @@ async function loadSkillStore() {
         ? '<span title="本地笔记 " style="padding:2px 6px;font-size:10px;background:rgba(251,191,36,0.15);color:#f59e0b;border-radius:10px;margin-left:6px">💡 '+ann.notes.length+'</span>'
         : '';
       var actions = '';
+      // Edit available regardless of install state — admins may want to
+      // tighten descriptions / tag a skill before installing.
+      var editBtn = '<button class="btn btn-sm" onclick="_showSkillEditModal(\''+esc(e.id)+'\')" title="Edit description / tags / scenarios"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">edit</span> Edit</button>';
       if (e.installed) {
         actions = '<button class="btn btn-sm" onclick="openGrantModal(\''+esc(e.installed_id)+'\',\''+esc(e.name)+'\')">授权给 Agent</button>'
                 + '<button class="btn btn-sm" onclick="openAnnotateModal(\''+esc(e.installed_id)+'\',\''+esc(e.name)+'\')">📝 笔记</button>'
+                + editBtn
                 + '<button class="btn btn-sm" style="color:var(--error)" onclick="uninstallStoreEntry(\''+esc(e.id)+'\')">卸载</button>';
       } else {
-        actions = '<button class="btn btn-primary btn-sm" onclick="installStoreEntry(\''+esc(e.id)+'\')">安装到 Hub</button>';
+        actions = '<button class="btn btn-primary btn-sm" onclick="installStoreEntry(\''+esc(e.id)+'\')">安装到 Hub</button>'
+                + editBtn;
       }
       var sensitive = e.sensitive ? '<span style="padding:2px 6px;font-size:10px;background:rgba(239,68,68,0.15);color:#ef4444;border-radius:10px;margin-left:6px">敏感</span>' : '';
       var tagList = (e.tags||[]).slice(0,6).map(function(t){ return '<span style="font-size:10px;padding:1px 6px;border:1px solid var(--border);border-radius:8px;margin-right:4px">'+esc(t)+'</span>'; }).join('');
@@ -208,6 +213,174 @@ async function _doLocalImport() {
   }
   btn.disabled = false;
   btn.innerHTML = '导入';
+}
+
+// ── Edit metadata modal ──────────────────────────────────────────
+//
+// Edit the LLM-facing fields of a catalog skill (description, tags,
+// applicable_roles, scenarios, languages). Backend caps description at
+// 100 chars per project rule (skills with overlong descriptions waste
+// prompt tokens and the LLM uses description to decide WHEN to call
+// a skill, not WHAT it is).
+//
+// Read-only fields (id / version / source / spec / runtime / entry)
+// are shown for context but not editable.
+
+var _SKILL_DESC_MAX = 100;
+
+function _showSkillEditModal(entryId) {
+  var entry = (_skillStoreState.entries || []).find(function(e){ return e.id === entryId; });
+  if (!entry) {
+    alert('Entry not found in current view; rescan and try again.');
+    return;
+  }
+  // Pre-existing modal? Remove first to avoid duplicates on rapid clicks.
+  var existing = document.getElementById('skill-edit-modal');
+  if (existing) existing.remove();
+
+  var modal = document.createElement('div');
+  modal.id = 'skill-edit-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9999;display:flex;align-items:center;justify-content:center';
+
+  var roTr = function(label, value) {
+    return '<tr><td style="padding:4px 10px 4px 0;color:var(--text3);font-size:11px;white-space:nowrap;vertical-align:top">' + esc(label) + '</td>'
+         + '<td style="padding:4px 0;font-family:var(--font-mono),monospace;font-size:12px;color:var(--text2)">' + esc(value || '—') + '</td></tr>';
+  };
+
+  modal.innerHTML = '<div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:22px;max-width:640px;width:94%;max-height:88vh;overflow:auto;box-shadow:0 12px 40px rgba(0,0,0,0.4)">'
+    + '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px">'
+    +   '<div>'
+    +     '<h3 style="margin:0;font-size:18px">编辑 Skill 元数据</h3>'
+    +     '<div style="font-size:11px;color:var(--text3);margin-top:4px">'
+    +       '只编辑发给 LLM 的字段。结构性字段(id/version/spec)不可改;'
+    +       '改完后 rescan 自动刷新缓存。'
+    +     '</div>'
+    +   '</div>'
+    +   '<button onclick="document.getElementById(\'skill-edit-modal\').remove()" style="background:transparent;border:none;font-size:20px;color:var(--text3);cursor:pointer;padding:0">✕</button>'
+    + '</div>'
+
+    // Read-only context block
+    + '<table style="width:100%;border-collapse:collapse;margin-bottom:14px;background:var(--surface);border:1px solid var(--border-light);border-radius:6px">'
+    +   '<tbody>'
+    +     roTr('name', entry.name)
+    +     roTr('id', entry.id)
+    +     roTr('version', entry.version)
+    +     roTr('source', entry.source)
+    +     roTr('spec', entry.spec)
+    +     roTr('runtime', entry.runtime)
+    +   '</tbody>'
+    + '</table>'
+
+    // Editable: description
+    + '<div style="margin-bottom:14px">'
+    +   '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">'
+    +     '<label style="font-size:12px;font-weight:600">描述 (description)</label>'
+    +     '<span id="skill-edit-desc-count" style="font-size:10px;color:var(--text3)">0 / ' + _SKILL_DESC_MAX + '</span>'
+    +   '</div>'
+    +   '<div style="font-size:11px;color:var(--text3);margin-bottom:6px">'
+    +     '说明<b>什么场景下调用这个 skill</b>(不是它是什么)。最多 ' + _SKILL_DESC_MAX + ' 字符。'
+    +   '</div>'
+    +   '<textarea id="skill-edit-desc" rows="3" maxlength="' + _SKILL_DESC_MAX + '" '
+    +     'oninput="_skillEditDescUpdate()" '
+    +     'style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:13px;box-sizing:border-box;font-family:inherit;resize:vertical">'
+    +     esc(entry.description || '')
+    +   '</textarea>'
+    + '</div>'
+
+    // Editable: tags / scenarios / applicable_roles / languages — CSV inputs
+    + _renderCsvField('tags', '标签 (tags)', '逗号分隔,如: dev,review,qa', entry.tags)
+    + _renderCsvField('scenarios', '典型场景 (scenarios)', '逗号分隔,如: 新功能开发, bug 修复', entry.scenarios)
+    + _renderCsvField('applicable_roles', '适用角色 (applicable_roles)', '逗号分隔,如: coder, reviewer', entry.applicable_roles)
+    + _renderCsvField('languages', '编程语言 (languages)', '逗号分隔,如: python, javascript', entry.languages)
+
+    + '<div id="skill-edit-status" style="font-size:12px;margin-bottom:8px;display:none"></div>'
+    + '<div style="display:flex;justify-content:flex-end;gap:8px">'
+    +   '<button class="btn btn-sm" onclick="document.getElementById(\'skill-edit-modal\').remove()">取消</button>'
+    +   '<button class="btn btn-primary btn-sm" id="skill-edit-save" onclick="_doSkillEdit(\'' + esc(entryId) + '\')">'
+    +     '<span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">save</span> 保存'
+    +   '</button>'
+    + '</div>'
+    + '</div>';
+
+  document.body.appendChild(modal);
+  // Initialize counter
+  _skillEditDescUpdate();
+  // Auto-focus description for fast editing
+  setTimeout(function(){
+    var ta = document.getElementById('skill-edit-desc');
+    if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+  }, 0);
+}
+
+function _renderCsvField(key, label, placeholder, currentList) {
+  var val = (currentList && currentList.length) ? currentList.join(', ') : '';
+  return '<div style="margin-bottom:12px">'
+    + '<label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px">' + esc(label) + '</label>'
+    + '<input id="skill-edit-' + key + '" type="text" placeholder="' + esc(placeholder) + '" value="' + esc(val) + '" '
+    +   'style="width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:13px;box-sizing:border-box">'
+    + '</div>';
+}
+
+function _skillEditDescUpdate() {
+  var ta = document.getElementById('skill-edit-desc');
+  var counter = document.getElementById('skill-edit-desc-count');
+  if (!ta || !counter) return;
+  var len = (ta.value || '').length;
+  counter.textContent = len + ' / ' + _SKILL_DESC_MAX;
+  counter.style.color = (len > _SKILL_DESC_MAX * 0.9)
+    ? 'var(--warning, #ff9800)'
+    : (len > _SKILL_DESC_MAX ? 'var(--error)' : 'var(--text3)');
+}
+
+async function _doSkillEdit(entryId) {
+  var status = document.getElementById('skill-edit-status');
+  var btn = document.getElementById('skill-edit-save');
+  var desc = (document.getElementById('skill-edit-desc') || {}).value || '';
+  if (desc.length > _SKILL_DESC_MAX) {
+    status.style.display = 'block';
+    status.style.color = 'var(--error)';
+    status.innerHTML = '描述超过 ' + _SKILL_DESC_MAX + ' 字符,请精简。';
+    return;
+  }
+  var updates = { description: desc.trim() };
+  ['tags', 'scenarios', 'applicable_roles', 'languages'].forEach(function(key) {
+    var el = document.getElementById('skill-edit-' + key);
+    if (!el) return;
+    var raw = (el.value || '').trim();
+    if (!raw) { updates[key] = []; return; }
+    updates[key] = raw.split(',').map(function(s){ return s.trim(); }).filter(Boolean);
+  });
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle;animation:spin 1s linear infinite">progress_activity</span> 保存中…';
+  status.style.display = 'block';
+  status.style.color = 'var(--text3)';
+  status.innerHTML = '正在写入磁盘…';
+
+  try {
+    var data = await api('POST', '/api/portal/skill-store', {
+      action: 'edit_metadata',
+      entry_id: entryId,
+      updates: updates,
+    });
+    if (data && data.ok) {
+      status.style.color = '#10b981';
+      status.innerHTML = '✓ 已保存' + (data.note ? ' (' + esc(data.note) + ')' : '');
+      loadSkillStore();
+      setTimeout(function(){
+        var m = document.getElementById('skill-edit-modal');
+        if (m) m.remove();
+      }, 800);
+    } else {
+      status.style.color = 'var(--error)';
+      status.innerHTML = '保存失败: ' + esc((data && data.error) || JSON.stringify(data));
+    }
+  } catch(err) {
+    status.style.color = 'var(--error)';
+    status.innerHTML = '请求失败: ' + esc(String(err));
+  }
+  btn.disabled = false;
+  btn.innerHTML = '<span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">save</span> 保存';
 }
 
 // ── Remote URL Scan Modal ──

@@ -864,6 +864,26 @@ async def manage_skill_store(
             store.scan()
             return {"ok": ok}
 
+        if action == "edit_metadata":
+            # In-place edit of LLM-facing fields (description, tags,
+            # applicable_roles, scenarios, languages). description hard-
+            # capped at 100 chars. Writes back to manifest.yaml or
+            # SKILL.md depending on the entry's spec, atomically.
+            entry_id = body.get("entry_id", "")
+            updates = body.get("updates") or {}
+            if not isinstance(updates, dict):
+                raise HTTPException(400, "updates must be an object")
+            ok, msg = store.update_entry_metadata(entry_id, updates)
+            if ok:
+                store.scan()  # refresh disk-backed entry cache
+                entry = store.get_entry(entry_id)
+                return {
+                    "ok": True,
+                    "note": msg,
+                    "entry": entry.to_dict() if entry else None,
+                }
+            return {"ok": False, "error": msg}
+
         if action == "grant":
             installed_id = body.get("installed_id", "")
             agent_id = body.get("agent_id", "")

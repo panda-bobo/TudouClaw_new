@@ -30462,9 +30462,13 @@ async function loadSkillStore() {
             (opts.iconOnly ? '' : label) +
           '</button>';
         };
+        // Edit button — available regardless of install state. Lets
+        // admins tighten description / tags / scenarios in place.
+        var editBtnTech = techBtn('', 'edit', "event.stopPropagation();_showSkillEditModal('"+esc(e.id)+"')", { iconOnly: true, title: 'Edit description / tags / scenarios' });
         if (e.installed) {
           actions = techBtn('GRANT', 'badge', "event.stopPropagation();openGrantModal('"+esc(e.installed_id)+"','"+esc(e.name)+"')", { primary: true, flex: 1 })
                   + (pptxThemeBtn ? techBtn('THEMES', 'palette', 'event.stopPropagation();openPptxThemeGallery()', {}) : '')
+                  + editBtnTech
                   + techBtn('', 'edit_note', "event.stopPropagation();openAnnotateModal('"+esc(e.installed_id)+"','"+esc(e.name)+"')", { iconOnly: true, title: 'Notes' })
                   + techBtn('', 'remove_circle', "event.stopPropagation();uninstallStoreEntry('"+esc(e.id)+"')", { iconOnly: true, title: 'Uninstall (keep catalog)' })
                   + techBtn('', 'delete_forever', "event.stopPropagation();deleteCatalogEntry('"+esc(e.id)+"','"+esc(e.name)+"')", { iconOnly: true, danger: true, title: 'Hard-delete catalog dir' });
@@ -30472,13 +30476,16 @@ async function loadSkillStore() {
           var disLabel = disabled ? 'Restore' : 'Hide';
           var disIcon = disabled ? 'visibility' : 'visibility_off';
           actions = techBtn('INSTALL', 'download', "event.stopPropagation();installStoreEntry('"+esc(e.id)+"')", { primary: true, flex: 1 })
+                  + editBtnTech
                   + techBtn('', disIcon, "event.stopPropagation();toggleDisableCatalogEntry('"+esc(e.id)+"',"+(!disabled)+")", { iconOnly: true, title: disLabel })
                   + techBtn('', 'delete_forever', "event.stopPropagation();deleteCatalogEntry('"+esc(e.id)+"','"+esc(e.name)+"')", { iconOnly: true, danger: true, title: 'Hard-delete catalog dir' });
         }
       } else {
+        var editBtnLegacy = '<button class="btn btn-sm" title="编辑元数据" onclick="event.stopPropagation();_showSkillEditModal(\''+esc(e.id)+'\')"><span class="material-symbols-outlined" style="font-size:14px">edit</span></button>';
         if (e.installed) {
           actions = '<button class="btn btn-sm" style="flex:1" onclick="event.stopPropagation();openGrantModal(\''+esc(e.installed_id)+'\',\''+esc(e.name)+'\')"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">badge</span> 授权</button>'
                   + pptxThemeBtn
+                  + editBtnLegacy
                   + '<button class="btn btn-sm" title="笔记" onclick="event.stopPropagation();openAnnotateModal(\''+esc(e.installed_id)+'\',\''+esc(e.name)+'\')">📝</button>'
                   + '<button class="btn btn-sm" title="卸载 (保留目录)" style="color:var(--warning,#f59e0b)" onclick="event.stopPropagation();uninstallStoreEntry(\''+esc(e.id)+'\')"><span class="material-symbols-outlined" style="font-size:14px">remove_circle</span></button>'
                   + '<button class="btn btn-sm" title="彻底删除目录" style="color:var(--error)" onclick="event.stopPropagation();deleteCatalogEntry(\''+esc(e.id)+'\',\''+esc(e.name)+'\')"><span class="material-symbols-outlined" style="font-size:14px">delete_forever</span></button>';
@@ -30486,6 +30493,7 @@ async function loadSkillStore() {
           var disableLabel = disabled ? 'Resume' : 'Expired';
           var disableIcon = disabled ? 'visibility' : 'visibility_off';
           actions = '<button class="btn btn-primary btn-sm" style="flex:1" onclick="event.stopPropagation();installStoreEntry(\''+esc(e.id)+'\')"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">download</span> 安装</button>'
+                  + editBtnLegacy
                   + '<button class="btn btn-sm" title="'+disableLabel+'" onclick="event.stopPropagation();toggleDisableCatalogEntry(\''+esc(e.id)+'\','+(!disabled)+')"><span class="material-symbols-outlined" style="font-size:14px">'+disableIcon+'</span></button>'
                   + '<button class="btn btn-sm" title="彻底删除目录" style="color:var(--error)" onclick="event.stopPropagation();deleteCatalogEntry(\''+esc(e.id)+'\',\''+esc(e.name)+'\')"><span class="material-symbols-outlined" style="font-size:14px">delete_forever</span></button>';
         }
@@ -30668,6 +30676,160 @@ async function installStoreEntry(entryId) {
     if (r && r.ok) loadSkillStore();
     else alert('Install failed:' + JSON.stringify(r));
   } catch(e) { alert('Install failed:'+e); }
+}
+
+// ── Edit metadata modal ──────────────────────────────────────────
+//
+// Edit LLM-facing fields of a catalog skill (description, tags,
+// applicable_roles, scenarios, languages). Backend caps description at
+// 100 chars per project rule — long blurbs hurt prompt economy and the
+// LLM uses description to decide WHEN to call a skill, not WHAT it is.
+// Read-only fields (id/version/source/spec/runtime) shown for context.
+
+var _SKILL_DESC_MAX = 100;
+
+function _showSkillEditModal(entryId) {
+  var entry = (_skillStoreState.entries || []).find(function(e){ return e.id === entryId; });
+  if (!entry) {
+    alert('Entry not found in current view; rescan and try again.');
+    return;
+  }
+  var existing = document.getElementById('skill-edit-modal');
+  if (existing) existing.remove();
+
+  var modal = document.createElement('div');
+  modal.id = 'skill-edit-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9999;display:flex;align-items:center;justify-content:center';
+
+  var roTr = function(label, value) {
+    return '<tr><td style="padding:4px 10px 4px 0;color:var(--text3);font-size:11px;white-space:nowrap;vertical-align:top">' + esc(label) + '</td>'
+         + '<td style="padding:4px 0;font-family:var(--font-mono),monospace;font-size:12px;color:var(--text2)">' + esc(value || '—') + '</td></tr>';
+  };
+
+  modal.innerHTML = '<div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:22px;max-width:640px;width:94%;max-height:88vh;overflow:auto;box-shadow:0 12px 40px rgba(0,0,0,0.4)">'
+    + '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px">'
+    +   '<div>'
+    +     '<h3 style="margin:0;font-size:18px">Edit Skill Metadata</h3>'
+    +     '<div style="font-size:11px;color:var(--text3);margin-top:4px">'
+    +       'Only LLM-visible fields are editable. Structural fields '
+    +       '(id / version / spec) are immutable; rescan refreshes after save.'
+    +     '</div>'
+    +   '</div>'
+    +   '<button onclick="document.getElementById(\'skill-edit-modal\').remove()" style="background:transparent;border:none;font-size:20px;color:var(--text3);cursor:pointer;padding:0">✕</button>'
+    + '</div>'
+    + '<table style="width:100%;border-collapse:collapse;margin-bottom:14px;background:var(--surface);border:1px solid var(--border-light);border-radius:6px">'
+    +   '<tbody>'
+    +     roTr('name', entry.name)
+    +     roTr('id', entry.id)
+    +     roTr('version', entry.version)
+    +     roTr('source', entry.source)
+    +     roTr('spec', entry.spec)
+    +     roTr('runtime', entry.runtime)
+    +   '</tbody>'
+    + '</table>'
+    + '<div style="margin-bottom:14px">'
+    +   '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">'
+    +     '<label style="font-size:12px;font-weight:600">Description</label>'
+    +     '<span id="skill-edit-desc-count" style="font-size:10px;color:var(--text3)">0 / ' + _SKILL_DESC_MAX + '</span>'
+    +   '</div>'
+    +   '<div style="font-size:11px;color:var(--text3);margin-bottom:6px">'
+    +     'Describe <b>WHEN to call this skill</b> (not what it is). Max ' + _SKILL_DESC_MAX + ' chars.'
+    +   '</div>'
+    +   '<textarea id="skill-edit-desc" rows="3" maxlength="' + _SKILL_DESC_MAX + '" '
+    +     'oninput="_skillEditDescUpdate()" '
+    +     'style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:13px;box-sizing:border-box;font-family:inherit;resize:vertical">'
+    +     esc(entry.description || '')
+    +   '</textarea>'
+    + '</div>'
+    + _renderSkillEditCsvField('tags', 'Tags', 'comma-separated, e.g. dev,review,qa', entry.tags)
+    + _renderSkillEditCsvField('scenarios', 'Scenarios', 'comma-separated, e.g. new feature, bug fix', entry.scenarios)
+    + _renderSkillEditCsvField('applicable_roles', 'Applicable Roles', 'comma-separated, e.g. coder, reviewer', entry.applicable_roles)
+    + _renderSkillEditCsvField('languages', 'Languages', 'comma-separated, e.g. python, javascript', entry.languages)
+    + '<div id="skill-edit-status" style="font-size:12px;margin-bottom:8px;display:none"></div>'
+    + '<div style="display:flex;justify-content:flex-end;gap:8px">'
+    +   '<button class="btn btn-sm" onclick="document.getElementById(\'skill-edit-modal\').remove()">Cancel</button>'
+    +   '<button class="btn btn-primary btn-sm" id="skill-edit-save" onclick="_doSkillEdit(\'' + esc(entryId) + '\')">'
+    +     '<span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">save</span> Save'
+    +   '</button>'
+    + '</div>'
+    + '</div>';
+
+  document.body.appendChild(modal);
+  _skillEditDescUpdate();
+  setTimeout(function(){
+    var ta = document.getElementById('skill-edit-desc');
+    if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+  }, 0);
+}
+
+function _renderSkillEditCsvField(key, label, placeholder, currentList) {
+  var val = (currentList && currentList.length) ? currentList.join(', ') : '';
+  return '<div style="margin-bottom:12px">'
+    + '<label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px">' + esc(label) + '</label>'
+    + '<input id="skill-edit-' + key + '" type="text" placeholder="' + esc(placeholder) + '" value="' + esc(val) + '" '
+    +   'style="width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:13px;box-sizing:border-box">'
+    + '</div>';
+}
+
+function _skillEditDescUpdate() {
+  var ta = document.getElementById('skill-edit-desc');
+  var counter = document.getElementById('skill-edit-desc-count');
+  if (!ta || !counter) return;
+  var len = (ta.value || '').length;
+  counter.textContent = len + ' / ' + _SKILL_DESC_MAX;
+  counter.style.color = (len > _SKILL_DESC_MAX * 0.9)
+    ? 'var(--warning, #ff9800)'
+    : (len > _SKILL_DESC_MAX ? 'var(--error)' : 'var(--text3)');
+}
+
+async function _doSkillEdit(entryId) {
+  var status = document.getElementById('skill-edit-status');
+  var btn = document.getElementById('skill-edit-save');
+  var desc = (document.getElementById('skill-edit-desc') || {}).value || '';
+  if (desc.length > _SKILL_DESC_MAX) {
+    status.style.display = 'block';
+    status.style.color = 'var(--error)';
+    status.innerHTML = 'Description exceeds ' + _SKILL_DESC_MAX + ' chars; please shorten.';
+    return;
+  }
+  var updates = { description: desc.trim() };
+  ['tags', 'scenarios', 'applicable_roles', 'languages'].forEach(function(key) {
+    var el = document.getElementById('skill-edit-' + key);
+    if (!el) return;
+    var raw = (el.value || '').trim();
+    updates[key] = raw ? raw.split(',').map(function(s){ return s.trim(); }).filter(Boolean) : [];
+  });
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle;animation:spin 1s linear infinite">progress_activity</span> Saving…';
+  status.style.display = 'block';
+  status.style.color = 'var(--text3)';
+  status.innerHTML = 'Writing to disk…';
+
+  try {
+    var data = await api('POST', '/api/portal/skill-store', {
+      action: 'edit_metadata',
+      entry_id: entryId,
+      updates: updates,
+    });
+    if (data && data.ok) {
+      status.style.color = '#10b981';
+      status.innerHTML = '✓ Saved' + (data.note ? ' (' + esc(data.note) + ')' : '');
+      loadSkillStore();
+      setTimeout(function(){
+        var m = document.getElementById('skill-edit-modal');
+        if (m) m.remove();
+      }, 800);
+    } else {
+      status.style.color = 'var(--error)';
+      status.innerHTML = 'Save failed: ' + esc((data && data.error) || JSON.stringify(data));
+    }
+  } catch(err) {
+    status.style.color = 'var(--error)';
+    status.innerHTML = 'Request failed: ' + esc(String(err));
+  }
+  btn.disabled = false;
+  btn.innerHTML = '<span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">save</span> Save';
 }
 
 async function uninstallStoreEntry(entryId) {
