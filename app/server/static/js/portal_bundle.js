@@ -18280,8 +18280,21 @@ async function renderProjectDetail(projId) {
         '<div id="proj-pane-issues-'+projId+'" style="flex:1;overflow:auto;padding:20px;'+paneVis('issues')+'"></div>' +
         '<div id="proj-pane-team-'+projId+'" style="flex:1;overflow:auto;padding:20px;'+paneVis('team')+'"><div class="tc-text-dim" style="font-size:12px">Loading team status…</div></div>' +
         '<div id="proj-pane-inbox-'+projId+'" style="flex:1;overflow:auto;padding:20px;'+paneVis('inbox')+'"><div class="tc-text-dim" style="font-size:12px">Loading inbox…</div></div>' +
-        '<div id="proj-pane-chat-'+projId+'" style="flex:1;min-height:0;display:flex;flex-direction:column;'+paneVis('chat')+'">' +
+        '<div id="proj-pane-chat-'+projId+'" style="flex:1;min-height:0;display:flex;flex-direction:column;position:relative;'+paneVis('chat')+'">' +
           '<div id="project-chat-msgs-'+projId+'" style="flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px;min-height:0"></div>' +
+          // Floating "scroll to bottom" button. Hidden when user is
+          // within 150px of the bottom; pops up while scrolling history
+          // up. Click jumps back to newest message.
+          '<button id="proj-scroll-bottom-'+projId+'" onclick="_projScrollToBottom(\''+projId+'\')" title="Jump to latest" ' +
+            'style="position:absolute;right:18px;bottom:88px;width:34px;height:34px;border-radius:50%;' +
+            'background:var(--surface-container-high,rgba(40,40,52,0.9));border:1px solid var(--overlay-10,rgba(255,255,255,0.1));' +
+            'color:var(--text,#e0e6ed);display:none;align-items:center;justify-content:center;cursor:pointer;' +
+            'box-shadow:0 4px 12px rgba(0,0,0,0.3);z-index:5;opacity:0.85;backdrop-filter:blur(4px);' +
+            'transition:opacity 0.15s,transform 0.15s" ' +
+            'onmouseover="this.style.opacity=\'1\';this.style.transform=\'translateY(-2px)\'" ' +
+            'onmouseout="this.style.opacity=\'0.85\';this.style.transform=\'translateY(0)\'">' +
+            '<span class="material-symbols-outlined" style="font-size:20px">keyboard_arrow_down</span>' +
+          '</button>' +
           '<div style="padding:12px 16px;border-top:1px solid var(--overlay-5)">' +
             _renderUnifiedChatInput({
               id: projId,
@@ -18574,6 +18587,27 @@ function switchProjectTab(projId, tabKey) {
     var el = document.getElementById('proj-pane-'+k+'-'+projId);
     if (el) el.style.display = (k === tabKey) ? (k === 'chat' ? 'flex' : 'block') : 'none';
   });
+  // When switching INTO chat: jump to the bottom so the user sees the
+  // newest message, not page-top. The initial loadProjectChat (in
+  // renderProjectDetail) already sets el.scrollTop = scrollHeight, but
+  // that runs while the pane is display:none — scroll on a hidden
+  // element is a no-op, so once display flips to 'flex' the scrollbar
+  // is back at 0. requestAnimationFrame waits one paint so layout has
+  // computed the real scrollHeight before we scroll.
+  if (tabKey === 'chat') {
+    var msgsEl = document.getElementById('project-chat-msgs-' + projId);
+    if (msgsEl) {
+      var scrollToBottom = function(){ msgsEl.scrollTop = msgsEl.scrollHeight; };
+      try {
+        requestAnimationFrame(function(){
+          requestAnimationFrame(scrollToBottom);  // 2 frames for layout settle
+        });
+      } catch(e) { setTimeout(scrollToBottom, 0); }
+    }
+    // Attach the floating scroll-down button's listener (idempotent —
+    // safe to call repeatedly on tab re-entries).
+    try { _attachProjectScrollDownBtn(projId); } catch(e) {}
+  }
   // Update tab-bar highlighting in place — no full re-render. The old
   // implementation called renderProjectDetail() which re-fetched the
   // project, rebuilt every pane, and on a 429 wiped the chat sidebar
@@ -19745,6 +19779,9 @@ async function loadProjectChat(projId) {
     _renderProjectStreamingPreviews(el, streaming);
 
     el.scrollTop = el.scrollHeight;
+    // Bind the floating scroll-down button's listener (idempotent —
+    // dataset flag prevents duplicate handlers on polling re-renders).
+    try { _attachProjectScrollDownBtn(projId); } catch(e) {}
   } catch(e) {}
 }
 
@@ -21496,6 +21533,36 @@ function _getProjectMembers(projId) {
   });
   return out;
 }
+
+// Floating "scroll to bottom" button helpers for project chat.
+// Pop the button when the user has scrolled up >150px from the bottom;
+// hide it when they're within that threshold (i.e. effectively at the
+// latest message). Clicking jumps back to bottom and the button hides.
+window._projScrollToBottom = function(projId) {
+  var msgs = document.getElementById('project-chat-msgs-' + projId);
+  if (!msgs) return;
+  msgs.scrollTop = msgs.scrollHeight;
+  var btn = document.getElementById('proj-scroll-bottom-' + projId);
+  if (btn) btn.style.display = 'none';
+};
+
+function _attachProjectScrollDownBtn(projId) {
+  var msgs = document.getElementById('project-chat-msgs-' + projId);
+  var btn = document.getElementById('proj-scroll-bottom-' + projId);
+  if (!msgs || !btn) return;
+  // Idempotent: stash a flag on the element so re-render doesn't
+  // attach duplicate listeners.
+  if (msgs.dataset.scrollBtnBound === '1') return;
+  msgs.dataset.scrollBtnBound = '1';
+  var update = function() {
+    var fromBottom = msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight;
+    btn.style.display = (fromBottom > 150) ? 'flex' : 'none';
+  };
+  msgs.addEventListener('scroll', update, { passive: true });
+  // Initial state — hide if currently at/near bottom.
+  setTimeout(update, 0);
+}
+window._attachProjectScrollDownBtn = _attachProjectScrollDownBtn;
 
 function _projInputChange(projId) {
   var input = document.getElementById('project-chat-input-'+projId);
