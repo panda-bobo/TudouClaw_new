@@ -36607,8 +36607,12 @@ window._ltRoleColor = function(role) {
 
 async function _ltCheckPendingDrafts(projectId) {
   if (!projectId) return;
+  // Re-rendered every tab switch via switchProjectTab → renderProjectDetail,
+  // which schedules a fresh setTimeout — without coalesce, tab-spam
+  // queues N timers → N GETs → 429. _apiShortGet's 2s window collapses
+  // duplicate fires into a single fetch.
   try {
-    var data = await api('GET',
+    var data = await _apiShortGet(
       '/api/portal/projects/' + encodeURIComponent(projectId)
       + '/decomposition-drafts?status=pending');
     var drafts = (data && data.drafts) || [];
@@ -36642,7 +36646,7 @@ async function _ltCheckPendingDrafts(projectId) {
 
 async function _ltShowDraftModal(projectId, draftId) {
   try {
-    var draft = await api('GET',
+    var draft = await _apiShortGet(
       '/api/portal/projects/' + encodeURIComponent(projectId)
       + '/decomposition-drafts/' + encodeURIComponent(draftId));
     if (!draft || draft.error) { alert('Load failed:' + (draft&&draft.error||'?')); return; }
