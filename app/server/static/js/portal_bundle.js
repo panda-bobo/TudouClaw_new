@@ -5415,7 +5415,7 @@ function renderAgentChat(agentId) {
     'visible at a time so each gets full readable real estate (vs. 4 ' +
     'cramped cards). Horizontal split: chat (flex:1) | artifact panel. -->' +
     '<section style="display:flex;height:75%;flex-shrink:0;background:var(--surface);border-bottom:1px solid var(--overlay-5);overflow:hidden;position:relative">' +
-    '<div style="flex:1;display:flex;flex-direction:column;min-width:0">' +
+    '<div style="flex:1;display:flex;flex-direction:column;min-width:0;position:relative">' +
       '<div style="padding:10px 20px;border-bottom:1px solid var(--overlay-5);display:flex;justify-content:space-between;align-items:center;background:var(--bg2);backdrop-filter:blur(16px)">' +
         '<div style="display:flex;align-items:center;gap:10px">' +
           '<img src="' + _robotIconUrl(ag.robot_avatar || ('robot_' + agRole)) + '" style="width:28px;height:28px" onerror="this.outerHTML=\'<span class=material-symbols-outlined style=color:var(--primary);font-size:20px>smart_toy</span>\'">' +
@@ -5439,6 +5439,17 @@ function renderAgentChat(agentId) {
         '</div>' +
       '</div>' +
       '<div class="chat-messages" id="chat-msgs-' + agentId + '" style="flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:14px"></div>' +
+      // Floating "scroll to bottom" button — same pattern as project chat.
+      '<button id="agent-scroll-bottom-'+agentId+'" onclick="_scrollMsgsToBottom(\'chat-msgs-'+agentId+'\',\'agent-scroll-bottom-'+agentId+'\')" title="Jump to latest" ' +
+        'style="position:absolute;right:18px;bottom:96px;width:34px;height:34px;border-radius:50%;' +
+        'background:var(--surface-container-high,rgba(40,40,52,0.9));border:1px solid var(--overlay-10,rgba(255,255,255,0.1));' +
+        'color:var(--text,#e0e6ed);display:none;align-items:center;justify-content:center;cursor:pointer;' +
+        'box-shadow:0 4px 12px rgba(0,0,0,0.3);z-index:5;opacity:0.85;backdrop-filter:blur(4px);' +
+        'transition:opacity 0.15s,transform 0.15s" ' +
+        'onmouseover="this.style.opacity=\'1\';this.style.transform=\'translateY(-2px)\'" ' +
+        'onmouseout="this.style.opacity=\'0.85\';this.style.transform=\'translateY(0)\'">' +
+        '<span class="material-symbols-outlined" style="font-size:20px">keyboard_arrow_down</span>' +
+      '</button>' +
       _llmBannerHtml +
       '<div style="padding:14px 20px;background:var(--bg2);border-top:1px solid var(--overlay-5)">' +
         _renderUnifiedChatInput({
@@ -5542,6 +5553,8 @@ function renderAgentChat(agentId) {
     // After history is rendered, attach file cards to historical
     // bubbles by matching filenames mentioned in their text.
     try { attachHistoricalFileCards(agentId); } catch(e) {}
+    // Bind the floating scroll-down button's listener (idempotent).
+    try { _attachScrollDownBtn('chat-msgs-' + agentId, 'agent-scroll-bottom-' + agentId); } catch(e) {}
   });
   try { _initRagToggle(agentId); } catch(e) {}
   loadTasks(agentId);
@@ -5668,8 +5681,19 @@ function renderAgentChatTech(agentId) {
     // ── Main section: chat (left) | right column [artifact (top) + tabs (bottom)] ──
     '<section style="display:flex;flex:1;min-height:0;background:var(--surface);overflow:hidden;position:relative">' +
       // ── Left: chat column (chat-msgs + banner + input) ──
-      '<div style="flex:1;display:flex;flex-direction:column;min-width:0">' +
+      '<div style="flex:1;display:flex;flex-direction:column;min-width:0;position:relative">' +
         '<div class="chat-messages" id="chat-msgs-' + agentId + '" style="flex:1;overflow-y:auto;padding:24px 24px 8px;display:flex;flex-direction:column;gap:14px"></div>' +
+        // Floating "scroll to bottom" button.
+        '<button id="agent-scroll-bottom-'+agentId+'" onclick="_scrollMsgsToBottom(\'chat-msgs-'+agentId+'\',\'agent-scroll-bottom-'+agentId+'\')" title="Jump to latest" ' +
+          'style="position:absolute;right:18px;bottom:96px;width:34px;height:34px;border-radius:50%;' +
+          'background:var(--surface-container-high,rgba(40,40,52,0.9));border:1px solid var(--overlay-10,rgba(255,255,255,0.1));' +
+          'color:var(--text,#e0e6ed);display:none;align-items:center;justify-content:center;cursor:pointer;' +
+          'box-shadow:0 4px 12px rgba(0,0,0,0.3);z-index:5;opacity:0.85;backdrop-filter:blur(4px);' +
+          'transition:opacity 0.15s,transform 0.15s" ' +
+          'onmouseover="this.style.opacity=\'1\';this.style.transform=\'translateY(-2px)\'" ' +
+          'onmouseout="this.style.opacity=\'0.85\';this.style.transform=\'translateY(0)\'">' +
+          '<span class="material-symbols-outlined" style="font-size:20px">keyboard_arrow_down</span>' +
+        '</button>' +
         _llmBannerHtml +
         '<div style="padding:14px 20px;background:var(--surface-container-low);border-top:1px solid var(--outline-variant)">' +
           _renderUnifiedChatInput({
@@ -5763,6 +5787,7 @@ function renderAgentChatTech(agentId) {
 
   loadAgentChat(agentId).then(function() {
     try { attachHistoricalFileCards(agentId); } catch(e) {}
+    try { _attachScrollDownBtn('chat-msgs-' + agentId, 'agent-scroll-bottom-' + agentId); } catch(e) {}
   });
   try { _initRagToggle(agentId); } catch(e) {}
   loadTasks(agentId);
@@ -21534,24 +21559,31 @@ function _getProjectMembers(projId) {
   return out;
 }
 
-// Floating "scroll to bottom" button helpers for project chat.
-// Pop the button when the user has scrolled up >150px from the bottom;
-// hide it when they're within that threshold (i.e. effectively at the
-// latest message). Clicking jumps back to bottom and the button hides.
-window._projScrollToBottom = function(projId) {
-  var msgs = document.getElementById('project-chat-msgs-' + projId);
+// ── Floating "scroll to bottom" button — generic helpers ────────────
+// Pop the button when the user has scrolled up >150px from the bottom
+// of the messages container; hide when within threshold. Clicking
+// jumps to bottom and hides the button. Used by project chat, agent
+// chat, and meeting chat — all three share these helpers.
+
+// Generic: scroll any chat-msgs element to the bottom + hide its
+// associated scroll-down button.
+window._scrollMsgsToBottom = function(msgsId, btnId) {
+  var msgs = document.getElementById(msgsId);
   if (!msgs) return;
   msgs.scrollTop = msgs.scrollHeight;
-  var btn = document.getElementById('proj-scroll-bottom-' + projId);
-  if (btn) btn.style.display = 'none';
+  if (btnId) {
+    var btn = document.getElementById(btnId);
+    if (btn) btn.style.display = 'none';
+  }
 };
 
-function _attachProjectScrollDownBtn(projId) {
-  var msgs = document.getElementById('project-chat-msgs-' + projId);
-  var btn = document.getElementById('proj-scroll-bottom-' + projId);
+// Generic: bind a passive scroll listener that toggles the button's
+// visibility based on distance from the bottom. Idempotent — safe
+// to call repeatedly on polling re-renders / tab re-entries.
+window._attachScrollDownBtn = function(msgsId, btnId) {
+  var msgs = document.getElementById(msgsId);
+  var btn = document.getElementById(btnId);
   if (!msgs || !btn) return;
-  // Idempotent: stash a flag on the element so re-render doesn't
-  // attach duplicate listeners.
   if (msgs.dataset.scrollBtnBound === '1') return;
   msgs.dataset.scrollBtnBound = '1';
   var update = function() {
@@ -21559,8 +21591,20 @@ function _attachProjectScrollDownBtn(projId) {
     btn.style.display = (fromBottom > 150) ? 'flex' : 'none';
   };
   msgs.addEventListener('scroll', update, { passive: true });
-  // Initial state — hide if currently at/near bottom.
-  setTimeout(update, 0);
+  setTimeout(update, 0);  // initial state
+};
+
+// Project-chat thin wrappers (legacy names — kept for the inline
+// onclick generated in chat pane HTML).
+window._projScrollToBottom = function(projId) {
+  window._scrollMsgsToBottom(
+    'project-chat-msgs-' + projId,
+    'proj-scroll-bottom-' + projId);
+};
+function _attachProjectScrollDownBtn(projId) {
+  window._attachScrollDownBtn(
+    'project-chat-msgs-' + projId,
+    'proj-scroll-bottom-' + projId);
 }
 window._attachProjectScrollDownBtn = _attachProjectScrollDownBtn;
 
@@ -23041,7 +23085,7 @@ async function openMeetingDetail(mid) {
           '</div>' +
 
           // == Center: Chat / Discussion ==
-          '<div style="flex:1;display:flex;flex-direction:column;min-width:0">' +
+          '<div style="flex:1;display:flex;flex-direction:column;min-width:0;position:relative">' +
             // Messages scrollable area. Inner #mtg-messages-body is the
             // surgical-update target: the poll rewrites JUST that child's
             // innerHTML so the scroll container (with its current scroll
@@ -23053,6 +23097,18 @@ async function openMeetingDetail(mid) {
               '<div id="mtg-messages-body">' + msgHtml + '</div>' +
               '<div id="mtg-typing-area"></div>' +
             '</div>' +
+            // Floating "scroll to bottom" button — same pattern as
+            // project / agent chats.
+            '<button id="mtg-scroll-bottom" onclick="_scrollMsgsToBottom(\'mtg-chat-scroll\',\'mtg-scroll-bottom\')" title="Jump to latest" ' +
+              'style="position:absolute;right:18px;bottom:88px;width:34px;height:34px;border-radius:50%;' +
+              'background:var(--surface-container-high,rgba(40,40,52,0.9));border:1px solid var(--overlay-10,rgba(255,255,255,0.1));' +
+              'color:var(--text,#e0e6ed);display:none;align-items:center;justify-content:center;cursor:pointer;' +
+              'box-shadow:0 4px 12px rgba(0,0,0,0.3);z-index:5;opacity:0.85;backdrop-filter:blur(4px);' +
+              'transition:opacity 0.15s,transform 0.15s" ' +
+              'onmouseover="this.style.opacity=\'1\';this.style.transform=\'translateY(-2px)\'" ' +
+              'onmouseout="this.style.opacity=\'0.85\';this.style.transform=\'translateY(0)\'">' +
+              '<span class="material-symbols-outlined" style="font-size:20px">keyboard_arrow_down</span>' +
+            '</button>' +
             // Input area (only if meeting not closed/cancelled)
             (m.status !== 'closed' && m.status !== 'cancelled' ?
               '<div style="padding:10px 18px;border-top:1px solid var(--overlay-6);flex-shrink:0">' +
@@ -23102,6 +23158,9 @@ async function openMeetingDetail(mid) {
     // -- Post-render: scroll to bottom --
     var chatScroll = document.getElementById('mtg-chat-scroll');
     if (chatScroll) chatScroll.scrollTop = chatScroll.scrollHeight;
+
+    // -- Post-render: bind floating scroll-down button (idempotent) --
+    try { _attachScrollDownBtn('mtg-chat-scroll', 'mtg-scroll-bottom'); } catch(e) {}
 
     // -- Post-render: attach file cards + execution event blocks --
     _mtgAttachMsgDecorations(_mtgMsgRefs, mid);
