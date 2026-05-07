@@ -93,6 +93,61 @@ def _ensure_str_content(content) -> str:
 _IMAGE_TYPES = frozenset({"image_url", "image", "input_image"})
 
 
+def _apply_ephemeral_reminders(messages: list[dict], agent) -> list[dict]:
+    """Append the agent's pending ``system_reminder`` queue to the LAST
+    user message, wrapped in ``<system-reminder>...</system-reminder>``.
+
+    Borrowed from Claude Code's pattern: a transient "you've now read
+    this file 5 times" / "tool budget exhausted" / etc. nudge belongs
+    at the user message edge so the LLM sees it for THIS call but it
+    doesn't contaminate the cached history prefix on the next call.
+
+    Lifecycle:
+      - Queue via ``agent.queue_reminder(text)`` (anywhere in the
+        codebase that detects a one-shot condition).
+      - Drained ONCE per LLM call by this function — turns the queue
+        into ephemeral content, then ``consume_reminders`` clears it.
+      - Reminders never enter ``agent.messages`` history.
+
+    Returns a NEW list — original messages not mutated. Falls through
+    cleanly when the queue is empty (zero overhead).
+    """
+    if agent is None:
+        return messages
+    try:
+        reminders = agent.consume_reminders() if hasattr(agent, "consume_reminders") else []
+    except Exception:
+        return messages
+    if not reminders:
+        return messages
+    # Anchor on the last user message (so the reminder reads as
+    # guidance for the *current* prompt, not as a stray system
+    # interjection in the middle of history).
+    last_user_idx = -1
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "user":
+            last_user_idx = i
+            break
+    if last_user_idx < 0:
+        return messages  # no user msg to anchor to — drop reminders
+    appended = "\n\n".join(
+        f"<system-reminder>\n{r}\n</system-reminder>" for r in reminders
+    )
+    out = list(messages)
+    msg = dict(out[last_user_idx])
+    content = msg.get("content", "")
+    if isinstance(content, str):
+        msg["content"] = (content.rstrip() + "\n\n" + appended)
+    elif isinstance(content, list):
+        # Multimodal user content — append a text part at the end so
+        # the image parts stay intact.
+        msg["content"] = list(content) + [{"type": "text", "text": appended}]
+    else:
+        msg["content"] = (str(content or "").rstrip() + "\n\n" + appended)
+    out[last_user_idx] = msg
+    return out
+
+
 def _strip_old_images(messages: list[dict]) -> list[dict]:
     """Replace base64 image data in all but the last user message.
 
@@ -3047,6 +3102,44 @@ class Agent:
                 for t in pool.tools[:30]
             ],
         }
+
+    # ── Ephemeral system_reminder queue ────────────────────────────
+    # Queued reminders are appended to the LAST user message of the
+    # next LLM call (via _apply_ephemeral_reminders), wrapped in
+    # <system-reminder>...</system-reminder>, then cleared. They never
+    # enter self.messages so the cached history prefix stays stable
+    # across turns. Use this for one-shot nudges like read-valve warns,
+    # tool-budget reminders, sandbox notices — anything the LLM should
+    # see ONCE without permanently shifting the prompt fingerprint.
+    def queue_reminder(self, text: str, *, dedupe: bool = True) -> None:
+        """Queue a one-shot system_reminder. Empty / whitespace-only
+        text is ignored. ``dedupe=True`` (default) drops a reminder
+        whose body matches a queued one — prevents the same warning
+        firing 4 times in one turn from inflating the user message.
+        """
+        if not text or not text.strip():
+            return
+        text = text.strip()
+        q = getattr(self, "_pending_reminders", None)
+        if q is None:
+            q = []
+            try:
+                self._pending_reminders = q
+            except Exception:
+                return
+        if dedupe and text in q:
+            return
+        q.append(text)
+
+    def consume_reminders(self) -> list[str]:
+        """Return all queued reminders and clear the queue. Called
+        once per LLM call by ``_apply_ephemeral_reminders``."""
+        q = getattr(self, "_pending_reminders", None)
+        if not q:
+            return []
+        out = list(q)
+        q.clear()
+        return out
 
     def _log(self, kind: str, data: dict):
         # Skip event logging during scheduled task execution — scheduled
@@ -7356,6 +7449,30 @@ Write only the summary body. Do not include any preamble or prefix."""
         # Resolve alias (e.g. "exec" → "bash") BEFORE permission check
         tool_name = tools._TOOL_ALIASES.get(tool_name, tool_name)
 
+        # Strip universal _reason field — the LLM was forced (via
+        # ToolSchema.to_openai_payload) to articulate WHY before
+        # calling, but the underlying tool function never sees it.
+        # Log it so debugging can replay the agent's intent. 100-char
+        # cap is enforced by schema maxLength but truncate defensively.
+        reason_text = ""
+        if isinstance(arguments, dict) and "_reason" in arguments:
+            try:
+                arguments = dict(arguments)  # don't mutate caller's dict
+                _r = arguments.pop("_reason", "")
+                reason_text = (str(_r) if _r is not None else "")[:100]
+            except Exception:
+                reason_text = ""
+        if reason_text:
+            try:
+                logger.info(
+                    "tool_reason agent=%s tool=%s reason=%s",
+                    self.id[:8], tool_name, reason_text,
+                )
+                self._log("tool_reason",
+                          {"tool": tool_name, "reason": reason_text})
+            except Exception:
+                pass
+
         # Substitute credential placeholders ({{CRED_xxx}}) with real values
         # so sensitive data stays out of LLM context but reaches the tool.
         arguments = self._substitute_credentials(arguments)
@@ -9068,6 +9185,12 @@ Write only the summary body. Do not include any preamble or prefix."""
                 _msgs_to_send = _compress_old_write_tool_calls(_msgs_to_send)
                 # Final safety: drop any orphan tool messages (DeepSeek strict).
                 _msgs_to_send = _drop_orphan_tool_messages(_msgs_to_send)
+
+                # Ephemeral system_reminder injection — append any queued
+                # one-shot reminders to the last user message wrapped in
+                # <system-reminder>...</system-reminder>. Cache-friendly
+                # (doesn't enter self.messages), Claude-Code-style.
+                _msgs_to_send = _apply_ephemeral_reminders(_msgs_to_send, self)
 
                 # ── Multimodal diagnostic: verify images survive pipeline ──
                 if _is_multimodal:
