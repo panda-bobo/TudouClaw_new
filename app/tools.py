@@ -2860,6 +2860,45 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "spawn_explore_subagent",
+            "description": (
+                "Spawn a stateless ephemeral subagent to handle a focused READ-ONLY exploration / research task. The subagent runs its own chat loop with its own budget; you get back its final reply as a single string. The subagent's intermediate tool calls and reasoning DO NOT enter your context — your prefix cache stays clean.\n"
+                "Use when: you'd otherwise spend 10+ tool calls reading / searching / web-fetching just to ANSWER a sub-question. Examples: 'find which file declares the auth middleware', 'survey the existing test framework', 'compile a list of competitor pricing pages'. Especially valuable for orchestrator-role agents (PM / executive) who shouldn't burn their budget on discovery.\n"
+                "Not for: writing code / dispatching tasks / submitting deliverables (those are mutations — do them yourself in your context). Not for sub-questions you can answer with one read_file or one project_state call (the spawn overhead isn't worth it).\n"
+                "Output: subagent's final assistant text, prefixed with a metadata header showing tool calls used and elapsed time. Errors come back as 'Error: ...' so you can decide whether to retry / handle yourself.\n"
+                "GOTCHA: depth limit (default 3) prevents recursive forking. read_only_tools=true (default) restricts subagent to read-only primitives — set false ONLY if you specifically need a writing fork. Subagent shares your model/provider/working_dir/shared_workspace; doesn't share message history."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "The task for the subagent. Be specific and bounded — 'find which file defines auth middleware and list its public exports' beats 'explore the auth code'.",
+                    },
+                    "return_format": {
+                        "type": "string",
+                        "description": "summary (≤500 chars, default) | full | list. Hint to the subagent on how to shape its reply.",
+                    },
+                    "read_only_tools": {
+                        "type": "boolean",
+                        "description": "Restrict subagent's tools to read-only primitives (default true). Set false only if you specifically need a writing fork.",
+                    },
+                    "timeout_s": {
+                        "type": "integer",
+                        "description": "Caller-side wait timeout in seconds (default 180, clamped 10-600).",
+                    },
+                    "role": {
+                        "type": "string",
+                        "description": "Optional role hint (default: inherit parent role). Affects role-preset tool defaults when read_only_tools=false.",
+                    },
+                },
+                "required": ["prompt"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "project_state",
             "description": (
                 "Snapshot of structured project state — replaces glob_files for status checks.\n"
@@ -3114,6 +3153,11 @@ from .tools_split.finalize import (  # noqa: E402,F401
 # level) and create_milestone (project checkpoint level).
 from .tools_split.agent_todo import _tool_agent_todo  # noqa: E402,F401
 
+# Ephemeral subagent spawn (Claude-Code-style Task). Off-loads focused
+# read-only research/exploration to a stateless subagent so the parent's
+# context stays lean.
+from .tools_split.subagent import _tool_spawn_explore_subagent  # noqa: E402,F401
+
 # MCP call + builtin audio TTS/STT handler moved to
 # app/tools_split/mcp.py. That module registers the builtin handler
 # with the dispatcher at import time — keep this import unconditional
@@ -3251,6 +3295,8 @@ _TOOL_FUNCS: dict[str, callable] = {
     "bootstrap_project": _tool_bootstrap_project,
     # Per-agent private todo list (Claude-Code-style TodoWrite).
     "agent_todo": _tool_agent_todo,
+    # Ephemeral subagent spawn (Claude-Code-style Task tool).
+    "spawn_explore_subagent": _tool_spawn_explore_subagent,
     "mcp_call": _tool_mcp_call,
     # Experience persistence + skill generation
     "save_experience": _tool_save_experience,
