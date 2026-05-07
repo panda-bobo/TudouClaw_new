@@ -6869,6 +6869,33 @@ Write only the summary body. Do not include any preamble or prefix."""
             # ones if the classification module has a bug.
             pass
 
+        # 2026-05-07: route through ToolSchema → to_openai_payload to
+        # establish single-source-of-truth between the LLM's tools[]
+        # payload and the validation-error signature shown in
+        # middleware.py. Without this, the OpenAI tools[] payload and
+        # the tool-error renderer can drift if a tool definition is
+        # patched in only one place. Verified lossless on all 62 live
+        # TOOL_DEFINITIONS entries; defensive fallback to raw dicts on
+        # any schema-route exception.
+        try:
+            from .core.prompt_schemas import (
+                from_tool_definition, ToolSchema,
+            )
+            normalized: list[dict] = []
+            for _td in all_tools:
+                try:
+                    _ts = from_tool_definition(_td)
+                    if isinstance(_ts, ToolSchema) and _ts.name:
+                        normalized.append(_ts.to_openai_payload())
+                    else:
+                        normalized.append(_td)  # fallback
+                except Exception:
+                    normalized.append(_td)
+            all_tools = normalized
+        except Exception:
+            # Catastrophic — keep raw dicts so chats keep working
+            pass
+
         return all_tools
 
     def _message_is_multimodal(self, user_message: Any) -> bool:

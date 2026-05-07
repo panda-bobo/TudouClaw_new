@@ -3600,6 +3600,21 @@ class ProjectChatEngine:
                     "3. 如果 ADMIN 指令与你被分配的工作冲突，以 ADMIN 指令为准。\n"
                     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 )
+                # Route through AdminInstructionSchema so the LLM-visible
+                # block carries explicit has_pending / pause_active flags
+                # for downstream auditing. to_llm_markdown() returns the
+                # same markdown_fallback unchanged — no behavior change.
+                try:
+                    from .core.prompt_schemas import (
+                        from_admin_block, render_block,
+                    )
+                    _ai_schema = from_admin_block(
+                        admin_cmds_block,
+                        pause_active=bool(getattr(project, "paused", False)),
+                    )
+                    admin_cmds_block = render_block(_ai_schema)
+                except Exception as _ai_err:
+                    logger.debug("admin schema wrap skipped: %s", _ai_err)
         except Exception as _e:
             logger.debug("admin_cmds_block build failed: %s", _e)
 
