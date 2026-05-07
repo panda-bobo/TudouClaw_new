@@ -1031,9 +1031,19 @@ def _looks_like_narrator_stall(text: str) -> bool:
 # 静态 prompt 的一部分, 能被 KV cache / Anthropic prompt cache 吃掉。
 
 def _build_granted_skills_roster(agent) -> str:
-    """Short roster of all skills granted to this agent."""
+    """Short roster of all skills granted to this agent.
+
+    2026-05-07: skill listing now goes through ``app.core.prompt_schemas``
+    (``SkillSchema`` + ``render_skills_block``) so LLM-visibility is
+    explicit per-field (only fields tagged ``llm=True`` are emitted).
+    The QA gate snippet below is unchanged — it's a per-deployment
+    invariant, not a per-skill metadata pull.
+    """
     try:
         from .skills.engine import get_registry as _get_skill_registry
+        from .core.prompt_schemas import (
+            from_skill_install, render_skills_block,
+        )
         reg = _get_skill_registry()
         if reg is None:
             return ""
@@ -1043,36 +1053,23 @@ def _build_granted_skills_roster(agent) -> str:
     if not installs:
         return ""
 
-    lines = [
-        "## 你已装配的技能 (Installed Skills)",
-        "以下是你可用的技能包。**需要执行时才调 `get_skill_guide(name)`** "
-        "拿详细用法。不要在没必要时调用,也不要重复调用同一个。",
-        "",
-    ]
     # Stable order for KV cache: sort by name
     sorted_installs = sorted(
         installs,
         key=lambda i: ((i.manifest.name or i.id or "").lower(), i.id))
-    for inst in sorted_installs:
-        m = inst.manifest
-        name = m.name or inst.id or "?"
-        # Prefer zh-CN description; else fall back to generic description.
-        desc = ""
-        try:
-            if hasattr(m, "get_description"):
-                desc = m.get_description("zh-CN") or ""
-        except Exception:
-            pass
-        if not desc:
-            desc = getattr(m, "description", "") or ""
-        # Flatten multi-line desc to first sentence + cap length.
-        desc = str(desc).replace("\n", " ").strip()
-        if len(desc) > 80:
-            desc = desc[:80].rstrip() + "…"
-        if desc:
-            lines.append(f"- `{name}`: {desc}")
-        else:
-            lines.append(f"- `{name}`")
+    skills = [from_skill_install(inst) for inst in sorted_installs]
+    block = render_skills_block(
+        skills,
+        heading="## 你已装配的技能 (Installed Skills)",
+    )
+    if not block:
+        return ""
+    lines = [
+        block,
+        "",
+        "**调用前先 `read_file <path>/SKILL.md`** 看完整 must_do / QA gate / 样例。"
+        "不需要的别调,也别重复调同一个。",
+    ]
 
     # ── 通用 QA Gate ─────────────────────────────────────────────────
     # 适用于所有 skill / 所有产出物 (设计 / 报告 / 数据 / 代码 / 通信)。

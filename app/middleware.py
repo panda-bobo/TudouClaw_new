@@ -293,13 +293,18 @@ def tool_lint_check(ctx: MiddlewareContext) -> MiddlewareResult:
             # Genuinely broken JSON — give the LLM a SPECIFIC error so
             # it knows to retry the tool call with valid JSON, not waste
             # cycles wondering why required fields are "missing".
+            _bad_schema = _find_tool_schema(tool_name)
+            _bad_sig = _format_schema_signature(_bad_schema) if _bad_schema else ""
+            _err_text = (
+                f"Tool '{tool_name}' arguments JSON 解析失败: {_je}\n"
+                f"收到的原始文本(前 200 字符): {raw_str[:200]!r}\n"
+                f"请重新发起 tool call,确保 arguments 是合法 JSON 对象。"
+            )
+            if _bad_sig:
+                _err_text += f"\n\n📋 工具签名: {_bad_sig}"
             return MiddlewareResult(
                 action=Action.SHORT_CIRCUIT,
-                value=(
-                    f"Tool '{tool_name}' arguments JSON 解析失败: {_je}\n"
-                    f"收到的原始文本(前 200 字符): {raw_str[:200]!r}\n"
-                    f"请重新发起 tool call,确保 arguments 是合法 JSON 对象。"
-                ),
+                value=_err_text,
                 message=f"lint_check: _raw JSON parse failed ({_je})",
             )
 
@@ -314,16 +319,20 @@ def tool_lint_check(ctx: MiddlewareContext) -> MiddlewareResult:
 
     if errors:
         # Pull an example from the tool's description (schema's GOTCHA /
-        # Example block) so the LLM sees a correct call alongside the
-        # diagnostic, not just "validation failed". Claude Code error
-        # handling does the same — error + correct example is ~10x more
-        # recoverable than error alone.
+        # Example block) AND build a compact signature from the schema
+        # itself so the LLM sees a correct call alongside the diagnostic,
+        # not just "validation failed". Claude Code error handling does
+        # the same — error + signature + example is ~10x more recoverable
+        # than error alone.
         example_hint = _extract_schema_example(schema)
+        sig_hint = _format_schema_signature(schema)
         error_text = (
             f"Tool '{tool_name}' 参数校验失败:\n"
             + "\n".join(f"  - {e}" for e in errors[:5])
             + "\n请修正参数后重试。"
         )
+        if sig_hint:
+            error_text += f"\n\n📋 工具签名: {sig_hint}"
         if example_hint:
             error_text += f"\n\n✅ 正确调用示例:\n{example_hint}"
         return MiddlewareResult(
@@ -333,6 +342,20 @@ def tool_lint_check(ctx: MiddlewareContext) -> MiddlewareResult:
         )
 
     return MiddlewareResult()
+
+
+def _format_schema_signature(schema: dict) -> str:
+    """Compact tool signature for tool-validation error messages.
+
+    Thin shim over ``app.core.prompt_schemas.render_tool_signature``
+    so middleware doesn't have to import the schema module at every
+    call site. Returns "" on any error.
+    """
+    try:
+        from .core.prompt_schemas import from_tool_definition, render_tool_signature
+        return render_tool_signature(from_tool_definition(schema), multiline=True)
+    except Exception:
+        return ""
 
 
 def _extract_schema_example(schema: dict) -> str:
