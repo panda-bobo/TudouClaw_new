@@ -32513,30 +32513,75 @@ async function renderPermissionsPanel() {
 
     var _techPm = false;
     try { _techPm = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
-    var pmHeaderTitle = _techPm
-      ? '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px"><span>ACCESS CONTROL</span><span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span></div><h1 class="tc-h2" style="margin:6px 0 0">' + window.t('perm.title', 'User Management') + '</h1>'
-      : '<h3 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:20px;font-weight:700;margin:0 0 4px">' + window.t('perm.title', 'User Management') + '</h3>';
-    c.innerHTML = ''
-      + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:20px">'
-      +   '<div>'
-      +     pmHeaderTitle
-      +     '<p style="font-size:12px;color:var(--text3);margin-top:6px;margin-bottom:0">'
-      +       window.t('perm.subtitle',
-          'superAdmin 管全部；admin 只能管理被授权节点上的 agent 与该节点的配置；user 只能使用 agent。')
-      +     '</p>'
-      +   '</div>'
-      +   '<button class="btn btn-primary btn-sm" onclick="_permShowCreateUserModal()">'
-      +     '<span class="material-symbols-outlined" style="font-size:16px">person_add</span> '
-      +     window.t('perm.newUser', '新建用户') + '</button>'
-      + '</div>'
-      + '<div style="display:grid;grid-template-columns:320px 1fr;gap:20px">'
-      +   '<div id="perm-user-list" style="background:var(--surface);border:1px solid var(--border-light);border-radius:12px;padding:8px"></div>'
-      +   '<div id="perm-detail" style="background:var(--surface);border:1px solid var(--border-light);border-radius:12px;padding:20px">'
-      +     '<div style="color:var(--text3)">'
-      +       window.t('perm.pickUser', '← 选择左侧的账号以编辑权限')
-      +     '</div>'
-      +   '</div>'
-      + '</div>';
+    if (_techPm) {
+      // Tech mode — stitch_18-style layout: kicker + h2, two-column
+      // glass panels, full Permissions page styled like System / Rule
+      // Engine / MCP Catalog. Body of the panel is rendered by
+      // _permRenderList / _permSelectUser which also branch on
+      // _techPm (so user rows + detail cards match).
+      c.innerHTML = ''
+        + '<section style="padding:var(--s-lg) 0">'
+        + '<div class="tc-page-header" style="margin-bottom:var(--s-lg)">'
+        +   '<div>'
+        +     '<div class="tc-mono-label" style="color:var(--primary);letter-spacing:0.20em;display:flex;align-items:center;gap:8px">'
+        +       '<span style="width:8px;height:8px;border-radius:50%;background:var(--primary);box-shadow:0 0 8px var(--primary);animation:pulse-dot 2s infinite ease-in-out"></span>'
+        +       'ACCESS CONTROL'
+        +     '</div>'
+        +     '<h1 class="tc-h2" style="margin:6px 0 0;font-family:var(--font-display);font-size:30px;font-weight:600;letter-spacing:-0.01em">'
+        +       window.t('perm.title', 'User Management')
+        +     '</h1>'
+        +     '<p class="tc-text-dim" style="font-size:13px;line-height:1.55;margin:8px 0 0;max-width:640px">'
+        +       window.t('perm.subtitle',
+            'superAdmin manages everything. admin only manages agents on delegated nodes plus those nodes\' config. user can only USE agents.')
+        +     '</p>'
+        +   '</div>'
+        +   '<button class="tc-btn tc-btn-primary" onclick="_permShowCreateUserModal()" style="display:inline-flex;align-items:center;gap:6px">'
+        +     '<span class="material-symbols-outlined" style="font-size:18px">person_add</span>'
+        +     '<span>' + window.t('perm.newUser', 'New User') + '</span>'
+        +   '</button>'
+        + '</div>'
+        + '<div style="display:grid;grid-template-columns:320px 1fr;gap:var(--s-lg)">'
+        +   '<div class="tc-panel" style="overflow:hidden">'
+        +     '<div class="tc-panel-header">'
+        +       '<span class="tc-mono-label">Accounts</span>'
+        +       '<span class="tc-chip">' + (admins.length || 0) + ' total</span>'
+        +     '</div>'
+        +     '<div id="perm-user-list" class="tc-panel-body" style="padding:var(--s-sm);max-height:70vh;overflow-y:auto"></div>'
+        +   '</div>'
+        +   '<div class="tc-panel" style="overflow:hidden">'
+        +     '<div id="perm-detail" class="tc-panel-body" style="padding:var(--s-lg);min-height:400px">'
+        +       '<div class="tc-text-dim" style="font-size:13px;display:flex;align-items:center;gap:8px;padding:24px 0">'
+        +         '<span class="material-symbols-outlined" style="font-size:18px;color:var(--outline)">arrow_back</span>'
+        +         window.t('perm.pickUser', 'Select an account on the left to edit permissions')
+        +       '</div>'
+        +     '</div>'
+        +   '</div>'
+        + '</div>'
+        + '</section>';
+    } else {
+      var pmHeaderTitle = '<h3 style="font-family:\'Plus Jakarta Sans\',sans-serif;font-size:20px;font-weight:700;margin:0 0 4px">' + window.t('perm.title', 'User Management') + '</h3>';
+      c.innerHTML = ''
+        + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:20px">'
+        +   '<div>'
+        +     pmHeaderTitle
+        +     '<p style="font-size:12px;color:var(--text3);margin-top:6px;margin-bottom:0">'
+        +       window.t('perm.subtitle',
+            'superAdmin 管全部；admin 只能管理被授权节点上的 agent 与该节点的配置；user 只能使用 agent。')
+        +     '</p>'
+        +   '</div>'
+        +   '<button class="btn btn-primary btn-sm" onclick="_permShowCreateUserModal()">'
+        +     '<span class="material-symbols-outlined" style="font-size:16px">person_add</span> '
+        +     window.t('perm.newUser', '新建用户') + '</button>'
+        + '</div>'
+        + '<div style="display:grid;grid-template-columns:320px 1fr;gap:20px">'
+        +   '<div id="perm-user-list" style="background:var(--surface);border:1px solid var(--border-light);border-radius:12px;padding:8px"></div>'
+        +   '<div id="perm-detail" style="background:var(--surface);border:1px solid var(--border-light);border-radius:12px;padding:20px">'
+        +     '<div style="color:var(--text3)">'
+        +       window.t('perm.pickUser', '← 选择左侧的账号以编辑权限')
+        +     '</div>'
+        +   '</div>'
+        + '</div>';
+    }
 
     _permRenderList(admins, allAgents, allNodes);
   } catch (e) {
@@ -32547,12 +32592,24 @@ async function renderPermissionsPanel() {
 function _permRenderList(admins, allAgents, allNodes) {
   var list = document.getElementById('perm-user-list');
   if (!list) return;
+  var _techPmList = false;
+  try { _techPmList = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
   if (!admins.length) {
-    list.innerHTML = '<div style="padding:16px;color:var(--text3);text-align:center">'
+    list.innerHTML = '<div style="padding:16px;color:var(--' + (_techPmList ? 'on-surface-variant' : 'text3') + ');text-align:center;font-size:12px">'
       + window.t('common.noData', 'No data') + '</div>';
     return;
   }
   var roleChip = function(role) {
+    if (_techPmList) {
+      // Tech mode — use tc-chip with role-color variants
+      var cls = 'tc-chip';
+      if (role === 'superAdmin') cls += ' tc-chip-primary';
+      else if (role === 'admin') cls += ' tc-chip-success';
+      // user → plain tc-chip
+      return '<span class="' + cls + '" style="font-size:9px;padding:2px 8px;letter-spacing:0.05em">'
+        + (role === 'superAdmin' ? 'SUPER' : (role === 'admin' ? 'ADMIN' : 'USER'))
+        + '</span>';
+    }
     var bg, fg, label;
     if (role === 'superAdmin') {
       bg = 'var(--primary-tint-15)'; fg = 'var(--primary)';
@@ -32568,20 +32625,41 @@ function _permRenderList(admins, allAgents, allNodes) {
     return '<span style="font-size:10px;padding:2px 6px;border-radius:4px;background:'
       + bg + ';color:' + fg + ';font-weight:600">' + label + '</span>';
   };
-  list.innerHTML = admins.map(function(a) {
-    return '<div onclick="_permSelectUser(\'' + esc(a.user_id) + '\')" '
-      + 'style="padding:10px 12px;border-radius:8px;cursor:pointer;display:flex;'
-      + 'align-items:center;gap:8px;margin-bottom:4px" '
-      + 'onmouseenter="this.style.background=\'var(--surface2)\'" '
-      + 'onmouseleave="this.style.background=\'none\'">'
-      + '<span class="material-symbols-outlined" style="font-size:20px;color:var(--text3)">account_circle</span>'
-      + '<div style="flex:1;min-width:0">'
-      +   '<div style="font-size:13px;font-weight:600">' + esc(a.display_name || a.username) + '</div>'
-      +   '<div style="font-size:10px;color:var(--text3);margin-top:1px">' + esc(a.username) + '</div>'
-      + '</div>'
-      + roleChip(a.role)
-      + '</div>';
-  }).join('');
+  if (_techPmList) {
+    list.innerHTML = admins.map(function(a) {
+      return '<div onclick="_permSelectUser(\'' + esc(a.user_id) + '\')" '
+        + 'class="tc-card-clickable" '
+        + 'style="padding:10px 12px;border-radius:var(--r-md);cursor:pointer;'
+        + 'display:flex;align-items:center;gap:10px;margin-bottom:4px;'
+        + 'background:transparent;border:1px solid transparent;transition:all 0.15s" '
+        + 'onmouseenter="this.style.background=\'var(--surface-container)\';this.style.borderColor=\'var(--outline-variant)\'" '
+        + 'onmouseleave="this.style.background=\'transparent\';this.style.borderColor=\'transparent\'">'
+        + '<div style="width:32px;height:32px;border-radius:50%;background:var(--surface-container-high);display:flex;align-items:center;justify-content:center;flex-shrink:0">'
+        +   '<span class="material-symbols-outlined" style="font-size:18px;color:var(--on-surface-variant)">account_circle</span>'
+        + '</div>'
+        + '<div style="flex:1;min-width:0">'
+        +   '<div style="font-size:13px;font-weight:600;color:var(--on-surface);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(a.display_name || a.username) + '</div>'
+        +   '<div class="tc-mono-label" style="font-size:9px;margin-top:2px;text-transform:none">@' + esc(a.username) + '</div>'
+        + '</div>'
+        + roleChip(a.role)
+        + '</div>';
+    }).join('');
+  } else {
+    list.innerHTML = admins.map(function(a) {
+      return '<div onclick="_permSelectUser(\'' + esc(a.user_id) + '\')" '
+        + 'style="padding:10px 12px;border-radius:8px;cursor:pointer;display:flex;'
+        + 'align-items:center;gap:8px;margin-bottom:4px" '
+        + 'onmouseenter="this.style.background=\'var(--surface2)\'" '
+        + 'onmouseleave="this.style.background=\'none\'">'
+        + '<span class="material-symbols-outlined" style="font-size:20px;color:var(--text3)">account_circle</span>'
+        + '<div style="flex:1;min-width:0">'
+        +   '<div style="font-size:13px;font-weight:600">' + esc(a.display_name || a.username) + '</div>'
+        +   '<div style="font-size:10px;color:var(--text3);margin-top:1px">' + esc(a.username) + '</div>'
+        + '</div>'
+        + roleChip(a.role)
+        + '</div>';
+    }).join('');
+  }
   // Stash for the selector
   window._permAdmins = admins;
   window._permAgents = allAgents;
@@ -32599,23 +32677,56 @@ function _permSelectUser(uid) {
   var isSuper = a.role === 'superAdmin';
   var isUser  = a.role === 'user';
   var isAdmin = a.role === 'admin';
+  var _techPmDetail = false;
+  try { _techPmDetail = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
 
-  // Header (common to all three roles)
-  var header = ''
-    + '<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">'
-    +   '<span class="material-symbols-outlined" style="font-size:24px;color:var(--primary)">manage_accounts</span>'
-    +   '<div style="flex:1">'
-    +     '<div style="font-size:16px;font-weight:700">' + esc(a.display_name || a.username) + '</div>'
-    +     '<div style="font-size:11px;color:var(--text3)">@' + esc(a.username) + ' · ' + esc(a.role)
-    +       (a.active ? '' : ' · <span style="color:var(--error)">disabled</span>') + '</div>'
-    +   '</div>'
-    + '</div>';
+  // Header (common to all three roles) — tech variant uses avatar
+  // chip + role badge styling consistent with the rest of the panel.
+  var header;
+  if (_techPmDetail) {
+    var roleBadgeCls = 'tc-chip';
+    if (a.role === 'superAdmin') roleBadgeCls += ' tc-chip-primary';
+    else if (a.role === 'admin') roleBadgeCls += ' tc-chip-success';
+    header = ''
+      + '<div style="display:flex;align-items:center;gap:14px;margin-bottom:var(--s-lg);padding-bottom:var(--s-md);border-bottom:1px solid var(--outline-variant)">'
+      +   '<div style="width:48px;height:48px;border-radius:50%;background:var(--surface-container-high);display:flex;align-items:center;justify-content:center;flex-shrink:0">'
+      +     '<span class="material-symbols-outlined" style="font-size:26px;color:var(--primary)">manage_accounts</span>'
+      +   '</div>'
+      +   '<div style="flex:1;min-width:0">'
+      +     '<div style="font-family:var(--font-display);font-size:20px;font-weight:600;color:var(--on-surface);letter-spacing:-0.01em">' + esc(a.display_name || a.username) + '</div>'
+      +     '<div class="tc-row-sm" style="margin-top:4px;gap:8px">'
+      +       '<span class="tc-mono-label" style="font-size:10px;text-transform:none">@' + esc(a.username) + '</span>'
+      +       '<span class="' + roleBadgeCls + '" style="font-size:9px;padding:2px 8px;letter-spacing:0.05em">'
+      +         (a.role === 'superAdmin' ? 'SUPER' : (a.role === 'admin' ? 'ADMIN' : 'USER'))
+      +       '</span>'
+      +       (a.active ? '' : '<span class="tc-chip" style="font-size:9px;padding:2px 8px;color:var(--error);border-color:rgba(255,180,171,0.30)">DISABLED</span>')
+      +     '</div>'
+      +   '</div>'
+      + '</div>';
+  } else {
+    header = ''
+      + '<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">'
+      +   '<span class="material-symbols-outlined" style="font-size:24px;color:var(--primary)">manage_accounts</span>'
+      +   '<div style="flex:1">'
+      +     '<div style="font-size:16px;font-weight:700">' + esc(a.display_name || a.username) + '</div>'
+      +     '<div style="font-size:11px;color:var(--text3)">@' + esc(a.username) + ' · ' + esc(a.role)
+      +       (a.active ? '' : ' · <span style="color:var(--error)">disabled</span>') + '</div>'
+      +   '</div>'
+      + '</div>';
+  }
 
   // Role-specific body
   var body = '';
   if (isSuper) {
-    body = '<div style="padding:10px 12px;background:var(--primary-tint-8);border-radius:8px;font-size:12px;color:var(--primary);margin-bottom:16px">'
-      + '<b>superAdmin</b> ' + window.t('perm.superNote', '拥有全部权限，无需授权。')
+    body = _techPmDetail
+      ? '<div class="tc-card-glass" style="padding:var(--s-md) var(--s-lg);font-size:13px;color:var(--primary);margin-bottom:var(--s-lg);border-color:rgba(192,193,255,0.30);box-shadow:0 0 12px -3px rgba(137,206,255,0.15)">'
+        + '<div class="tc-row-sm" style="gap:8px">'
+        +   '<span class="material-symbols-outlined" style="font-size:18px">verified_user</span>'
+        +   '<span><b>superAdmin</b> — ' + window.t('perm.superNote', 'has all permissions; no delegation needed.') + '</span>'
+        + '</div>'
+      + '</div>'
+      : '<div style="padding:10px 12px;background:var(--primary-tint-8);border-radius:8px;font-size:12px;color:var(--primary);margin-bottom:16px">'
+        + '<b>superAdmin</b> ' + window.t('perm.superNote', '拥有全部权限，无需授权。')
       + '</div>';
   } else if (isUser) {
     // User: agent-level binding only. Superadmin picks a subset of agents
@@ -32637,26 +32748,35 @@ function _permSelectUser(uid) {
             + '</label>';
         }).join('')
       : '<div style="padding:8px;color:var(--text3);font-size:12px">' + window.t('common.noData', 'No data') + '</div>';
-    body = ''
-      + '<div style="padding:10px 12px;background:var(--overlay-8);border-radius:8px;font-size:12px;color:var(--text2);margin-bottom:16px">'
-      +   window.t('perm.userNote', 'user 只能使用被授权的 agent，不能管理。勾选允许此用户使用的 agent。')
+    var userNoteBox = _techPmDetail
+      ? '<div class="tc-card-glass" style="padding:var(--s-md) var(--s-lg);font-size:12px;color:var(--on-surface-variant);margin-bottom:var(--s-lg)">'
+        + window.t('perm.userNote', 'Users can only USE delegated agents, not manage them. Tick the agents this user is allowed to use.')
       + '</div>'
-      + '<div style="margin-bottom:20px">'
-      +   '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'
-      +     '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text3)">'
-      +       window.t('perm.allowedAgents', '可使用的 Agent') + ' (' + delegatedAgents.size + '/' + (allAgents || []).length + ')'
+      : '<div style="padding:10px 12px;background:var(--overlay-8);border-radius:8px;font-size:12px;color:var(--text2);margin-bottom:16px">'
+        + window.t('perm.userNote', 'user 只能使用被授权的 agent，不能管理。勾选允许此用户使用的 agent。')
+      + '</div>';
+    var userListContainerStyle = _techPmDetail
+      ? 'max-height:320px;overflow-y:auto;border:1px solid var(--outline-variant);border-radius:var(--r-md);padding:6px;background:var(--surface-container-low)'
+      : 'max-height:320px;overflow-y:auto;border:1px solid var(--border-light);border-radius:8px;padding:4px';
+    var userBtnCls = _techPmDetail ? 'tc-btn tc-btn-ghost' : 'btn btn-ghost btn-sm';
+    body = ''
+      + userNoteBox
+      + '<div style="margin-bottom:var(--s-lg)">'
+      +   '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">'
+      +     '<div class="tc-mono-label" style="font-size:10px;letter-spacing:0.10em">'
+      +       window.t('perm.allowedAgents', 'Allowed Agents') + ' (' + delegatedAgents.size + '/' + (allAgents || []).length + ')'
       +     '</div>'
-      +     '<div>'
-      +       '<button class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 8px" onclick="_permUserToggleAll(true)">'
-      +         window.t('perm.selectAll', '全选') + '</button>'
-      +       '<button class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 8px" onclick="_permUserToggleAll(false)">'
+      +     '<div style="display:flex;gap:6px">'
+      +       '<button class="' + userBtnCls + '" style="font-size:11px;padding:4px 10px" onclick="_permUserToggleAll(true)">'
+      +         window.t('perm.selectAll', 'Select all') + '</button>'
+      +       '<button class="' + userBtnCls + '" style="font-size:11px;padding:4px 10px" onclick="_permUserToggleAll(false)">'
       +         window.t('perm.clearAll', 'Clear') + '</button>'
       +     '</div>'
       +   '</div>'
-      +   '<div style="font-size:11px;color:var(--text3);margin-bottom:8px">'
-      +     window.t('perm.userScopeHint', 'user 登录后只能看到并使用被勾选的 agent。')
+      +   '<div class="tc-text-dim" style="font-size:11px;margin-bottom:8px">'
+      +     window.t('perm.userScopeHint', 'After login, users only see/use the agents ticked here.')
       +   '</div>'
-      +   '<div style="max-height:320px;overflow-y:auto;border:1px solid var(--border-light);border-radius:8px;padding:4px">'
+      +   '<div style="' + userListContainerStyle + '">'
       +     agentRows
       +   '</div>'
       + '</div>';
@@ -32673,36 +32793,44 @@ function _permSelectUser(uid) {
             + '<span style="font-size:10px;color:var(--text3)">' + esc(n.url || '') + '</span>'
             + '</label>';
         }).join('');
+    var adminListContainerStyle = _techPmDetail
+      ? 'max-height:320px;overflow-y:auto;border:1px solid var(--outline-variant);border-radius:var(--r-md);padding:6px;background:var(--surface-container-low)'
+      : 'max-height:320px;overflow-y:auto;border:1px solid var(--border-light);border-radius:8px;padding:4px';
     body = ''
-      + '<div style="margin-bottom:20px">'
-      +   '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text3);margin-bottom:4px">'
-      +     window.t('perm.delegatedNodes', '可管理的 Node') + ' (' + delegatedNodes.size + '/' + nodes.length + ')'
+      + '<div style="margin-bottom:var(--s-lg)">'
+      +   '<div class="tc-mono-label" style="font-size:10px;letter-spacing:0.10em;margin-bottom:4px">'
+      +     window.t('perm.delegatedNodes', 'Delegated Nodes') + ' (' + delegatedNodes.size + '/' + nodes.length + ')'
       +   '</div>'
-      +   '<div style="font-size:11px;color:var(--text3);margin-bottom:8px">'
-      +     window.t('perm.nodeScopeHint', 'admin 对被授权节点上的 agent 和该节点的配置拥有完整管理权限。')
+      +   '<div class="tc-text-dim" style="font-size:11px;margin-bottom:8px">'
+      +     window.t('perm.nodeScopeHint', 'admin gets full management rights over agents on delegated nodes plus those nodes\' config.')
       +   '</div>'
-      +   '<div style="max-height:320px;overflow-y:auto;border:1px solid var(--border-light);border-radius:8px;padding:4px">'
+      +   '<div style="' + adminListContainerStyle + '">'
       +     nodeRows
       +   '</div>'
       + '</div>';
   }
 
   // Actions row (common: reset pw + disable/enable + delete; save for admin+user)
-  var actions = '<div style="display:flex;gap:8px">'
+  var primaryBtnCls = _techPmDetail ? 'tc-btn tc-btn-primary' : 'btn btn-primary btn-sm';
+  var ghostBtnCls = _techPmDetail ? 'tc-btn tc-btn-ghost' : 'btn btn-ghost btn-sm';
+  var actionsRowStyle = _techPmDetail
+    ? 'display:flex;gap:8px;padding-top:var(--s-md);border-top:1px solid var(--outline-variant)'
+    : 'display:flex;gap:8px';
+  var actions = '<div style="' + actionsRowStyle + '">'
     + ((isAdmin || isUser)
-        ? '<button class="btn btn-primary btn-sm" onclick="_permSaveDelegation(\'' + esc(uid) + '\',\'' + esc(a.role) + '\')">'
+        ? '<button class="' + primaryBtnCls + '" onclick="_permSaveDelegation(\'' + esc(uid) + '\',\'' + esc(a.role) + '\')">'
           + '<span class="material-symbols-outlined" style="font-size:16px">save</span> '
           + window.t('action.save', 'Save') + '</button>'
         : '')
-    + '<button class="btn btn-ghost btn-sm" onclick="_permResetPassword(\'' + esc(uid) + '\')">'
+    + '<button class="' + ghostBtnCls + '" onclick="_permResetPassword(\'' + esc(uid) + '\')">'
     +   '<span class="material-symbols-outlined" style="font-size:16px">lock_reset</span> '
-    +   window.t('perm.resetPassword', '重置密码') + '</button>'
+    +   window.t('perm.resetPassword', 'Reset password') + '</button>'
     + (isSuper ? '' :
-        '<button class="btn btn-ghost btn-sm" style="color:var(--error);margin-left:auto" onclick="_permToggleActive(\'' + esc(uid) + '\',' + (!a.active) + ')">'
+        '<button class="' + ghostBtnCls + '" style="color:var(--error);margin-left:auto" onclick="_permToggleActive(\'' + esc(uid) + '\',' + (!a.active) + ')">'
         + '<span class="material-symbols-outlined" style="font-size:16px">' + (a.active ? 'block' : 'check_circle') + '</span> '
         + (a.active ? window.t('perm.disable', '禁用账号') : window.t('perm.enable', '启用账号')) + '</button>')
     + (isSuper ? '' :
-        '<button class="btn btn-ghost btn-sm" style="color:var(--error)" onclick="_permDeleteUser(\'' + esc(uid) + '\',\'' + esc(a.username) + '\')">'
+        '<button class="' + ghostBtnCls + '" style="color:var(--error)" onclick="_permDeleteUser(\'' + esc(uid) + '\',\'' + esc(a.username) + '\')">'
         + '<span class="material-symbols-outlined" style="font-size:16px">delete</span> '
         + window.t('action.delete', 'Delete') + '</button>')
     + '</div>';
