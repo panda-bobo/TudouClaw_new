@@ -589,6 +589,12 @@ async function api(method, url, body) {
 // Prevents trivial rate-limit trips (RateLimitMiddleware caps each
 // (ip, path) at 10 req / 5s) and saves roundtrips. TTL default 2s.
 // On error the cache entry is dropped so the next caller retries.
+// IMPORTANT: api() returns {error:...} for HTTP error responses (instead
+// of rejecting), so .catch() alone isn't enough — we also have to inspect
+// the resolved value and uncache failures. Otherwise a single 429 would
+// poison the cache for 2s, and any caller that does
+// `if (data.error) wipeUI()` would wipe on every retry within that window
+// (the "sidebar 闪一下就没了" symptom).
 const _apiShortCache = new Map();
 function _apiShortGet(url, ttlMs) {
   ttlMs = ttlMs || 2000;
@@ -597,7 +603,11 @@ function _apiShortGet(url, ttlMs) {
   if (hit && (now - hit.ts) < ttlMs) return hit.promise;
   const p = api('GET', url);
   _apiShortCache.set(url, {ts: now, promise: p});
-  p.catch(function(){ _apiShortCache.delete(url); });
+  p.then(function(data){
+    if (!data || (typeof data === 'object' && data.error)) {
+      _apiShortCache.delete(url);
+    }
+  }, function(){ _apiShortCache.delete(url); });
   return p;
 }
 window._apiShortGet = _apiShortGet;
@@ -18103,7 +18113,22 @@ async function renderProjectDetail(projId) {
   c.style.padding = '0';
   try {
     var proj = await _apiShortGet('/api/portal/projects/'+projId);
-    if (!proj || proj.error) { c.innerHTML = '<div style="padding:24px;color:var(--error)">Project not found</div>'; return; }
+    // Transient errors (429 throttle, brief 5xx during deploy) shouldn't
+    // wipe the whole detail UI — including the chat sidebar — to a flat
+    // "Project not found". If we have a previously-cached proj for this
+    // id, reuse it and quietly retry on the next user-triggered render.
+    // Only show the terminal "not found" message when we have NOTHING.
+    if (!proj || proj.error) {
+      var cached = (window._projectData || {})[projId];
+      var msg = (proj && proj.error) ? proj.error : 'Project not found';
+      var transient = (typeof msg === 'string') && /(HTTP\s*(429|5\d\d)|rate_limited|timeout|fetch)/i.test(msg);
+      if (cached && transient) {
+        proj = cached;  // reuse last-good — sidebar stays intact
+      } else {
+        c.innerHTML = '<div style="padding:24px;color:var(--error)">'+esc(msg)+'</div>';
+        return;
+      }
+    }
     // Cache project detail for @mention dropdown (_getProjectMembers)
     window._projectData = window._projectData || {};
     window._projectData[projId] = proj;
@@ -18206,39 +18231,17 @@ async function renderProjectDetail(projId) {
           '</div>' +
         '</section>';
     }
-    // Panes: one pane per tab; only the chat pane keeps the legacy grid+sidebar.
+    // Panes: one per tab. The Workspace sidebar (Members / Workflow Steps
+    // / Milestones / Tasks) used to live INSIDE the chat pane only, so
+    // every other tab silently lost it — Overview being the default tab,
+    // users opening a project saw zero sidebar ("project sidebar 还是没有").
+    // Refactored 2026-05-07: sidebar is now an outer right-column grid
+    // sibling of the panes container, persistent across all tabs.
     var paneVis = function(key){ return _activeTab === key ? '' : 'display:none;'; };
-    c.innerHTML = heroHtml + tabBar +
-      '<div id="proj-pane-overview-'+projId+'" style="flex:1;overflow:auto;padding:20px;'+paneVis('overview')+'"></div>' +
-      '<div id="proj-pane-goals-'+projId+'" style="flex:1;overflow:auto;padding:20px;'+paneVis('goals')+'"></div>' +
-      '<div id="proj-pane-milestones-'+projId+'" style="flex:1;overflow:auto;padding:20px;'+paneVis('milestones')+'"></div>' +
-      '<div id="proj-pane-deliverables-'+projId+'" style="flex:1;overflow:auto;padding:20px;'+paneVis('deliverables')+'"></div>' +
-      '<div id="proj-pane-issues-'+projId+'" style="flex:1;overflow:auto;padding:20px;'+paneVis('issues')+'"></div>' +
-      '<div id="proj-pane-team-'+projId+'" style="flex:1;overflow:auto;padding:20px;'+paneVis('team')+'"><div class="tc-text-dim" style="font-size:12px">Loading team status…</div></div>' +
-      '<div id="proj-pane-inbox-'+projId+'" style="flex:1;overflow:auto;padding:20px;'+paneVis('inbox')+'"><div class="tc-text-dim" style="font-size:12px">Loading inbox…</div></div>' +
-      '<div id="proj-pane-chat-'+projId+'" style="flex:1;min-height:0;'+paneVis('chat')+'">' +
-      '<div style="display:grid;grid-template-columns:1fr 300px;height:100%;min-height:0;overflow:hidden">' +
-      '<!-- Chat Area -->' +
-      '<div style="display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--overlay-5)">' +
-        '<div id="project-chat-msgs-'+projId+'" style="flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px;min-height:0"></div>' +
-        '<div style="padding:12px 16px;border-top:1px solid var(--overlay-5)">' +
-          _renderUnifiedChatInput({
-            id: projId,
-            scope: 'project',
-            placeholder: 'Message the team... (@ to mention)',
-            sendFnName: 'sendProjectMsg',
-            attachFnName: 'handleProjAttach',
-            keydownHandler: '_projInputKeydown(event,\'' + projId + '\')',
-            inputChangeFn: '_projInputChange',
-            acceptFiles: 'image/*,.pdf,.doc,.docx,.txt,.csv,.json,.yaml,.yml,.md',
-          }) +
-        '</div>' +
-      '</div>' +
-      '<!-- Sidebar: Members + Workflow Steps / Milestones + Tasks -->' +
-      '<div style="overflow-y:auto;padding:16px;background:var(--bg)">' +
+    var sidebarHtml =
+      '<aside id="proj-sidebar-'+projId+'" style="overflow-y:auto;padding:16px;background:var(--bg);border-left:1px solid var(--overlay-5);min-height:0">' +
         '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--text3);margin-bottom:8px">Workspace</div>' +
         '<div style="font-size:10px;color:var(--text3);margin-bottom:12px;padding:8px;background:var(--surface2);border-radius:6px;border-left:2px solid var(--primary);word-break:break-all">' + (proj.working_directory ? esc(proj.working_directory) : '(not set)') + '</div>' +
-        // Team Members: 有 workflow 时只显示文字列表，无 workflow 时显示机器人头像
         (proj.workflow_binding ?
           '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--text3);margin-bottom:8px">Team Members</div>' +
           '<div id="project-members-'+projId+'" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:16px"></div>'
@@ -18246,7 +18249,6 @@ async function renderProjectDetail(projId) {
           '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--text3);margin-bottom:10px">Team Members</div>' +
           '<div id="project-members-'+projId+'" style="display:flex;flex-direction:column;gap:6px;margin-bottom:20px"></div>'
         ) +
-        // Workflow Steps 或 Milestones
         (proj.workflow_binding ?
           '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--text3)">Workflow Steps</div></div>' +
           '<div id="project-wf-steps-'+projId+'" style="display:flex;flex-direction:column;gap:6px;margin-bottom:20px"></div>'
@@ -18256,9 +18258,39 @@ async function renderProjectDetail(projId) {
         ) +
         '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--text3);margin-bottom:10px">Tasks</div>' +
         '<div id="project-tasks-'+projId+'" style="display:flex;flex-direction:column;gap:6px"></div>' +
-      '</div>' +
-      '</div>' +
-    '</div>';  // /proj-pane-chat
+      '</aside>';
+
+    var panesHtml =
+      '<div id="proj-panes-col-'+projId+'" style="min-height:0;min-width:0;display:flex;flex-direction:column;overflow:hidden">' +
+        '<div id="proj-pane-overview-'+projId+'" style="flex:1;overflow:auto;padding:20px;'+paneVis('overview')+'"></div>' +
+        '<div id="proj-pane-goals-'+projId+'" style="flex:1;overflow:auto;padding:20px;'+paneVis('goals')+'"></div>' +
+        '<div id="proj-pane-milestones-'+projId+'" style="flex:1;overflow:auto;padding:20px;'+paneVis('milestones')+'"></div>' +
+        '<div id="proj-pane-deliverables-'+projId+'" style="flex:1;overflow:auto;padding:20px;'+paneVis('deliverables')+'"></div>' +
+        '<div id="proj-pane-issues-'+projId+'" style="flex:1;overflow:auto;padding:20px;'+paneVis('issues')+'"></div>' +
+        '<div id="proj-pane-team-'+projId+'" style="flex:1;overflow:auto;padding:20px;'+paneVis('team')+'"><div class="tc-text-dim" style="font-size:12px">Loading team status…</div></div>' +
+        '<div id="proj-pane-inbox-'+projId+'" style="flex:1;overflow:auto;padding:20px;'+paneVis('inbox')+'"><div class="tc-text-dim" style="font-size:12px">Loading inbox…</div></div>' +
+        '<div id="proj-pane-chat-'+projId+'" style="flex:1;min-height:0;display:flex;flex-direction:column;'+paneVis('chat')+'">' +
+          '<div id="project-chat-msgs-'+projId+'" style="flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px;min-height:0"></div>' +
+          '<div style="padding:12px 16px;border-top:1px solid var(--overlay-5)">' +
+            _renderUnifiedChatInput({
+              id: projId,
+              scope: 'project',
+              placeholder: 'Message the team... (@ to mention)',
+              sendFnName: 'sendProjectMsg',
+              attachFnName: 'handleProjAttach',
+              keydownHandler: '_projInputKeydown(event,\'' + projId + '\')',
+              inputChangeFn: '_projInputChange',
+              acceptFiles: 'image/*,.pdf,.doc,.docx,.txt,.csv,.json,.yaml,.yml,.md',
+            }) +
+          '</div>' +
+        '</div>' +
+      '</div>';
+
+    c.innerHTML = heroHtml + tabBar +
+      '<div style="flex:1;display:grid;grid-template-columns:minmax(0,1fr) 300px;min-height:0;overflow:hidden">' +
+        panesHtml +
+        sidebarHtml +
+      '</div>';
 
     // Populate members — 有 workflow 时紧凑文字，无 workflow 时机器人头像
     var membersEl = document.getElementById('project-members-'+projId);
@@ -18283,8 +18315,13 @@ async function renderProjectDetail(projId) {
         if (ag) return _robotIconUrl('robot_' + (ag.role || 'general'));
         return _miniRobotDataURL(role || 'general');
       };
+      // Defensive: proj.members can be null on freshly-created projects
+      // or after a partial response; bare .map would TypeError and the
+      // outer catch would wipe the whole detail (the "sidebar 闪一下就没了"
+      // symptom). Other code paths already guard with `||[]`.
+      var _membersArr = Array.isArray(proj.members) ? proj.members : [];
       if (proj.workflow_binding) {
-        membersEl.innerHTML = proj.members.map(function(m) {
+        membersEl.innerHTML = _membersArr.map(function(m) {
           var ag = agents.find(function(a){ return a.id === m.agent_id; });
           var name = ag ? ag.name : m.agent_id;
           var role = ag ? _resolveRobotRole(ag) : 'general';
@@ -18295,7 +18332,7 @@ async function renderProjectDetail(projId) {
           '</span>';
         }).join('');
       } else {
-        membersEl.innerHTML = proj.members.map(function(m) {
+        membersEl.innerHTML = _membersArr.map(function(m) {
           var ag = agents.find(function(a){ return a.id === m.agent_id; });
           var name = ag ? (ag.role+'-'+ag.name) : m.agent_id;
           var role = ag ? _resolveRobotRole(ag) : 'general';
@@ -18500,7 +18537,19 @@ async function renderProjectDetail(projId) {
     loadProjectChat(projId);
     // Load the active (default) tab content
     loadProjectTabContent(projId, _activeTab);
-  } catch(e) { c.innerHTML = '<div style="padding:24px;color:var(--error)">Error: '+e.message+'</div>'; }
+  } catch(e) {
+    // Don't wipe a successfully-rendered shell to a flat error string —
+    // that's the "sidebar 闪一下就没了" failure shape: hero + panes are
+    // already in the DOM, then a populate step (e.g. proj.members.map
+    // on a null members array) throws and the catch nukes everything.
+    // Log to console for diagnosis but leave whatever already rendered
+    // intact. Only fall back to the error shell if c is still empty
+    // (i.e. the failure happened BEFORE the first c.innerHTML write).
+    console.error('renderProjectDetail error', e);
+    if (!c.innerHTML || !c.innerHTML.trim()) {
+      c.innerHTML = '<div style="padding:24px;color:var(--error)">Error: '+esc(e.message || String(e))+'</div>';
+    }
+  }
 }
 
 // ── Project detail tab switching ──
@@ -18514,8 +18563,27 @@ function switchProjectTab(projId, tabKey) {
     var el = document.getElementById('proj-pane-'+k+'-'+projId);
     if (el) el.style.display = (k === tabKey) ? (k === 'chat' ? 'flex' : 'block') : 'none';
   });
-  // Re-render tab bar highlighting (quick hack: re-run detail render)
-  renderProjectDetail(projId);
+  // Update tab-bar highlighting in place — no full re-render. The old
+  // implementation called renderProjectDetail() which re-fetched the
+  // project, rebuilt every pane, and on a 429 wiped the chat sidebar
+  // ("闪一下就没了"). Tab bar buttons all use onclick="switchProjectTab(<projId>,'<key>')",
+  // so we can find them via that attribute and re-style.
+  try {
+    var btns = document.querySelectorAll('button[onclick^="switchProjectTab("]');
+    btns.forEach(function(b){
+      var oc = b.getAttribute('onclick') || '';
+      // Match the tabKey arg (second arg). e.g. switchProjectTab('p1','chat')
+      var m = oc.match(/switchProjectTab\(['"][^'"]+['"]\s*,\s*['"]([^'"]+)['"]/);
+      if (!m) return;
+      var key = m[1];
+      var active = (key === tabKey);
+      b.style.borderBottom = '2px solid '+(active?'var(--primary)':'transparent');
+      b.style.color = active ? 'var(--primary)' : 'var(--text2)';
+      b.style.fontWeight = active ? '700' : '500';
+    });
+  } catch (e) { /* fall through */ }
+  // Lazy-load tab content if not already populated.
+  loadProjectTabContent(projId, tabKey);
 }
 
 async function loadProjectTabContent(projId, tabKey) {
