@@ -2899,6 +2899,41 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "init_project_context",
+            "description": (
+                "Generate (or refresh) the project's PROJECT_CONTEXT.md file in shared/<project_id>/. Spawns an init subagent that explores the directory, reads README/manifests/entry points, queries project_state, and writes a structured doc. Idempotent — re-running with force=False returns the existing path without regenerating.\n"
+                "Use when: starting work on a new project (the very first turn) and you want every future agent in this project to skip the rediscovery cost; or when project structure changed enough that the existing PROJECT_CONTEXT.md is stale (force=true).\n"
+                "Not for: documenting individual deliverables (use submit_deliverable). Not for changing project metadata (use update_milestone_status / create_goal). Not for solo agents without a project context.\n"
+                "Output: ✅ confirmation with target path + size + elapsed; or ⚠️ if subagent ran but didn't write the file; or Error if it failed / timed out.\n"
+                "GOTCHA: this spawns a subagent so it takes 30-180s typically — don't call it inside a tight loop. Subagent has write_file permission BUT scoped to a curated whitelist (no submit_deliverable / no dispatch_task). Default timeout 300s."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "description": "Project to initialise (REQUIRED).",
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "description": "Overwrite existing PROJECT_CONTEXT.md if present (default false).",
+                    },
+                    "timeout_s": {
+                        "type": "integer",
+                        "description": "Caller-side wait timeout in seconds (default 300, clamped 60-900).",
+                    },
+                    "extra_focus": {
+                        "type": "string",
+                        "description": "Optional free-text instructing the init subagent to pay extra attention to a specific area (e.g. 'focus on the auth flow').",
+                    },
+                },
+                "required": ["project_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "project_state",
             "description": (
                 "Snapshot of structured project state — replaces glob_files for status checks.\n"
@@ -3158,6 +3193,11 @@ from .tools_split.agent_todo import _tool_agent_todo  # noqa: E402,F401
 # context stays lean.
 from .tools_split.subagent import _tool_spawn_explore_subagent  # noqa: E402,F401
 
+# Project-context bootstrap (Claude-Code-style /init). Spawns an init
+# subagent that explores the project's shared dir and writes a
+# PROJECT_CONTEXT.md so future agents skip the rediscovery cost.
+from .tools_split.project_init import _tool_init_project_context  # noqa: E402,F401
+
 # MCP call + builtin audio TTS/STT handler moved to
 # app/tools_split/mcp.py. That module registers the builtin handler
 # with the dispatcher at import time — keep this import unconditional
@@ -3297,6 +3337,8 @@ _TOOL_FUNCS: dict[str, callable] = {
     "agent_todo": _tool_agent_todo,
     # Ephemeral subagent spawn (Claude-Code-style Task tool).
     "spawn_explore_subagent": _tool_spawn_explore_subagent,
+    # Project-context bootstrap (Claude-Code-style /init).
+    "init_project_context": _tool_init_project_context,
     "mcp_call": _tool_mcp_call,
     # Experience persistence + skill generation
     "save_experience": _tool_save_experience,

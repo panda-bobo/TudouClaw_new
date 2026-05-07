@@ -1,6 +1,6 @@
 # TudouClaw — Tools Reference
 
-**Total tools registered**: 65
+**Total tools registered**: 70
 _(Generated from `app.tools.TOOL_DEFINITIONS` — keep regenerating when tools change.)_
 
 ## How visibility works
@@ -19,9 +19,18 @@ Every tool's schema also receives a universal `_reason: string ≤100 chars`
 required field (toggle in System Configuration → "Tool Reason Required")
 forcing the LLM to articulate WHY before each call.
 
-**Composite tools** (`finalize_step`, `submit_review`, `bootstrap_project`)
-fold multi-step rituals into ONE LLM round-trip — listed under their
-respective groups below; details in their `Use when` / `GOTCHA` sections.
+**Composite tools** fold multi-step rituals into ONE LLM round-trip:
+`finalize_step` (coder/researcher closure) · `submit_review` (reviewer)
+`bootstrap_project` (PM init) · `init_project_context` (CC `/init` equivalent).
+
+**Subagent fork** (`spawn_explore_subagent`) off-loads focused read-only
+research to a stateless ephemeral subagent — parent context stays clean.
+
+**Background bash** (`bash run_in_background=true` + `bash_logs` + `bash_kill`)
+lets long-running dev servers / watchers / daemons not block the agent.
+
+**TodoWrite-style scratch list** (`agent_todo`) gives each agent a private
+in-memory todo list across turns — separate from project plan / milestones.
 
 ---
 
@@ -182,22 +191,24 @@ _Capability skill: `shell-ops` — agent must have this granted (or it's in the 
 
 ### `bash`
 
-Execute a shell command with configurable timeout and sandbox policy enforcement.
+Execute a shell command. Two modes: foreground (default, sync, blocks until exit/timeout) and background (run_in_background=true, returns immediately with a process_id).
 
-**Use when**: running a compile/test/format command, git operations, quick system queries, any task that is naturally a CLI invocation.
+**Use when**: running a compile/test/format command, git operations, quick system queries; or — with run_in_background=true — starting a long-running dev server / build watch / file watcher / daemon.
 
-**Not for**: file reads (use read_file), file searches (use search_files/glob_files), pip installs (use pip_install for clear intent), date math (use datetime_calc).
+**Not for**: file reads (use read_file), file searches (use search_files/glob_files), pip installs (use pip_install for clear intent), date math (use datetime_calc). Avoid `bash cd <dir>` as a standalone call — each bash is a fresh shell, cd doesn't persist; chain with && (e.g. `cd /path && ls`) instead.
 
-**Output**: stdout + stderr (labeled) + exit code. Commands run in the sandbox root (agent's working_dir).
+**Output**: foreground returns stdout + stderr + exit code. Background returns 🟢 status line with pid + first log slice; use bash_logs(process_id) for incremental output, bash_kill(process_id) to terminate.
 
-**GOTCHA**: dangerous commands may be blocked by sandbox policy. Max timeout 600s. Avoid long-running commands that buffer output — no stdout is returned until the process exits or the timeout fires.
+**GOTCHA**: foreground max timeout 600s. For dev servers / `npx http-server` / `npm run dev` etc. — ALWAYS pass run_in_background=true; they never exit, so foreground will timeout and kill them. Use chain (`cmd1 && cmd2`) when you need cwd to persist across steps.
 
 **Parameters**:
 
 | name | type | required | description |
 |------|------|----------|-------------|
-| `command` | string | ✓ | Shell command to execute |
-| `timeout` | integer | — | Timeout in seconds (default 30) |
+| `command` | string | ✓ | Shell command to execute. Chain multi-step shell work with && or ; in a single call rather than issuing several bash calls. cd is per-call (doesn't persist across calls). |
+| `timeout` | integer | — | Timeout in seconds for foreground mode (default 30, max 600). Ignored when run_in_background=true. |
+| `run_in_background` | boolean | — | Start the command in the background without blocking. Returns a process_id. Use for dev servers / watchers / daemons. Pull output later with bash_logs. |
+| `background_log_lines` | integer | — | When run_in_background=true: how many initial log lines to return in the response (default 30, max 500). |
 
 ### `run_tests`
 
@@ -947,6 +958,64 @@ Receiver-side tool: pop a task assignment from your inbox and get its structured
 |------|------|----------|-------------|
 | `ta_id` | string | — | Specific assignment id (optional — defaults to highest-priority pending). |
 
+### `agent_todo`
+
+Maintain YOUR OWN private todo list across the next few turns. In-memory only (not persisted across process restarts). Cap 20 items.
+
+**Use when**: you're juggling multiple sub-tasks within one assignment and want to remember progress across turns; before context-compaction events; whenever you'd otherwise paragraph-write 'I still need to do A, then B, then C'.
+
+**Not for**: project-level steps (use plan_update). Not for milestones (use create_milestone). Not for tasks assigned to other agents (use dispatch_task). NEVER use it as a chat reply substitute — emit text in your reply too.
+
+**Output**: formatted list with status icons (○ pending · ◐ in_progress · ● completed) and ids.
+
+**GOTCHA**: at most ONE item may be in_progress at a time — setting a second errors out. Use action='set' for the initial plan or major pivot, action='update_one' for routine status flips (cheaper, doesn't re-emit the whole list).
+
+**Parameters**:
+
+| name | type | required | description |
+|------|------|----------|-------------|
+| `action` | string | — | get \| set \| update_one \| clear (default 'get'). |
+| `todos` | array | — | For action='set': the FULL replacement list (max 20). Each item has fields below. |
+| `todo_id` | string | — | For action='update_one': which item's status to change. |
+| `status` | string | — | For action='update_one': new status (pending \| in_progress \| completed). |
+
+### `bash_kill`
+
+Terminate a background bash process started via bash(run_in_background=true). SIGTERM first, SIGKILL if it doesn't exit within 2s.
+
+**Use when**: cleaning up a dev server / watcher you started and no longer need; or when a background process is misbehaving / wrong-config and needs a restart.
+
+**Not for**: foreground commands (they always exit on their own). Not as a way to abort a still-running unrelated agent task — that's the host's responsibility.
+
+**Output**: ⏹ confirmation with final exit code. Idempotent — calling on an already-finished pid returns its final status without erroring.
+
+**GOTCHA**: process_id must be one returned by an earlier bash(run_in_background=true).
+
+**Parameters**:
+
+| name | type | required | description |
+|------|------|----------|-------------|
+| `process_id` | integer | ✓ | The pid returned by bash(run_in_background=true). |
+
+### `bash_logs`
+
+Pull recent log lines from a background bash process started via bash(run_in_background=true).
+
+**Use when**: you started a dev server / long-running command in the background and want to see what it's printing. Repeated calls return the latest tail (no offset / no incremental cursor — just the last N lines).
+
+**Not for**: foreground commands (their output is already in the bash result). Not as a polling loop substitute for waiting — if you just want to wait for a server to be ready, prefer one or two calls separated by other work.
+
+**Output**: status line (running / exited with code) + last N log lines. Records GC'd ~1 hour after exit.
+
+**GOTCHA**: process_id must be one returned by an earlier bash(run_in_background=true). Stale or wrong pids return an error.
+
+**Parameters**:
+
+| name | type | required | description |
+|------|------|----------|-------------|
+| `process_id` | integer | ✓ | The pid returned by bash(run_in_background=true). |
+| `lines` | integer | — | How many log lines to return (default 30, max 500). |
+
 ### `bootstrap_project`
 
 Atomic project skeleton creation: declare folder layout + acceptance, create N milestones, create N goals, dispatch N initial tasks — all in ONE call.
@@ -1037,6 +1106,27 @@ Atomic step closure: register one-or-more local files as project deliverables, c
 ### `inbox_assignments`
 
 List structured task assignments waiting in your inbox. Different from check_inbox (which is chat messages). Use when looking for work-to-do.
+
+### `init_project_context`
+
+Generate (or refresh) the project's PROJECT_CONTEXT.md file in shared/<project_id>/. Spawns an init subagent that explores the directory, reads README/manifests/entry points, queries project_state, and writes a structured doc. Idempotent — re-running with force=False returns the existing path without regenerating.
+
+**Use when**: starting work on a new project (the very first turn) and you want every future agent in this project to skip the rediscovery cost; or when project structure changed enough that the existing PROJECT_CONTEXT.md is stale (force=true).
+
+**Not for**: documenting individual deliverables (use submit_deliverable). Not for changing project metadata (use update_milestone_status / create_goal). Not for solo agents without a project context.
+
+**Output**: ✅ confirmation with target path + size + elapsed; or ⚠️ if subagent ran but didn't write the file; or Error if it failed / timed out.
+
+**GOTCHA**: this spawns a subagent so it takes 30-180s typically — don't call it inside a tight loop. Subagent has write_file permission BUT scoped to a curated whitelist (no submit_deliverable / no dispatch_task). Default timeout 300s.
+
+**Parameters**:
+
+| name | type | required | description |
+|------|------|----------|-------------|
+| `project_id` | string | ✓ | Project to initialise (REQUIRED). |
+| `force` | boolean | — | Overwrite existing PROJECT_CONTEXT.md if present (default false). |
+| `timeout_s` | integer | — | Caller-side wait timeout in seconds (default 300, clamped 60-900). |
+| `extra_focus` | string | — | Optional free-text instructing the init subagent to pay extra attention to a specific area (e.g. 'focus on the auth flow'). |
 
 ### `list_issues`
 
@@ -1254,6 +1344,28 @@ Record a workspace file as a sharable artifact reference so other agents can fin
 | `token_count` | integer | — | Approximate token count of the full file (helps consumers budget) |
 | `project_id` | string | — | Optional; inferred from chat context |
 
+### `spawn_explore_subagent`
+
+Spawn a stateless ephemeral subagent to handle a focused READ-ONLY exploration / research task. The subagent runs its own chat loop with its own budget; you get back its final reply as a single string. The subagent's intermediate tool calls and reasoning DO NOT enter your context — your prefix cache stays clean.
+
+**Use when**: you'd otherwise spend 10+ tool calls reading / searching / web-fetching just to ANSWER a sub-question. Examples: 'find which file declares the auth middleware', 'survey the existing test framework', 'compile a list of competitor pricing pages'. Especially valuable for orchestrator-role agents (PM / executive) who shouldn't burn their budget on discovery.
+
+**Not for**: writing code / dispatching tasks / submitting deliverables (those are mutations — do them yourself in your context). Not for sub-questions you can answer with one read_file or one project_state call (the spawn overhead isn't worth it).
+
+**Output**: subagent's final assistant text, prefixed with a metadata header showing tool calls used and elapsed time. Errors come back as 'Error: ...' so you can decide whether to retry / handle yourself.
+
+**GOTCHA**: depth limit (default 3) prevents recursive forking. read_only_tools=true (default) restricts subagent to read-only primitives — set false ONLY if you specifically need a writing fork. Subagent shares your model/provider/working_dir/shared_workspace; doesn't share message history.
+
+**Parameters**:
+
+| name | type | required | description |
+|------|------|----------|-------------|
+| `prompt` | string | ✓ | The task for the subagent. Be specific and bounded — 'find which file defines auth middleware and list its public exports' beats 'explore the auth code'. |
+| `return_format` | string | — | summary (≤500 chars, default) \| full \| list. Hint to the subagent on how to shape its reply. |
+| `read_only_tools` | boolean | — | Restrict subagent's tools to read-only primitives (default true). Set false only if you specifically need a writing fork. |
+| `timeout_s` | integer | — | Caller-side wait timeout in seconds (default 180, clamped 10-600). |
+| `role` | string | — | Optional role hint (default: inherit parent role). Affects role-preset tool defaults when read_only_tools=false. |
+
 ### `submit_review`
 
 Atomic milestone-review closure: register the review report as a deliverable, batch-file any issues found, transition the milestone status in ONE call.
@@ -1359,20 +1471,13 @@ Get teammate ids from the [项目群聊] team list at the top of your prompt: ea
 
 ---
 
-## Inconsistencies / Notes
-
-- `plan_update` is declared in `CORE_UNIVERSAL_TOOLS` but is not present
-  in `TOOL_DEFINITIONS`. The plan-state machine is reachable through
-  separate channels (agent.py emits step events directly). Listed here
-  for transparency.
-- `_reason` injection adds a required string param to every tool's schema
-  but is stripped server-side in `_execute_tool_with_policy` before reaching
-  the underlying handler. Not shown in per-tool param tables above.
-
 ## Where to look
 
 - Definitions: `app/tools.py` (`TOOL_DEFINITIONS` at module top, dispatch table `_TOOL_FUNCS`)
 - Per-tool implementations: `app/tools_split/<category>.py`
 - Composite tools: `app/tools_split/finalize.py`
+- Subagent / init: `app/tools_split/subagent.py` · `app/tools_split/project_init.py`
+- TodoWrite: `app/tools_split/agent_todo.py`
+- Bash background: `app/tools_split/system.py`
 - Capability gating: `app/tool_capabilities.py`
-- Schema layer: `app/core/prompt_schemas.py` (`ToolSchema`, `from_tool_definition`)
+- Schema layer: `app/core/prompt_schemas.py`
