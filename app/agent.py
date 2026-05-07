@@ -6860,13 +6860,26 @@ Write only the summary body. Do not include any preamble or prefix."""
         # Infrastructure tool bypass: tools every agent universally
         # needs (coordination, state query, memory recall, etc.) skip
         # the allowed_tools intersection. Source of truth is
-        # tool_capabilities.CORE_TOOLS — keep this set in sync (or
-        # better: import directly).
+        # tool_capabilities.core_tools_for_context — context-aware so
+        # solo agents drop ~24 project-coordination schemas (~5500
+        # tokens) they would never call (no peer to message, no
+        # milestone to update). Project/meeting agents still get the
+        # full union.
         try:
-            from .tool_capabilities import CORE_TOOLS as _CORE
-            _INFRA_TOOLS_SCHEMA = frozenset(_CORE)
+            from .tool_capabilities import core_tools_for_context
+            _has_project = bool(getattr(self, "project_id", "") or "")
+            _has_meeting = bool(getattr(self, "source_meeting_id", "") or "")
+            _INFRA_TOOLS_SCHEMA = core_tools_for_context(
+                in_project=_has_project, in_meeting=_has_meeting,
+            )
         except Exception:
-            _INFRA_TOOLS_SCHEMA = frozenset()
+            # Last-resort fallback: load full CORE_TOOLS so we don't
+            # accidentally hide infrastructure if the helper trips.
+            try:
+                from .tool_capabilities import CORE_TOOLS as _CORE
+                _INFRA_TOOLS_SCHEMA = frozenset(_CORE)
+            except Exception:
+                _INFRA_TOOLS_SCHEMA = frozenset()
 
         allowed_set = set(allowed) | _INFRA_TOOLS_SCHEMA
         all_tools = [t for t in all_tools

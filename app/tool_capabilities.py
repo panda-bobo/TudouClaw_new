@@ -60,95 +60,48 @@ logger = logging.getLogger("tudou.capabilities")
 
 
 # ── CORE tier ───────────────────────────────────────────────────────
-# Minimal set that stays on for EVERY agent regardless of granted skills.
-# Kept tiny (3 tools) because empty-CORE + no-skill agent would be
-# useless — but every "real" capability now goes behind a skill bundle
-# below. This is the safety floor, not the primary capability surface.
-CORE_TOOLS: frozenset[str] = frozenset({
-    # Plan state machine — without this, agent can't report progress.
-    # Can't sensibly gate behind a skill because planning is how skills
-    # coordinate; chicken-and-egg.
+# 2026-05-07 (user feedback "发送的工具只有这里已经绑定的"): the
+# Tool Permissions UI is the single source of truth for what tools an
+# agent gets. The ONLY exception is the 4 tools the UI explicitly
+# labels as "核心" — read-only reflex primitives that aren't worth
+# making the user click 4 boxes for every agent:
+#
+#   plan_update       — agent must be able to report its own progress.
+#   get_skill_guide   — bootstrap; agent needs to discover what skills
+#                       it was granted.
+#   memory_recall     — read-only memory; doing your job needs context.
+#   knowledge_lookup  — read-only KB; doing your job needs context.
+#
+# Everything else — dispatch_task, send_message, sc_*, milestone /
+# goal / issue updates, mcp_call, submit_skill, task_update, etc. —
+# now requires the user to tick the box in Tool Permissions. Previously
+# those were silently injected as "CORE", so a solo agent shipped ~33
+# tool schemas (~9k tokens) the user never asked for. Token hit on a
+# typical agent: 25K tools → ~10–13K tools depending on what's ticked.
+CORE_UNIVERSAL_TOOLS: frozenset[str] = frozenset({
     "plan_update",
-    # Skill introspection — lets the LLM discover what granted skills
-    # provide, essential bootstrap.
     "get_skill_guide",
-    # MCP bridge — MCP has its own auth layer (per-server binding).
-    "mcp_call",
-    # Skill submission to the Forge (admin-reviewed). Promoted to CORE
-    # 2026-04-30: any agent that finishes authoring a skill in its
-    # workspace should be able to push it to the Forge for review,
-    # without needing the operator to grant ``admin-ops`` first.
-    # The actual installation / activation still requires admin
-    # approval in the Forge UI — this just creates a draft.
-    "submit_skill",
-    # Phase 3 (2026-05-06): structured task handoff — these are
-    # infrastructure tier, every agent (PM dispatches, worker accepts /
-    # reports back) needs them. Without them in CORE, the strict
-    # capability filter drops the schemas → LLM doesn't know they
-    # exist → emits DSML-style pseudo-tool-call markup as text.
-    "dispatch_task",
-    "accept_task",
-    "report_back",
-    "inbox_assignments",
-    # Phase 3 (2026-05-06): project coordination primitives. These
-    # are called by EVERY agent in a project context (PM creates
-    # milestones / goals; worker updates progress as they complete
-    # work). Should not require a capability skill grant — they're
-    # the "talk about your work" primitives. Without these in CORE,
-    # PM agents that have a goal owner_agent_id pointing to them can
-    # see the goal in their prompt but have no way to update it →
-    # frustrating dead-end UX.
-    "update_goal_progress",
-    "create_goal",
-    "update_milestone_status",
-    "update_milestone_responsibility",
-    # Phase 3 (2026-05-06): issue / risk tracking — ALL agents need
-    # to be able to report blockers/risks they hit. Without these in
-    # CORE, Issues tab stays permanently empty.
-    "report_issue",
-    "update_issue",
-    "list_issues",
-    # L2 (2026-05-06): structured project state query — replaces the
-    # glob_files anti-pattern for agents asking "what's done / what's
-    # mine". CORE so the eventual Rule Engine deny on glob_files in
-    # project context has a guaranteed alternative.
-    "project_state",
-    # L3 (2026-05-06): PM one-shot blueprint that generates engine rules
-    "define_project_blueprint",
-    # 2026-05-06 (user feedback): submit_deliverable + create_milestone
-    # were behind the project-management capability skill — meaning
-    # workers couldn't submit their work without admin granting that
-    # bundle. Anti-pattern: agent finishes a doc, has no way to
-    # register it, gives up or loops on glob_files looking for
-    # confirmation. Moving to CORE so every project-context agent can
-    # close the loop on their own work.
-    "submit_deliverable",
-    "create_milestone",
-    # send_message / check_inbox were behind 'messaging' bundle. Agents
-    # in a project NEED to talk to teammates without admin grant.
-    "send_message", "check_inbox", "ack_message", "reply_message",
-    # task_update was behind 'scheduling' — every agent that has work
-    # in flight needs to mark progress.
-    "task_update",
-    # 2026-05-06 (user feedback "有一些常见的tools都放白名单里"):
-    # Coordination + read-only state primitives. Without these in
-    # CORE, agents hit the visibility gate (allowed_tools intersection)
-    # and surface as "DENIED: not permitted for this agent" — even
-    # though risk tier is "low". Risk only governs the approval gate,
-    # not visibility — they're independent.
-    #
-    # Shared-context (SC) protocol — coordination read/write,
-    # cross-agent cheap queries instead of dumping content via chat.
-    "sc_query", "sc_get_artifact", "sc_handoff",
-    "sc_register_artifact", "sc_register_link",
-    # Status queries on team / single agent — read-only, cheap.
-    "query_team_status", "query_agent_status",
-    # Memory + knowledge recall — universally useful so an agent can
-    # check "did I/we figure this out before" without admin grant.
-    # Write paths (save_experience, share_knowledge) STAY behind the
-    # memory-ops bundle — write needs intent, read is reflex.
-    "memory_recall", "knowledge_lookup",
+    "memory_recall",
+    "knowledge_lookup",
 })
+
+# Kept as an empty set for back-compat with any caller that still
+# imports it; project-coordination tools now go through the normal
+# allowed_tools gate. Will be removed once no caller references it.
+CORE_PROJECT_TOOLS: frozenset[str] = frozenset()
+
+# Back-compat alias — existing imports of CORE_TOOLS still resolve.
+# Now equal to CORE_UNIVERSAL_TOOLS since CORE_PROJECT is empty.
+CORE_TOOLS: frozenset[str] = CORE_UNIVERSAL_TOOLS
+
+
+def core_tools_for_context(*, in_project: bool, in_meeting: bool) -> frozenset[str]:
+    """Return the CORE bypass set — tools that ship to the LLM
+    regardless of the agent's allowed_tools selection. Now context-
+    invariant (always the 4 UI-declared 核心 tools): the in_project /
+    in_meeting kwargs are kept for caller compatibility but ignored.
+    """
+    return CORE_UNIVERSAL_TOOLS
 
 
 # ── SKILL-GATED tier ───────────────────────────────────────────────
