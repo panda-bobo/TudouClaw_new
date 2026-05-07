@@ -18102,7 +18102,7 @@ async function renderProjectDetail(projId) {
   var c = document.getElementById('content');
   c.style.padding = '0';
   try {
-    var proj = await api('GET', '/api/portal/projects/'+projId);
+    var proj = await _apiShortGet('/api/portal/projects/'+projId);
     if (!proj || proj.error) { c.innerHTML = '<div style="padding:24px;color:var(--error)">Project not found</div>'; return; }
     // Cache project detail for @mention dropdown (_getProjectMembers)
     window._projectData = window._projectData || {};
@@ -18524,19 +18524,19 @@ async function loadProjectTabContent(projId, tabKey) {
   if (!pane) return;
   try {
     if (tabKey === 'overview') {
-      var data = await api('GET', '/api/portal/projects/'+projId+'/overview');
+      var data = await _apiShortGet('/api/portal/projects/'+projId+'/overview');
       pane.innerHTML = _renderProjectOverview(projId, data);
     } else if (tabKey === 'goals') {
-      var r = await api('GET', '/api/portal/projects/'+projId+'/goals');
+      var r = await _apiShortGet('/api/portal/projects/'+projId+'/goals');
       pane.innerHTML = _renderProjectGoals(projId, r.goals || []);
     } else if (tabKey === 'milestones') {
-      var r2 = await api('GET', '/api/portal/projects/'+projId+'/milestones');
+      var r2 = await _apiShortGet('/api/portal/projects/'+projId+'/milestones');
       pane.innerHTML = _renderProjectMilestonesTab(projId, r2.milestones || []);
     } else if (tabKey === 'deliverables') {
-      var r3 = await api('GET', '/api/portal/projects/'+projId+'/deliverables-by-agent');
+      var r3 = await _apiShortGet('/api/portal/projects/'+projId+'/deliverables-by-agent');
       pane.innerHTML = _renderProjectDeliverables(projId, r3);
     } else if (tabKey === 'issues') {
-      var r4 = await api('GET', '/api/portal/projects/'+projId+'/issues');
+      var r4 = await _apiShortGet('/api/portal/projects/'+projId+'/issues');
       pane.innerHTML = _renderProjectIssues(projId, r4.issues || []);
     } else if (tabKey === 'team') {
       // Phase 3 P3-2 (2026-05-06): Team Status pane
@@ -18552,7 +18552,7 @@ async function loadProjectTabContent(projId, tabKey) {
 
 // Phase 3 P3-3 (2026-05-06): TaskAssignment inbox renderer
 async function _renderProjectInbox(projId, pane) {
-  var r = await api('GET', '/api/portal/projects/'+projId+'/assignments');
+  var r = await _apiShortGet('/api/portal/projects/'+projId+'/assignments');
   var items = (r && r.assignments) || [];
   var html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">' +
     '<div><h3 style="font-size:18px;font-weight:700;margin:0">Task Assignments</h3>' +
@@ -18639,8 +18639,8 @@ async function _renderProjectInbox(projId, pane) {
 
 // Phase 3 P3-2 (2026-05-06): Team Status renderer
 async function _renderProjectTeamStatus(projId, pane) {
-  var r = await api('GET', '/api/portal/projects/'+projId+'/team_status');
-  var ev = await api('GET', '/api/portal/projects/'+projId+'/team_events?limit=20');
+  var r = await _apiShortGet('/api/portal/projects/'+projId+'/team_status');
+  var ev = await _apiShortGet('/api/portal/projects/'+projId+'/team_events?limit=20');
   var agents = (r && r.agents) || [];
   var watcher = (r && r.watcher) || {};
   var events = (ev && ev.events) || [];
@@ -19144,7 +19144,7 @@ function _renderProjectIssues(projId, items) {
 // ── Goal CRUD helpers ──
 async function _fetchProjectMembers(projId) {
   try {
-    var proj = await api('GET', '/api/portal/projects/'+projId);
+    var proj = await _apiShortGet('/api/portal/projects/'+projId);
     var members = (proj && proj.members) || [];
     // Enrich with agent name/role from agents API
     try {
@@ -19533,7 +19533,7 @@ function _renderRichContent(text) {
 
 async function loadProjectChat(projId) {
   try {
-    var data = await api('GET', '/api/portal/projects/'+projId+'/chat?limit=200');
+    var data = await _apiShortGet('/api/portal/projects/'+projId+'/chat?limit=200');
     var el = document.getElementById('project-chat-msgs-'+projId);
     if (!el) return;
     var msgs = data.messages || [];
@@ -19890,7 +19890,7 @@ async function sendProjectMsg(projId) {
 
 async function editProject(projId, currentName, currentDesc) {
   // 获取项目详情和可用 workflow 模板
-  var proj = await api('GET', '/api/portal/projects/'+projId);
+  var proj = await _apiShortGet('/api/portal/projects/'+projId);
   var tmplData = [];
   try {
     var td = await api('GET', '/api/portal/workflows');
@@ -20045,7 +20045,7 @@ async function editTaskSteps(projId, taskId) {
   // Fetch current task to load existing steps
   var proj = null;
   try {
-    proj = await api('GET', '/api/portal/projects/'+projId);
+    proj = await _apiShortGet('/api/portal/projects/'+projId);
   } catch(e) { alert('Load project failed: '+e.message); return; }
   var task = (proj.tasks||[]).find(function(t){ return t.id === taskId; });
   if (!task) { alert('Task not found'); return; }
