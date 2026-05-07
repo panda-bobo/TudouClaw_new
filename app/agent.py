@@ -4506,14 +4506,29 @@ class Agent:
 
         # 0.0 Plan state injection (P0/L1) — authoritative "where am I"
         # snapshot so the LLM doesn't have to reconstruct its own
-        # execution state from scattered tool_result history. See
-        # agent.format_plan_state_for_llm() for format. Kept first so
-        # budget truncation can't drop it.
+        # execution state from scattered tool_result history.
+        # 2026-05-07: routed through PlanStateSchema (prompt_schemas)
+        # so the LLM-visible projection is auditable. Falls back to
+        # legacy format_plan_state_for_llm() when structured projection
+        # is empty.
         try:
-            plan_ctx = self.format_plan_state_for_llm()
+            from .core.prompt_schemas import from_execution_plan, render_block
+            _plan = getattr(self, "_current_plan", None)
+            plan_ctx = ""
+            if _plan is not None:
+                _ps = from_execution_plan(_plan)
+                if _ps.is_empty():
+                    _ps.markdown_fallback = self.format_plan_state_for_llm()
+                plan_ctx = render_block(_ps)
             if plan_ctx:
                 _try_add(plan_ctx, "plan")
         except Exception as _pe:
+            try:
+                plan_ctx = self.format_plan_state_for_llm()
+                if plan_ctx:
+                    _try_add(plan_ctx, "plan")
+            except Exception:
+                pass
             try:
                 logger.debug("plan state injection skipped: %s", _pe)
             except Exception:
@@ -4553,17 +4568,112 @@ class Agent:
             except Exception:
                 pass
 
-        # 1. Shared Knowledge Wiki (lightweight title list)
+        # 0.5 RolePresetV2 Playbook injection — 岗位做事逻辑 + 场景筛选规则
+        # 2026-05-07: mirrored from the agent_llm tombstone into the
+        # active path. Wraps playbook_runtime.build_playbook_context
+        # output via PlaybookSchema (prompt_schemas).
+        try:
+            from .role_preset_registry import get_registry as _get_role_reg
+            from .playbook_runtime import build_playbook_context
+            from .scope_detector import detect_scopes
+            from .core.prompt_schemas import from_playbook, render_block
+            _role_id = getattr(self.profile, "role_preset_id", "") or ""
+            if _role_id:
+                _preset = _get_role_reg().get(_role_id)
+                if _preset is not None and not _preset.playbook.is_empty():
+                    _scopes = detect_scopes(current_query or "")
+                    self._playbook_active_scopes = _scopes
+                    self._playbook_active_preset_id = _role_id
+                    _pb_ctx = build_playbook_context(_preset, _scopes)
+                    if _pb_ctx:
+                        _pb_md = render_block(from_playbook(
+                            _role_id, _scopes, _pb_ctx,
+                            preset_version=getattr(_preset, "version", 0),
+                        ))
+                        if _pb_md:
+                            _try_add(_pb_md, "playbook")
+        except Exception as _pe2:
+            try:
+                logger.debug("playbook injection skipped: %s", _pe2)
+            except Exception:
+                pass
+
+        # 0.6 Rule Engine — surface applicable rules so the LLM knows
+        # IN ADVANCE what will be enforced. Without this, agents try
+        # an action → get denied → retry → eat budget. Showing rules
+        # upfront is much cheaper than the deny-retry loop.
+        try:
+            from .rule_engine import get_engine as _get_rule_engine
+            from .core.prompt_schemas import (
+                from_rule_engine_rule, render_rules_block,
+            )
+            _rule_eng = _get_rule_engine()
+            if _rule_eng is not None and _rule_eng.store is not None:
+                _proj_id_re = getattr(self, "project_id", "") or ""
+                _meeting_id_re = getattr(self, "source_meeting_id", "") or ""
+                if _proj_id_re:
+                    _rule_scope = {"kind": "project",
+                                   "project_id": _proj_id_re}
+                elif _meeting_id_re:
+                    _rule_scope = {"kind": "meeting",
+                                   "meeting_id": _meeting_id_re}
+                else:
+                    _rule_scope = {"kind": "solo", "agent_id": self.id}
+                _action_triggers = (
+                    "before_tool_call",
+                    "before_file_write",
+                    "before_dispatch_task",
+                    "before_task_done",
+                    "before_message_send",
+                )
+                _seen_ids: set = set()
+                _rule_schemas: list = []
+                for _trig in _action_triggers:
+                    for _r in _rule_eng.store.for_trigger(_trig, _rule_scope):
+                        if _r.id in _seen_ids:
+                            continue
+                        _seen_ids.add(_r.id)
+                        _rule_schemas.append(from_rule_engine_rule(_r))
+                _rule_schemas = _rule_schemas[:12]
+                if _rule_schemas:
+                    _rules_block = render_rules_block(
+                        _rule_schemas,
+                        heading=("## 当前生效的规则 (Rule Engine) — "
+                                 "动作前先看,违反会被硬拦或警告"),
+                    )
+                    if _rules_block:
+                        _try_add(_rules_block, "rules")
+        except Exception as _re_err:
+            try:
+                logger.debug("rule engine system_prompt injection skipped: %s",
+                             _re_err)
+            except Exception:
+                pass
+
+        # 1. Shared Knowledge Wiki (lightweight title list) — KnowledgeWikiSchema
         try:
             from . import knowledge as _kb
+            from .core.prompt_schemas import from_knowledge_wiki, render_block
             kb_summary = _kb.get_prompt_summary()
-            _try_add(kb_summary, "kb_wiki")
+            if kb_summary:
+                _try_add(render_block(from_knowledge_wiki(kb_summary)), "kb_wiki")
         except Exception:
-            pass
+            try:
+                from . import knowledge as _kb_fallback
+                _try_add(_kb_fallback.get_prompt_summary(), "kb_wiki")
+            except Exception:
+                pass
 
         # 2. Workspace files (MCP, Tasks, Scheduled — needed for tool usage)
-        sched_ctx = self._get_scheduled_context()
-        _try_add(sched_ctx, "scheduled")
+        # ScheduledContextSchema
+        try:
+            from .core.prompt_schemas import from_scheduled_context, render_block
+            sched_ctx = self._get_scheduled_context()
+            if sched_ctx:
+                _try_add(render_block(from_scheduled_context(sched_ctx)), "scheduled")
+        except Exception:
+            sched_ctx = self._get_scheduled_context()
+            _try_add(sched_ctx, "scheduled")
 
         # 2.5 Recent artifacts in workspace (deliverables agent produced).
         # Without this, agent forgets files it created earlier in the same
@@ -4578,17 +4688,27 @@ class Agent:
         except Exception as _ae:
             logger.debug("recent-artifacts injection skipped: %s", _ae)
 
-        # 3. Git context (with cooldown)
+        # 3. Git context (with cooldown) — GitContextSchema
         now = time.time()
         if now - self._git_context_ts >= self._GIT_CONTEXT_COOLDOWN:
             self._cached_git_context = self._get_git_context()
             self._git_context_ts = now
-        _try_add(self._cached_git_context, "git")
+        try:
+            from .core.prompt_schemas import from_git_context_markdown, render_block
+            if self._cached_git_context:
+                _try_add(
+                    render_block(from_git_context_markdown(self._cached_git_context)),
+                    "git",
+                )
+        except Exception:
+            _try_add(self._cached_git_context, "git")
 
         # 4. Three-layer memory: L2 + L3 retrieval (query-dependent)
+        # MemoryRecallSchema
         mm = self._get_memory_manager()
         if mm and current_query and total_chars < max_dynamic_chars:
             try:
+                from .core.prompt_schemas import from_memory_recall, render_block
                 mem_config = self._get_memory_config()
                 # Pass current scope so MemoryManager can drop facts
                 # / episodes scoped to OTHER projects/tasks (2026-05-05).
@@ -4607,7 +4727,12 @@ class Agent:
                     current_project_id=_cur_pid,
                     current_task_id=_cur_tid,
                 )
-                _try_add(memory_context or "", "memory_l2l3")
+                _mem_md = render_block(from_memory_recall(
+                    memory_context or "",
+                    query=current_query,
+                    budget_chars=max_dynamic_chars,
+                ))
+                _try_add(_mem_md or "", "memory_l2l3")
                 # ── 记录本次记忆注入的体量，供 portal 展示"记忆使用比例" ──
                 try:
                     mem_chars = len(memory_context or "")
