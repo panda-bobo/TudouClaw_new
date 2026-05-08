@@ -117,6 +117,12 @@ def verify_one_file(abs_path: Path, must_contain: list[str],
 
     Returns ``(verified, reasons)`` where ``reasons`` is a non-empty list
     of human-readable failure causes when verified is False.
+
+    Each reason is augmented with an actionable "💡 fix" hint when we
+    can derive one — e.g. for a missing markdown section we list the
+    file's existing headers and suggest a concrete edit_file invocation
+    with old_string/new_string anchors. Without this, the agent
+    typically loops 5-10 times trying to figure out where to insert.
     """
     if not abs_path.exists():
         return False, [f"file does not exist: {abs_path}"]
@@ -126,14 +132,99 @@ def verify_one_file(abs_path: Path, must_contain: list[str],
     reasons: list[str] = []
     n_lines = _file_lines(abs_path)
     if min_lines and n_lines < min_lines:
-        reasons.append(f"too few lines ({n_lines} < {min_lines})")
+        reasons.append(
+            f"too few lines ({n_lines} < {min_lines}). "
+            f"💡 Fix: extend each section with concrete bullets / "
+            f"paragraphs until you reach {min_lines}+ lines. "
+            f"Don't pad with whitespace — auto-detected as gibberish."
+        )
     if max_lines and n_lines > max_lines:
-        reasons.append(f"too many lines ({n_lines} > {max_lines})")
+        reasons.append(
+            f"too many lines ({n_lines} > {max_lines}). "
+            f"💡 Fix: trim with edit_file — collapse verbose sections "
+            f"to bullet lists, remove duplicate paragraphs."
+        )
     for needle in must_contain or []:
         if not _check_substring(text, needle):
-            preview = needle if len(needle) <= 60 else needle[:60] + "…"
-            reasons.append(f"missing required content: {preview!r}")
+            reasons.append(_build_missing_content_reason(text, needle, abs_path))
     return (not reasons), reasons
+
+
+def _build_missing_content_reason(file_text: str, needle: str,
+                                    abs_path: Path) -> str:
+    """For a missing required substring, render an actionable error
+    that tells the agent EXACTLY how to fix it. Special-cased for
+    markdown-section missing (the most common case).
+    """
+    preview = needle if len(needle) <= 60 else needle[:60] + "…"
+    base = f"missing required content: {preview!r}"
+
+    # Detect: does the missing needle look like a markdown heading?
+    needle_stripped = needle.strip()
+    is_md_header = bool(re.match(r"^#+\s", needle_stripped))
+
+    if not is_md_header:
+        # Generic literal-string missing
+        return (
+            f"{base}\n     💡 Fix: insert the exact text {preview!r} "
+            f"somewhere in the file. If this is a marker meant to "
+            f"appear at the top, prepend it; if it's a section "
+            f"identifier, follow the same pattern other markers use."
+        )
+
+    # Markdown-header case — give specific edit_file instructions.
+    existing_headers: list[tuple[int, str]] = []  # [(line_no_1based, header_text), ...]
+    for i, line in enumerate(file_text.splitlines(), start=1):
+        if re.match(r"^#+\s+\S", line):
+            existing_headers.append((i, line.rstrip()))
+
+    if not existing_headers:
+        # Empty / no-header file — append the section.
+        return (
+            f"{base}\n"
+            f"     💡 Fix: the file has no markdown headers yet. "
+            f"Use write_file to overwrite with a structure that "
+            f"includes the {needle_stripped!r} section, or use "
+            f"edit_file with old_string=<the first line of current "
+            f"content> and prepend the missing section before it."
+        )
+
+    # Show existing structure (cap at 8 to keep response concise).
+    headers_preview = existing_headers[-8:] if len(existing_headers) > 8 else existing_headers
+    headers_lines = "\n".join(
+        f"        line {ln}: {hdr}" for ln, hdr in headers_preview
+    )
+    if len(existing_headers) > 8:
+        headers_lines = f"        ... ({len(existing_headers) - 8} earlier headers omitted)\n" + headers_lines
+
+    # Pick the LAST same-level (or any) header as the anchor — the new
+    # section will be inserted BEFORE it (so it lands above the last
+    # bookkeeping section like 总结 / 风险登记 / etc.).
+    anchor_line, anchor_text = existing_headers[-1]
+    new_section_template = (
+        f"{needle_stripped}\n\n"
+        f"<your content here — at least 3 lines of substantive bullets / paragraphs>\n\n"
+    )
+    edit_example = (
+        f"        edit_file(\n"
+        f"          path={str(abs_path)!r},\n"
+        f"          old_string={anchor_text!r},\n"
+        f"          new_string={(new_section_template + anchor_text)!r}\n"
+        f"        )"
+    )
+    return (
+        f"{base}\n"
+        f"     💡 Fix steps:\n"
+        f"     1. The file currently has these section headers:\n"
+        f"{headers_lines}\n"
+        f"     2. Insert the {needle_stripped!r} section BEFORE the last "
+        f"existing header (line {anchor_line}: {anchor_text!r}).\n"
+        f"     3. Use ONE edit_file call:\n"
+        f"{edit_example}\n"
+        f"     4. The deliverable check will re-run automatically — "
+        f"if it still fails, the new error will tell you what's missing "
+        f"in the section body."
+    )
 
 
 def verify_task_deliverables(
