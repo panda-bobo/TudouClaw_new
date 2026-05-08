@@ -990,13 +990,58 @@ def _sanitize_messages_for_openai(messages: list[dict],
                 cleaned.append(mm)
             else:
                 # No resolved tool_calls. If the assistant message has text
-                # content, strip tool_calls and keep it; otherwise drop it.
+                # content, strip tool_calls and keep it; otherwise *salvage*
+                # by demoting the tool_calls to a text summary so the slot
+                # in the conversation survives. Without this we'd drop the
+                # message entirely; combined with HISTORY_SUMMARY eating
+                # the surrounding user messages this can produce a payload
+                # with zero user/asst → rescue placeholder kicks in →
+                # agent loses the thread (root cause of the 22:02 bug).
+                # 2026-05-08.
                 txt = (m.get("content") or "").strip()
                 if txt:
                     mm = dict(m)
                     mm.pop("tool_calls", None)
                     cleaned.append(mm)
-                # else drop entirely
+                else:
+                    # Build a compact summary of the orphan tool_calls so
+                    # the LLM sees "I tried these tools earlier; results
+                    # weren't preserved" instead of an empty turn.
+                    _orphan_summary_parts = []
+                    for _tc in (m.get("tool_calls") or []):
+                        if not isinstance(_tc, dict):
+                            continue
+                        _fn = _tc.get("function") or {}
+                        _name = (
+                            _fn.get("name", "?")
+                            if isinstance(_fn, dict) else "?"
+                        )
+                        _args = (
+                            _fn.get("arguments", "")
+                            if isinstance(_fn, dict) else ""
+                        )
+                        if isinstance(_args, str) and len(_args) > 200:
+                            _args = _args[:200] + "…"
+                        _orphan_summary_parts.append(
+                            f"{_name}({_args})"
+                        )
+                    if _orphan_summary_parts:
+                        _orphan_summary = (
+                            "[Earlier tool call(s) — results not "
+                            "preserved across history compaction: "
+                            + "; ".join(_orphan_summary_parts) + "]"
+                        )
+                        mm = dict(m)
+                        mm.pop("tool_calls", None)
+                        mm["content"] = _orphan_summary
+                        cleaned.append(mm)
+                        logger.warning(
+                            "[sanitize] salvaged orphan asst.tool_calls "
+                            "(%d) as text summary — pipeline lost the "
+                            "matching tool messages.",
+                            len(m.get("tool_calls") or []),
+                        )
+                    # else: tool_calls list was empty after all → drop
         else:
             cleaned.append(m)
 
@@ -1227,14 +1272,69 @@ def _sanitize_messages_for_openai(messages: list[dict],
                 sys_end = i + 1
             else:
                 break
-        final_pass.insert(sys_end, {
-            "role": "user",
-            "content": (
+        # Salvage real content from the original input — walk backward,
+        # find the most recent user/asst/tool messages with non-empty
+        # text, and stitch them into the placeholder. This gives the
+        # LLM ACTUAL context of what just happened instead of a generic
+        # "(continue)" stub. Helps the agent recover its thread when
+        # the pipeline ate everything.
+        _last_user_txt = ""
+        _last_asst_txt = ""
+        _last_tool_txt = ""
+        for _m in reversed(messages):
+            _r = _m.get("role", "")
+            _c = _m.get("content")
+            if isinstance(_c, list):
+                # Multimodal: extract text parts
+                _texts = [
+                    p.get("text", "")
+                    for p in _c
+                    if isinstance(p, dict) and p.get("type") == "text"
+                ]
+                _c = "\n".join(_texts).strip()
+            elif isinstance(_c, str):
+                _c = _c.strip()
+            else:
+                continue
+            if not _c:
+                continue
+            if _r == "user" and not _last_user_txt:
+                _last_user_txt = _c[:1500]
+            elif _r == "assistant" and not _last_asst_txt:
+                _last_asst_txt = _c[:800]
+            elif _r == "tool" and not _last_tool_txt:
+                _last_tool_txt = _c[:600]
+            if _last_user_txt and _last_asst_txt:
+                break
+        _salvage_parts = []
+        if _last_user_txt:
+            _salvage_parts.append(
+                f"[最近一条 user 消息]\n{_last_user_txt}"
+            )
+        if _last_asst_txt:
+            _salvage_parts.append(
+                f"[最近一条 assistant 文本]\n{_last_asst_txt}"
+            )
+        if _last_tool_txt and not _salvage_parts:
+            _salvage_parts.append(
+                f"[最近一条 tool 结果]\n{_last_tool_txt}"
+            )
+        if _salvage_parts:
+            _content = (
+                "(框架在 sanitize 阶段丢失了对话上下文,以下是从原始 "
+                "messages 抢救出来的最近内容。请基于这些继续工作:)\n\n"
+                + "\n\n".join(_salvage_parts)
+            )
+        else:
+            _content = (
                 "(continue with the most recent task — the conversation "
                 "history was compacted by the framework. Refer to the "
                 "[HISTORY_SUMMARY] block in the system prompt above for "
                 "what's been done so far.)"
-            ),
+            )
+        final_pass.insert(sys_end, {
+            "role": "user",
+            "content": _content,
         })
 
     return final_pass
