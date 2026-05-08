@@ -334,11 +334,64 @@ def _tool_write_file(path: str, content: str, **_: Any) -> str:
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
-        # Return the resolved absolute path so the artifact system can
-        # locate the file reliably (relative paths break file card downloads).
-        return f"Successfully wrote {len(content)} bytes to {p}"
+        # Return a Claude-Code-style result: header + numbered preview
+        # of the just-written content. Without this, the LLM sees only
+        # "Successfully wrote N bytes" and frequently follows up with a
+        # read_file to "verify" — wasting a turn. With the snippet,
+        # it sees exactly what's now on disk and can proceed.
+        return _format_write_result(str(p), content, len(content))
     except Exception as e:
         return f"Error writing file: {e}"
+
+
+def _format_write_result(path_str: str, content: str, byte_count: int,
+                          *, max_lines: int = 40) -> str:
+    """Format the write_file response with a numbered snippet of the
+    written content (Claude Code style).
+
+    The snippet caps at ``max_lines`` total — if the file is longer,
+    we emit head + "...  (N more lines truncated)" tail so the LLM
+    sees both the start and end. If the file fits within max_lines,
+    the entire content goes back numbered.
+    """
+    lines = (content or "").splitlines()
+    total = len(lines)
+    if total == 0:
+        # Empty content (rare but possible — e.g. truncating a file).
+        return (f"The file {path_str} has been written ({byte_count} bytes, "
+                f"empty).")
+    # Build numbered preview
+    if total <= max_lines:
+        body_lines = list(enumerate(lines, start=1))
+        truncated_note = ""
+    else:
+        head_n = max_lines * 2 // 3   # 2/3 head, 1/3 tail
+        tail_n = max_lines - head_n
+        head = list(enumerate(lines[:head_n], start=1))
+        tail = list(enumerate(
+            lines[-tail_n:],
+            start=total - tail_n + 1,
+        ))
+        body_lines = head + [(0, "...")] + tail  # 0 = sentinel for skip line
+        truncated_note = (
+            f"\n  ({total - max_lines} more line(s) elided between "
+            f"head and tail)"
+        )
+
+    preview_parts: list[str] = []
+    for n, line in body_lines:
+        if n == 0:
+            preview_parts.append("       ...")
+        else:
+            preview_parts.append(f"  {n:5d}\t{line}")
+    preview = "\n".join(preview_parts)
+
+    return (
+        f"The file {path_str} has been written successfully "
+        f"({byte_count} bytes, {total} line(s)). "
+        f"Here's the result of running `cat -n` on the file:\n"
+        f"{preview}{truncated_note}"
+    )
 
 
 # ── edit_file ────────────────────────────────────────────────────────
@@ -366,7 +419,72 @@ def _tool_edit_file(path: str, old_string: str, new_string: str,
 
     new_text = text.replace(old_string, new_string, 1)
     p.write_text(new_text, encoding="utf-8")
-    return f"Successfully edited {path} (replaced 1 occurrence)"
+    # Claude-Code-style result: show the numbered SNIPPET around the
+    # edited region so the LLM can verify the change without doing a
+    # follow-up read_file. Without this, agents wander into a "edit →
+    # read → edit → read" verification loop, wasting tokens. Showing
+    # 6 lines before + 6 after the edit gives enough context to
+    # confirm intent without dumping the whole file.
+    return _format_edit_result(str(p), new_text, new_string, context_lines=6)
+
+
+def _format_edit_result(path_str: str, full_text: str, new_string: str,
+                         *, context_lines: int = 6) -> str:
+    """Render an edit_file result with a numbered preview of the edited
+    region. Locates the new_string in the post-edit file, finds its
+    line number, and emits ``context_lines`` lines on each side
+    (clamped to file boundaries) prefixed with line numbers.
+
+    If the new_string spans multiple lines, the preview covers the
+    full span plus the surrounding context.
+    """
+    new_lines = full_text.splitlines()
+    total = len(new_lines)
+
+    # Find which lines contain (any part of) the new_string. We search
+    # by iterating — splitting on raw newlines is the simplest robust
+    # approach across embedded \n in old/new_string.
+    new_first_line: int | None = None
+    new_last_line: int | None = None
+    if new_string:
+        # Linear scan for the first occurrence of new_string in
+        # full_text, then map to line numbers. Cheap because edit
+        # files usually < 5KB.
+        idx = full_text.find(new_string)
+        if idx >= 0:
+            # Number of newlines before idx → start line (1-based)
+            prefix = full_text[:idx]
+            new_first_line = prefix.count("\n") + 1
+            inner_newlines = new_string.count("\n")
+            new_last_line = new_first_line + inner_newlines
+    if new_first_line is None or new_last_line is None:
+        # Couldn't locate (e.g. new_string was empty / pure whitespace).
+        # Fall back to a brief acknowledgment without snippet.
+        return (
+            f"The file {path_str} has been edited successfully. "
+            f"(replacement region not previewable — "
+            f"new_string was empty or whitespace-only)"
+        )
+
+    # Compute snippet range
+    start = max(1, new_first_line - context_lines)
+    end = min(total, new_last_line + context_lines)
+    preview_parts: list[str] = []
+    for i in range(start, end + 1):
+        line = new_lines[i - 1] if (i - 1) < total else ""
+        marker = " "  # space → context line
+        if new_first_line <= i <= new_last_line:
+            marker = "+"  # → indicates this line is part of the edit
+        preview_parts.append(f"{marker} {i:5d}\t{line}")
+    preview = "\n".join(preview_parts)
+
+    return (
+        f"The file {path_str} has been edited successfully "
+        f"(1 occurrence replaced). Here's the result of running `cat -n` "
+        f"on a snippet of the edited file (lines {start}-{end} of {total}; "
+        f"`+` marks lines inside the new content):\n"
+        f"{preview}"
+    )
 
 
 # ── search_files ─────────────────────────────────────────────────────
