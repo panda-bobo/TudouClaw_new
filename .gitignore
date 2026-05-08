@@ -73,3 +73,13 @@ tools/diag_jimeng.py
 # Database files
 *.db
 *.sqlite
+
+# Auto-generated runtime markers / caches that pollute working tree
+# - .skill_id: per-skill marker dropped by the catalog scanner
+# - _backup_pre_*: stitched-asset backup directories
+# - _sanitizer_dumps/: rescue diagnostic dumps written by the LLM
+#   sanitizer when no user/asst message survives — admin-only debug
+data/skill_catalog/*/*/.skill_id
+data/skill_catalog/imported/*/.skill_id
+app/static/robots/*/_backup_pre_*/
+.tudou_claw/_sanitizer_dumps/
