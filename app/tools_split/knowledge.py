@@ -999,6 +999,12 @@ def _tool_knowledge_lookup(query: str = "", entry_id: str = "",
     # methodology / template / pattern / reference). Search it BEFORE
     # the legacy KB so wiki hits — agent-authored, curated — surface
     # at the top. Best-effort: any error keeps falling through to KB.
+    #
+    # Phase-1 evolution (2026-05-08): every hit returned to the LLM
+    # also lands in the calling agent's ``lookup_trace``. When the
+    # agent later closes a step via finalize_step, that trace is
+    # flushed and each hit gets a success_count++ on its wiki page —
+    # the cheap learning signal that doesn't write any new tokens.
     wiki_lines: list[str] = []
     if mode == "search" and _q_str and not entry_id:
         try:
@@ -1014,6 +1020,19 @@ def _tool_knowledge_lookup(query: str = "", entry_id: str = "",
                         f"  {body_preview}"
                         + ("..." if len(p.body or "") > 400 else "")
                     )
+                    # Record into the calling agent's outcome-trace.
+                    # Best-effort: silent skip if no caller agent
+                    # (e.g. invoked from a hub admin path).
+                    if _kl_agent is not None:
+                        try:
+                            _kl_agent.record_lookup_hit(
+                                scope=p.scope, kind=p.kind, slug=p.slug,
+                                query=_q_str,
+                            )
+                        except Exception as _rh_err:
+                            logger.debug(
+                                "record_lookup_hit skipped: %s", _rh_err,
+                            )
         except Exception as _we:
             logger.debug("wiki search in knowledge_lookup skipped: %s", _we)
 

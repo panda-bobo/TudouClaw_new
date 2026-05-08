@@ -3170,6 +3170,75 @@ class Agent:
         q.clear()
         return out
 
+    # ── Self-evolution Phase 1 (2026-05-08): lookup outcome trace ──
+    # When ``knowledge_lookup`` returns wiki hits, the tool records the
+    # hit refs here. When the agent later closes a step via
+    # ``finalize_step``, the closing tool flushes this trace and calls
+    # ``WikiStore.update_outcome(success=True)`` for each hit so the
+    # success_count / fail_count fields actually accumulate. Zero token
+    # cost — pure data layer.
+    #
+    # Storage shape: list of dicts
+    #   {
+    #     "scope": "global",
+    #     "kind":  "experience",
+    #     "slug":  "pci-dss-40-...",
+    #     "ts":    1778...,
+    #     "query": "the search query that produced the hit",
+    #   }
+    # In-memory only; capped at LOOKUP_TRACE_MAX (50). Not persisted
+    # across server restarts on purpose — a hit that wasn't followed
+    # by a finalize within the same process lifetime shouldn't credit
+    # the page.
+    _LOOKUP_TRACE_MAX = 50
+
+    def record_lookup_hit(
+        self, *, scope: str, kind: str, slug: str, query: str = "",
+    ) -> None:
+        """Append one wiki hit to this agent's lookup-outcome trace.
+
+        Called by ``_tool_knowledge_lookup`` once per hit returned to
+        the LLM. Dedupes within the trace so the same (scope, kind,
+        slug) doesn't accumulate phantom credits if the agent calls
+        knowledge_lookup multiple times in one step.
+        """
+        if not (scope and kind and slug):
+            return
+        trace = getattr(self, "_lookup_trace", None)
+        if trace is None:
+            trace = []
+            try:
+                self._lookup_trace = trace
+            except Exception:
+                return
+        ref = (str(scope), str(kind), str(slug))
+        # Dedupe: drop if same triple already in trace.
+        for entry in trace:
+            if (entry.get("scope"), entry.get("kind"),
+                entry.get("slug")) == ref:
+                return
+        trace.append({
+            "scope": ref[0], "kind": ref[1], "slug": ref[2],
+            "ts": time.time(), "query": query[:120],
+        })
+        # Cap. Drop oldest first.
+        if len(trace) > self._LOOKUP_TRACE_MAX:
+            del trace[: len(trace) - self._LOOKUP_TRACE_MAX]
+
+    def consume_lookup_trace(self) -> list[dict]:
+        """Return-and-clear the agent's wiki lookup hits.
+
+        Called by ``_tool_finalize_step`` (success path) and
+        ``plan_update`` action='fail_step' so each closing event can
+        write outcomes back to the wiki layer in one shot. Idempotent
+        — second call within the same step returns []."""
+        trace = getattr(self, "_lookup_trace", None)
+        if not trace:
+            return []
+        out = list(trace)
+        trace.clear()
+        return out
+
     def _log(self, kind: str, data: dict):
         # Skip event logging during scheduled task execution — scheduled
         # prompts/replies must NOT appear in the agent's chat UI.

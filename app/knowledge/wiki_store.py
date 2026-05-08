@@ -91,6 +91,29 @@ class WikiPage:
     fail_count: int = 0
     sources: list[str] = field(default_factory=list)
     related: list[str] = field(default_factory=list)
+    # ── Self-evolution Phase 1 (2026-05-08) ──
+    # When ``knowledge_lookup`` returns this page and the calling
+    # agent then closes a step via ``finalize_step`` (success) or marks
+    # a step failed (fail), ``update_outcome()`` increments these
+    # counters. Lets repeat-applied experiences accumulate authority
+    # over time WITHOUT needing to fabricate new wiki entries (which
+    # would be expensive in tokens and noise).
+    #
+    # applied_count    — total times the page was lookup-hit AND a
+    #                    downstream step closed with this page in the
+    #                    agent's ``lookup_trace``. == success + fail.
+    # last_applied_at  — unix ts of the most recent application.
+    # consecutive_fails — current streak of failures since last success.
+    #                    Reset to 0 on any success. Used by the lazy
+    #                    decay rule (≥3 → mark is_valid=False).
+    # is_valid         — when False, ``search()`` skips this page so
+    #                    repeatedly-failing lessons stop being injected.
+    #                    Set automatically by update_outcome() OR by
+    #                    admin via the wiki UI.
+    applied_count: int = 0
+    last_applied_at: float = 0.0
+    consecutive_fails: int = 0
+    is_valid: bool = True
     # ── Optional structured fields (Gene-like, borrowed from
     # @evomap/evolver's gene schema). Filled when ``kind`` is
     # "experience" / "methodology" / "pattern" — gives downstream
@@ -132,6 +155,16 @@ class WikiPage:
         fm_lines.append(f"updated_at: {self.updated_at:.0f}")
         fm_lines.append(f"success_count: {self.success_count}")
         fm_lines.append(f"fail_count: {self.fail_count}")
+        # Phase-1 evolution counters — only written when non-default to
+        # keep legacy wiki files unchanged on first read.
+        if self.applied_count:
+            fm_lines.append(f"applied_count: {self.applied_count}")
+        if self.last_applied_at:
+            fm_lines.append(f"last_applied_at: {self.last_applied_at:.0f}")
+        if self.consecutive_fails:
+            fm_lines.append(f"consecutive_fails: {self.consecutive_fails}")
+        if not self.is_valid:
+            fm_lines.append(f"is_valid: false")
         if self.sources:
             fm_lines.append(f"sources: [{', '.join(_yaml_str(s) for s in self.sources)}]")
         if self.related:
@@ -351,6 +384,13 @@ class WikiStore:
         _constraints = fm.get("constraints") or {}
         if not isinstance(_constraints, dict):
             _constraints = {}
+        # is_valid: legacy pages have no field → True; explicit "false"
+        # / 0 / "no" / "False" all coerce to False.
+        _iv_raw = fm.get("is_valid", True)
+        if isinstance(_iv_raw, bool):
+            _is_valid = _iv_raw
+        else:
+            _is_valid = str(_iv_raw).strip().lower() not in ("false", "0", "no")
         return WikiPage(
             scope=str(fm.get("scope", scope)),
             kind=str(fm.get("kind", kind)),
@@ -369,6 +409,10 @@ class WikiStore:
             strategy=list(fm.get("strategy") or []),
             constraints=_constraints,
             validation=list(fm.get("validation") or []),
+            applied_count=int(fm.get("applied_count") or 0),
+            last_applied_at=float(fm.get("last_applied_at") or 0.0),
+            consecutive_fails=int(fm.get("consecutive_fails") or 0),
+            is_valid=_is_valid,
         )
 
     # ── write ─────────────────────────────────────────────────────
@@ -443,6 +487,12 @@ class WikiStore:
         terms = [t for t in q.split() if t]
         for sc in scopes_to_search:
             for p in self.list_pages(sc, kind=kind):
+                # Phase-1 evolution: lazy-skip pages that the outcome
+                # tracker has marked invalid (≥3 consecutive fails or
+                # admin-disabled). Keeps repeatedly-bad lessons from
+                # leaking back into agent prompts.
+                if not p.is_valid:
+                    continue
                 score = 0.0
                 title_l = (p.title or "").lower()
                 body_l = (p.body or "").lower()
@@ -455,9 +505,58 @@ class WikiStore:
                     if t in body_l:
                         score += 1.0
                 if score > 0:
-                    scored.append((score, p))
+                    # Tie-break by success_rate so pages that have
+                    # repeatedly worked appear higher than equally-
+                    # matching pages with no track record.
+                    total_uses = p.success_count + p.fail_count
+                    success_rate = (p.success_count / total_uses
+                                    if total_uses > 0 else 0.5)
+                    scored.append((score + success_rate * 0.5, p))
         scored.sort(key=lambda x: (-x[0], x[1].title))
         return [p for _, p in scored[:limit]]
+
+    # ── Phase-1 evolution: outcome write-back ─────────────────────
+    def update_outcome(self, scope: str, kind: str, slug: str,
+                       *, success: bool) -> Optional[WikiPage]:
+        """Record that this page was applied and the downstream task
+        succeeded (or failed). Called from finalize_step / fail_step.
+
+        Cheap and idempotent within a single application: the caller
+        is expected to dedupe by (entry_id, turn_id) before invoking
+        this. Zero LLM cost — pure file write.
+
+        Returns the updated WikiPage on success, None if the page
+        doesn't exist or write failed.
+        """
+        with self._lock:
+            page = self.read_page(scope, kind, slug)
+            if page is None:
+                logger.debug("update_outcome: %s/%s/%s not found",
+                             scope, kind, slug)
+                return None
+            if success:
+                page.success_count += 1
+                page.consecutive_fails = 0
+            else:
+                page.fail_count += 1
+                page.consecutive_fails += 1
+                # Lazy decay — 3 consecutive fails marks the page so
+                # it stops being returned by ``search()``. Admin can
+                # flip is_valid back to True via the wiki UI after
+                # editing the page content.
+                if page.consecutive_fails >= 3 and page.is_valid:
+                    page.is_valid = False
+                    logger.info(
+                        "wiki page %s/%s/%s marked invalid "
+                        "(3 consecutive fails)",
+                        scope, kind, slug,
+                    )
+            page.applied_count += 1
+            page.last_applied_at = time.time()
+            # Write-through; reuse the regular write path so log.md /
+            # index.md stay coherent. ``log_action="outcome"`` keeps
+            # these writes distinguishable from genuine ingest events.
+            return self.write_page(page, log_action="outcome")
 
     # ── index / log ───────────────────────────────────────────────
     def rebuild_index(self, scope: str) -> None:

@@ -65,7 +65,7 @@ def _tool_finalize_step(
     milestone_id: str = "",
     step_summary: str = "",
     project_id: str = "",
-    **_: Any,
+    **ctx: Any,
 ) -> str:
     """Atomic step closure.
 
@@ -162,6 +162,49 @@ def _tool_finalize_step(
         else:
             errors.append(f"milestone_update {milestone_id}: {_ms_result[:200]}")
 
+    # ── Self-evolution Phase 1 (2026-05-08): wiki outcome write-back ──
+    # If this step closure succeeded AND the calling agent had wiki
+    # hits in its lookup_trace, credit each hit with success_count++.
+    # Cheap (file write per hit, ≤50 max) and zero LLM cost — purely
+    # the data side of "experiences accumulate authority by repeat
+    # successful application". Skipped on outright failure (no
+    # submitted deliverables AND no step closed AND errors present).
+    step_succeeded = bool(submitted or step_closed or milestone_closed) \
+        and not errors
+    wiki_credited = 0
+    if step_succeeded:
+        try:
+            agent_id = ctx.get("_caller_agent_id", "") or ""
+            if agent_id:
+                from ..hub import get_hub
+                _hub_ref = get_hub()
+                _agent_ref = _hub_ref.get_agent(agent_id) if _hub_ref else None
+                if _agent_ref is not None and hasattr(
+                    _agent_ref, "consume_lookup_trace"
+                ):
+                    _trace = _agent_ref.consume_lookup_trace()
+                    if _trace:
+                        from ..knowledge.wiki_store import get_wiki_store
+                        _ws = get_wiki_store()
+                        for _rec in _trace:
+                            try:
+                                _result = _ws.update_outcome(
+                                    scope=_rec.get("scope", ""),
+                                    kind=_rec.get("kind", ""),
+                                    slug=_rec.get("slug", ""),
+                                    success=True,
+                                )
+                                if _result is not None:
+                                    wiki_credited += 1
+                            except Exception as _ue:
+                                logger.debug(
+                                    "wiki update_outcome skipped for "
+                                    "%s: %s", _rec, _ue,
+                                )
+        except Exception as _wb_err:
+            # Never let an outcome-tracking error break finalize_step.
+            logger.debug("wiki outcome writeback skipped: %s", _wb_err)
+
     # Format the human-readable result
     lines: list[str] = []
     if submitted:
@@ -173,6 +216,11 @@ def _tool_finalize_step(
         lines.append(f"✅ Step {step_id} closed")
     if milestone_closed:
         lines.append(f"✅ Milestone {milestone_id} marked done")
+    if wiki_credited:
+        lines.append(
+            f"📚 Credited {wiki_credited} wiki experience(s) "
+            f"(success_count++)"
+        )
     if errors:
         lines.append("⚠️ Issues encountered:")
         for err in errors:
