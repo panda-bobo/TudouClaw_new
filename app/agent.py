@@ -4864,14 +4864,19 @@ class Agent:
             )
             _rule_eng = _get_rule_engine()
             if _rule_eng is not None and _rule_eng.store is not None:
-                _proj_id_re = getattr(self, "project_id", "") or ""
-                _meeting_id_re = getattr(self, "source_meeting_id", "") or ""
-                if _proj_id_re:
+                # 2026-05-08: route through get_context_mode() so a
+                # closed-but-not-cleared project_id stops fetching
+                # rules under scope:project (where "no glob in project
+                # chat" lives). Without this, agents bound to a
+                # closed project keep getting glob_files denied even
+                # though they're effectively in solo.
+                _ctx_mode_re = self.get_context_mode()
+                if _ctx_mode_re == "project":
                     _rule_scope = {"kind": "project",
-                                   "project_id": _proj_id_re}
-                elif _meeting_id_re:
+                                   "project_id": getattr(self, "project_id", "") or ""}
+                elif _ctx_mode_re == "meeting":
                     _rule_scope = {"kind": "meeting",
-                                   "meeting_id": _meeting_id_re}
+                                   "meeting_id": getattr(self, "source_meeting_id", "") or ""}
                 else:
                     _rule_scope = {"kind": "solo", "agent_id": self.id}
                 _action_triggers = (
@@ -4922,13 +4927,23 @@ class Agent:
         # (branch + log + diff_stat) and worth a dedicated section.
         try:
             from .core.prompt_schemas import EnvSchema, render_block
+            # 2026-05-08: solo agents skip the shared-workspace probe
+            # — get_active_shared_workspace returns the (now stale)
+            # project workspace path even after the project closed,
+            # which would re-leak project context into the env block.
+            _is_solo_env = (self.get_context_mode() == "solo")
             _ws_root_path = ""
-            try:
-                if hasattr(self, "get_active_shared_workspace"):
-                    _ws_root_path = self.get_active_shared_workspace() or ""
-            except Exception:
-                _ws_root_path = ""
-            _proj_id = getattr(self, "project_id", "") or ""
+            if not _is_solo_env:
+                try:
+                    if hasattr(self, "get_active_shared_workspace"):
+                        _ws_root_path = self.get_active_shared_workspace() or ""
+                except Exception:
+                    _ws_root_path = ""
+            # closed projects auto-degrade to solo, so we don't fetch
+            # project name / inject project context for an effectively-
+            # solo agent.
+            _proj_id = (getattr(self, "project_id", "") or "") \
+                if not _is_solo_env else ""
             _proj_name = ""
             if _proj_id:
                 try:
@@ -5062,9 +5077,14 @@ class Agent:
                 # will be added when WF runner sets a task context.
                 # Day 3 PM: prefer current_scenario if set, fall back
                 # to legacy self.project_id for back-compat.
+                # 2026-05-08: route fallback through get_context_mode()
+                # so memory_recall doesn't scope by a closed-project's
+                # id (would surface stale memories from dead context).
                 _sc = getattr(self, "current_scenario", None)
-                _cur_pid = (_sc.project_id if _sc else "") \
-                    or (getattr(self, "project_id", "") or "")
+                _cur_pid = (_sc.project_id if _sc else "") or (
+                    (getattr(self, "project_id", "") or "")
+                    if self.get_context_mode() == "project" else ""
+                )
                 _cur_tid = (_sc.task_id if _sc else "")
                 memory_context = mm.retrieve_for_prompt(
                     self.id, current_query, config=mem_config,
