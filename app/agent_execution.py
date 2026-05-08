@@ -2564,6 +2564,42 @@ class AgentExecutionMixin:
             step = self.update_plan_step(
                 arguments.get("step_id", ""), "failed",
                 arguments.get("result_summary", ""))
+            # ── Self-evolution Phase 2 (2026-05-08) ──
+            # Failures are scarce and informative — exactly the signal
+            # worth distilling into a wiki entry. We don't auto-write
+            # one (would burn tokens + add noise); instead we queue an
+            # ephemeral reminder so the SAME agent's NEXT turn (which
+            # is going to happen anyway because the task failed) emits
+            # one wiki_ingest with a 3-line lesson. Zero new LLM calls.
+            #
+            # Only fires for "non-trivial" failures — `error_summary`
+            # must be ≥20 chars to skip noise like "fail_step" called
+            # with empty summary. Successful steps deliberately don't
+            # trigger this; "every successful task → wiki entry" was
+            # the rejected design ("浪费 token").
+            try:
+                _err = (arguments.get("result_summary", "") or "").strip()
+                if step is not None and len(_err) >= 20 \
+                        and hasattr(self, "queue_reminder"):
+                    self.queue_reminder(
+                        "刚刚 fail_step 了一个步骤,失败原因:\n"
+                        f"  {_err[:300]}\n"
+                        "如果这个失败模式值得未来 agent 避开,在你的下一段"
+                        "回复里附带一次 wiki_ingest:\n"
+                        "    wiki_ingest(\n"
+                        "      kind='experience',\n"
+                        "      title='<具体失败场景>',\n"
+                        "      body='## 场景\\n...\\n## 触发原因\\n...\\n"
+                        "## 下次怎么避开\\n...',\n"
+                        "      tags=['failure','lesson'],\n"
+                        "      scope='global'\n"
+                        "    )\n"
+                        "如果这只是一次琐碎失败 (输错参数 / 调试 / 临时绕过),"
+                        "不要 wiki_ingest — 跳过即可。",
+                    )
+            except Exception:
+                # Never block fail_step on a reminder-queue hiccup.
+                pass
             return json.dumps({"ok": step is not None,
                                "step": step.to_dict() if step else None},
                               ensure_ascii=False)
