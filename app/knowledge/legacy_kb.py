@@ -1,6 +1,27 @@
 """
 Shared Knowledge Base — global reference entries accessible by all agents.
 
+⚠️ DEPRECATED (2026-05-08, Step E of wiki / SK merge plan)
+============================================================
+This module is the legacy single-JSON store. New content should be
+written to the wiki layer (``app/knowledge/wiki_store.py``) which
+has richer structure (scope / kind / domains / effectiveness
+counters), an admin Portal UI (Wiki / 经验库 tab), and shares the
+same RAG indexing path. The migration script
+``scripts/migrate_shared_knowledge_to_wiki.py`` already moved
+existing entries to ``wiki/global/reference/<slug>.md``.
+
+This module remains in tree because:
+  1. The Portal Shared Knowledge tab still renders existing entries
+     (with a "已迁出 (legacy)" banner) so admins can verify the
+     migration before the legacy store is fully retired.
+  2. ``knowledge_lookup`` falls through to legacy_kb for back-compat
+     when wiki search returns no hits.
+
+After 2026-08 (or once admin confirms wiki side is feature-complete
+for their workflow), this file can be removed and shared_knowledge
+.json archived.
+
 Each entry has:
   - id:      unique identifier (auto-generated)
   - title:   short name, e.g. "UI精美网站TOP10"

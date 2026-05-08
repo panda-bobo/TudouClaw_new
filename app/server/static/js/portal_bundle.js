@@ -25576,14 +25576,22 @@ function _formatNum(n) {
 }
 
 // ---- Knowledge & Memory Hub (redesigned with RAG integration) ----
-var _kmTab = 'shared';
+// Default tab: Wiki (Step E demoted Shared Knowledge to read-only legacy
+// — new entries go to Wiki). Existing users land here on first open.
+var _kmTab = 'wiki';
 
 function renderKnowledgeMemoryHub() {
   try { if (localStorage.getItem('tudou_theme') === 'tech') return renderKnowledgeMemoryHubTech(); } catch (e) {}
   var c = document.getElementById('content');
+  // 2026-05-08 (Step E): "Shared Knowledge" demoted to "(legacy)" —
+  // its content was migrated into the Wiki layer (see Step C). Keeping
+  // the tab around in read-only-ish form so admins can verify the
+  // migration before deleting; new entries should go to the Wiki tab
+  // (which has the same import flow + structured fields + outcome
+  // tracking + RAG indexing). legacy_kb.py also marked deprecated.
   var tabs = [
-    { id: 'shared',  label: window.t('tab.km.shared',  '共享知识库'),     icon: 'public' },
     { id: 'wiki',    label: window.t('tab.km.wiki',    'Wiki / 经验库'),  icon: 'menu_book' },
+    { id: 'shared',  label: window.t('tab.km.shared',  '共享知识库 (legacy)'), icon: 'public' },
     { id: 'private', label: window.t('tab.km.private', '专业领域知识库'), icon: 'school' },
     { id: 'rag',     label: window.t('tab.km.rag',     'RAG 提供方'),     icon: 'cloud' },
     { id: 'memory',  label: window.t('tab.km.memory',  'Agent 私有记忆'), icon: 'psychology' },
@@ -25614,6 +25622,23 @@ async function _renderKmShared() {
     sc = document.getElementById('tech-hub-km-body') || document.getElementById('content');
   }
   if (!sc) return;
+  // Step E (2026-05-08): legacy banner. The migration from Shared
+  // Knowledge → Wiki happened in 361f04b; new content should land on
+  // the Wiki tab. We keep this view live so admins can verify the
+  // migration / spot anything they want to clean up before fully
+  // dropping the legacy_kb store.
+  var _legacyBanner = ''
+    + '<div style="padding:12px 14px;margin-bottom:14px;background:rgba(255,180,0,0.08);'
+    +              'border:1px solid rgba(255,180,0,0.25);border-radius:8px;'
+    +              'display:flex;align-items:flex-start;gap:10px;font-size:12px;color:var(--text2)">'
+    +   '<span class="material-symbols-outlined" style="font-size:18px;color:#e6a700;flex-shrink:0">history</span>'
+    +   '<div style="flex:1">'
+    +     '<div style="font-weight:700;color:var(--text);margin-bottom:2px">这个 tab 已迁出 (legacy)</div>'
+    +     '内容已经迁到 <b>Wiki / 经验库</b> tab,新条目请去那边添加。本视图保留供你核对迁移结果,后续会移除。'
+    +   '</div>'
+    +   '<button class="btn btn-sm" onclick="_kmTab=\'wiki\';renderKnowledgeMemoryHub()" '
+    +     'style="flex-shrink:0">去 Wiki tab →</button>'
+    + '</div>';
   sc.innerHTML = '<div style="color:var(--text3);padding:20px;text-align:center">加载中...</div>';
   try {
     var data = await api('GET', '/api/portal/knowledge');
@@ -25719,6 +25744,7 @@ async function _renderKmShared() {
           '<button class="btn btn-primary btn-sm" onclick="_kmShowAddEntry()"><span class="material-symbols-outlined" style="font-size:14px">add</span> 新增条目</button>' +
         '</div>';
     sc.innerHTML = ''
+      + _legacyBanner
       + '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;gap:12px;flex-wrap:wrap">'
         + sharedHeader
         + sharedActions
