@@ -4846,6 +4846,21 @@ class Agent:
             except Exception:
                 pass
 
+        # 0.8 Execution discipline — fixed rules that cap wandering /
+        # read-loops / no-task-exploration. Cache-friendly because the
+        # text is constant per process. Lives close to <env> so the
+        # rules sit at a stable prefix position.
+        try:
+            from .core.prompt_schemas import ExecutionDisciplineSchema, render_block
+            _disc_md = render_block(ExecutionDisciplineSchema(enabled=True))
+            if _disc_md:
+                _try_add(_disc_md, "execution_discipline")
+        except Exception as _de:
+            try:
+                logger.debug("execution_discipline injection skipped: %s", _de)
+            except Exception:
+                pass
+
         # 1. Shared Knowledge Wiki (lightweight title list) — KnowledgeWikiSchema
         try:
             from . import knowledge as _kb

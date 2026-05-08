@@ -1196,6 +1196,69 @@ class EnvSchema(LLMVisibleSchema):
 
 
 @dataclass
+class ExecutionDisciplineSchema(LLMVisibleSchema):
+    """Fixed rules that cap exploration / wandering. Always-on; the
+    rules are constant text so the LLM gets the same prefix every
+    turn (cache-friendly).
+
+    Why this is its own schema instead of a portal-managed prompt
+    card: rules here are HARD INVARIANTS the framework needs to
+    survive (no read-loops, no mid-step exploration, no work without
+    actionable task input). User can still add discretionary rules
+    via the System Prompts UI; this block is the floor.
+    """
+
+    enabled: bool = field(default=True, metadata={"llm": False})
+
+    def is_empty(self) -> bool:
+        return not self.enabled
+
+    def to_llm_markdown(self) -> str:
+        if not self.enabled:
+            return ""
+        return (
+            "<execution_discipline>\n"
+            "1. **Don't re-read files you've already read this turn.** "
+            "If write_file/edit_file succeeded (no error in tool_result), "
+            "trust it — don't read_file to verify. If it failed, the bug is "
+            "your tool args, not the file; fix args, don't re-read.\n"
+            "2. **Each tool call's `_reason` must be substantively new.** "
+            "Rewording the same intent (\"check X\" → \"verify X config\") "
+            "is a red flag — stop. If you can't articulate a NEW unknown "
+            "this call resolves, don't make the call.\n"
+            "3. **Stop exploring once you have enough.** A turn with 4+ "
+            "read_file calls and no write_file is the failure mode. Read "
+            "the minimum, then either write code or finalize the step. "
+            "Exploration without production is wasted budget.\n"
+            "4. **No actionable task ⇒ no exploration.** If the user / "
+            "delegating agent gave you a vague trigger (e.g. \"check inbox\", "
+            "\"继续\", \"工作\") and your inbox is empty / has no concrete "
+            "assignment, DO NOT proactively read project files trying to "
+            "find work. Reply with one sentence (\"等待具体任务指令\") and "
+            "stop. The orchestrator will wake you when there's real work.\n"
+            "5. **Stuck → summarize + ask, don't loop.** After 2-3 reads "
+            "with no clear path, emit a one-line \"已知 X / 缺 Y\" summary "
+            "and call plan_update(action='blocked'), or @-mention the "
+            "delegating agent. Don't keep re-exploring the same paths.\n"
+            "6. **Bash mode discipline.** dev servers / `npx http-server` / "
+            "`npm run dev` MUST use bash(run_in_background=true). `bash cd "
+            "<dir>` as a standalone call is anti-pattern (cd doesn't persist "
+            "between bash calls — chain with `&&` instead).\n"
+            "7. **Tool catalog is closed.** Tools shown in `tools[]` are the "
+            "complete capability set. Don't bash `which X` / `pip show X` "
+            "trying to discover other tools. If you need something not in "
+            "the list, propose_skill or tell admin.\n"
+            "8. **Write completes a step? Use finalize_step.** After "
+            "write_file × N, call finalize_step(files=[...], step_id, "
+            "milestone_id) ONCE — registers all deliverables, closes the "
+            "step, transitions the milestone. Don't manually loop "
+            "submit_deliverable + plan_update + update_milestone_status; "
+            "that's 6-9 wasted tool calls.\n"
+            "</execution_discipline>"
+        )
+
+
+@dataclass
 class AdminInstructionSchema(LLMVisibleSchema):
     """ADMIN messages directed at the agent (project chat). Already
     filtered upstream by @-mention + timestamp (see project.py admin

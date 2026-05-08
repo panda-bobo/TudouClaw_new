@@ -2166,6 +2166,26 @@ class ProjectChatEngine:
                 "dispatch_to_agent: agent %s not found", agent_id[:8],
             )
             return False
+        # ── Task-quality gate (2026-05-08) ────────────────────────────
+        # Reject machine-originated dispatches whose content is too
+        # short / vague to be actionable. Production data: child agents
+        # spawned by @-mention propagation or workflow auto-advance
+        # often arrived with content ≤30 chars like "继续", "工作",
+        # "check inbox" — agent then burned 14 read_file calls trying
+        # to "understand the project" because it had no concrete task.
+        # User-originated dispatches are NOT gated (operator has the
+        # right to send "继续" as a wake signal — that's intentional).
+        _content = (content or "").strip()
+        _system_origin = source in ("agent", "workflow", "milestone", "system",
+                                       "system:watchdog", "system:auto_resume_on_chat")
+        if _system_origin and len(_content) < 20:
+            logger.warning(
+                "dispatch_to_agent: REJECTED %s→%s — task too vague "
+                "(source=%s, content=%r, %d chars). Provide a concrete "
+                "task description with a verb and object.",
+                source, agent_id[:8], source, _content[:60], len(_content),
+            )
+            return False
         # 1) Surface the trigger in chat history so the UI shows it.
         if post_to_chat:
             try:
