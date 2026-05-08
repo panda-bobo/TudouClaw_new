@@ -1157,13 +1157,68 @@ def _sanitize_messages_for_openai(messages: list[dict],
         m.get("role") in ("user", "assistant") for m in final_pass
     )
     if not has_user_or_asst:
-        logger.error(
-            "Sanitizer: payload has no user/assistant message after "
-            "sanitization (orig=%d, after=%d). Injecting a placeholder "
-            "user message to prevent provider 400. This indicates an "
-            "earlier pipeline bug — investigate why every conversation "
-            "turn was dropped.", len(messages), len(final_pass),
-        )
+        # Diagnostic dump — write the ORIGINAL pre-sanitize messages
+        # to a one-shot file so we can replay through the pipeline
+        # offline and find which pass ate them. Best-effort; never
+        # raises. Files self-rotate (keep newest 20).
+        try:
+            import json as _json_dump, os as _os_dump, time as _time_dump
+            _dump_dir = _os_dump.path.expanduser(
+                "~/.tudou_claw/_sanitizer_dumps"
+            )
+            _os_dump.makedirs(_dump_dir, exist_ok=True)
+            _ts = int(_time_dump.time() * 1000)
+            _dump_path = _os_dump.path.join(
+                _dump_dir, f"rescue-{_ts}.json"
+            )
+            with open(_dump_path, "w", encoding="utf-8") as _df:
+                _json_dump.dump({
+                    "ts": _ts,
+                    "target_url": target_url,
+                    "target_model": target_model,
+                    "orig_messages": messages,
+                    "after_sanitize": final_pass,
+                    "orig_count": len(messages),
+                    "after_count": len(final_pass),
+                    "stage_diagnostics": {
+                        "merged_after_pass1": len(merged) if 'merged' in dir() else None,
+                        "deorphan_after_pass1_5": len(deorphan) if 'deorphan' in dir() else None,
+                        "sanitized_after_pass2": len(sanitized) if 'sanitized' in dir() else None,
+                        "final_after_pass3": len(final) if 'final' in dir() else None,
+                        "cleaned_after_pass3b": len(cleaned) if 'cleaned' in dir() else None,
+                        "deduped_after_pass5": len(deduped) if 'deduped' in dir() else None,
+                        "after_fold": len(deduped) if 'deduped' in dir() else None,
+                    },
+                }, _df, ensure_ascii=False, indent=2, default=str)
+            # Rotate: keep newest 20 dumps
+            try:
+                _entries = sorted(
+                    [e for e in _os_dump.listdir(_dump_dir)
+                     if e.startswith("rescue-") and e.endswith(".json")],
+                    reverse=True,
+                )
+                for _old in _entries[20:]:
+                    try:
+                        _os_dump.remove(_os_dump.path.join(_dump_dir, _old))
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+            logger.error(
+                "Sanitizer: payload has no user/assistant message after "
+                "sanitization (orig=%d, after=%d). Dump written to %s. "
+                "Injecting a placeholder user message to prevent provider "
+                "400. This indicates an earlier pipeline bug — "
+                "investigate why every conversation turn was dropped.",
+                len(messages), len(final_pass), _dump_path,
+            )
+        except Exception as _de:
+            logger.error(
+                "Sanitizer: payload has no user/assistant message after "
+                "sanitization (orig=%d, after=%d, dump_failed=%s). "
+                "Injecting a placeholder user message to prevent provider "
+                "400.", len(messages), len(final_pass), _de,
+            )
         # Insert AFTER any leading system/system_summary blocks so the
         # message ordering looks like the LLM expects: system… → user.
         sys_end = 0

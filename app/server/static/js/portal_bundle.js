@@ -35023,6 +35023,15 @@ async function renderSystemSettings(container) {
                    '</div>';
           })()
       + '</div>'
+
+      // 2026-05-08: Tech-theme path also needs the Sandbox readonly card
+      // (the legacy `c.innerHTML` branch below has it; without this, only
+      // legacy-theme users saw it). Re-uses the same _renderSandboxReadonlyCard
+      // helper — admins see identical content regardless of theme.
+      + '<div style="margin-top:var(--s-xl)">'
+      +   _renderSandboxReadonlyCard(settings, defaults)
+      + '</div>'
+
       + '<div style="margin-top:var(--s-xl)">'
       +   '<button class="tc-mono-label" onclick="_systemSettingsResetDefaults()" '
       +     (anyDiverged
