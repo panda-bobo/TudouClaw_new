@@ -67,6 +67,113 @@ _DETAIL_PATTERNS = [
 ]
 
 
+# ─── Domain inference (Phase 3 / Domain Step 4) ──────────────────────
+# Lightweight keyword-based mapping from query text → domain tags.
+# Defensive vocabulary — keeps the LIST of domains identical to the
+# wiki layer so search() boosts cleanly. Multi-domain queries are
+# allowed (e.g. "PCI compliance audit" → security + payments-compliance).
+#
+# Cost: zero LLM calls (pure regex / membership check). Misses (no
+# keyword match) → empty list → search behaves exactly as before.
+_DOMAIN_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "security": (
+        "安全", "漏洞", "vuln", "exploit", "auth", "认证", "授权",
+        "csrf", "xss", "sql injection", "渗透", "pen test",
+        "secret", "credential", "api key", "ssh key",
+    ),
+    "payments-compliance": (
+        "pci", "支付", "信用卡", "credit card", "payment", "compliance",
+        "合规", "audit", "审计", "saq",
+    ),
+    "regulatory": (
+        "gdpr", "soc2", "soc 2", "hipaa", "iso27001", "regulator",
+        "regulation", "法规", "监管",
+    ),
+    "project-management": (
+        "milestone", "里程碑", "项目管理", "pm", "scrum", "kanban",
+        "sprint", "敏捷", "复盘", "retrospective", "ooda", "wbs",
+        "gantt", "甘特",
+    ),
+    "frontend": (
+        "frontend", "react", "vue", "css", "html", "tailwind",
+        "responsive", "ui", "ux", "前端",
+    ),
+    "backend": (
+        "backend", "api", "rest", "graphql", "database", "数据库",
+        "sql", "orm", "redis", "cache", "后端",
+    ),
+    "devops": (
+        "deploy", "deployment", "ci", "cd", "docker", "kubernetes",
+        "k8s", "terraform", "ansible", "monitoring", "prometheus",
+        "grafana", "运维", "部署",
+    ),
+    "testing": (
+        "test", "testing", "unit test", "integration test", "e2e",
+        "fixture", "mock", "pytest", "jest", "测试",
+    ),
+    "data-analysis": (
+        "etl", "pipeline", "spark", "pandas", "dataframe", "sql query",
+        "数据分析", "可视化", "visualization", "dashboard",
+    ),
+    "writing-content": (
+        "blog", "article", "文档", "documentation", "seo", "marketing copy",
+        "营销文案", "技术写作",
+    ),
+    "marketing": (
+        "marketing", "promotion", "营销", "推广", "gumroad", "marketplace",
+    ),
+    "design": (
+        "design", "figma", "sketch", "mockup", "设计", "色彩",
+    ),
+    "customer-support": (
+        "客服", "support ticket", "退款", "refund", "complaint", "投诉",
+    ),
+    "legal-compliance": (
+        "contract", "合同", "intellectual property", "ip", "知识产权",
+        "privacy policy", "隐私协议", "tos", "条款",
+    ),
+}
+
+
+def _infer_domains_from_query(query: str) -> list[str]:
+    """Cheap keyword-based domain classifier. Returns 0-N domains.
+
+    Used by knowledge_lookup to boost wiki hits whose ``domains``
+    intersect what the user is asking about. Falls back to empty
+    list (= no boost) for queries that don't match any domain
+    vocabulary.
+
+    Short keywords (≤3 ASCII chars like "ci", "cd", "ip") use
+    word-boundary regex to avoid bogus matches inside larger words
+    ("PCI" containing "ci" → falsely tagged devops). Chinese /
+    longer English keywords use plain substring match (Chinese
+    doesn't have word boundaries; longer English words rarely
+    embed inside other words).
+    """
+    if not query or not isinstance(query, str):
+        return []
+    import re as _re_dom
+    q_lower = query.lower()
+    matched: list[str] = []
+    for domain, kws in _DOMAIN_KEYWORDS.items():
+        hit = False
+        for kw in kws:
+            if not kw:
+                continue
+            if len(kw) <= 3 and kw.isascii():
+                # Word boundary — avoid "ci" matching "PCI"
+                if _re_dom.search(rf"\b{_re_dom.escape(kw)}\b", q_lower):
+                    hit = True
+                    break
+            else:
+                if kw in q_lower:
+                    hit = True
+                    break
+        if hit:
+            matched.append(domain)
+    return matched
+
+
 def _classify_rag_intent(query: str) -> str:
     """Return one of: 'stat' (overview/aggregate), 'detail' (specific
     content asked), 'normal' (default — don't reroute).
@@ -1009,7 +1116,14 @@ def _tool_knowledge_lookup(query: str = "", entry_id: str = "",
     if mode == "search" and _q_str and not entry_id:
         try:
             from ..knowledge.wiki_store import get_wiki_store
-            _hits = get_wiki_store().search(_q_str, limit=5)
+            # Phase 3 / Domain Step 4: infer domains from the query
+            # and pass them to search() for relevance boost. Keyword-
+            # based, zero-LLM, returns [] for unclassifiable queries
+            # (in which case search behaves identically to before).
+            _inferred_domains = _infer_domains_from_query(_q_str)
+            _hits = get_wiki_store().search(
+                _q_str, limit=5, match_domains=_inferred_domains,
+            )
             if _hits:
                 wiki_lines.append("[wiki layer hits]")
                 for p in _hits:
@@ -1409,11 +1523,19 @@ def _tool_wiki_ingest(kind: str = "",
                       slug: str = "",
                       sources: Any = None,
                       related: Any = None,
+                      domains: Any = None,
                       **ctx: Any) -> str:
     """Write or update a markdown page in the wiki layer.
 
-    kind  ∈ experience | methodology | template | pattern | reference
-    scope ∈ "global" | "" (auto = role:<caller_role>)
+    kind    ∈ experience | methodology | template | pattern | reference
+    scope   ∈ "global" | "" (auto = role:<caller_role>)
+    domains ∈ controlled vocabulary (security / payments-compliance /
+              project-management / frontend / backend / devops /
+              testing / data-analysis / writing-content / customer-
+              support / legal-compliance / general-ops, etc.). Used by
+              knowledge_lookup to boost domain-relevant hits AND by
+              expertise_scores accumulation. List of strings.
+              See app/knowledge/wiki_store.py for the rationale.
     """
     try:
         from ..knowledge.wiki_store import (
@@ -1493,6 +1615,12 @@ def _tool_wiki_ingest(kind: str = "",
     related_list = related if isinstance(related, list) else (
         [related] if related else []
     )
+    if isinstance(domains, str):
+        domains_list = [d.strip() for d in domains.split(",") if d.strip()]
+    elif isinstance(domains, list):
+        domains_list = [str(d).strip() for d in domains if str(d).strip()]
+    else:
+        domains_list = []
 
     final_slug = slug.strip() if slug else slugify(title)
 
@@ -1505,6 +1633,7 @@ def _tool_wiki_ingest(kind: str = "",
         tags=tags_list,
         sources=[str(s) for s in sources_list if s],
         related=[str(r) for r in related_list if r],
+        domains=domains_list,
     )
 
     store = get_wiki_store()

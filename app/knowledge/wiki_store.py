@@ -487,10 +487,16 @@ class WikiStore:
         return out
 
     def search(self, query: str, *, scope: str = "",
-               kind: str = "", limit: int = 5) -> list[WikiPage]:
-        """Simple substring + tag search.
+               kind: str = "", limit: int = 5,
+               match_domains: list[str] | None = None) -> list[WikiPage]:
+        """Simple substring + tag + domain search.
 
         Matches in title get a 3x weight, tag exact-match 2x, body 1x.
+        2026-05-08: ``match_domains`` (Domain Step 4) — caller can
+        pass the inferred-domain of the current task; pages whose
+        ``domains`` intersect get a +4.0 boost (heavier than a title
+        keyword match because domain match is a stronger signal of
+        relevance). Empty / None match_domains → behaves like before.
         Replace with embedding-based search if/when the wiki grows large.
         """
         q = (query or "").strip().lower()
@@ -509,6 +515,13 @@ class WikiStore:
                         scopes_to_search.append(f"role:{r}")
         scored: list[tuple[float, WikiPage]] = []
         terms = [t for t in q.split() if t]
+        # Domain-match preprocessing: lowercase set for fast lookup.
+        match_domain_set: set[str] = set()
+        if match_domains:
+            for _d in match_domains:
+                _ds = str(_d or "").strip().lower()
+                if _ds:
+                    match_domain_set.add(_ds)
         for sc in scopes_to_search:
             for p in self.list_pages(sc, kind=kind):
                 # Phase-1 evolution: lazy-skip pages that the outcome
@@ -528,6 +541,15 @@ class WikiStore:
                         score += 2.0
                     if t in body_l:
                         score += 1.0
+                # Domain match boost (Phase 3 / Domain Step 4)
+                if match_domain_set and p.domains:
+                    page_domains_lower = {
+                        str(d).strip().lower() for d in p.domains
+                    }
+                    overlap = match_domain_set & page_domains_lower
+                    if overlap:
+                        # +4.0 per matching domain, up to a cap
+                        score += min(4.0 * len(overlap), 8.0)
                 if score > 0:
                     # Tie-break by success_rate so pages that have
                     # repeatedly worked appear higher than equally-

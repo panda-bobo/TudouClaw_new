@@ -1463,6 +1463,21 @@ TOOL_DEFINITIONS: list[dict] = [
                         "items": {"type": "string"},
                         "description": "Optional: related page slugs (e.g. 'experience/saudi-cloud').",
                     },
+                    "domains": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional: domain tags from controlled vocabulary "
+                            "(security, payments-compliance, project-management, "
+                            "frontend, backend, devops, testing, data-analysis, "
+                            "writing-content, customer-support, legal-compliance, "
+                            "general-ops, etc.). Used by knowledge_lookup to "
+                            "boost domain-relevant hits and by expertise_scores "
+                            "accumulation. Pick 1-3 that best describe the "
+                            "subject matter of this page. Leave empty for "
+                            "general / unclassified content."
+                        ),
+                    },
                 },
                 "required": ["kind", "title", "body"],
             },
