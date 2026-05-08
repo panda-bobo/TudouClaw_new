@@ -322,7 +322,7 @@ async def create_wiki_page(
     )
     store.write_page(page, log_action="ingest")
     logger.info("wiki page created: %s/%s/%s by %s",
-                scope, kind, slug, user.username)
+                scope, kind, slug, user.user_id)
     return {"ok": True, "page": _page_to_full(page)}
 
 
@@ -367,7 +367,7 @@ async def edit_wiki_page(
 
     store.write_page(page, log_action="edit")
     logger.info("wiki page edited: %s/%s/%s by %s",
-                scope, kind, slug, user.username)
+                scope, kind, slug, user.user_id)
     return {"ok": True, "page": _page_to_full(page)}
 
 
@@ -398,7 +398,7 @@ async def delete_wiki_page(
     except Exception as e:
         logger.warning("rebuild_index after delete skipped: %s", e)
     logger.info("wiki page deleted: %s/%s/%s by %s",
-                scope, kind, slug, user.username)
+                scope, kind, slug, user.user_id)
     return {"ok": True}
 
 
@@ -469,7 +469,7 @@ async def import_wiki_page(
     store.write_page(page, log_action="import")
     logger.info(
         "wiki page imported: %s/%s/%s (%d chars, overwrote=%s) by %s",
-        scope, kind, slug, len(body_text), overwrote, user.username,
+        scope, kind, slug, len(body_text), overwrote, user.user_id,
     )
     return {
         "ok": True,
@@ -567,7 +567,7 @@ async def index_wiki_into_rag(
     logger.info(
         "wiki RAG re-index by %s: indexed=%d skipped_invalid=%d "
         "total=%d collection=%s",
-        user.username, count, skipped_invalid, len(pages), collection,
+        user.user_id, count, skipped_invalid, len(pages), collection,
     )
     return {
         "ok": True,
@@ -606,6 +606,6 @@ async def toggle_wiki_valid(
         page.consecutive_fails = 0
     store.write_page(page, log_action="toggle_valid")
     logger.info("wiki page %s/%s/%s is_valid=%s (set by %s)",
-                scope, kind, slug, page.is_valid, user.username)
+                scope, kind, slug, page.is_valid, user.user_id)
     return {"ok": True, "is_valid": page.is_valid,
             "consecutive_fails": page.consecutive_fails}
