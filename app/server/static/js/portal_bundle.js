@@ -26325,15 +26325,11 @@ function _kmWikiApplyFilters() {
 }
 
 async function _kmWikiToggleValid(scope, kind, slug) {
-  // 2026-05-08: bring up a confirmation when going valid → invalid.
-  // Without this, accidentally hitting the ⊘ icon visually "deletes"
-  // the entry (filter hides invalid pages by default), confusing
-  // users who thought they were toggling. Skip confirmation when
-  // RESTORING (no destructive side effect).
-  // We have to fetch current state to know which way the toggle goes
-  // — but we can read it from the chip color (the in-memory list).
-  // Cheap: just always ask. User clicks valid→invalid OR invalid→valid;
-  // both deserve a 1-click confirm given the visual side effect.
+  // 2026-05-08: confirm-only flow (no success toast). The list re-
+  // render is the feedback — the chip badge flips from READY/APPLIED
+  // to INVALID (or vice versa), or the row disappears if the default
+  // filter hides invalid pages. Two-popup design (confirm + toast)
+  // was redundant per user feedback "弹一个框，也弹一个 toast".
   var ok = confirm(
     '确认切换 ' + scope + '/' + kind + '/' + slug + ' 的有效状态？\n\n' +
     '• 标记失效：agent 检索时不再返回该 entry,页面在默认列表里也会隐藏\n' +
@@ -26341,20 +26337,21 @@ async function _kmWikiToggleValid(scope, kind, slug) {
   );
   if (!ok) return;
   try {
-    var r = await api('POST', '/api/portal/wiki/toggle-valid', { scope: scope, kind: kind, slug: slug });
-    if (window._toast) window._toast(r.is_valid ? '已恢复有效' : '已标记失效', 'success');
-    _renderKmWiki();
+    await api('POST', '/api/portal/wiki/toggle-valid', { scope: scope, kind: kind, slug: slug });
+    _renderKmWiki();   // re-render IS the feedback
   } catch (e) {
     alert('Toggle failed: ' + (e.message || e));
   }
 }
 
 async function _kmWikiDelete(scope, kind, slug) {
-  if (!confirm('永久删除 ' + scope + '/' + kind + '/' + slug + ' ？此操作不可恢复。')) return;
+  // 2026-05-08: confirm-only, no success toast. The card disappearing
+  // from the list IS the feedback. User flagged the confirm+toast
+  // double popup as redundant.
+  if (!confirm('永久删除 ' + scope + '/' + kind + '/' + slug + ' ？\n此操作不可恢复 — 文件会从磁盘移除。')) return;
   try {
     await api('POST', '/api/portal/wiki/delete', { scope: scope, kind: kind, slug: slug });
-    if (window._toast) window._toast('已删除', 'success');
-    _renderKmWiki();
+    _renderKmWiki();   // re-render IS the feedback
   } catch (e) {
     alert('Delete failed: ' + (e.message || e));
   }
