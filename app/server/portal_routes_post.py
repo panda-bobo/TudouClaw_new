@@ -3048,6 +3048,45 @@ def _do_post_inner(handler, path: str):
             else:
                 handler._json({"error": "Milestone not found"}, 404)
 
+    elif path.startswith("/api/portal/projects/") and "/milestones/" in path and path.endswith("/force-close"):
+        # 2026-05-08: admin manual close — bypass agent completion +
+        # confirm gate. Same logic as handlers/projects.py:
+        # _handle_milestone_force_close; this branch just keeps the
+        # legacy router in sync.
+        parts = path.split("/")
+        proj_id = parts[4]
+        milestone_id = parts[6]
+        proj = hub.get_project(proj_id)
+        if not proj:
+            handler._json({"error": "Project not found"}, 404)
+        else:
+            reason = body.get("reason", "") or ""
+            ms = proj.force_close_milestone(
+                milestone_id, reason=reason,
+                by=actor_name or "admin",
+            )
+            if ms:
+                proj.post_message(
+                    sender="system", sender_name="System",
+                    content=(
+                        f"🔒 里程碑「{ms.name}」已被 "
+                        f"{actor_name or 'admin'} 手动关闭。"
+                        + (f" 原因：{reason}" if reason else "")
+                    ),
+                    msg_type="system",
+                )
+                hub._save_projects()
+                auth.audit(
+                    "force_close_milestone",
+                    actor=actor_name, role=user_role,
+                    target=f"{proj_id}/{milestone_id}",
+                    detail=f"reason={reason!r}",
+                    ip=get_client_ip(handler),
+                )
+                handler._json({"ok": True, "milestone": ms.to_dict()})
+            else:
+                handler._json({"error": "Milestone not found"}, 404)
+
     # ── Project Goals ──
     elif path.startswith("/api/portal/projects/") and path.endswith("/goals"):
         proj_id = path.split("/")[4]

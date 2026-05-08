@@ -107,6 +107,9 @@ def try_handle(handler, path: str, hub, body: dict, auth,
     if "/milestones/" in path and path.endswith("/reject"):
         return _handle_milestone_reject(handler, path, hub, body, auth, actor_name, user_role)
 
+    if "/milestones/" in path and path.endswith("/force-close"):
+        return _handle_milestone_force_close(handler, path, hub, body, auth, actor_name, user_role)
+
     if "/milestones/" in path and path.endswith("/update"):
         return _handle_milestone_update(handler, path, hub, body, auth, actor_name, user_role)
 
@@ -717,6 +720,55 @@ def _handle_milestone_reject(handler, path, hub, body, auth, actor_name, user_ro
             handler._json({"error": "Milestone not found"}, 404)
     except Exception as exc:
         logger.exception("milestone_reject error: %s", exc)
+        handler._json({"error": str(exc)}, 500)
+    return True
+
+
+def _handle_milestone_force_close(handler, path, hub, body, auth, actor_name, user_role) -> bool:
+    """POST /api/portal/projects/{id}/milestones/{mid}/force-close
+
+    Admin manual override — force a milestone to ``confirmed`` status
+    regardless of current state, bypassing the agent completion +
+    rule-engine confirm gate. Use cases:
+      - The responsible agent stalled / is unavailable
+      - The milestone is no longer relevant but should stay in history
+      - Cleanup of stale milestones during project wind-down
+    """
+    try:
+        parts = path.split("/")
+        proj_id = parts[4]
+        milestone_id = parts[6]
+        proj = hub.get_project(proj_id)
+        if not proj:
+            handler._json({"error": "Project not found"}, 404)
+            return True
+        reason = body.get("reason", "") or ""
+        ms = proj.force_close_milestone(
+            milestone_id, reason=reason, by=actor_name or "admin",
+        )
+        if ms:
+            proj.post_message(
+                sender="system", sender_name="System",
+                content=(
+                    f"\U0001f512 里程碑「{ms.name}」已被 "
+                    f"{actor_name or 'admin'} 手动关闭。"
+                    + (f" 原因：{reason}" if reason else "")
+                ),
+                msg_type="system",
+            )
+            hub._save_projects()
+            auth.audit(
+                "force_close_milestone",
+                actor=actor_name, role=user_role,
+                target=f"{proj_id}/{milestone_id}",
+                detail=f"reason={reason!r}",
+                ip=get_client_ip(handler),
+            )
+            handler._json({"ok": True, "milestone": ms.to_dict()})
+        else:
+            handler._json({"error": "Milestone not found"}, 404)
+    except Exception as exc:
+        logger.exception("milestone_force_close error: %s", exc)
         handler._json({"error": str(exc)}, 500)
     return True
 

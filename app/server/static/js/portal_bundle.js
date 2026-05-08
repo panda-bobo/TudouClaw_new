@@ -18977,17 +18977,29 @@ function _renderProjectGoals(projId, goals) {
 function _renderProjectMilestonesTab(projId, milestones) {
   var rows = (milestones||[]).map(function(m){
     var statusIcon = m.status==='confirmed'?'✅':m.status==='completed'?'☑️':m.status==='rejected'?'❌':m.status==='in_progress'?'⏳':'○';
+    // 2026-05-08: action buttons:
+    //   - completed → [Confirm] [Reject] (existing flow)
+    //   - non-terminal (pending/in_progress/blocked) → [手动关闭] for
+    //     admin override; useful when responsible agent has stalled
+    //   - confirmed/rejected → no actions (terminal states)
     var actions = '';
     if (m.status === 'completed') {
       actions = '<div style="display:flex;gap:6px;margin-top:8px">' +
         '<button class="btn btn-primary btn-xs" onclick="confirmMilestone(\''+projId+'\',\''+m.id+'\')">Confirm</button>' +
         '<button class="btn btn-ghost btn-xs" style="color:var(--error)" onclick="rejectMilestone(\''+projId+'\',\''+m.id+'\')">Reject</button>' +
+        '<button class="btn btn-ghost btn-xs" style="color:var(--text3)" onclick="forceCloseMilestone(\''+projId+'\',\''+m.id+'\')" title="跳过 agent 流程,管理员直接关闭">🔒 手动关闭</button>' +
+      '</div>';
+    } else if (m.status !== 'confirmed' && m.status !== 'rejected') {
+      // pending / in_progress / blocked / etc — admin can force close
+      actions = '<div style="display:flex;gap:6px;margin-top:8px">' +
+        '<button class="btn btn-ghost btn-xs" style="color:var(--text3)" onclick="forceCloseMilestone(\''+projId+'\',\''+m.id+'\')" title="跳过 agent 流程,管理员直接关闭"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">lock</span> 手动关闭</button>' +
       '</div>';
     }
     return '<div style="background:var(--surface);border-radius:10px;padding:14px 16px;border:1px solid var(--overlay-6);margin-bottom:10px">' +
       '<div style="font-weight:700;font-size:14px">'+statusIcon+' '+esc(m.name||'')+'</div>' +
       '<div style="font-size:11px;color:var(--text3);margin-top:4px">Owner: '+esc(m.responsible_agent_id||'—')+' · Due: '+esc(m.due_date||'—')+' · Status: '+esc(m.status||'pending')+'</div>' +
       (m.rejected_reason?'<div style="color:var(--error);font-size:11px;margin-top:4px">Reject reason: '+esc(m.rejected_reason)+'</div>':'') +
+      (m.evidence ? '<div style="font-size:10px;color:var(--text3);margin-top:4px;font-family:Menlo,monospace;line-height:1.4">'+esc(m.evidence).slice(0,200)+'</div>' : '') +
       actions +
     '</div>';
   });
@@ -20349,6 +20361,27 @@ async function rejectMilestone(projId, msId) {
   var reason = await askInline('驳回此 milestone 的原因:', { defaultVal: '', multiline: true, placeholder: '说明理由…' }) || '';
   await api('POST', '/api/portal/projects/'+projId+'/milestones/'+msId+'/reject', {reason:reason});
   renderProjectDetail(projId);
+}
+
+// 2026-05-08: admin manual close — bypass agent completion + confirm
+// gate. Use when responsible agent stalled / unavailable / milestone
+// no longer relevant. Records [manual close by <admin>] in evidence.
+async function forceCloseMilestone(projId, msId) {
+  var reason = await askInline(
+    '手动关闭这个 milestone — 跳过 agent 完成/确认流程。\n\n' +
+    '附上原因 (可选, 会写进 evidence 字段):',
+    { defaultVal: '', multiline: true, placeholder: '如: agent 已停用 / 任务作废 / 改换方向…' }
+  );
+  if (reason === null) return;   // user cancelled
+  try {
+    await api('POST',
+      '/api/portal/projects/'+projId+'/milestones/'+msId+'/force-close',
+      { reason: reason || '' }
+    );
+    renderProjectDetail(projId);
+  } catch (e) {
+    alert('Force close failed: ' + (e.message || e));
+  }
 }
 
 // ============ Workflows ============

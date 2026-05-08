@@ -1070,6 +1070,43 @@ class Project:
                     return m
         return None
 
+    def force_close_milestone(
+        self, milestone_id: str, *,
+        reason: str = "", by: str = "admin",
+    ) -> ProjectMilestone | None:
+        """Admin manual close — bypass the agent completion / confirm
+        loop. Useful when the responsible agent has stalled / is
+        unavailable / the milestone is no longer needed but should be
+        marked done rather than deleted (preserves history).
+
+        2026-05-08: User-requested "项目里程碑 加一个手动关闭".
+        Distinct from confirm_milestone (which validates engine rules
+        + requires the milestone to have been marked completed by the
+        agent) — this is an unconditional admin override. Records the
+        admin actor + reason in confirmed_by / evidence so the audit
+        trail still shows it was a manual close, not an organic flow.
+        Final state: status=confirmed (closed) with evidence prefixed
+        ``[manual close by <admin>]``.
+        """
+        with self._lock:
+            for m in self.milestones:
+                if m.id == milestone_id:
+                    m.status = "confirmed"
+                    m.confirmed_by = f"manual-close:{by}"
+                    m.confirmed_at = time.time()
+                    # Preserve any existing evidence; prefix audit note.
+                    note = f"[manual close by {by}]"
+                    if reason:
+                        note += f" reason: {reason}"
+                    if m.evidence:
+                        m.evidence = note + "\n" + m.evidence
+                    else:
+                        m.evidence = note
+                    m.rejected_reason = ""
+                    self.updated_at = time.time()
+                    return m
+        return None
+
     def remove_milestone(self, milestone_id: str) -> bool:
         with self._lock:
             before = len(self.milestones)
