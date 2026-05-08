@@ -5218,6 +5218,64 @@ class Agent:
             except Exception as _we:
                 logger.debug("wiki index injection skipped: %s", _we)
 
+        # 7.6. Domain-expertise lazy injection (Phase 4 of self-evolution).
+        # When the user's current_query contains keywords that match a
+        # domain AND this agent has accumulated expertise_scores in that
+        # domain, fetch the top wiki entry for that domain and inject as
+        # a compact "[Your domain expertise: X]" block. ~150-300 tokens
+        # per fire; zero tokens when current_query has no domain match
+        # (most non-task chitchat). Builds on top of:
+        #   - Phase 1 success_count writeback (so top-N is success-rate
+        #     ordered)
+        #   - Phase 3 expertise_scores accumulation (so we know WHICH
+        #     domain to surface for THIS agent)
+        #   - Domain Step 4 wiki search match_domains boost
+        if total_chars < max_dynamic_chars and current_query:
+            try:
+                from .tools_split.knowledge import _infer_domains_from_query
+                from .knowledge import get_wiki_store
+                _q_domains = _infer_domains_from_query(current_query)
+                if _q_domains:
+                    # Sort domains by this agent's expertise score
+                    # (DESC) so the most-confident domain surfaces.
+                    _scores = self.expertise_scores or {}
+                    _q_domains_sorted = sorted(
+                        _q_domains,
+                        key=lambda d: -_scores.get(d.lower(), 0.0),
+                    )
+                    _store_de = get_wiki_store()
+                    _injected = []
+                    # Cap at 2 expert blocks per turn to bound tokens.
+                    for _d in _q_domains_sorted[:2]:
+                        _hits = _store_de.search(
+                            current_query, limit=1,
+                            match_domains=[_d],
+                        )
+                        if not _hits:
+                            continue
+                        _p = _hits[0]
+                        _score = _scores.get(_d.lower(), 0.0)
+                        _excerpt = (_p.body or "")[:280].replace("\n", " ")
+                        if len(_p.body or "") > 280:
+                            _excerpt += "…"
+                        _injected.append(
+                            f"[Your domain expertise: {_d} "
+                            f"(score={_score:.0f}, ✓{_p.success_count}/"
+                            f"✗{_p.fail_count})]\n"
+                            f"{_p.title}\n{_excerpt}"
+                        )
+                    if _injected:
+                        _try_add(
+                            "<domain_expertise>\n"
+                            + "\n\n".join(_injected)
+                            + "\n</domain_expertise>",
+                            "domain_expertise",
+                        )
+            except Exception as _de:
+                logger.debug(
+                    "domain-expertise injection skipped: %s", _de,
+                )
+
         # 8. (REMOVED 2026-04-28) Granted skills used to be re-rendered
         #    here every turn via skill_registry.build_prompt_block() —
         #    ~2K tokens/turn of duplicated content. Single source of
