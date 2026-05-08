@@ -334,7 +334,14 @@ async def edit_wiki_page(
 ):
     """Edit an existing wiki page. The (scope, kind, slug) triple
     identifies the page; remaining fields are optional and only
-    overwrite when present in the request."""
+    overwrite when present in the request.
+
+    2026-05-08: ``new_scope`` field — admin can move a page between
+    scopes (e.g. global → role:coder, or role:pm → global). When
+    present and different from current ``scope``, the page is
+    re-written under the new scope and the original file deleted.
+    User-reported request: "scope 要矫正一下。有的不是 global 的".
+    """
     scope = (body.get("scope") or "").strip()
     kind = (body.get("kind") or "").strip().lower()
     slug = (body.get("slug") or "").strip()
@@ -357,6 +364,9 @@ async def edit_wiki_page(
         page.sources = list(body["sources"])
     if "related" in body and isinstance(body["related"], list):
         page.related = list(body["related"])
+    if "domains" in body and isinstance(body["domains"], list):
+        page.domains = [str(d).strip() for d in body["domains"]
+                        if str(d).strip()]
     # Gene-like structured fields (admin can still author by hand)
     for fld in ("signals_match", "preconditions", "strategy",
                 "validation"):
@@ -364,6 +374,42 @@ async def edit_wiki_page(
             setattr(page, fld, list(body[fld]))
     if "constraints" in body and isinstance(body["constraints"], dict):
         page.constraints = dict(body["constraints"])
+
+    # Scope move: rewrite under new scope, drop the old file.
+    new_scope = (body.get("new_scope") or "").strip()
+    if new_scope and new_scope != scope:
+        # Validate new_scope shape
+        if new_scope != "global" and not new_scope.startswith("role:"):
+            raise HTTPException(
+                400,
+                f"new_scope must be 'global' or 'role:<role>', "
+                f"got {new_scope!r}",
+            )
+        # Refuse if a page with the same kind/slug already exists at
+        # the new scope (avoid silent overwrite).
+        existing_at_new = store.read_page(new_scope, kind, slug)
+        if existing_at_new is not None:
+            raise HTTPException(
+                409,
+                f"target already exists: {new_scope}/{kind}/{slug}. "
+                f"Delete or rename it first.",
+            )
+        # Write to new path
+        page.scope = new_scope
+        store.write_page(page, log_action="move")
+        # Delete old file
+        old_path = store._page_path(scope, kind, slug)
+        try:
+            if os.path.exists(old_path):
+                os.remove(old_path)
+            store.rebuild_index(scope)
+        except OSError as e:
+            logger.warning("scope-move old-file cleanup failed: %s", e)
+        logger.info(
+            "wiki page moved: %s/%s/%s → %s/%s/%s by %s",
+            scope, kind, slug, new_scope, kind, slug, user.user_id,
+        )
+        return {"ok": True, "page": _page_to_full(page), "moved": True}
 
     store.write_page(page, log_action="edit")
     logger.info("wiki page edited: %s/%s/%s by %s",

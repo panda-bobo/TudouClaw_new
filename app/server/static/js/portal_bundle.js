@@ -26363,17 +26363,35 @@ function _kmWikiShowCreate() {
 function _kmWikiShowEditModal(p, isCreate) {
   var kindOpts = ['experience','methodology','template','pattern','reference']
     .map(function(k){ return '<option value="'+k+'"'+(p.kind===k?' selected':'')+'>'+k+'</option>'; }).join('');
+  // 2026-05-08: scope is now editable on edit (with a select drop-
+  // down + "(原 scope)" hint). Backend /edit handles scope move via
+  // new_scope field. User-reported request: "scope 要矫正一下".
+  var commonScopes = ['global', 'role:pm', 'role:coder', 'role:reviewer',
+                      'role:researcher', 'role:tester', 'role:general'];
+  // Add the page's current scope if not in the standard list
+  if (p.scope && commonScopes.indexOf(p.scope) === -1) {
+    commonScopes.push(p.scope);
+  }
+  var scopeOpts = commonScopes.map(function(s){
+    return '<option value="'+esc(s)+'"'+(p.scope===s?' selected':'')+'>'+esc(s)+'</option>';
+  }).join('');
   var html = ''
     + '<div class="modal-overlay" id="kmw-edit-modal" onclick="if(event.target===this)this.remove()">'
     +   '<div class="modal" style="max-width:860px;max-height:92vh;overflow-y:auto">'
     +     '<h3>'+(isCreate?'新建 Wiki 条目':'编辑 Wiki 条目')+'</h3>'
     +     '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:8px">'
-    +       '<div class="form-group"><label>Scope</label><input id="kmw-edit-scope" value="'+esc(p.scope||'global')+'"'+(isCreate?'':' readonly')+'></div>'
+    +       '<div class="form-group"><label>Scope</label><select id="kmw-edit-scope">'+scopeOpts+'</select>'
+    +         (isCreate ? '' : '<div style="font-size:10px;color:var(--text3);margin-top:4px">改 scope 会移动文件到新路径(scope 矫正)</div>')
+    +       '</div>'
     +       '<div class="form-group"><label>Kind</label><select id="kmw-edit-kind"'+(isCreate?'':' disabled')+'>'+kindOpts+'</select></div>'
     +     '</div>'
     +     '<div class="form-group"><label>Title</label><input id="kmw-edit-title" value="'+esc(p.title||'')+'"></div>'
-    +     (isCreate ? '<div class="form-group"><label>Slug (留空自动生成)</label><input id="kmw-edit-slug" value="" placeholder="auto"></div>' : '<div style="font-size:11px;color:var(--text3);margin-bottom:8px">slug: <code>'+esc(p.slug)+'</code> · '+esc(p.scope)+'/'+esc(p.kind)+'</div>')
+    +     (isCreate
+        ? '<div class="form-group"><label>Slug (留空自动生成)</label><input id="kmw-edit-slug" value="" placeholder="auto"></div>'
+        : '<div style="font-size:11px;color:var(--text3);margin-bottom:8px">slug: <code data-orig-scope="'+esc(p.scope)+'">'+esc(p.slug)+'</code> · 当前路径 <code>'+esc(p.scope)+'/'+esc(p.kind)+'</code></div>'
+      )
     +     '<div class="form-group"><label>Tags (逗号分隔)</label><input id="kmw-edit-tags" value="'+esc((p.tags||[]).join(', '))+'" placeholder="payments, security, audit"></div>'
+    +     '<div class="form-group"><label>Domains (逗号分隔, 受控词表)</label><input id="kmw-edit-domains" value="'+esc((p.domains||[]).join(', '))+'" placeholder="security, payments-compliance, project-management..."></div>'
     +     '<div class="form-group"><label>Body (Markdown)</label><textarea id="kmw-edit-body" rows="14" style="font-family:Menlo,Monaco,monospace;font-size:12px;line-height:1.5">'+esc(p.body||'')+'</textarea></div>'
     +     '<details style="margin-bottom:10px"><summary style="cursor:pointer;font-size:12px;color:var(--text2)">高级字段（结构化经验，可选）</summary>'
     +       '<div class="form-group" style="margin-top:10px"><label>Signals Match (逗号分隔关键词)</label><input id="kmw-edit-signals" value="'+esc((p.signals_match||[]).join(', '))+'"></div>'
@@ -26396,12 +26414,14 @@ async function _kmWikiSaveModal(isCreate) {
   function _list(id) { return _val(id).split(',').map(function(t){ return t.trim(); }).filter(Boolean); }
   function _lines(id) { return _val(id).split('\n').map(function(t){ return t.trim(); }).filter(Boolean); }
 
+  var formScope = _val('kmw-edit-scope') || 'global';
   var payload = {
-    scope: _val('kmw-edit-scope') || 'global',
+    scope: formScope,
     kind:  _val('kmw-edit-kind') || 'experience',
     title: _val('kmw-edit-title'),
     body:  document.getElementById('kmw-edit-body').value,  // preserve newlines
     tags:  _list('kmw-edit-tags'),
+    domains: _list('kmw-edit-domains'),
     signals_match: _list('kmw-edit-signals'),
     preconditions: _lines('kmw-edit-precond'),
     strategy:      _lines('kmw-edit-strat'),
@@ -26411,12 +26431,25 @@ async function _kmWikiSaveModal(isCreate) {
     var slug = _val('kmw-edit-slug');
     if (slug) payload.slug = slug;
   } else {
-    // For edit: scope/kind/slug come from the original page (read-only fields).
-    // The slug is in the modal's hidden state via the page reference text.
-    // Use the form's scope/kind values + look up the slug from the modal label.
+    // 2026-05-08: detect scope move. The original (pre-edit) scope
+    // is stamped on the slug <code> via data-orig-scope; if the
+    // current select differs, send `new_scope` so backend rewrites
+    // the file under the new path.
     var modal = document.getElementById('kmw-edit-modal');
-    var slugEl = modal && modal.querySelector('code');
-    if (slugEl) payload.slug = slugEl.textContent.trim();
+    var slugEl = modal && modal.querySelector('code[data-orig-scope]');
+    if (slugEl) {
+      payload.slug = slugEl.textContent.trim();
+      var origScope = slugEl.getAttribute('data-orig-scope') || '';
+      if (origScope && origScope !== formScope) {
+        // Tell backend: identify by origScope, rewrite under formScope
+        payload.scope = origScope;       // identifier
+        payload.new_scope = formScope;   // target
+      }
+    } else {
+      // Fallback for older modals (shouldn't happen post-this-commit)
+      var anySlugEl = modal && modal.querySelector('code');
+      if (anySlugEl) payload.slug = anySlugEl.textContent.trim();
+    }
   }
   if (!payload.title) { alert('Title required'); return; }
   if (!isCreate && !payload.slug) { alert('Internal error: slug missing'); return; }
@@ -26424,9 +26457,11 @@ async function _kmWikiSaveModal(isCreate) {
 
   try {
     var url = isCreate ? '/api/portal/wiki/create' : '/api/portal/wiki/edit';
-    await api('POST', url, payload);
+    var resp = await api('POST', url, payload);
     var m = document.getElementById('kmw-edit-modal'); if (m) m.remove();
-    if (window._toast) window._toast(isCreate ? '已创建' : '已保存', 'success');
+    var msg = isCreate ? '已创建' : '已保存';
+    if (resp && resp.moved) msg = '已移动到 ' + payload.new_scope;
+    if (window._toast) window._toast(msg, 'success');
     _renderKmWiki();
   } catch (e) {
     alert((isCreate ? 'Create' : 'Save') + ' failed: ' + (e.message || e));
