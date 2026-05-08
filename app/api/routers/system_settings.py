@@ -102,6 +102,50 @@ def _validate_value(path: str, value: Any) -> None:
             raise HTTPException(400, f"{path} must be in 1..600")
         return
 
+    # ── Tool Reason Required (per-tool _reason injection) ──
+    # 2026-05-08 user-reported "关闭不掉": toggling the UI checkbox
+    # 400'd because this validator never had a case for these paths.
+    if path == "tool_reason.enabled":
+        if not isinstance(value, bool):
+            raise HTTPException(400, f"{path} must be boolean")
+        return
+    if path == "tool_reason.max_chars":
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise HTTPException(400, f"{path} must be an integer")
+        if not (10 <= value <= 1000):
+            raise HTTPException(400, f"{path} must be in 10..1000")
+        return
+
+    # ── Sandbox: admin-maintained readonly path allowlist ──
+    # 2026-05-08: list of strings, each path expanded for ~ / $VAR
+    # at sandbox-build time. We accept any list of non-empty strings
+    # here — paths that don't exist are silently dropped at sandbox
+    # build time, not at write time (admin can pre-stage entries
+    # before a vault is created, etc.).
+    if path == "sandbox.readonly_dirs":
+        if not isinstance(value, list):
+            raise HTTPException(
+                400,
+                f"{path} must be a list of strings (got "
+                f"{type(value).__name__})",
+            )
+        if len(value) > 200:
+            raise HTTPException(
+                400, f"{path}: too many paths (max 200, got {len(value)})",
+            )
+        for i, item in enumerate(value):
+            if not isinstance(item, str):
+                raise HTTPException(
+                    400,
+                    f"{path}[{i}] must be a string (got "
+                    f"{type(item).__name__})",
+                )
+            if len(item) > 1024:
+                raise HTTPException(
+                    400, f"{path}[{i}]: path too long (>1024 chars)",
+                )
+        return
+
     # Unknown path: reject (caught by caller's _walk_defaults check too,
     # but explicit here for safety)
     raise HTTPException(400, f"unknown / not allowed path: {path}")
