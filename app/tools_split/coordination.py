@@ -869,6 +869,73 @@ def _tool_task_update(action: str, task_id: str = "", title: str = "",
 # typed TaskAssignment objects in SQLite + recipient inbox. See
 # app/core/task_assignment.py for the data model.
 
+def _auto_route_dispatch(
+    *, brief: str, caller_id: str, project_id: str,
+) -> tuple[str, str]:
+    """Resolve to_agent="auto" → concrete agent_id by domain expertise.
+
+    Returns (agent_id, reason_str). Empty agent_id signals no match —
+    caller should reject the dispatch with an error.
+
+    Strategy:
+      1. Infer 0-N domains from `brief` (keyword classifier)
+      2. Build candidate set = project members (excluding caller)
+         OR all agents if no project_id
+      3. Score each candidate = sum(expertise_scores[d] for d in
+         inferred_domains)
+      4. Pick the candidate with the highest score; tie-break by
+         total expertise (sum across all domains)
+      5. If all candidates score zero, return ("", "no expertise match")
+
+    Zero LLM calls — pure dict math on agents already in the hub.
+    """
+    from .knowledge import _infer_domains_from_query
+    from ..hub import get_hub
+    inferred = _infer_domains_from_query(brief)
+    if not inferred:
+        return ("", "no domain inferred from brief")
+
+    hub = get_hub()
+    if hub is None:
+        return ("", "hub unavailable")
+
+    # Candidate set
+    candidates: list[tuple[str, float, float]] = []  # (id, score, total)
+    for aid, agent in hub.agents.items():
+        if aid == caller_id:
+            continue
+        # Skip child / hidden agents from auto-routing — only top-level
+        # team members are valid dispatch targets.
+        if getattr(agent, "parent_id", "") or "":
+            continue
+        # If project_id given, restrict to project members.
+        if project_id:
+            proj = hub.get_project(project_id) if hasattr(hub, "get_project") else None
+            if proj is not None:
+                _members = getattr(proj, "members", []) or []
+                if not any(getattr(_m, "agent_id", "") == aid for _m in _members):
+                    continue
+        scores = getattr(agent, "expertise_scores", {}) or {}
+        match_score = sum(
+            float(scores.get(str(d).lower(), 0.0)) for d in inferred
+        )
+        total_score = sum(float(v) for v in scores.values())
+        candidates.append((aid, match_score, total_score))
+
+    # Drop zero-match candidates
+    candidates = [c for c in candidates if c[1] > 0.0]
+    if not candidates:
+        return ("", f"no candidate has expertise in {inferred}")
+
+    # Sort: match_score DESC, total_score DESC (tie-break)
+    candidates.sort(key=lambda c: (-c[1], -c[2]))
+    best_id, best_match, best_total = candidates[0]
+    return (
+        best_id,
+        f"domain={inferred} score={best_match:.1f} (total={best_total:.1f})",
+    )
+
+
 def _tool_dispatch_task(
     to_agent: str = "",
     brief: str = "",
@@ -885,16 +952,57 @@ def _tool_dispatch_task(
     Returns the task_assignment id. The receiving agent will see this
     task in its inbox the next time it calls accept_task — no markdown
     parsing required.
+
+    2026-05-08: Phase 6 — pass ``to_agent="auto"`` to route by domain
+    expertise. Infer the brief's domain via _infer_domains_from_query,
+    then pick the agent with the highest expertise_scores in that
+    domain (across the same project's members). Falls back to the PM
+    if no candidate has any score in the inferred domain.
     """
     from ..core.task_assignment import (
         TaskAssignment, FileRef, Deliverable, get_store,
     )
-    if not to_agent or not brief:
+    if not brief:
         return ("Error: dispatch_task requires `to_agent` and `brief`. "
                 "Brief should be 1-3 sentences (≤ 500 chars).")
     if len(brief) > 500:
         return (f"Error: brief is too long ({len(brief)} chars). "
                 f"Max 500 — be concise. Put detail in deliverables.")
+
+    # ── Phase 6: auto-routing ──
+    # ``to_agent="auto"`` (or the bare string "auto" / "@auto" with
+    # case-insensitive match) — pick the best-matched agent by domain
+    # expertise. Caller can still pass an explicit id to override.
+    if to_agent.strip().lower().lstrip("@") in ("auto", "best"):
+        try:
+            _picked, _picked_reason = _auto_route_dispatch(
+                brief=brief,
+                caller_id=str(kwargs.get("_caller_agent_id") or ""),
+                project_id=project_id or str(kwargs.get("_project_id") or ""),
+            )
+            if _picked:
+                to_agent = _picked
+                logger.info(
+                    "dispatch_task auto-routed: '%s...' → %s (%s)",
+                    brief[:60], to_agent, _picked_reason,
+                )
+            else:
+                return (
+                    "Error: dispatch_task to_agent='auto' but no candidate "
+                    "matched the inferred domain. Specify to_agent="
+                    "<agent_id> explicitly."
+                )
+        except Exception as _are:
+            logger.warning("auto-route failed: %s", _are)
+            return (
+                "Error: dispatch_task to_agent='auto' failed during routing — "
+                f"{type(_are).__name__}. Specify to_agent=<agent_id> "
+                "explicitly."
+            )
+
+    if not to_agent:
+        return ("Error: dispatch_task requires `to_agent` and `brief`. "
+                "Brief should be 1-3 sentences (≤ 500 chars).")
 
     # ── PEP: before_dispatch_task ──
     # Rule Engine hook for PM dispatch — rules can deny based on
