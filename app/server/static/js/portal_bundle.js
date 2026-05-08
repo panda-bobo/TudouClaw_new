@@ -35055,6 +35055,10 @@ async function renderSystemSettings(container) {
     +       renderSelect('delegate.max_parallel_children', delegateMax, delegateDefault)
     +     '</div>'
     +   '</div>'
+
+    // ── Sandbox readonly directories (admin-maintained allowlist) ──
+    +   _renderSandboxReadonlyCard(settings, defaults)
+
     +   '<button class="btn btn-ghost btn-sm" onclick="_systemSettingsResetDefaults()" '
     +     (anyDiverged ? '' : 'disabled style="opacity:0.5"')
     +     '><span class="material-symbols-outlined" style="font-size:14px">restart_alt</span> Reset to defaults</button>'
@@ -35068,6 +35072,50 @@ async function _systemSettingsPatch(path, value) {
     renderSystemSettings();   // re-render so Reset button state updates
   } catch (e) {
     _toast('Save failed:' + e, 'error');
+  }
+}
+
+// ── Sandbox readonly directories card (admin-maintained allowlist) ──
+function _renderSandboxReadonlyCard(settings, defaults) {
+  var sb = (settings && settings.sandbox) || {};
+  var roDirs = Array.isArray(sb.readonly_dirs) ? sb.readonly_dirs : [];
+  var roText = roDirs.join('\n');
+  return ''
+    + '<div style="background:var(--surface);border:1px solid var(--border-light);border-radius:10px;padding:18px;margin-bottom:14px">'
+    +   '<div style="font-size:13px;font-weight:700;margin-bottom:4px">Sandbox Readonly 路径</div>'
+    +   '<div style="font-size:11px;color:var(--text3);margin-bottom:12px">'
+    +     'Admin 维护的全局只读路径列表 — agent tool 可以 <b>read</b>，但不能 write。每行一条路径。<br>'
+    +     '支持 <code>~</code> 和 <code>$VAR</code> 展开。例:'
+    +     '<code style="font-size:10px;background:var(--surface2);padding:1px 4px;border-radius:3px">$HOME/Library/Application Support/obsidian/</code>'
+    +   '</div>'
+    +   '<textarea id="sys-sandbox-readonly" rows="6" '
+    +     'style="width:100%;font-family:Menlo,Monaco,monospace;font-size:12px;padding:8px;'
+    +     'border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);resize:vertical" '
+    +     'placeholder="$HOME/Library/Application Support/obsidian/&#10;~/Documents/Vault/&#10;...">'
+    +     esc(roText)
+    +   '</textarea>'
+    +   '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;gap:8px">'
+    +     '<div style="font-size:11px;color:var(--text3)">当前 ' + roDirs.length + ' 条 — 改完点保存生效（agent 下次起 chat 即应用）</div>'
+    +     '<button class="btn btn-primary btn-sm" onclick="_saveSandboxReadonly()">保存</button>'
+    +   '</div>'
+    + '</div>';
+}
+
+async function _saveSandboxReadonly() {
+  var ta = document.getElementById('sys-sandbox-readonly');
+  if (!ta) return;
+  // Parse: split by newline, trim, drop empties + comment lines (#).
+  var lines = ta.value.split('\n').map(function(l){ return l.trim(); })
+    .filter(function(l){ return l && !l.startsWith('#'); });
+  try {
+    await api('PATCH', '/api/portal/system-settings', {
+      path: 'sandbox.readonly_dirs',
+      value: lines,
+    });
+    _toast('已保存 ' + lines.length + ' 条路径', 'success');
+    renderSystemSettings();
+  } catch (e) {
+    _toast('Save failed: ' + (e.message || e), 'error');
   }
 }
 

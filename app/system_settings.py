@@ -50,6 +50,27 @@ DEFAULTS: dict[str, Any] = {
         "max_requests": 30,
         "window_seconds": 5.0,
     },
+    # ── Sandbox: admin-maintained read-only path allowlist ──
+    # 2026-05-08: User asked for a Settings-driven way to grant agents
+    # read access to specific paths outside their working_dir jail —
+    # e.g. an Obsidian skill needs to read
+    # ~/Library/Application Support/obsidian/obsidian.json to find the
+    # vault, but that path is sandbox-blocked by default.
+    #
+    # Each entry is a directory path. The sandbox layer expands ~ and
+    # $VAR at load time, then treats the path as readonly_dirs (READ
+    # OK, WRITE blocked) for ALL agents. Admin maintains this list
+    # manually via Portal → Settings → 系统配置 → Sandbox readonly.
+    #
+    # Schema: list of strings.
+    # Example: [
+    #   "$HOME/Library/Application Support/obsidian/",
+    #   "/usr/share/dict/words",
+    #   "/etc/timezone",
+    # ]
+    "sandbox": {
+        "readonly_dirs": [],
+    },
     # ── Agent runtime guardrails (read by tools_split + agent.py) ──
     "agent_guardrails": {
         # Soft warn / hard deny thresholds for project-scoped glob_files

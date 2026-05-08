@@ -8693,6 +8693,35 @@ Write only the summary body. Do not include any preamble or prefix."""
                 readonly_dirs.append(_skills_root)
         except Exception:
             pass
+
+        # ── Admin-maintained readonly paths (system_settings) ───────
+        # 2026-05-08: User asked for a Settings-driven way to grant
+        # agents read access to specific paths outside their jail
+        # (e.g. obsidian skill needs ~/Library/Application Support/
+        # obsidian/obsidian.json). Maintained by admin via Portal →
+        # 系统配置 → Sandbox readonly. Each entry expands ~ and $VAR.
+        # Failures (missing settings store, bad path) silently skip
+        # — never break agent boot.
+        try:
+            from .system_settings import get_store as _get_ss_store
+            _ss = _get_ss_store()
+            if _ss is not None:
+                _admin_ro = _ss.get("sandbox.readonly_dirs", []) or []
+                if isinstance(_admin_ro, list):
+                    for _p in _admin_ro:
+                        try:
+                            _expanded = _os.path.expandvars(
+                                _os.path.expanduser(str(_p).strip())
+                            )
+                            if _expanded and _os.path.exists(_expanded):
+                                if _expanded not in readonly_dirs:
+                                    readonly_dirs.append(_expanded)
+                        except (TypeError, ValueError):
+                            continue
+        except Exception:
+            # Sandbox without admin readonly is still functional —
+            # this is purely additive. Never raise.
+            pass
         # Member-project shared workspaces — full read+write access for
         # every project this agent is a member of. The shared workspace
         # is the project's collaboration area; membership IS the access
