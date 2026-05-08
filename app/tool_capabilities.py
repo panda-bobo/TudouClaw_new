@@ -62,15 +62,23 @@ logger = logging.getLogger("tudou.capabilities")
 # ── CORE tier ───────────────────────────────────────────────────────
 # 2026-05-07 (user feedback "发送的工具只有这里已经绑定的"): the
 # Tool Permissions UI is the single source of truth for what tools an
-# agent gets. The ONLY exception is the 4 tools the UI explicitly
-# labels as "核心" — read-only reflex primitives that aren't worth
-# making the user click 4 boxes for every agent:
+# agent gets. The ONLY exceptions are reflex primitives that aren't
+# worth making the user click for every agent:
 #
 #   plan_update       — agent must be able to report its own progress.
 #   get_skill_guide   — bootstrap; agent needs to discover what skills
 #                       it was granted.
 #   memory_recall     — read-only memory; doing your job needs context.
 #   knowledge_lookup  — read-only KB; doing your job needs context.
+#   wiki_ingest       — write-side counterpart of knowledge_lookup
+#                       (added 2026-05-08, user feedback "wiki_ingest
+#                       不是默认的么"). Without it, the ExecutionDiscipline
+#                       rule "retros/playbooks must wiki_ingest" can't
+#                       fire on agents that haven't been ticked. The
+#                       wiki layer's built-in leak guardrail (defends
+#                       against API-key / .env / IP leakage at ingest)
+#                       provides a similar security floor to
+#                       knowledge_lookup, so it's safe as default.
 #
 # Everything else — dispatch_task, send_message, sc_*, milestone /
 # goal / issue updates, mcp_call, submit_skill, task_update, etc. —
@@ -83,6 +91,7 @@ CORE_UNIVERSAL_TOOLS: frozenset[str] = frozenset({
     "get_skill_guide",
     "memory_recall",
     "knowledge_lookup",
+    "wiki_ingest",
 })
 
 # Kept as an empty set for back-compat with any caller that still
