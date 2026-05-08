@@ -2209,6 +2209,20 @@ class Agent:
     #    "qwen2.5:3b-instruct@http://localhost:11434"]
     preprocessor_fallback: list[str] = field(default_factory=list)
     granted_skills: list[str] = field(default_factory=list)  # Skill IDs granted to this agent
+    # ── Self-evolution Phase 3 (2026-05-08): per-domain expertise ──
+    # Map domain → cumulative score. Incremented when this agent
+    # successfully applied a wiki entry tagged with that domain
+    # (signal: lookup_trace flushed via update_outcome with success=True).
+    # Decremented (-0.5) on failure. Used by:
+    #   - Phase 4 (lazy prompt injection — inject top-1 wiki entry
+    #     when the user message is in a domain this agent has high
+    #     score in)
+    #   - Phase 6 (dispatch_task("auto") — route a task to the agent
+    #     with the highest score in the inferred-domain of the task)
+    # Persisted via to_dict / from_dict so accumulation survives
+    # restarts. NOT capped — a long-running expert can accumulate to
+    # hundreds; the score IS the authority signal.
+    expertise_scores: dict[str, float] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     # --- src integration ---
     cost_tracker: CostTracker = field(default_factory=CostTracker)
@@ -2389,6 +2403,7 @@ class Agent:
             "desktop_lottie_url": self.desktop_lottie_url,
             "channel_ids": self.channel_ids,
             "granted_skills": list(self.granted_skills),
+            "expertise_scores": dict(self.expertise_scores or {}),
             # Preprocessor settings (per-agent opt-in for small local LLM)
             "preprocessor_model": self.preprocessor_model,
             "preprocessor_modes": list(self.preprocessor_modes or []),
@@ -2491,6 +2506,7 @@ class Agent:
             desktop_lottie_url=str(d.get("desktop_lottie_url", "") or ""),
             channel_ids=d.get("channel_ids", []),
             granted_skills=list(d.get("granted_skills", []) or []),
+            expertise_scores=dict(d.get("expertise_scores", {}) or {}),
             preprocessor_model=str(d.get("preprocessor_model", "") or ""),
             preprocessor_modes=list(d.get("preprocessor_modes", []) or []),
             preprocessor_endpoint=str(d.get("preprocessor_endpoint", "") or ""),
@@ -3194,6 +3210,7 @@ class Agent:
 
     def record_lookup_hit(
         self, *, scope: str, kind: str, slug: str, query: str = "",
+        domains: list[str] | None = None,
     ) -> None:
         """Append one wiki hit to this agent's lookup-outcome trace.
 
@@ -3201,6 +3218,10 @@ class Agent:
         the LLM. Dedupes within the trace so the same (scope, kind,
         slug) doesn't accumulate phantom credits if the agent calls
         knowledge_lookup multiple times in one step.
+
+        2026-05-08: ``domains`` field captures the wiki page's
+        domain tags so finalize_step can attribute success_count
+        AND expertise_scores increments to the right domain bucket.
         """
         if not (scope and kind and slug):
             return
@@ -3220,10 +3241,38 @@ class Agent:
         trace.append({
             "scope": ref[0], "kind": ref[1], "slug": ref[2],
             "ts": time.time(), "query": query[:120],
+            "domains": list(domains or []),
         })
         # Cap. Drop oldest first.
         if len(trace) > self._LOOKUP_TRACE_MAX:
             del trace[: len(trace) - self._LOOKUP_TRACE_MAX]
+
+    # ── Self-evolution Phase 3 (2026-05-08) ──
+    def credit_expertise(
+        self, domains: list[str], *, success: bool = True,
+    ) -> None:
+        """Increment ``expertise_scores`` for each domain.
+
+        Success: +1.0 per domain.
+        Fail:    -0.5 per domain (signal of misapplication).
+        Score floors at 0.0 to keep semantics monotonic-positive.
+
+        Called by finalize_step (success) / plan_update fail_step (fail)
+        after consuming the lookup_trace. Cheap dict update.
+        """
+        if not domains:
+            return
+        scores = self.expertise_scores
+        if not isinstance(scores, dict):
+            scores = {}
+            self.expertise_scores = scores
+        delta = 1.0 if success else -0.5
+        for d in domains:
+            d_norm = str(d or "").strip().lower()
+            if not d_norm:
+                continue
+            new_val = scores.get(d_norm, 0.0) + delta
+            scores[d_norm] = max(0.0, new_val)
 
     def consume_lookup_trace(self) -> list[dict]:
         """Return-and-clear the agent's wiki lookup hits.

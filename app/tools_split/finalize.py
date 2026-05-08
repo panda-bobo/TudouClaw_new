@@ -172,6 +172,7 @@ def _tool_finalize_step(
     step_succeeded = bool(submitted or step_closed or milestone_closed) \
         and not errors
     wiki_credited = 0
+    expertise_credited = 0   # Phase 3 — domain-score increments
     if step_succeeded:
         try:
             agent_id = ctx.get("_caller_agent_id", "") or ""
@@ -186,6 +187,10 @@ def _tool_finalize_step(
                     if _trace:
                         from ..knowledge.wiki_store import get_wiki_store
                         _ws = get_wiki_store()
+                        # Aggregate all domains across the trace so a
+                        # single batch credit covers them. Avoids the
+                        # multi-pass dict update overhead.
+                        _all_domains: set[str] = set()
                         for _rec in _trace:
                             try:
                                 _result = _ws.update_outcome(
@@ -196,10 +201,37 @@ def _tool_finalize_step(
                                 )
                                 if _result is not None:
                                     wiki_credited += 1
+                                    # Collect domains: prefer recorded
+                                    # at lookup-time (cheaper), fall
+                                    # back to re-reading from the
+                                    # updated page in case the trace
+                                    # didn't capture them.
+                                    _rec_domains = _rec.get("domains") \
+                                        or list(_result.domains or [])
+                                    for _d in _rec_domains:
+                                        _ds = str(_d).strip().lower()
+                                        if _ds:
+                                            _all_domains.add(_ds)
                             except Exception as _ue:
                                 logger.debug(
                                     "wiki update_outcome skipped for "
                                     "%s: %s", _rec, _ue,
+                                )
+                        # Phase 3: credit expertise once per unique
+                        # domain (not per hit) — avoids inflating
+                        # scores when an agent applies 3 wiki entries
+                        # all tagged "security" in one task.
+                        if _all_domains and hasattr(
+                            _agent_ref, "credit_expertise"
+                        ):
+                            try:
+                                _agent_ref.credit_expertise(
+                                    list(_all_domains), success=True,
+                                )
+                                expertise_credited = len(_all_domains)
+                            except Exception as _ce:
+                                logger.debug(
+                                    "credit_expertise skipped: %s", _ce,
                                 )
         except Exception as _wb_err:
             # Never let an outcome-tracking error break finalize_step.
@@ -217,10 +249,13 @@ def _tool_finalize_step(
     if milestone_closed:
         lines.append(f"✅ Milestone {milestone_id} marked done")
     if wiki_credited:
-        lines.append(
+        _line = (
             f"📚 Credited {wiki_credited} wiki experience(s) "
             f"(success_count++)"
         )
+        if expertise_credited:
+            _line += f", expertise +{expertise_credited} domain(s)"
+        lines.append(_line)
     if errors:
         lines.append("⚠️ Issues encountered:")
         for err in errors:

@@ -1137,11 +1137,15 @@ def _tool_knowledge_lookup(query: str = "", entry_id: str = "",
                     # Record into the calling agent's outcome-trace.
                     # Best-effort: silent skip if no caller agent
                     # (e.g. invoked from a hub admin path).
+                    # 2026-05-08: capture page.domains too — Phase 3
+                    # uses these to credit expertise_scores when the
+                    # agent's downstream task succeeds.
                     if _kl_agent is not None:
                         try:
                             _kl_agent.record_lookup_hit(
                                 scope=p.scope, kind=p.kind, slug=p.slug,
                                 query=_q_str,
+                                domains=list(p.domains or []),
                             )
                         except Exception as _rh_err:
                             logger.debug(
