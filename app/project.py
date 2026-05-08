@@ -2818,38 +2818,55 @@ class ProjectChatEngine:
             #   * Skip the agent that ORIGINALLY triggered this turn (the
             #     `source` chain) so A→B→A bounces stop. Detected by
             #     parsing source="agent:<id>" of the user_msg we replied to.
+            # 2026-05-08: gated on system_settings.auto_wakeup. The
+            # @-mention auto-trigger was the loop driver in the
+            # multi-million-token overnight DELEGATE storm — agent A
+            # @ B and C in one reply, B's reply @ A again, etc.
+            # Master switch defaults to OFF (manual wakeup only).
             try:
-                mentioned_ids = self._parse_mentions(result, project)
-                # Identify source agent (if any) to avoid bouncing back.
-                _src_id = ""
-                if isinstance(source, str) and source.startswith("agent:"):
-                    _src_id = source.split(":", 1)[1]
-                for _mid in mentioned_ids:
-                    if _mid == agent_id:
-                        continue  # skip self
-                    if _mid == _src_id:
+                from .system_settings import auto_wakeup_allowed
+                _propagate = auto_wakeup_allowed("mention_propagation")
+            except Exception:
+                _propagate = False
+            if not _propagate:
+                logger.info(
+                    "Project chat [%s] @-mention propagation skipped "
+                    "(auto_wakeup disabled — manual wake required)",
+                    project.name,
+                )
+            else:
+                try:
+                    mentioned_ids = self._parse_mentions(result, project)
+                    # Identify source agent (if any) to avoid bouncing back.
+                    _src_id = ""
+                    if isinstance(source, str) and source.startswith("agent:"):
+                        _src_id = source.split(":", 1)[1]
+                    for _mid in mentioned_ids:
+                        if _mid == agent_id:
+                            continue  # skip self
+                        if _mid == _src_id:
+                            logger.info(
+                                "Project chat [%s] skip mention bounce-back: "
+                                "%s -> %s (source chain)",
+                                project.name, agent_id[:8], _mid[:8],
+                            )
+                            continue
+                        self.dispatch_to_agent(
+                            project, _mid, result,
+                            source="agent",
+                            source_id=agent_id,
+                            source_label=name,
+                            # Reply already posted above — don't double-post.
+                            post_to_chat=False,
+                        )
                         logger.info(
-                            "Project chat [%s] skip mention bounce-back: "
-                            "%s -> %s (source chain)",
+                            "Project chat [%s] @-mention triggered: %s -> %s",
                             project.name, agent_id[:8], _mid[:8],
                         )
-                        continue
-                    self.dispatch_to_agent(
-                        project, _mid, result,
-                        source="agent",
-                        source_id=agent_id,
-                        source_label=name,
-                        # Reply already posted above — don't double-post.
-                        post_to_chat=False,
+                except Exception as _me:
+                    logger.debug(
+                        "@-mention propagation skipped: %s", _me,
                     )
-                    logger.info(
-                        "Project chat [%s] @-mention triggered: %s -> %s",
-                        project.name, agent_id[:8], _mid[:8],
-                    )
-            except Exception as _me:
-                logger.debug(
-                    "@-mention propagation skipped: %s", _me,
-                )
             # B: auto-registration from chat replies is disabled on purpose —
             # deliverables should only come from explicit submit_deliverable tool
             # calls (or manual UI submission). Auto-scanning 📎 markers and

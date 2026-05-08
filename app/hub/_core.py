@@ -175,10 +175,18 @@ class Hub:
             agent_lookup_fn=lambda aid: self.agents.get(aid),
             save_fn=self._save_projects,
         )
-        # Workflow engine — uses _workflow_chat (delegate) because it
-        # specifically wants worker forking for each step.
+        # Workflow engine — 2026-05-08: switched from _workflow_chat
+        # (which fork-spawns a child agent per step) to _direct_chat
+        # (preserves the agent's primary identity, NO fork). The fork
+        # path was responsible for the multi-million-token DELEGATE
+        # storm overnight when @-mention propagation kept feeding new
+        # workflow steps in. _direct_chat shares the agent's main
+        # message bucket, which means workflow steps now show up in
+        # the agent's regular chat history — that's a feature, not a
+        # bug: operators can see what their agents were asked to do
+        # without diffing through child-agent uuids.
         self.workflow_engine = WorkflowEngine(
-            agent_chat_fn=self._workflow_chat
+            agent_chat_fn=self._direct_chat
         )
         self.workflow_engine.set_data_dir(self._data_dir)
         self.workflow_engine.load()
@@ -2005,22 +2013,38 @@ class Hub:
                     log.debug("Post-workflow consolidate failed: %s", e)
 
             # Auto-progress: 触发下一个步骤的 Agent
-            for proj in self.projects.values():
-                if proj.workflow_binding.workflow_id != template_id:
-                    continue
-                step_num = step_index + 1
-                prefix = f"[WF Step {step_num}]"
-                completed_task = None
-                for task in proj.tasks:
-                    if task.title.startswith(prefix):
-                        completed_task = task
-                        break
-                if completed_task:
-                    try:
-                        self.project_chat_engine._auto_progress_next_step(
-                            proj, completed_task)
-                    except Exception as e:
-                        logger.warning("WF auto-progress failed: %s", e)
+            # 2026-05-08: gated on auto_wakeup.step_completion_advance.
+            # When master switch is off, workflow steps don't auto-
+            # advance to the next agent — operator must wake them
+            # manually.
+            try:
+                from ..system_settings import auto_wakeup_allowed
+                _advance = auto_wakeup_allowed("step_completion_advance")
+            except Exception:
+                _advance = False
+            if _advance:
+                for proj in self.projects.values():
+                    if proj.workflow_binding.workflow_id != template_id:
+                        continue
+                    step_num = step_index + 1
+                    prefix = f"[WF Step {step_num}]"
+                    completed_task = None
+                    for task in proj.tasks:
+                        if task.title.startswith(prefix):
+                            completed_task = task
+                            break
+                    if completed_task:
+                        try:
+                            self.project_chat_engine._auto_progress_next_step(
+                                proj, completed_task)
+                        except Exception as e:
+                            logger.warning("WF auto-progress failed: %s", e)
+            else:
+                logger.info(
+                    "Workflow step %d/%s completed — NOT auto-advancing "
+                    "(auto_wakeup off; operator must wake next agent manually)",
+                    step_index, template_id[:8],
+                )
 
     def _sync_agent_to_project_dir(self, agent_id: str, project_dir: str,
                                     project_id: str = "", project_name: str = ""):
@@ -2292,7 +2316,17 @@ class Hub:
 
         When all pass, injects a synthetic user message from
         source="system:watchdog" pointing at the next unfinished step.
+
+        2026-05-08: gated on system_settings.auto_wakeup.watchdog_wake_stuck.
+        Master switch defaults OFF — admin opts in once they trust loop
+        controls.
         """
+        try:
+            from ..system_settings import auto_wakeup_allowed
+            if not auto_wakeup_allowed("watchdog_wake_stuck"):
+                return
+        except Exception:
+            return  # fail closed
         from ..agent_types import AgentStatus, StepStatus
         plan = getattr(agent, "_current_plan", None)
         if plan is None or getattr(plan, "status", "") != "active":

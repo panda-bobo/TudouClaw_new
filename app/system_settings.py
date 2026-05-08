@@ -96,6 +96,38 @@ DEFAULTS: dict[str, Any] = {
         "plans_busy_seconds": 3,
         "runtime_stats_busy_seconds": 8,
     },
+    # ── Auto-wakeup master switches (read by every auto-trigger entry) ──
+    # When `enabled` is False, EVERY automatic agent-trigger path is
+    # disabled — agents only act when the user explicitly sends a
+    # message / clicks Wake. This is the kill switch for "DELEGATE
+    # storm" scenarios where @-mention propagation + workflow advance
+    # + watchdog wakeups feed each other in a loop and burn token
+    # budget overnight.
+    #
+    # Sub-flags let admins keep some automation on while disabling
+    # specific dangerous ones. All gated by the master `enabled` —
+    # if master is False, all sub-flags are ignored (treated False).
+    #
+    # 2026-05-08: defaulting to FALSE because @-mention propagation
+    # crossed with workflow auto-advance produced a 30-min, 50-spawn,
+    # multi-million-token loop in production. Admin must explicitly
+    # opt back in per project after manually tuning loop-detection.
+    "auto_wakeup": {
+        "enabled": False,
+        # @-mention in agent reply auto-triggers mentioned agent (was
+        # the loop trigger in the 2026-05-08 incident — kept off until
+        # a multi-hop A→B→C→A detector is added).
+        "mention_propagation": False,
+        # Workflow engine advances to next step on completion.
+        "workflow_advance": False,
+        # Stuck-agent watchdog wakes idle agents with open plans.
+        "watchdog_wake_stuck": False,
+        # On step completion, auto-trigger the next-step responsible.
+        "step_completion_advance": False,
+        # On user message into a paused project's queue, resume on
+        # unpause (this one is benign; default True even when master False).
+        "resume_on_unpause": True,
+    },
     # ── Tool _reason injection (read by ToolSchema.to_openai_payload) ──
     # When enabled, every tool's OpenAI schema gets a required "_reason"
     # string param (≤max_chars). Forces the LLM to articulate WHY before
@@ -235,3 +267,35 @@ def init_store(data_dir: str | Path) -> SystemSettingsStore:
 
 def get_store() -> SystemSettingsStore | None:
     return _STORE
+
+
+# ── Auto-wakeup helper ─────────────────────────────────────────────
+# Single point all auto-trigger entries call to decide "should I
+# fire". Master switch + per-flag check; master False ⇒ everything
+# False regardless of sub-flag value.
+def auto_wakeup_allowed(kind: str = "") -> bool:
+    """Return True iff the named auto-trigger path is allowed to fire.
+
+    kind values (free-form, but these match DEFAULTS):
+      "mention_propagation" — agent reply @-mention auto-trigger
+      "workflow_advance"    — workflow step advance
+      "watchdog_wake_stuck" — stuck-agent watchdog wake
+      "step_completion_advance" — workflow step completion → next agent
+      "resume_on_unpause"   — project unpause queue resume
+
+    Caller convention: returning False means SKIP the auto-trigger
+    silently (don't error). Manual user actions (Wake button,
+    explicit chat send) bypass this entirely — they don't even call
+    this helper.
+    """
+    try:
+        store = get_store()
+        if store is None:
+            return False  # fail-safe: closed
+        if not bool(store.get("auto_wakeup.enabled", False)):
+            return False  # master kill
+        if not kind:
+            return True  # master is on; caller didn't name a sub-flag
+        return bool(store.get(f"auto_wakeup.{kind}", False))
+    except Exception:
+        return False  # any error → fail closed
