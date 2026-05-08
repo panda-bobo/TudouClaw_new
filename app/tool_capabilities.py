@@ -130,6 +130,10 @@ CAPABILITY_SKILLS: dict[str, list[str]] = {
     ],
     "shell-ops": [
         "bash", "run_tests",
+        # 2026-05-08: Background mode helpers — let agents kick off
+        # long-running compiles/tests with run_in_background=true,
+        # then poll bash_logs(pid) and finally bash_kill(pid).
+        "bash_logs", "bash_kill",
     ],
     "web-ops": [
         "web_search", "web_fetch",
@@ -147,6 +151,9 @@ CAPABILITY_SKILLS: dict[str, list[str]] = {
     ],
     "scheduling": [
         "task_update",
+        # 2026-05-08: Per-agent scratch todo list — TodoWrite-style
+        # in-memory checklist, max 1 in_progress at a time.
+        "agent_todo",
     ],
     "messaging": [
         "send_message", "ack_message", "reply_message",
@@ -156,12 +163,59 @@ CAPABILITY_SKILLS: dict[str, list[str]] = {
         "emit_handoff", "handoff_request", "team_create",
     ],
     # ── Specialty bundles (opt-in per agent) ──
+    #
+    # 2026-05-08: project-management WAS just goal/milestone/
+    # deliverable creation. Bug surfaced from pm-小明's complaint
+    # ("wiki_ingest 仍不可用"): the strict capability filter was
+    # silently dropping 28 unclassified tools (project_state, sc_*,
+    # finalize_step, etc.) even when the admin had ticked them in
+    # Tool Permissions. Fix: classify ALL of them so the filter
+    # ships them whenever the relevant skill is granted. Two new
+    # bundles below (task-coordination, shadow-control) cover the
+    # rest.
     "project-management": [
+        # Goals / milestones / deliverables (existing)
         "submit_deliverable",
         "create_goal",
         "update_goal_progress",
         "create_milestone",
         "update_milestone_status",
+        # Project state / blueprint / issue tracking
+        "project_state",
+        "define_project_blueprint",
+        "update_milestone_responsibility",
+        "list_issues",
+        "report_issue",
+        "update_issue",
+        # Composite project workflows (collapse N atomic calls → 1)
+        "bootstrap_project",
+        "submit_review",
+        "finalize_step",
+        "init_project_context",
+    ],
+    "task-coordination": [
+        # Agent-to-agent task lifecycle: dispatch / accept / inbox /
+        # report-back. PMs need dispatch; every worker needs accept
+        # + inbox + report.
+        "dispatch_task",
+        "accept_task",
+        "inbox_assignments",
+        "report_back",
+        "propose_decomposition",
+        "query_agent_status",
+        "query_team_status",
+        # Read-only fork — explore-subagent for off-loading research
+        "spawn_explore_subagent",
+    ],
+    "shadow-control": [
+        # Story Control / Shadow Constraint — artifact ledger and
+        # decision log. Used by PMs and any agent that produces
+        # tracked artifacts.
+        "sc_register_artifact",
+        "sc_get_artifact",
+        "sc_query",
+        "sc_record_decision",
+        "sc_handoff",
     ],
     "pptx-author": [
         "create_pptx",
@@ -181,9 +235,13 @@ CAPABILITY_SKILLS: dict[str, list[str]] = {
         "pip_install",
         "request_web_login",
         "propose_skill",
-        # ``submit_skill`` was moved to CORE_TOOLS on 2026-04-30 so
-        # every agent can push a draft to the Forge. Final activation
-        # still gated by admin approval in the Forge UI.
+        # 2026-05-08: submit_skill / mcp_call moved here. Earlier
+        # comment claimed submit_skill was "moved to CORE_TOOLS on
+        # 2026-04-30" but it never actually landed in CORE — it was
+        # silently unclassified and stripped. mcp_call is the same
+        # story; bridging to external MCP servers is admin-level.
+        "submit_skill",
+        "mcp_call",
     ],
 }
 
@@ -246,6 +304,13 @@ _FACTORY_DEFAULT_CAPABILITIES: list[str] = [
     "scheduling",
     "messaging",
     "handoff",
+    # 2026-05-08: task-coordination added to defaults — every worker
+    # agent needs accept_task / inbox_assignments / report_back to
+    # function in a multi-agent setting. PM-style dispatch_task is
+    # also here; non-PM agents simply won't call it. Token cost is
+    # ~2KB schema for the bundle, negligible compared to fixing the
+    # silent-drop bug.
+    "task-coordination",
 ]
 
 
@@ -331,21 +396,29 @@ def filter_tools_by_capability(
     tools_list: list[dict],
     granted_skills: list[str] | None,
     global_defaults: list[str] | None = None,
+    explicit_allow: set[str] | frozenset[str] | None = None,
 ) -> list[dict]:
-    """Apply the capability-tier filter — STRICT mode.
+    """Apply the capability-tier filter.
 
     Keeps a tool iff ANY of:
       1. It is in CORE_TOOLS (tiny irreducible set: plan_update /
-         get_skill_guide / mcp_call).
-      2. Its gating capability is in ``global_defaults`` (admin-wide).
-      3. Its gating capability is in ``granted_skills`` (per-agent).
+         get_skill_guide / memory_recall / knowledge_lookup /
+         wiki_ingest).
+      2. It is in ``explicit_allow`` — admin clicked the tick box for
+         this tool in the per-agent Tool Permissions UI. Per the
+         2026-05-07 design note ("the Tool Permissions UI is the
+         single source of truth for what tools an agent gets"), an
+         explicit tick wins over capability gating. Without this
+         bypass, ticking a tool the agent doesn't have the right
+         capability skill for silently drops it — the user complained
+         "wiki_ingest 仍不可用" after binding because of exactly this.
+      3. Its gating capability is in ``global_defaults`` (admin-wide).
+      4. Its gating capability is in ``granted_skills`` (per-agent).
 
-    Previous behavior allowed "unknown tools" through fail-open; removed
-    because it leaked every new unclassified tool to every agent, growing
-    the schema payload uncontrolled over time.
-    New policy: if a tool exists in the registry but isn't classified
-    into ANY capability bundle, it does NOT ship to the LLM. The sanity-
-    check helper flags such drift so admins can classify at review time.
+    For tools NOT explicitly ticked, the strict classification rule
+    still applies: unclassified tools (not in CORE, not in any
+    CAPABILITY_SKILLS bundle) don't ship. The sanity-check helper
+    flags such drift so admins can classify at review time.
 
     If ``global_defaults`` is None it's loaded from disk via
     ``load_global_default_capabilities()``. Pass an explicit empty list
@@ -353,6 +426,7 @@ def filter_tools_by_capability(
     """
     if global_defaults is None:
         global_defaults = load_global_default_capabilities()
+    explicit_set: set[str] = set(explicit_allow or ())
     # Normalize granted_skills — a registry-installed skill has id like
     # "file-ops@1.0.0" while CAPABILITY_SKILLS keys are "file-ops".
     # Accept either form by stripping @version.
@@ -371,11 +445,16 @@ def filter_tools_by_capability(
         if name in CORE_TOOLS:
             kept.append(t)
             continue
+        if name in explicit_set:
+            # Admin's explicit tick in profile.allowed_tools — ship it
+            # regardless of capability gating. The tick IS the grant.
+            kept.append(t)
+            continue
         cap = _TOOL_TO_CAPABILITY.get(name)
         if cap is None:
-            # Strict: unclassified tool → do NOT ship. This is intentional
-            # — admins must classify new tools into a capability bundle
-            # before agents see them, preventing silent payload growth.
+            # Strict: unclassified tool not explicitly ticked → do NOT
+            # ship. Prevents silent payload growth from new tools that
+            # haven't been classified into a bundle yet.
             continue
         if cap in effective_caps:
             kept.append(t)

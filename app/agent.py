@@ -7078,16 +7078,26 @@ Write only the summary body. Do not include any preamble or prefix."""
         except Exception:
             pass
 
-        # Capability-skill tier filter — keeps a tool iff it is CORE or
-        # its gating capability skill is in agent.granted_skills. This
-        # is the main token-saving lever: a fresh meeting agent with
-        # zero capability skills granted drops from 35 tools (~22k tok)
-        # to ~19 core tools (~9k tok). Admins grant capability skills
-        # per-agent via Portal UI to unlock specific tool bundles.
+        # Capability-skill tier filter — keeps a tool iff it is CORE,
+        # explicitly ticked in profile.allowed_tools, or its gating
+        # capability skill is in agent.granted_skills / global defaults.
+        # This is the main token-saving lever: a fresh meeting agent
+        # with zero capability skills granted drops from 35 tools
+        # (~22k tok) to ~19 core tools (~9k tok). Admins grant
+        # capability skills per-agent via Portal UI to unlock specific
+        # tool bundles.
+        #
+        # 2026-05-08: explicit_allow added so admin's per-agent tick
+        # in Tool Permissions UI bypasses the strict capability gate.
+        # User-reported bug: "wiki_ingest 仍不可用" after binding —
+        # the strict filter was silently stripping unclassified tools
+        # even after the user had ticked them. Now ticking wins.
         try:
             from .tool_capabilities import filter_tools_by_capability
             all_tools = filter_tools_by_capability(
-                all_tools, self.granted_skills)
+                all_tools, self.granted_skills,
+                explicit_allow=set(allowed),
+            )
         except Exception:
             # Fail open: better to expose all tools than hide legit
             # ones if the classification module has a bug.
