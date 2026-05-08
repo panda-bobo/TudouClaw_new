@@ -93,6 +93,16 @@ class ShadowRecorder:
                 env.deliverable_dir = wd
         except Exception as e:
             logger.debug("shadow: env init failed: %s", e)
+        # Populate extra_public_roots — env.py contract says shadow
+        # fills this with project / meeting shared workspaces the
+        # agent participates in, so artifacts produced under those
+        # paths don't trip the I5 "outside deliverable_dir" check.
+        # Without this, every project_state-produced artifact gets a
+        # false-positive WARNING at commit time.
+        try:
+            self._refresh_public_roots()
+        except Exception as e:
+            logger.debug("shadow: public roots init failed: %s", e)
         # First-pass scan: ingest anything already sitting in the
         # deliverable_dir from previous runs / side-channel drops.
         # Side-effects only — must never raise.
@@ -100,6 +110,64 @@ class ShadowRecorder:
             self.rescan_deliverable_dir()
         except Exception as e:
             logger.debug("shadow: initial deliverable scan failed: %s", e)
+
+    def _refresh_public_roots(self) -> None:
+        """Re-populate ``env.extra_public_roots`` from the agent's
+        currently-active project / meeting workspaces. Idempotent —
+        safe to call repeatedly (every turn ideally, so the agent
+        switching between projects gets the right whitelist).
+
+        Sources, in priority order:
+          1. Agent.get_active_shared_workspace()  — the canonical
+             "what dir am I producing into right now" accessor.
+          2. project_id → shared/<project_id>/  via Agent.get_shared_workspace_path
+          3. source_meeting_id → meeting workspace, if available.
+          4. authorized_workspaces — explicit grants on the agent profile.
+        """
+        env: EnvState = self.state.env
+        roots: list[str] = []
+
+        def _add(path: str) -> None:
+            if path and path not in roots:
+                roots.append(path)
+
+        # 1. Active shared workspace (project / meeting context-aware)
+        try:
+            if hasattr(self.agent, "get_active_shared_workspace"):
+                _add(self.agent.get_active_shared_workspace() or "")
+        except Exception:
+            pass
+        # 2. Project shared workspace by id
+        try:
+            pid = getattr(self.agent, "project_id", "") or ""
+            if pid:
+                try:
+                    from ..agent import Agent as _A
+                    _add(_A.get_shared_workspace_path(pid) or "")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # 3. Meeting workspace (if it has its own shared dir helper)
+        try:
+            mid = getattr(self.agent, "source_meeting_id", "") or ""
+            if mid:
+                try:
+                    from ..agent import Agent as _A
+                    if hasattr(_A, "get_meeting_workspace_path"):
+                        _add(_A.get_meeting_workspace_path(mid) or "")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # 4. Explicit authorised workspaces from the agent profile
+        try:
+            for w in (getattr(self.agent, "authorized_workspaces", []) or []):
+                _add(str(w or ""))
+        except Exception:
+            pass
+
+        env.extra_public_roots = roots
 
     def rescan_deliverable_dir(self) -> int:
         """Public re-entry point for callers (e.g. portal endpoint) that
