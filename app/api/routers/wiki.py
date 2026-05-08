@@ -479,6 +479,106 @@ async def import_wiki_page(
     }
 
 
+@router.post("/index")
+async def index_wiki_into_rag(
+    body: dict = Body(...),
+    user: CurrentUser = Depends(get_current_user),
+    hub=Depends(get_hub),
+):
+    """Bulk-export all valid wiki pages to a RAG collection.
+
+    Step D of the wiki / shared-knowledge merge plan. Admin triggers
+    this from the Wiki tab "重建 RAG 索引" button — same UX model as
+    the existing ``/api/portal/rag/{provider_id}/rebuild`` for legacy
+    KB. Re-runs are safe; existing entries with the same id get
+    overwritten in the vector store (standard Chroma semantics).
+
+    Each wiki page produces ONE RAG document keyed by
+    ``wiki:<scope>/<kind>/<slug>`` so re-runs replace cleanly.
+    Pages with ``is_valid=False`` are skipped (decay-marked content
+    shouldn't leak back into vector search either).
+
+    Body: { provider_id?: str, collection?: str (default 'wiki') }
+    Returns: { ok, indexed_count, skipped_invalid, total_pages }
+    """
+    provider_id = (body.get("provider_id") or "").strip()
+    collection = (body.get("collection") or "wiki").strip()
+
+    try:
+        from ...rag_provider import get_rag_registry
+        reg = get_rag_registry()
+    except Exception as e:
+        raise HTTPException(501, f"RAG registry unavailable: {e}")
+
+    store = _get_store()
+    pages = _list_all_pages(store)
+    documents = []
+    skipped_invalid = 0
+    for p in pages:
+        if not p.is_valid:
+            skipped_invalid += 1
+            continue
+        # One RAG doc per page. ID encodes scope/kind/slug so a
+        # re-index replaces (Chroma upsert by id).
+        doc_id = f"wiki:{p.scope}/{p.kind}/{p.slug}"
+        # Render body with frontmatter-summary as a single retrievable
+        # text — the agent's wiki-aware results are already structured,
+        # but the RAG path needs a flat document.
+        content = (p.body or "").strip()
+        if not content:
+            continue
+        documents.append({
+            "id": doc_id,
+            "title": p.title or p.slug,
+            "content": content,
+            "tags": list(p.tags or []),
+            "metadata": {
+                "scope": p.scope, "kind": p.kind, "slug": p.slug,
+                "wiki": True,
+                "success_count": p.success_count,
+                "fail_count": p.fail_count,
+                "applied_count": getattr(p, "applied_count", 0),
+                "source": next(
+                    (t.split(":", 1)[1] for t in (p.tags or [])
+                     if isinstance(t, str) and t.startswith("source:")),
+                    "agent",  # default — wiki_ingest writes from agents
+                ),
+            },
+        })
+
+    if not documents:
+        return {
+            "ok": True, "indexed_count": 0,
+            "skipped_invalid": skipped_invalid,
+            "total_pages": len(pages),
+            "note": "no documents to index",
+        }
+
+    try:
+        count = reg.ingest(
+            provider_id=provider_id,
+            collection=collection,
+            documents=documents,
+        )
+    except Exception as e:
+        logger.exception("wiki RAG ingest failed")
+        raise HTTPException(500, f"RAG ingest failed: {e}")
+
+    logger.info(
+        "wiki RAG re-index by %s: indexed=%d skipped_invalid=%d "
+        "total=%d collection=%s",
+        user.username, count, skipped_invalid, len(pages), collection,
+    )
+    return {
+        "ok": True,
+        "indexed_count": count,
+        "skipped_invalid": skipped_invalid,
+        "total_pages": len(pages),
+        "collection": collection,
+        "provider_id": provider_id or "local",
+    }
+
+
 @router.post("/toggle-valid")
 async def toggle_wiki_valid(
     body: dict = Body(...),

@@ -26036,6 +26036,7 @@ async function _renderKmWiki() {
       +     '<div style="font-size:12px;color:var(--text3);margin-top:2px">Agent 自动写入的经验 + Admin 整理的参考资料。每条带成功率追踪。</div>'
       +   '</div>'
       +   '<div style="display:flex;gap:8px">'
+      +     '<button class="btn btn-sm" onclick="_kmWikiRebuildIndex()" title="将所有 valid 的 wiki 页面重新写入 RAG 向量库 (collection=wiki)"><span class="material-symbols-outlined" style="font-size:14px">database</span> 重建 RAG 索引</button>'
       +     '<button class="btn btn-sm" onclick="_kmWikiShowImport()"><span class="material-symbols-outlined" style="font-size:14px">upload_file</span> 导入文件</button>'
       +     '<button class="btn btn-primary btn-sm" onclick="_kmWikiShowCreate()"><span class="material-symbols-outlined" style="font-size:14px">add</span> 新建条目</button>'
       +   '</div>'
@@ -26256,6 +26257,23 @@ async function _kmWikiSaveModal(isCreate) {
     _renderKmWiki();
   } catch (e) {
     alert((isCreate ? 'Create' : 'Save') + ' failed: ' + (e.message || e));
+  }
+}
+
+
+// ── Wiki: rebuild RAG index (Step D of merge plan) ──
+async function _kmWikiRebuildIndex() {
+  if (!confirm('重建 RAG 向量索引？所有 valid 的 wiki 页面会被重新写入 collection=wiki。\n仅需在内容大幅变化或迁移后执行一次。')) return;
+  try {
+    var r = await api('POST', '/api/portal/wiki/index', {
+      provider_id: '',  // empty = use default/local
+      collection: 'wiki',
+    });
+    var msg = '已重建索引: ' + r.indexed_count + ' 篇 wiki 页 (跳过 invalid: ' + r.skipped_invalid + ')';
+    if (window._toast) window._toast(msg, 'success');
+    else alert(msg);
+  } catch (e) {
+    alert('Rebuild failed: ' + (e.message || e));
   }
 }
 
