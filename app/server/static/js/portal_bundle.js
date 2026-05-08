@@ -26257,14 +26257,17 @@ function _kmWikiCardHtml(p, isTech) {
       +       '<p style="font-family:var(--font-mono);font-size:11px;color:var(--outline);margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(p.slug)+'">'+esc(p.slug)+'</p>'
       +     '</div>'
       +   '</div>'
-      // action row
+      // action row — all 3 buttons get text labels so users don't
+      // confuse INVALIDATE with DELETE (icon-only previously caused
+      // mis-clicks). Equal-width via flex:1 so the row reads as
+      // 3 sibling actions, not "1 primary + 2 dangerous icons".
       +   '<div style="display:flex;gap:8px;margin-top:auto">'
       +     '<button onclick="_kmWikiEdit('+refArgs+')" class="tc-mono-label" style="flex:1;padding:8px 0;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:var(--r-md);color:var(--on-surface);font-size:10px;cursor:pointer;letter-spacing:0.05em;display:inline-flex;align-items:center;justify-content:center;gap:6px;transition:all 0.15s" onmouseover="this.style.background=\'rgba(255,255,255,0.08)\'" onmouseout="this.style.background=\'rgba(255,255,255,0.04)\'"><span class="material-symbols-outlined" style="font-size:14px">edit</span> EDIT</button>'
-      +     '<button onclick="_kmWikiToggleValid('+refArgs+')" title="'+validToggleLabel+'" style="padding:8px 12px;background:'+validToggleColor+'10;border:1px solid '+validToggleColor+'30;border-radius:var(--r-md);color:'+validToggleColor+';cursor:pointer;display:inline-flex;align-items:center;transition:all 0.15s">'
-      +       '<span class="material-symbols-outlined" style="font-size:16px">'+(p.is_valid ? 'block' : 'check_circle')+'</span>'
+      +     '<button onclick="_kmWikiToggleValid('+refArgs+')" class="tc-mono-label" title="'+validToggleLabel+(p.is_valid ? ' — agent 检索时跳过此 entry' : ' — 恢复对 agent 可见')+'" style="flex:1;padding:8px 0;background:'+validToggleColor+'10;border:1px solid '+validToggleColor+'30;border-radius:var(--r-md);color:'+validToggleColor+';cursor:pointer;font-size:10px;letter-spacing:0.05em;display:inline-flex;align-items:center;justify-content:center;gap:6px;transition:all 0.15s" onmouseover="this.style.background=\''+validToggleColor+'20\'" onmouseout="this.style.background=\''+validToggleColor+'10\'">'
+      +       '<span class="material-symbols-outlined" style="font-size:14px">'+(p.is_valid ? 'block' : 'check_circle')+'</span> '+validToggleLabel
       +     '</button>'
-      +     '<button onclick="_kmWikiDelete('+refArgs+')" title="DELETE" style="padding:8px 12px;background:rgba(255,180,171,0.06);border:1px solid rgba(255,180,171,0.20);border-radius:var(--r-md);color:var(--error);cursor:pointer;display:inline-flex;align-items:center;transition:all 0.15s" onmouseover="this.style.background=\'rgba(255,180,171,0.14)\'" onmouseout="this.style.background=\'rgba(255,180,171,0.06)\'">'
-      +       '<span class="material-symbols-outlined" style="font-size:16px">delete</span>'
+      +     '<button onclick="_kmWikiDelete('+refArgs+')" class="tc-mono-label" title="DELETE — 永久从磁盘移除文件,不可恢复" style="flex:1;padding:8px 0;background:rgba(255,180,171,0.06);border:1px solid rgba(255,180,171,0.20);border-radius:var(--r-md);color:var(--error);cursor:pointer;font-size:10px;letter-spacing:0.05em;display:inline-flex;align-items:center;justify-content:center;gap:6px;transition:all 0.15s" onmouseover="this.style.background=\'rgba(255,180,171,0.14)\'" onmouseout="this.style.background=\'rgba(255,180,171,0.06)\'">'
+      +       '<span class="material-symbols-outlined" style="font-size:14px">delete</span> DELETE'
       +     '</button>'
       +   '</div>'
       + '</div>';
@@ -26322,6 +26325,21 @@ function _kmWikiApplyFilters() {
 }
 
 async function _kmWikiToggleValid(scope, kind, slug) {
+  // 2026-05-08: bring up a confirmation when going valid → invalid.
+  // Without this, accidentally hitting the ⊘ icon visually "deletes"
+  // the entry (filter hides invalid pages by default), confusing
+  // users who thought they were toggling. Skip confirmation when
+  // RESTORING (no destructive side effect).
+  // We have to fetch current state to know which way the toggle goes
+  // — but we can read it from the chip color (the in-memory list).
+  // Cheap: just always ask. User clicks valid→invalid OR invalid→valid;
+  // both deserve a 1-click confirm given the visual side effect.
+  var ok = confirm(
+    '确认切换 ' + scope + '/' + kind + '/' + slug + ' 的有效状态？\n\n' +
+    '• 标记失效：agent 检索时不再返回该 entry,页面在默认列表里也会隐藏\n' +
+    '• 标记恢复：恢复对 agent 可见'
+  );
+  if (!ok) return;
   try {
     var r = await api('POST', '/api/portal/wiki/toggle-valid', { scope: scope, kind: kind, slug: slug });
     if (window._toast) window._toast(r.is_valid ? '已恢复有效' : '已标记失效', 'success');
