@@ -3239,6 +3239,63 @@ class Agent:
         trace.clear()
         return out
 
+    # ── Single source of truth for "what mode is this agent in?" ──
+    #
+    # 2026-05-08: User-reported bug — closing a project didn't free
+    # agents. Root cause: 7+ injection sites (project_context_block /
+    # project_context_files / env / memory_recall scope / shared_context
+    # / rule engine scope) all branched on ``bool(self.project_id)``,
+    # ignoring whether the project was actually closed. ``context_type``
+    # field exists in persistence but isn't read by any of those sites.
+    #
+    # This method consolidates the decision: returns
+    #   'project' iff project_id is set AND that project is currently
+    #              in an open status (planning / active);
+    #   'meeting' iff source_meeting_id is set;
+    #   'solo'    otherwise (including project_id set but project closed).
+    #
+    # When a project transitions to terminal status (closed / cancelled /
+    # completed / archived), this method auto-returns 'solo' even before
+    # ``Hub.unbind_agents_from_project`` runs — defense in depth on top
+    # of the cascade fix.
+    _OPEN_PROJECT_STATUSES = frozenset({"planning", "active"})
+
+    def get_context_mode(self) -> str:
+        """Return 'solo' | 'project' | 'meeting'.
+
+        Replaces every ``if self.project_id:`` and ``if self.context_type
+        == "project":`` branch in the codebase. Single source of truth.
+        """
+        pid = (getattr(self, "project_id", "") or "").strip()
+        if pid:
+            try:
+                from .hub import get_hub
+                hub = get_hub()
+                if hub is not None:
+                    proj = hub.get_project(pid)
+                    if proj is not None:
+                        # Project status is a ProjectStatus enum or string.
+                        st = getattr(proj, "status", None)
+                        st_val = (st.value if hasattr(st, "value")
+                                  else str(st or "")).strip().lower()
+                        if st_val in self._OPEN_PROJECT_STATUSES:
+                            return "project"
+                        # Project exists but is closed → degrade to solo.
+                        return "solo"
+                    # Project_id stamped but project not in hub →
+                    # treat as solo (project was deleted).
+                    return "solo"
+            except Exception:
+                # Hub unavailable mid-startup / mid-shutdown — fall
+                # through to the binary heuristic so we don't crash.
+                pass
+            # No hub: can't verify project status, fall back to
+            # binary check (preserves legacy behavior).
+            return "project"
+        if (getattr(self, "source_meeting_id", "") or "").strip():
+            return "meeting"
+        return "solo"
+
     def _log(self, kind: str, data: dict):
         # Skip event logging during scheduled task execution — scheduled
         # prompts/replies must NOT appear in the agent's chat UI.
@@ -4518,12 +4575,19 @@ class Agent:
         # project_context_files — only for project/meeting agents.
         # Read PROJECT_CONTEXT.md / TUDOU_CLAW.md / CLAW.md / README.md
         # from working_dir + shared_workspace, mirroring agent.py inline.
+        # 2026-05-08: gate the SHARED-WORKSPACE walk by get_context_mode()
+        # so closed-project agents stop auto-injecting stale
+        # TUDOU_CLAW.md content. Solo agents still get to read these
+        # files from their own working_dir (e.g. a personal README) —
+        # skipping just the shared workspace walk.
         project_context_files: list = []
+        _is_solo = (self.get_context_mode() == "solo")
         try:
             from pathlib import Path as _PCPath
             wd = self._effective_working_dir()
             _ctx_dirs: list[_PCPath] = [wd]
-            _active_sw = self.get_active_shared_workspace()
+            _active_sw = self.get_active_shared_workspace() \
+                if not _is_solo else ""
             if _active_sw:
                 try:
                     _sw = _PCPath(_active_sw)
@@ -5268,8 +5332,17 @@ class Agent:
             "stable rule" vs "current state" semantics).
           * KV cache stays hot — only the last user message grows.
         """
-        project_id = (getattr(self, "project_id", "") or "").strip()
-        meeting_id = (getattr(self, "meeting_id", "") or "").strip()
+        # 2026-05-08: route through get_context_mode() so a closed
+        # project (status ∈ cancelled/completed/archived) returns
+        # "solo" → no project block injected. Without this, agents
+        # bound to a closed project keep seeing project_summary +
+        # handoffs in their prompt every turn and respond with
+        # "M2/M3 done, no pending" to ANY user message.
+        ctx_mode = self.get_context_mode()
+        project_id = (getattr(self, "project_id", "") or "").strip() \
+            if ctx_mode == "project" else ""
+        meeting_id = (getattr(self, "meeting_id", "") or "").strip() \
+            if ctx_mode == "meeting" else ""
         if not project_id and not meeting_id:
             return ""
         blocks: list[str] = []
@@ -7110,8 +7183,13 @@ Write only the summary body. Do not include any preamble or prefix."""
         # full union.
         try:
             from .tool_capabilities import core_tools_for_context
-            _has_project = bool(getattr(self, "project_id", "") or "")
-            _has_meeting = bool(getattr(self, "source_meeting_id", "") or "")
+            # 2026-05-08: route through get_context_mode() — auto-
+            # downgrades to solo when project_id stamped but project
+            # closed. Eliminates the "agent stuck reporting M2/M3 done"
+            # bug after project status transitions to terminal.
+            _ctx_mode = self.get_context_mode()
+            _has_project = (_ctx_mode == "project")
+            _has_meeting = (_ctx_mode == "meeting")
             _INFRA_TOOLS_SCHEMA = core_tools_for_context(
                 in_project=_has_project, in_meeting=_has_meeting,
             )
