@@ -1233,6 +1233,31 @@ def _handle_status(handler, path, hub, body, auth, actor_name, user_role) -> boo
         if not ok:
             handler._json({"error": msg}, 400)
             return True
+
+        # 2026-05-08: Cascade — when a project transitions to a
+        # terminal status, detach every bound agent so they don't keep
+        # auto-injecting stale project context into every prompt.
+        # Without this, agents bound to a "completed" project still
+        # see project_summary / handoffs / project_context_files in
+        # their system prompt each turn AND the "no glob in project
+        # chat" rule still fires on their tool calls — so they report
+        # "M2/M3 done, no pending" instead of doing whatever the user
+        # just asked. User-reported bug 2026-05-08 21:40.
+        _terminal = {"cancelled", "completed", "archived"}
+        if new_status in _terminal:
+            try:
+                _detached = hub.unbind_agents_from_project(proj_id)
+                if _detached:
+                    logger.info(
+                        "project %s → %s: detached %d agent(s)",
+                        proj_id, new_status, _detached,
+                    )
+            except Exception as _ub:
+                logger.warning(
+                    "cascade unbind on %s → %s failed: %s",
+                    proj_id, new_status, _ub,
+                )
+
         try:
             label_map = {
                 "planning": "未开始",

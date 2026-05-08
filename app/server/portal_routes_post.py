@@ -3581,6 +3581,26 @@ def _do_post_inner(handler, path: str):
             if not ok:
                 handler._json({"error": msg}, 400)
             else:
+                # 2026-05-08: cascade — terminal status detaches every
+                # bound agent so they don't keep auto-injecting stale
+                # project context. Same block lives in
+                # app/server/handlers/projects.py:_handle_status — both
+                # routes need the cascade because both can land first
+                # depending on path resolution.
+                if new_status in ("cancelled", "completed", "archived"):
+                    try:
+                        _detached = hub.unbind_agents_from_project(proj_id)
+                        if _detached:
+                            logger.info(
+                                "project %s → %s: detached %d agent(s)",
+                                proj_id, new_status, _detached,
+                            )
+                    except Exception as _ub:
+                        logger.warning(
+                            "cascade unbind on %s → %s failed: %s",
+                            proj_id, new_status, _ub,
+                        )
+
                 try:
                     label_map = {
                         "planning": "未开始",

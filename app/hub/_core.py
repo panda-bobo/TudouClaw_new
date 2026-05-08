@@ -2142,6 +2142,48 @@ class Hub:
     def get_project(self, project_id: str) -> Project | None:
         return self.projects.get(project_id)
 
+    def unbind_agents_from_project(self, project_id: str) -> int:
+        """Detach every agent currently bound to ``project_id``.
+
+        Called when a project transitions to a terminal status
+        (cancelled / completed / archived) — clears the agent's
+        ``project_id`` and ``current_task`` so the 7+ project-context
+        injection sites in agent.py / prompt_schemas.py / rule_engine
+        stop firing for that project on the agent's next turn.
+
+        Without this cascade, agents stay glued to their dead project:
+        every chat() turn re-builds the system prompt with stale
+        project summary + handoffs + context files; the "no glob in
+        project chat" rule still denies free-form filesystem queries;
+        knowledge / memory layers still scope queries by project_id —
+        so the agent ends up reporting "M2/M3 done, no pending tasks"
+        instead of doing whatever the user actually asked.
+
+        Returns the number of agents that were detached.
+        """
+        if not project_id:
+            return 0
+        detached = 0
+        with self._lock:
+            for agent in list(self.agents.values()):
+                if (getattr(agent, "project_id", "") or "") == project_id:
+                    agent.project_id = ""
+                    if hasattr(agent, "current_task"):
+                        agent.current_task = None
+                    detached += 1
+        if detached:
+            try:
+                self._save_agents()
+            except Exception as _se:
+                logger.warning(
+                    "save_agents after unbind failed: %s", _se,
+                )
+            logger.info(
+                "unbind_agents_from_project(%s): detached %d agent(s)",
+                project_id, detached,
+            )
+        return detached
+
     def remove_project(self, project_id: str) -> bool:
         with self._lock:
             if project_id in self.projects:
