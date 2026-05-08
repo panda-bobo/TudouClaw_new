@@ -26050,7 +26050,14 @@ async function _renderKmWiki() {
   var sc = document.getElementById('km-content');
   if (!sc) sc = document.getElementById('tech-hub-km-body') || document.getElementById('content');
   if (!sc) return;
-  sc.innerHTML = '<div style="color:var(--text3);padding:20px;text-align:center">加载中...</div>';
+  // 2026-05-08: detect tech (Aether) theme — render glass cards /
+  // status pills / mono labels to match the rest of the Knowledge
+  // hub instead of the old "var(--surface) flat card" look.
+  var _techW = false;
+  try { _techW = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+  sc.innerHTML = _techW
+    ? '<div class="tc-text-dim" style="padding:40px;text-align:center;font-family:var(--font-mono);font-size:11px;letter-spacing:0.05em">LOADING WIKI…</div>'
+    : '<div style="color:var(--text3);padding:20px;text-align:center">加载中...</div>';
   try {
     // Pull stats + list in parallel.
     var [stats, scopesResp, listResp] = await Promise.all([
@@ -26062,61 +26069,131 @@ async function _renderKmWiki() {
     var scopes = (scopesResp && scopesResp.scopes) || ['global'];
     var kinds = ['experience', 'methodology', 'template', 'pattern', 'reference'];
 
-    var headerHtml = ''
-      + '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;gap:12px;flex-wrap:wrap">'
-      +   '<div>'
-      +     '<div style="font-size:15px;font-weight:700;color:var(--text)">Wiki / 经验库</div>'
-      +     '<div style="font-size:12px;color:var(--text3);margin-top:2px">Agent 自动写入的经验 + Admin 整理的参考资料。每条带成功率追踪。</div>'
-      +   '</div>'
-      +   '<div style="display:flex;gap:8px">'
-      +     '<button class="btn btn-sm" onclick="_kmWikiRebuildIndex()" title="将所有 valid 的 wiki 页面重新写入 RAG 向量库 (collection=wiki)"><span class="material-symbols-outlined" style="font-size:14px">database</span> 重建 RAG 索引</button>'
-      +     '<button class="btn btn-sm" onclick="_kmWikiShowImport()"><span class="material-symbols-outlined" style="font-size:14px">upload_file</span> 导入文件</button>'
-      +     '<button class="btn btn-primary btn-sm" onclick="_kmWikiShowCreate()"><span class="material-symbols-outlined" style="font-size:14px">add</span> 新建条目</button>'
-      +   '</div>'
-      + '</div>';
+    var headerHtml, statsHtml, filterHtml, cardsHtml;
 
-    // Stats row
-    var statsHtml = ''
-      + '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px">'
-      +   _kmWikiStatTile('总条目', stats.total, 'menu_book', 'var(--primary)')
-      +   _kmWikiStatTile('有效', stats.valid, 'check_circle', '#3fb950')
-      +   _kmWikiStatTile('已失效', stats.invalid, 'block', 'var(--error)')
-      +   _kmWikiStatTile('Scopes', Object.keys(stats.by_scope || {}).length, 'category', '#a371f7')
-      + '</div>';
+    if (_techW) {
+      // ── Tech-theme header ──
+      headerHtml = ''
+        + '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;gap:12px;flex-wrap:wrap">'
+        +   '<div style="flex:1;min-width:240px">'
+        +     '<div class="tc-mono-label" style="color:var(--primary);display:flex;align-items:center;gap:8px">'
+        +       '<span>WIKI / EXPERIENCE VAULT</span>'
+        +       '<span style="width:6px;height:6px;border-radius:50%;background:var(--secondary);animation:pulse-dot 2s infinite ease-in-out"></span>'
+        +     '</div>'
+        +     '<h1 class="tc-h2" style="margin-top:6px">Wiki / 经验库</h1>'
+        +     '<div class="tc-text-dim" style="font-size:12px;margin-top:6px">Agent-authored experiences + admin-curated references. Effectiveness tracked per page.</div>'
+        +   '</div>'
+        +   '<div style="display:flex;gap:8px;flex-shrink:0">'
+        +     '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="_kmWikiRebuildIndex()" title="重建 RAG 向量索引"><span class="material-symbols-outlined" style="font-size:14px">database</span> REBUILD INDEX</button>'
+        +     '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="_kmWikiShowImport()"><span class="material-symbols-outlined" style="font-size:14px">upload_file</span> IMPORT</button>'
+        +     '<button class="tc-btn tc-btn-primary tc-btn-sm" onclick="_kmWikiShowCreate()"><span class="material-symbols-outlined" style="font-size:14px">add</span> NEW ENTRY</button>'
+        +   '</div>'
+        + '</div>';
 
-    // Filters
-    var scopeOpts = '<option value="">所有 scope</option>' + scopes.map(function(s){
-      return '<option value="'+esc(s)+'"'+(_kmWikiFilters.scope===s?' selected':'')+'>'+esc(s)+'</option>';
-    }).join('');
-    var kindOpts = '<option value="">所有 kind</option>' + kinds.map(function(k){
-      return '<option value="'+k+'"'+(_kmWikiFilters.kind===k?' selected':'')+'>'+k+'</option>';
-    }).join('');
-    var filterHtml = ''
-      + '<div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center">'
-      +   '<input id="kmw-q" type="text" placeholder="搜索 标题 / 标签 / 内容..." value="'+esc(_kmWikiFilters.q||'')+'" style="flex:1;min-width:200px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:12px" onkeydown="if(event.key===\'Enter\')_kmWikiApplyFilters()">'
-      +   '<select id="kmw-scope" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:12px" onchange="_kmWikiApplyFilters()">'+scopeOpts+'</select>'
-      +   '<select id="kmw-kind" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:12px" onchange="_kmWikiApplyFilters()">'+kindOpts+'</select>'
-      +   '<input id="kmw-domain" type="text" placeholder="domain / tag" value="'+esc(_kmWikiFilters.domain||'')+'" style="width:120px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:12px" onkeydown="if(event.key===\'Enter\')_kmWikiApplyFilters()">'
-      +   '<label style="font-size:11px;color:var(--text3);display:flex;align-items:center;gap:4px;cursor:pointer">'
-      +     '<input type="checkbox" id="kmw-include-invalid"'+(_kmWikiFilters.include_invalid?' checked':'')+' onchange="_kmWikiApplyFilters()">'
-      +     '显示已失效'
-      +   '</label>'
-      +   '<button class="btn btn-sm" onclick="_kmWikiApplyFilters()" style="padding:6px 12px"><span class="material-symbols-outlined" style="font-size:14px">search</span> 筛选</button>'
-      + '</div>';
+      statsHtml = ''
+        + '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px">'
+        +   _kmWikiStatTile('TOTAL', stats.total, 'menu_book', 'var(--primary)', _techW)
+        +   _kmWikiStatTile('VALID', stats.valid, 'check_circle', 'var(--secondary)', _techW)
+        +   _kmWikiStatTile('INVALID', stats.invalid, 'block', '#ff9800', _techW)
+        +   _kmWikiStatTile('SCOPES', Object.keys(stats.by_scope || {}).length, 'category', '#a371f7', _techW)
+        + '</div>';
 
-    // Cards
-    var cardsHtml = pages.length
-      ? pages.map(_kmWikiCardHtml).join('')
-      : '<div style="padding:40px;text-align:center;color:var(--text3);font-size:13px">没有匹配的 wiki 条目。<br><span style="font-size:11px">如果是新装实例，让 agent 跑一次任务并 wiki_ingest 即可。</span></div>';
+      var scopeOptsT = '<option value="">所有 scope</option>' + scopes.map(function(s){
+        return '<option value="'+esc(s)+'"'+(_kmWikiFilters.scope===s?' selected':'')+'>'+esc(s)+'</option>';
+      }).join('');
+      var kindOptsT = '<option value="">所有 kind</option>' + kinds.map(function(k){
+        return '<option value="'+k+'"'+(_kmWikiFilters.kind===k?' selected':'')+'>'+k+'</option>';
+      }).join('');
+      filterHtml = ''
+        + '<div class="tc-card-glass" style="padding:14px;margin-bottom:14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">'
+        +   '<input id="kmw-q" type="text" placeholder="搜索 标题 / 标签 / 内容..." value="'+esc(_kmWikiFilters.q||'')+'" style="flex:1;min-width:200px;padding:8px 12px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--bg);color:var(--text);font-size:12px" onkeydown="if(event.key===\'Enter\')_kmWikiApplyFilters()">'
+        +   '<select id="kmw-scope" style="padding:8px 12px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--bg);color:var(--text);font-size:12px" onchange="_kmWikiApplyFilters()">'+scopeOptsT+'</select>'
+        +   '<select id="kmw-kind" style="padding:8px 12px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--bg);color:var(--text);font-size:12px" onchange="_kmWikiApplyFilters()">'+kindOptsT+'</select>'
+        +   '<input id="kmw-domain" type="text" placeholder="domain / tag" value="'+esc(_kmWikiFilters.domain||'')+'" style="width:120px;padding:8px 12px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--bg);color:var(--text);font-size:12px" onkeydown="if(event.key===\'Enter\')_kmWikiApplyFilters()">'
+        +   '<label class="tc-mono-label" style="font-size:10px;color:var(--on-surface-variant);display:flex;align-items:center;gap:4px;cursor:pointer">'
+        +     '<input type="checkbox" id="kmw-include-invalid"'+(_kmWikiFilters.include_invalid?' checked':'')+' onchange="_kmWikiApplyFilters()">'
+        +     'SHOW INVALID'
+        +   '</label>'
+        +   '<button class="tc-btn tc-btn-ghost tc-btn-sm" onclick="_kmWikiApplyFilters()"><span class="material-symbols-outlined" style="font-size:14px">search</span> FILTER</button>'
+        + '</div>';
 
-    sc.innerHTML = headerHtml + statsHtml + filterHtml
-      + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px">' + cardsHtml + '</div>';
+      cardsHtml = pages.length
+        ? pages.map(function(p){ return _kmWikiCardHtml(p, _techW); }).join('')
+        : '<div class="tc-card-glass" style="padding:40px;text-align:center"><span class="material-symbols-outlined" style="font-size:48px;color:rgba(192,193,255,0.3);display:block;margin-bottom:12px">menu_book</span><div class="tc-text-dim" style="font-size:13px">No wiki entries match the current filters.</div><div class="tc-text-dim" style="font-size:11px;margin-top:6px">点 NEW ENTRY 新建,或让 agent 跑任务时 wiki_ingest。</div></div>';
+
+      sc.innerHTML = headerHtml + statsHtml + filterHtml
+        + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:14px">' + cardsHtml + '</div>';
+    } else {
+      // ── Legacy header ──
+      headerHtml = ''
+        + '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;gap:12px;flex-wrap:wrap">'
+        +   '<div>'
+        +     '<div style="font-size:15px;font-weight:700;color:var(--text)">Wiki / 经验库</div>'
+        +     '<div style="font-size:12px;color:var(--text3);margin-top:2px">Agent 自动写入的经验 + Admin 整理的参考资料。每条带成功率追踪。</div>'
+        +   '</div>'
+        +   '<div style="display:flex;gap:8px">'
+        +     '<button class="btn btn-sm" onclick="_kmWikiRebuildIndex()" title="将所有 valid 的 wiki 页面重新写入 RAG 向量库 (collection=wiki)"><span class="material-symbols-outlined" style="font-size:14px">database</span> 重建 RAG 索引</button>'
+        +     '<button class="btn btn-sm" onclick="_kmWikiShowImport()"><span class="material-symbols-outlined" style="font-size:14px">upload_file</span> 导入文件</button>'
+        +     '<button class="btn btn-primary btn-sm" onclick="_kmWikiShowCreate()"><span class="material-symbols-outlined" style="font-size:14px">add</span> 新建条目</button>'
+        +   '</div>'
+        + '</div>';
+
+      statsHtml = ''
+        + '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px">'
+        +   _kmWikiStatTile('总条目', stats.total, 'menu_book', 'var(--primary)', false)
+        +   _kmWikiStatTile('有效', stats.valid, 'check_circle', '#3fb950', false)
+        +   _kmWikiStatTile('已失效', stats.invalid, 'block', 'var(--error)', false)
+        +   _kmWikiStatTile('Scopes', Object.keys(stats.by_scope || {}).length, 'category', '#a371f7', false)
+        + '</div>';
+
+      var scopeOpts = '<option value="">所有 scope</option>' + scopes.map(function(s){
+        return '<option value="'+esc(s)+'"'+(_kmWikiFilters.scope===s?' selected':'')+'>'+esc(s)+'</option>';
+      }).join('');
+      var kindOpts = '<option value="">所有 kind</option>' + kinds.map(function(k){
+        return '<option value="'+k+'"'+(_kmWikiFilters.kind===k?' selected':'')+'>'+k+'</option>';
+      }).join('');
+      filterHtml = ''
+        + '<div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center">'
+        +   '<input id="kmw-q" type="text" placeholder="搜索 标题 / 标签 / 内容..." value="'+esc(_kmWikiFilters.q||'')+'" style="flex:1;min-width:200px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:12px" onkeydown="if(event.key===\'Enter\')_kmWikiApplyFilters()">'
+        +   '<select id="kmw-scope" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:12px" onchange="_kmWikiApplyFilters()">'+scopeOpts+'</select>'
+        +   '<select id="kmw-kind" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:12px" onchange="_kmWikiApplyFilters()">'+kindOpts+'</select>'
+        +   '<input id="kmw-domain" type="text" placeholder="domain / tag" value="'+esc(_kmWikiFilters.domain||'')+'" style="width:120px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:12px" onkeydown="if(event.key===\'Enter\')_kmWikiApplyFilters()">'
+        +   '<label style="font-size:11px;color:var(--text3);display:flex;align-items:center;gap:4px;cursor:pointer">'
+        +     '<input type="checkbox" id="kmw-include-invalid"'+(_kmWikiFilters.include_invalid?' checked':'')+' onchange="_kmWikiApplyFilters()">'
+        +     '显示已失效'
+        +   '</label>'
+        +   '<button class="btn btn-sm" onclick="_kmWikiApplyFilters()" style="padding:6px 12px"><span class="material-symbols-outlined" style="font-size:14px">search</span> 筛选</button>'
+        + '</div>';
+
+      cardsHtml = pages.length
+        ? pages.map(function(p){ return _kmWikiCardHtml(p, false); }).join('')
+        : '<div style="padding:40px;text-align:center;color:var(--text3);font-size:13px">没有匹配的 wiki 条目。<br><span style="font-size:11px">如果是新装实例，让 agent 跑一次任务并 wiki_ingest 即可。</span></div>';
+
+      sc.innerHTML = headerHtml + statsHtml + filterHtml
+        + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px">' + cardsHtml + '</div>';
+    }
   } catch (e) {
     sc.innerHTML = '<div style="padding:20px;color:var(--error);font-size:13px">加载失败: '+esc(String(e))+'</div>';
   }
 }
 
-function _kmWikiStatTile(label, value, icon, color) {
+function _kmWikiStatTile(label, value, icon, color, isTech) {
+  if (isTech) {
+    return ''
+      + '<div class="tc-card-glass" style="padding:14px;display:flex;align-items:center;gap:12px;position:relative;overflow:hidden">'
+      +   '<div style="position:absolute;top:0;right:0;padding:8px;pointer-events:none">'
+      +     '<span class="material-symbols-outlined" style="font-size:36px;color:'+color+';opacity:0.18">'+icon+'</span>'
+      +   '</div>'
+      +   '<div style="padding:8px;background:'+color+'20;border:1px solid '+color+'40;border-radius:var(--r-md);display:inline-flex">'
+      +     '<span class="material-symbols-outlined" style="font-size:18px;color:'+color+';font-variation-settings:\'FILL\' 1">'+icon+'</span>'
+      +   '</div>'
+      +   '<div>'
+      +     '<div style="font-family:var(--font-mono);font-size:22px;font-weight:600;color:'+color+';line-height:1">'+(value||0)+'</div>'
+      +     '<div class="tc-mono-label" style="font-size:10px;color:var(--outline);margin-top:4px">'+label+'</div>'
+      +   '</div>'
+      + '</div>';
+  }
+  // legacy
   return ''
     + '<div style="background:var(--surface);border:1px solid var(--border-light);border-radius:8px;padding:12px;display:flex;align-items:center;gap:10px">'
     +   '<div style="width:36px;height:36px;border-radius:8px;background:'+color+'20;display:flex;align-items:center;justify-content:center;color:'+color+'"><span class="material-symbols-outlined" style="font-size:20px">'+icon+'</span></div>'
@@ -26127,24 +26204,87 @@ function _kmWikiStatTile(label, value, icon, color) {
     + '</div>';
 }
 
-function _kmWikiCardHtml(p) {
-  var scopeBadge = '<span style="padding:1px 6px;border-radius:4px;font-size:10px;background:'+(p.scope==='global'?'rgba(99,102,241,0.12);color:var(--primary)':'rgba(139,92,246,0.12);color:#a371f7')+'">'+esc(p.scope)+'</span>';
-  var kindBadge = '<span style="padding:1px 6px;border-radius:4px;font-size:10px;background:rgba(34,197,94,0.12);color:#3fb950">'+esc(p.kind)+'</span>';
-  var validBadge = p.is_valid
+function _kmWikiCardHtml(p, isTech) {
+  var refArgs = "'"+esc(p.scope)+"','"+esc(p.kind)+"','"+esc(p.slug)+"'";
+  var validToggleLabel = p.is_valid ? (isTech ? 'INVALIDATE' : '失效') : (isTech ? 'RESTORE' : '恢复');
+  var validToggleColor = p.is_valid ? 'var(--error)' : '#3fb950';
+
+  if (isTech) {
+    var statusColor = p.is_valid
+      ? (p.applied_count > 0 ? 'var(--secondary)' : 'var(--primary)')
+      : '#ff9800';
+    var statusLabel = p.is_valid
+      ? (p.applied_count > 0 ? ('APPLIED · ' + p.applied_count) : 'READY')
+      : 'INVALID';
+    var scopeBadge = '<span class="tc-mono-label" style="padding:2px 8px;background:'+(p.scope==='global'?'rgba(192,193,255,0.10)':'rgba(163,113,247,0.10)')+';color:'+(p.scope==='global'?'var(--primary)':'#a371f7')+';border:1px solid '+(p.scope==='global'?'rgba(192,193,255,0.20)':'rgba(163,113,247,0.20)')+';border-radius:9999px;font-size:9px;letter-spacing:0.05em">'+esc(p.scope).toUpperCase()+'</span>';
+    var kindBadge = '<span class="tc-mono-label" style="padding:2px 8px;background:rgba(63,185,80,0.10);color:#3fb950;border:1px solid rgba(63,185,80,0.20);border-radius:9999px;font-size:9px;letter-spacing:0.05em">'+esc(p.kind).toUpperCase()+'</span>';
+    var domainBadges = (p.tags||[]).filter(function(t){ return !t.startsWith('source:'); }).slice(0, 4).map(function(t){
+      return '<span class="tc-mono-label" style="padding:2px 8px;background:rgba(192,193,255,0.10);color:var(--primary);border:1px solid rgba(192,193,255,0.20);border-radius:9999px;font-size:9px;letter-spacing:0.05em">'+esc(t)+'</span>';
+    }).join('');
+    return ''
+      + '<div class="tc-card-glass" style="padding:var(--s-lg);display:flex;flex-direction:column;gap:14px;position:relative;overflow:hidden;border-top:1px solid rgba(255,255,255,0.15);'+(p.is_valid?'':'opacity:0.55;')+'box-shadow:0 0 12px -3px rgba(192,193,255,0.10)">'
+      // ghost icon
+      +   '<div style="position:absolute;top:0;right:0;padding:14px;pointer-events:none">'
+      +     '<span class="material-symbols-outlined" style="font-size:64px;color:rgba(192,193,255,0.18);margin:-12px -12px 0 0">article</span>'
+      +   '</div>'
+      // header: icon + status pill
+      +   '<div style="display:flex;justify-content:space-between;align-items:flex-start;position:relative">'
+      +     '<div style="padding:8px;background:rgba(192,193,255,0.10);border:1px solid rgba(192,193,255,0.20);border-radius:var(--r-md);display:inline-flex">'
+      +       '<span class="material-symbols-outlined" style="font-size:22px;color:var(--primary);font-variation-settings:\'FILL\' 1">menu_book</span>'
+      +     '</div>'
+      +     '<div style="display:flex;align-items:center;gap:6px;background:var(--surface-container-high);padding:4px 10px;border-radius:9999px;border:1px solid rgba(255,255,255,0.05)">'
+      +       '<span style="width:6px;height:6px;border-radius:50%;background:'+statusColor+';animation:pulse-dot 2s infinite ease-in-out;box-shadow:0 0 6px '+statusColor+'"></span>'
+      +       '<span class="tc-mono-label" style="font-size:10px;color:var(--on-surface);letter-spacing:0.05em">'+statusLabel+'</span>'
+      +     '</div>'
+      +   '</div>'
+      // title + preview
+      +   '<div style="position:relative">'
+      +     '<h3 style="font-family:var(--font-display);font-size:16px;font-weight:600;color:var(--on-surface);margin:0;letter-spacing:-0.01em;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(p.title||p.slug)+'">'+esc(p.title||p.slug)+'</h3>'
+      +     '<p class="tc-text-dim" style="font-size:12px;line-height:1.5;margin:6px 0 0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">'+esc(p.preview||'')+'</p>'
+      +   '</div>'
+      // badges row
+      +   '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">'
+      +     scopeBadge + kindBadge + domainBadges
+      +   '</div>'
+      // success/fail stats grid
+      +   '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:10px 0;border-top:1px solid rgba(255,255,255,0.05);border-bottom:1px solid rgba(255,255,255,0.05)">'
+      +     '<div>'
+      +       '<p class="tc-mono-label" style="font-size:9px;color:var(--outline);margin:0 0 2px">SUCCESS / FAIL</p>'
+      +       '<p style="font-family:var(--font-mono);font-size:14px;color:var(--secondary);margin:0">'+(p.success_count||0)+' / '+(p.fail_count||0)+'</p>'
+      +     '</div>'
+      +     '<div style="text-align:right">'
+      +       '<p class="tc-mono-label" style="font-size:9px;color:var(--outline);margin:0 0 2px">SLUG</p>'
+      +       '<p style="font-family:var(--font-mono);font-size:11px;color:var(--outline);margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(p.slug)+'">'+esc(p.slug)+'</p>'
+      +     '</div>'
+      +   '</div>'
+      // action row
+      +   '<div style="display:flex;gap:8px;margin-top:auto">'
+      +     '<button onclick="_kmWikiEdit('+refArgs+')" class="tc-mono-label" style="flex:1;padding:8px 0;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:var(--r-md);color:var(--on-surface);font-size:10px;cursor:pointer;letter-spacing:0.05em;display:inline-flex;align-items:center;justify-content:center;gap:6px;transition:all 0.15s" onmouseover="this.style.background=\'rgba(255,255,255,0.08)\'" onmouseout="this.style.background=\'rgba(255,255,255,0.04)\'"><span class="material-symbols-outlined" style="font-size:14px">edit</span> EDIT</button>'
+      +     '<button onclick="_kmWikiToggleValid('+refArgs+')" title="'+validToggleLabel+'" style="padding:8px 12px;background:'+validToggleColor+'10;border:1px solid '+validToggleColor+'30;border-radius:var(--r-md);color:'+validToggleColor+';cursor:pointer;display:inline-flex;align-items:center;transition:all 0.15s">'
+      +       '<span class="material-symbols-outlined" style="font-size:16px">'+(p.is_valid ? 'block' : 'check_circle')+'</span>'
+      +     '</button>'
+      +     '<button onclick="_kmWikiDelete('+refArgs+')" title="DELETE" style="padding:8px 12px;background:rgba(255,180,171,0.06);border:1px solid rgba(255,180,171,0.20);border-radius:var(--r-md);color:var(--error);cursor:pointer;display:inline-flex;align-items:center;transition:all 0.15s" onmouseover="this.style.background=\'rgba(255,180,171,0.14)\'" onmouseout="this.style.background=\'rgba(255,180,171,0.06)\'">'
+      +       '<span class="material-symbols-outlined" style="font-size:16px">delete</span>'
+      +     '</button>'
+      +   '</div>'
+      + '</div>';
+  }
+
+  // ── Legacy card ──
+  var scopeBadgeL = '<span style="padding:1px 6px;border-radius:4px;font-size:10px;background:'+(p.scope==='global'?'rgba(99,102,241,0.12);color:var(--primary)':'rgba(139,92,246,0.12);color:#a371f7')+'">'+esc(p.scope)+'</span>';
+  var kindBadgeL = '<span style="padding:1px 6px;border-radius:4px;font-size:10px;background:rgba(34,197,94,0.12);color:#3fb950">'+esc(p.kind)+'</span>';
+  var validBadgeL = p.is_valid
     ? ''
     : '<span title="已失效 — 3 连败被标记，不再返回给 agent" style="padding:1px 6px;border-radius:4px;font-size:10px;background:rgba(248,81,73,0.12);color:var(--error)">已失效</span>';
-  var stats = '<span style="font-size:10px;color:var(--text3);font-family:Menlo,monospace">✓'+p.success_count+'/✗'+p.fail_count+(p.applied_count?' · applied '+p.applied_count:'')+'</span>';
-  var tags = (p.tags||[]).slice(0,5).map(function(t){
+  var statsL = '<span style="font-size:10px;color:var(--text3);font-family:Menlo,monospace">✓'+p.success_count+'/✗'+p.fail_count+(p.applied_count?' · applied '+p.applied_count:'')+'</span>';
+  var tagsL = (p.tags||[]).slice(0,5).map(function(t){
     return '<span style="padding:1px 5px;border-radius:3px;font-size:10px;background:var(--primary-tint-10);color:var(--primary)">'+esc(t)+'</span>';
   }).join(' ');
-  var moreTags = (p.tags||[]).length > 5
+  var moreTagsL = (p.tags||[]).length > 5
     ? '<span style="font-size:10px;color:var(--text3)">+'+((p.tags||[]).length-5)+'</span>'
     : '';
-  var validToggleLabel = p.is_valid ? '失效' : '恢复';
-  var validToggleColor = p.is_valid ? 'var(--error)' : '#3fb950';
-  var refArgs = "'"+esc(p.scope)+"','"+esc(p.kind)+"','"+esc(p.slug)+"'";
   return ''
-    + '<div style="background:var(--surface);border:1px solid var(--border-light);border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:8px"'+(p.is_valid?'':' style="opacity:0.6"')+'>'
+    + '<div style="background:var(--surface);border:1px solid var(--border-light);border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:8px'+(p.is_valid?'':';opacity:0.6')+'">'
     +   '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">'
     +     '<div style="font-weight:600;font-size:13px;color:var(--text);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">'+esc(p.title||p.slug)+'</div>'
     +     '<div style="display:flex;gap:4px;flex-shrink:0">'
@@ -26154,10 +26294,10 @@ function _kmWikiCardHtml(p) {
     +     '</div>'
     +   '</div>'
     +   '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">'
-    +     scopeBadge + kindBadge + validBadge + stats
+    +     scopeBadgeL + kindBadgeL + validBadgeL + statsL
     +   '</div>'
     +   '<div style="font-size:11px;color:var(--text3);line-height:1.4;max-height:50px;overflow:hidden">'+esc(p.preview||'')+'</div>'
-    +   (tags ? '<div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">'+tags+' '+moreTags+'</div>' : '')
+    +   (tagsL ? '<div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">'+tagsL+' '+moreTagsL+'</div>' : '')
     +   '<div style="font-size:10px;color:var(--text3);font-family:Menlo,monospace;margin-top:auto">'+p.slug+'</div>'
     + '</div>';
 }
