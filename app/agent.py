@@ -874,6 +874,35 @@ def _summarize_old_history(messages: list[dict],
         except Exception:
             pass
 
+    # ── Safety net: never produce a payload with no user/assistant. ──
+    # The cache-reuse branch above sets recent_start = sys_prefix_end
+    # + cached_n. If a downstream sanitizer (e.g. _drop_orphan_tool_
+    # messages) dropped messages between the cache write and now,
+    # recent_start can exceed len(messages) → messages[recent_start:]
+    # is empty → final payload is [system, summary_system] only →
+    # provider returns 400 "no user/assistant message". Back up
+    # recent_start to whatever's needed to keep at least the LAST
+    # user/assistant in the recent slice.
+    def _last_user_or_assistant_idx(msgs: list[dict]) -> int:
+        for i in range(len(msgs) - 1, -1, -1):
+            r = msgs[i].get("role")
+            if r in ("user", "assistant"):
+                return i
+        return -1
+
+    _last_anchor = _last_user_or_assistant_idx(messages)
+    if _last_anchor >= 0 and recent_start > _last_anchor:
+        # We were about to slice past the last anchor — back up.
+        adjusted = _find_safe_cut_idx(messages, _last_anchor)
+        if adjusted < recent_start:
+            logger.info(
+                "HISTORY_SUMMARY: safety-net backup recent_start %d → %d "
+                "(would have left 0 user/assistant msgs) agent=%s",
+                recent_start, adjusted,
+                agent.id[:8] if agent else "?")
+            recent_start = adjusted
+            old_slice = messages[sys_prefix_end:recent_start]
+
     # Assemble: [system prefix ..., summary system msg, recent messages ...]
     summary_msg = {
         "role": "system",
