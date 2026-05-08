@@ -25583,6 +25583,7 @@ function renderKnowledgeMemoryHub() {
   var c = document.getElementById('content');
   var tabs = [
     { id: 'shared',  label: window.t('tab.km.shared',  '共享知识库'),     icon: 'public' },
+    { id: 'wiki',    label: window.t('tab.km.wiki',    'Wiki / 经验库'),  icon: 'menu_book' },
     { id: 'private', label: window.t('tab.km.private', '专业领域知识库'), icon: 'school' },
     { id: 'rag',     label: window.t('tab.km.rag',     'RAG 提供方'),     icon: 'cloud' },
     { id: 'memory',  label: window.t('tab.km.memory',  'Agent 私有记忆'), icon: 'psychology' },
@@ -25596,6 +25597,7 @@ function renderKnowledgeMemoryHub() {
     + '<div id="km-content"></div>';
 
   if (_kmTab === 'shared') _renderKmShared();
+  else if (_kmTab === 'wiki') _renderKmWiki();
   else if (_kmTab === 'private') _renderKmPrivate();
   else if (_kmTab === 'rag') _renderKmRagProviders();
   else if (_kmTab === 'memory') _renderKmMemory();
@@ -25990,7 +25992,274 @@ async function _kmDoImport(collection, providerId) {
   }
 }
 
-// ── Tab 2: Domain Knowledge Bases (standalone, decoupled from agents) ──
+// ── Tab 2: Wiki / Experience Library ──
+// Single admin UI for the wiki layer (`app/knowledge/wiki_store.py`).
+// Lists agent-authored experiences + admin-curated reference pages
+// in one place, with filters by scope/kind/domain and a per-row
+// edit/delete/toggle-valid action set. The is_valid toggle lets
+// admins resurrect pages that auto-decayed after 3 consecutive
+// failed applications, OR retire a noisy page without removing it
+// from disk (so its history stays auditable).
+//
+// Backend: app/api/routers/wiki.py — 8 endpoints
+//   GET  /api/portal/wiki[?scope&kind&domain&q]
+//   GET  /api/portal/wiki/page?scope&kind&slug
+//   GET  /api/portal/wiki/scopes
+//   GET  /api/portal/wiki/stats
+//   POST /api/portal/wiki/{create,edit,delete,toggle-valid}
+
+var _kmWikiFilters = {
+  scope: '',  kind: '',  domain: '',  q: '',
+  include_invalid: false,
+};
+
+async function _renderKmWiki() {
+  var sc = document.getElementById('km-content');
+  if (!sc) sc = document.getElementById('tech-hub-km-body') || document.getElementById('content');
+  if (!sc) return;
+  sc.innerHTML = '<div style="color:var(--text3);padding:20px;text-align:center">加载中...</div>';
+  try {
+    // Pull stats + list in parallel.
+    var [stats, scopesResp, listResp] = await Promise.all([
+      api('GET', '/api/portal/wiki/stats'),
+      api('GET', '/api/portal/wiki/scopes'),
+      _kmWikiFetchList(),
+    ]);
+    var pages = (listResp && listResp.pages) || [];
+    var scopes = (scopesResp && scopesResp.scopes) || ['global'];
+    var kinds = ['experience', 'methodology', 'template', 'pattern', 'reference'];
+
+    var headerHtml = ''
+      + '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;gap:12px;flex-wrap:wrap">'
+      +   '<div>'
+      +     '<div style="font-size:15px;font-weight:700;color:var(--text)">Wiki / 经验库</div>'
+      +     '<div style="font-size:12px;color:var(--text3);margin-top:2px">Agent 自动写入的经验 + Admin 整理的参考资料。每条带成功率追踪。</div>'
+      +   '</div>'
+      +   '<div style="display:flex;gap:8px">'
+      +     '<button class="btn btn-sm" onclick="_kmWikiShowCreate()"><span class="material-symbols-outlined" style="font-size:14px">add</span> 新建条目</button>'
+      +   '</div>'
+      + '</div>';
+
+    // Stats row
+    var statsHtml = ''
+      + '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px">'
+      +   _kmWikiStatTile('总条目', stats.total, 'menu_book', 'var(--primary)')
+      +   _kmWikiStatTile('有效', stats.valid, 'check_circle', '#3fb950')
+      +   _kmWikiStatTile('已失效', stats.invalid, 'block', 'var(--error)')
+      +   _kmWikiStatTile('Scopes', Object.keys(stats.by_scope || {}).length, 'category', '#a371f7')
+      + '</div>';
+
+    // Filters
+    var scopeOpts = '<option value="">所有 scope</option>' + scopes.map(function(s){
+      return '<option value="'+esc(s)+'"'+(_kmWikiFilters.scope===s?' selected':'')+'>'+esc(s)+'</option>';
+    }).join('');
+    var kindOpts = '<option value="">所有 kind</option>' + kinds.map(function(k){
+      return '<option value="'+k+'"'+(_kmWikiFilters.kind===k?' selected':'')+'>'+k+'</option>';
+    }).join('');
+    var filterHtml = ''
+      + '<div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center">'
+      +   '<input id="kmw-q" type="text" placeholder="搜索 标题 / 标签 / 内容..." value="'+esc(_kmWikiFilters.q||'')+'" style="flex:1;min-width:200px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:12px" onkeydown="if(event.key===\'Enter\')_kmWikiApplyFilters()">'
+      +   '<select id="kmw-scope" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:12px" onchange="_kmWikiApplyFilters()">'+scopeOpts+'</select>'
+      +   '<select id="kmw-kind" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:12px" onchange="_kmWikiApplyFilters()">'+kindOpts+'</select>'
+      +   '<input id="kmw-domain" type="text" placeholder="domain / tag" value="'+esc(_kmWikiFilters.domain||'')+'" style="width:120px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:12px" onkeydown="if(event.key===\'Enter\')_kmWikiApplyFilters()">'
+      +   '<label style="font-size:11px;color:var(--text3);display:flex;align-items:center;gap:4px;cursor:pointer">'
+      +     '<input type="checkbox" id="kmw-include-invalid"'+(_kmWikiFilters.include_invalid?' checked':'')+' onchange="_kmWikiApplyFilters()">'
+      +     '显示已失效'
+      +   '</label>'
+      +   '<button class="btn btn-sm" onclick="_kmWikiApplyFilters()" style="padding:6px 12px"><span class="material-symbols-outlined" style="font-size:14px">search</span> 筛选</button>'
+      + '</div>';
+
+    // Cards
+    var cardsHtml = pages.length
+      ? pages.map(_kmWikiCardHtml).join('')
+      : '<div style="padding:40px;text-align:center;color:var(--text3);font-size:13px">没有匹配的 wiki 条目。<br><span style="font-size:11px">如果是新装实例，让 agent 跑一次任务并 wiki_ingest 即可。</span></div>';
+
+    sc.innerHTML = headerHtml + statsHtml + filterHtml
+      + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px">' + cardsHtml + '</div>';
+  } catch (e) {
+    sc.innerHTML = '<div style="padding:20px;color:var(--error);font-size:13px">加载失败: '+esc(String(e))+'</div>';
+  }
+}
+
+function _kmWikiStatTile(label, value, icon, color) {
+  return ''
+    + '<div style="background:var(--surface);border:1px solid var(--border-light);border-radius:8px;padding:12px;display:flex;align-items:center;gap:10px">'
+    +   '<div style="width:36px;height:36px;border-radius:8px;background:'+color+'20;display:flex;align-items:center;justify-content:center;color:'+color+'"><span class="material-symbols-outlined" style="font-size:20px">'+icon+'</span></div>'
+    +   '<div>'
+    +     '<div style="font-size:18px;font-weight:700;color:var(--text);line-height:1.1">'+(value||0)+'</div>'
+    +     '<div style="font-size:11px;color:var(--text3);margin-top:2px">'+label+'</div>'
+    +   '</div>'
+    + '</div>';
+}
+
+function _kmWikiCardHtml(p) {
+  var scopeBadge = '<span style="padding:1px 6px;border-radius:4px;font-size:10px;background:'+(p.scope==='global'?'rgba(99,102,241,0.12);color:var(--primary)':'rgba(139,92,246,0.12);color:#a371f7')+'">'+esc(p.scope)+'</span>';
+  var kindBadge = '<span style="padding:1px 6px;border-radius:4px;font-size:10px;background:rgba(34,197,94,0.12);color:#3fb950">'+esc(p.kind)+'</span>';
+  var validBadge = p.is_valid
+    ? ''
+    : '<span title="已失效 — 3 连败被标记，不再返回给 agent" style="padding:1px 6px;border-radius:4px;font-size:10px;background:rgba(248,81,73,0.12);color:var(--error)">已失效</span>';
+  var stats = '<span style="font-size:10px;color:var(--text3);font-family:Menlo,monospace">✓'+p.success_count+'/✗'+p.fail_count+(p.applied_count?' · applied '+p.applied_count:'')+'</span>';
+  var tags = (p.tags||[]).slice(0,5).map(function(t){
+    return '<span style="padding:1px 5px;border-radius:3px;font-size:10px;background:var(--primary-tint-10);color:var(--primary)">'+esc(t)+'</span>';
+  }).join(' ');
+  var moreTags = (p.tags||[]).length > 5
+    ? '<span style="font-size:10px;color:var(--text3)">+'+((p.tags||[]).length-5)+'</span>'
+    : '';
+  var validToggleLabel = p.is_valid ? '失效' : '恢复';
+  var validToggleColor = p.is_valid ? 'var(--error)' : '#3fb950';
+  var refArgs = "'"+esc(p.scope)+"','"+esc(p.kind)+"','"+esc(p.slug)+"'";
+  return ''
+    + '<div style="background:var(--surface);border:1px solid var(--border-light);border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:8px"'+(p.is_valid?'':' style="opacity:0.6"')+'>'
+    +   '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">'
+    +     '<div style="font-weight:600;font-size:13px;color:var(--text);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">'+esc(p.title||p.slug)+'</div>'
+    +     '<div style="display:flex;gap:4px;flex-shrink:0">'
+    +       '<button onclick="_kmWikiEdit('+refArgs+')" class="btn btn-sm" style="padding:3px 8px;font-size:11px">编辑</button>'
+    +       '<button onclick="_kmWikiToggleValid('+refArgs+')" class="btn btn-sm" style="padding:3px 8px;font-size:11px;color:'+validToggleColor+'">'+validToggleLabel+'</button>'
+    +       '<button onclick="_kmWikiDelete('+refArgs+')" class="btn btn-sm" style="padding:3px 8px;font-size:11px;color:var(--error)">删除</button>'
+    +     '</div>'
+    +   '</div>'
+    +   '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">'
+    +     scopeBadge + kindBadge + validBadge + stats
+    +   '</div>'
+    +   '<div style="font-size:11px;color:var(--text3);line-height:1.4;max-height:50px;overflow:hidden">'+esc(p.preview||'')+'</div>'
+    +   (tags ? '<div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">'+tags+' '+moreTags+'</div>' : '')
+    +   '<div style="font-size:10px;color:var(--text3);font-family:Menlo,monospace;margin-top:auto">'+p.slug+'</div>'
+    + '</div>';
+}
+
+async function _kmWikiFetchList() {
+  var qs = [];
+  if (_kmWikiFilters.scope) qs.push('scope='+encodeURIComponent(_kmWikiFilters.scope));
+  if (_kmWikiFilters.kind) qs.push('kind='+encodeURIComponent(_kmWikiFilters.kind));
+  if (_kmWikiFilters.domain) qs.push('domain='+encodeURIComponent(_kmWikiFilters.domain));
+  if (_kmWikiFilters.q) qs.push('q='+encodeURIComponent(_kmWikiFilters.q));
+  if (_kmWikiFilters.include_invalid) qs.push('include_invalid=true');
+  return await api('GET', '/api/portal/wiki' + (qs.length ? '?'+qs.join('&') : ''));
+}
+
+function _kmWikiApplyFilters() {
+  _kmWikiFilters.scope = (document.getElementById('kmw-scope')||{}).value || '';
+  _kmWikiFilters.kind = (document.getElementById('kmw-kind')||{}).value || '';
+  _kmWikiFilters.domain = (document.getElementById('kmw-domain')||{}).value || '';
+  _kmWikiFilters.q = (document.getElementById('kmw-q')||{}).value || '';
+  _kmWikiFilters.include_invalid = (document.getElementById('kmw-include-invalid')||{}).checked || false;
+  _renderKmWiki();
+}
+
+async function _kmWikiToggleValid(scope, kind, slug) {
+  try {
+    var r = await api('POST', '/api/portal/wiki/toggle-valid', { scope: scope, kind: kind, slug: slug });
+    if (window._toast) window._toast(r.is_valid ? '已恢复有效' : '已标记失效', 'success');
+    _renderKmWiki();
+  } catch (e) {
+    alert('Toggle failed: ' + (e.message || e));
+  }
+}
+
+async function _kmWikiDelete(scope, kind, slug) {
+  if (!confirm('永久删除 ' + scope + '/' + kind + '/' + slug + ' ？此操作不可恢复。')) return;
+  try {
+    await api('POST', '/api/portal/wiki/delete', { scope: scope, kind: kind, slug: slug });
+    if (window._toast) window._toast('已删除', 'success');
+    _renderKmWiki();
+  } catch (e) {
+    alert('Delete failed: ' + (e.message || e));
+  }
+}
+
+async function _kmWikiEdit(scope, kind, slug) {
+  try {
+    var p = await api('GET', '/api/portal/wiki/page?scope=' + encodeURIComponent(scope) + '&kind=' + encodeURIComponent(kind) + '&slug=' + encodeURIComponent(slug));
+    _kmWikiShowEditModal(p, /*isCreate=*/false);
+  } catch (e) {
+    alert('Load failed: ' + (e.message || e));
+  }
+}
+
+function _kmWikiShowCreate() {
+  _kmWikiShowEditModal({
+    scope: 'global', kind: 'experience', slug: '', title: '', body: '',
+    tags: [], sources: [], related: [],
+    signals_match: [], preconditions: [], strategy: [], validation: [],
+    constraints: {},
+  }, /*isCreate=*/true);
+}
+
+function _kmWikiShowEditModal(p, isCreate) {
+  var kindOpts = ['experience','methodology','template','pattern','reference']
+    .map(function(k){ return '<option value="'+k+'"'+(p.kind===k?' selected':'')+'>'+k+'</option>'; }).join('');
+  var html = ''
+    + '<div class="modal-overlay" id="kmw-edit-modal" onclick="if(event.target===this)this.remove()">'
+    +   '<div class="modal" style="max-width:860px;max-height:92vh;overflow-y:auto">'
+    +     '<h3>'+(isCreate?'新建 Wiki 条目':'编辑 Wiki 条目')+'</h3>'
+    +     '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:8px">'
+    +       '<div class="form-group"><label>Scope</label><input id="kmw-edit-scope" value="'+esc(p.scope||'global')+'"'+(isCreate?'':' readonly')+'></div>'
+    +       '<div class="form-group"><label>Kind</label><select id="kmw-edit-kind"'+(isCreate?'':' disabled')+'>'+kindOpts+'</select></div>'
+    +     '</div>'
+    +     '<div class="form-group"><label>Title</label><input id="kmw-edit-title" value="'+esc(p.title||'')+'"></div>'
+    +     (isCreate ? '<div class="form-group"><label>Slug (留空自动生成)</label><input id="kmw-edit-slug" value="" placeholder="auto"></div>' : '<div style="font-size:11px;color:var(--text3);margin-bottom:8px">slug: <code>'+esc(p.slug)+'</code> · '+esc(p.scope)+'/'+esc(p.kind)+'</div>')
+    +     '<div class="form-group"><label>Tags (逗号分隔)</label><input id="kmw-edit-tags" value="'+esc((p.tags||[]).join(', '))+'" placeholder="payments, security, audit"></div>'
+    +     '<div class="form-group"><label>Body (Markdown)</label><textarea id="kmw-edit-body" rows="14" style="font-family:Menlo,Monaco,monospace;font-size:12px;line-height:1.5">'+esc(p.body||'')+'</textarea></div>'
+    +     '<details style="margin-bottom:10px"><summary style="cursor:pointer;font-size:12px;color:var(--text2)">高级字段（结构化经验，可选）</summary>'
+    +       '<div class="form-group" style="margin-top:10px"><label>Signals Match (逗号分隔关键词)</label><input id="kmw-edit-signals" value="'+esc((p.signals_match||[]).join(', '))+'"></div>'
+    +       '<div class="form-group"><label>Preconditions (每行一条)</label><textarea id="kmw-edit-precond" rows="3">'+esc((p.preconditions||[]).join('\n'))+'</textarea></div>'
+    +       '<div class="form-group"><label>Strategy (每行一条)</label><textarea id="kmw-edit-strat" rows="4">'+esc((p.strategy||[]).join('\n'))+'</textarea></div>'
+    +       '<div class="form-group"><label>Validation (每行一条)</label><textarea id="kmw-edit-valid" rows="3">'+esc((p.validation||[]).join('\n'))+'</textarea></div>'
+    +     '</details>'
+    +     (isCreate ? '' : '<div style="font-size:11px;color:var(--text3);margin-bottom:10px">✓'+(p.success_count||0)+'/✗'+(p.fail_count||0)+' · applied '+(p.applied_count||0)+' · valid='+p.is_valid+'</div>')
+    +     '<div class="form-actions">'
+    +       '<button class="btn btn-ghost" onclick="document.getElementById(\'kmw-edit-modal\').remove()">取消</button>'
+    +       '<button class="btn btn-primary" onclick="_kmWikiSaveModal('+(isCreate?'true':'false')+')">'+(isCreate?'创建':'保存')+'</button>'
+    +     '</div>'
+    +   '</div>'
+    + '</div>';
+  document.body.insertAdjacentHTML('beforeend', html);
+}
+
+async function _kmWikiSaveModal(isCreate) {
+  function _val(id) { var e = document.getElementById(id); return e ? e.value.trim() : ''; }
+  function _list(id) { return _val(id).split(',').map(function(t){ return t.trim(); }).filter(Boolean); }
+  function _lines(id) { return _val(id).split('\n').map(function(t){ return t.trim(); }).filter(Boolean); }
+
+  var payload = {
+    scope: _val('kmw-edit-scope') || 'global',
+    kind:  _val('kmw-edit-kind') || 'experience',
+    title: _val('kmw-edit-title'),
+    body:  document.getElementById('kmw-edit-body').value,  // preserve newlines
+    tags:  _list('kmw-edit-tags'),
+    signals_match: _list('kmw-edit-signals'),
+    preconditions: _lines('kmw-edit-precond'),
+    strategy:      _lines('kmw-edit-strat'),
+    validation:    _lines('kmw-edit-valid'),
+  };
+  if (isCreate) {
+    var slug = _val('kmw-edit-slug');
+    if (slug) payload.slug = slug;
+  } else {
+    // For edit: scope/kind/slug come from the original page (read-only fields).
+    // The slug is in the modal's hidden state via the page reference text.
+    // Use the form's scope/kind values + look up the slug from the modal label.
+    var modal = document.getElementById('kmw-edit-modal');
+    var slugEl = modal && modal.querySelector('code');
+    if (slugEl) payload.slug = slugEl.textContent.trim();
+  }
+  if (!payload.title) { alert('Title required'); return; }
+  if (!isCreate && !payload.slug) { alert('Internal error: slug missing'); return; }
+  if (isCreate && !payload.body.trim()) { alert('Body required'); return; }
+
+  try {
+    var url = isCreate ? '/api/portal/wiki/create' : '/api/portal/wiki/edit';
+    await api('POST', url, payload);
+    var m = document.getElementById('kmw-edit-modal'); if (m) m.remove();
+    if (window._toast) window._toast(isCreate ? '已创建' : '已保存', 'success');
+    _renderKmWiki();
+  } catch (e) {
+    alert((isCreate ? 'Create' : 'Save') + ' failed: ' + (e.message || e));
+  }
+}
+
+
+// ── Tab 3: Domain Knowledge Bases (standalone, decoupled from agents) ──
 async function _renderKmPrivate() {
   // Tech (Aether) variant — different visual chrome, reuses the same
   // /api/portal/domain-kb/list endpoint and the existing edit/delete/
