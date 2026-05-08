@@ -2380,6 +2380,17 @@ function renderCurrentView() {
       // take care of keeping side panels fresh.
       var existingChat = document.getElementById('chat-msgs-' + currentAgent);
       if (existingChat) {
+        // 2026-05-08 (bug "chat 框变小了"): the unconditional style reset
+        // above (lines 2343-2346) wipes the flex+height that
+        // renderAgentChat set on first mount. Without this restore the
+        // chat container collapses to natural content height, leaving
+        // a huge empty area below the input. Symptom user reported
+        // after clearAgent → refresh → renderCurrentView → early-break
+        // path. Restore the chat-layout styles before bailing out.
+        c.style.padding = '0';
+        c.style.display = 'flex';
+        c.style.flexDirection = 'column';
+        c.style.height = '100%';
         try { loadAgentEventLog(currentAgent); } catch(e) {}
         try { _pollChatNewMessages(currentAgent); } catch(e) {}
         try { loadExecutionSteps(currentAgent); } catch(e) {}
