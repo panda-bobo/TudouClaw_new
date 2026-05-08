@@ -718,15 +718,27 @@ class SkillStore:
         except Exception:
             return False
 
-    def delete_catalog_entry(self, entry_id: str) -> bool:
+    def delete_catalog_entry(self, entry_id: str) -> tuple[bool, str]:
         """Hard-delete: remove the catalog directory from disk entirely.
         If installed, uninstall first. Cannot be undone — caller MUST
-        confirm with the user. Returns True on success.
+        confirm with the user.
+
+        Returns (ok, error_message). On success, error_message is "".
+        On failure, error_message contains a diagnostic — surface it to
+        the UI so the user knows what to fix instead of seeing a
+        generic "Delete failed" alert.
+
+        2026-05-08: was returning bare bool; user reported "Delete
+        failed:后端返回 ok=false" with no clue why (root cause turned
+        out to be the imported pptx skill dir being chmod'd 0o500 /
+        dr-x------, so shutil.rmtree couldn't unlink files inside).
+        Now we (a) surface the real error and (b) auto-chmod read-only
+        children before retrying rmtree.
         """
         with self._lock:
             entry = self._entries.get(entry_id)
         if entry is None:
-            return False
+            return (False, f"entry not found: {entry_id}")
         # Uninstall first if currently installed.
         # SkillCatalogEntry attribute is ``installed`` (bool) and
         # ``installed_id`` (str). Fall back via getattr for defensive
@@ -742,6 +754,7 @@ class SkillStore:
         try:
             from pathlib import Path
             import shutil
+            import stat as _stat
             p = Path(entry.catalog_path)
             if p.exists() and p.is_dir():
                 # Sanity check: refuse to delete obviously dangerous paths
@@ -752,8 +765,41 @@ class SkillStore:
                 )
                 if not ok_root:
                     logger.warning("delete refused: %s outside catalog roots", p)
-                    return False
-                shutil.rmtree(p)
+                    return (False, (
+                        f"path outside catalog roots: {p} "
+                        f"(known roots: {self.catalog_dirs})"
+                    ))
+
+                # Imported skills can land with read-only directory
+                # permissions if the source archive was read-only and
+                # import_agent_skill missed chmod-ing the target itself.
+                # rmtree fails on those because unlinking a file
+                # requires write+execute on its CONTAINING directory.
+                # Walk the tree once and grant owner u+rwx so rmtree
+                # can do its job.
+                try:
+                    p.chmod(p.stat().st_mode | _stat.S_IRWXU)
+                    for _root, _dirs, _files in os.walk(str(p)):
+                        for _name in _dirs + _files:
+                            _fp = os.path.join(_root, _name)
+                            try:
+                                _mode = os.stat(_fp).st_mode
+                                os.chmod(_fp, _mode | _stat.S_IRWXU)
+                            except Exception:
+                                pass
+                except Exception as _ce:
+                    logger.warning("pre-delete chmod failed for %s: %s", p, _ce)
+
+                # rmtree with onerror that retries after chmod, in case
+                # the walk above missed something (race / nested
+                # symlinks / etc.).
+                def _on_rm_error(func, path, exc_info):
+                    try:
+                        os.chmod(path, 0o700)
+                        func(path)
+                    except Exception:
+                        raise
+                shutil.rmtree(p, onerror=_on_rm_error)
             # Drop from in-memory dict.
             # BUG FIX: ``_entries`` is a dict[str, SkillCatalogEntry]
             # (see line 435). Old code did `[e for e in self._entries
@@ -762,10 +808,10 @@ class SkillStore:
             # → returned False → UI showed "删除失败" with no clue why.
             with self._lock:
                 self._entries.pop(entry_id, None)
-            return True
+            return (True, "")
         except Exception as e:
             logger.warning("delete_catalog_entry %s failed: %s", entry_id, e)
-            return False
+            return (False, f"{type(e).__name__}: {e}")
 
     # ── Edit metadata (in-place rewrite of manifest / SKILL.md) ────
     #
@@ -1141,6 +1187,15 @@ def import_agent_skill(src_path: str, catalog_dir: str,
     shutil.copytree(src, target)
 
     # Make all copied files writable (upstream sources may be read-only).
+    # 2026-05-08: rglob('*') iterates CHILDREN — it skips ``target``
+    # itself. If the source dir was 0o500 (dr-x------), the target
+    # inherits that on the root and stays read-only after this loop,
+    # which makes future delete_catalog_entry fail (rmtree can't
+    # unlink files in a non-writable parent). Chmod the root first.
+    try:
+        target.chmod(0o755)
+    except Exception:
+        pass
     for _f in target.rglob("*"):
         try:
             _f.chmod(0o644 if _f.is_file() else 0o755)

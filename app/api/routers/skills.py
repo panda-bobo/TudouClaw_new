@@ -860,9 +860,11 @@ async def manage_skill_store(
             # Hard-delete: removes the catalog directory + uninstalls if
             # currently installed. NOT recoverable — caller must confirm.
             entry_id = body.get("entry_id", "")
-            ok = store.delete_catalog_entry(entry_id)
+            ok, err = store.delete_catalog_entry(entry_id)
             store.scan()
-            return {"ok": ok}
+            if ok:
+                return {"ok": True}
+            return {"ok": False, "error": err}
 
         if action == "edit_metadata":
             # In-place edit of LLM-facing fields (description, tags,
