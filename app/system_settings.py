@@ -128,6 +128,20 @@ DEFAULTS: dict[str, Any] = {
         # unpause (this one is benign; default True even when master False).
         "resume_on_unpause": True,
     },
+    # ── Project-level safety guards ────────────────────────────────────
+    # Auto-pause an active project when its chat_history has been silent
+    # for N minutes — companion to auto_wakeup. The combination prevents
+    # an idle project from quietly burning tokens on residual auto-
+    # triggers (watchdog wakes, scheduled tasks, etc.) while the
+    # operator isn't watching. Inactive-paused projects auto-resume the
+    # moment a user message arrives — operator never has to manually
+    # un-pause.
+    #
+    # Set to 0 to disable. Heartbeat checks every ~heartbeat_interval
+    # seconds (~15s default), so granularity is "within a heartbeat".
+    "project_safety": {
+        "auto_pause_inactivity_minutes": 30,
+    },
     # ── Tool _reason injection (read by ToolSchema.to_openai_payload) ──
     # When enabled, every tool's OpenAI schema gets a required "_reason"
     # string param (≤max_chars). Forces the LLM to articulate WHY before

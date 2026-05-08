@@ -1935,6 +1935,31 @@ class ProjectChatEngine:
                        全程作为 source metadata 流转到 agent.chat,落到
                        per-context message bucket 的 source 字段。
         """
+        # ── Auto-resume on user chat (companion to inactivity-pause) ──
+        # If the project was paused by the inactivity watchdog
+        # (paused_by == "system:inactivity") and the user is now
+        # sending a message, treat the message itself as the resume
+        # signal — operator never has to manually un-pause. Any other
+        # pause source (admin / manual API call) is left alone — only
+        # auto-pauses get auto-resumed.
+        if project.paused and project.paused_by == "system:inactivity":
+            project.resume(by="system:auto_resume_on_chat")
+            logger.info(
+                "Project [%s] auto-resumed on incoming user chat "
+                "(was inactivity-paused)", project.name,
+            )
+            try:
+                project.post_message(
+                    sender="system", sender_name="System",
+                    content="▶️ 项目已恢复（检测到新的 chat 消息）。",
+                    msg_type="system",
+                )
+            except Exception:
+                pass
+            try:
+                self._save()
+            except Exception:
+                pass
         # 记录用户消息
         project.post_message(
             sender="user", sender_name="User",

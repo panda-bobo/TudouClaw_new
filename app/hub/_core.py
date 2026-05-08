@@ -766,6 +766,19 @@ class Hub:
                 except Exception as _ge:
                     logger.debug("growth tick loop failed: %s", _ge)
 
+                # ── Project inactivity auto-pause ──
+                # Pause any active project whose chat_history has been
+                # silent for >= N minutes (system_settings:
+                # project_safety.auto_pause_inactivity_minutes; 0=off).
+                # Auto-resumed on the next user message (see
+                # project.py:handle_user_message). Together with the
+                # auto_wakeup kill switch this closes the "running
+                # project quietly burns tokens overnight" failure mode.
+                try:
+                    self._maybe_auto_pause_inactive_projects()
+                except Exception as _pe:
+                    logger.debug("inactivity auto-pause loop error: %s", _pe)
+
                 # ── Stuck-agent watchdog ──
                 # If an agent is IDLE but has an ACTIVE ExecutionPlan with
                 # pending/in-progress steps AND hasn't seen step-level
@@ -2301,6 +2314,76 @@ class Hub:
     # long tool or slow LLM call finishes first; only true deadlocks trip.
     _BUSY_STALL_SEC = float(
         os.environ.get("TUDOU_BUSY_STALL_SEC", "300") or 300)
+
+    # Inactive-paused project marker — used both to set `paused_by` on
+    # auto-pause AND to recognise the auto-pause state in
+    # handle_user_message so user chat triggers an auto-resume.
+    INACTIVE_AUTOPAUSE_BY = "system:inactivity"
+
+    def _maybe_auto_pause_inactive_projects(self) -> None:
+        """Pause projects whose chat_history has been silent for
+        ``project_safety.auto_pause_inactivity_minutes``. Only touches
+        ACTIVE projects (skips already-paused / completed / cancelled).
+        Threshold 0 ⇒ feature disabled. Auto-paused projects resume
+        the moment a user message lands (see project.py).
+        """
+        try:
+            from ..system_settings import get_store
+            store = get_store()
+            if store is None:
+                return
+            mins = int(store.get(
+                "project_safety.auto_pause_inactivity_minutes", 30) or 0)
+        except Exception:
+            return
+        if mins <= 0:
+            return
+        threshold_s = mins * 60
+        now = time.time()
+        # Snapshot to avoid concurrent-modification on dict iteration.
+        for proj in list(self.projects.values()):
+            try:
+                if proj.paused:
+                    continue
+                # Skip terminal-status projects — pausing a completed
+                # / cancelled / archived project is meaningless.
+                status_val = getattr(proj.status, "value", str(proj.status))
+                if status_val in ("completed", "cancelled", "archived"):
+                    continue
+                if not proj.chat_history:
+                    continue
+                last_ts = float(proj.chat_history[-1].timestamp or 0)
+                if last_ts <= 0:
+                    continue
+                idle_s = now - last_ts
+                if idle_s < threshold_s:
+                    continue
+                proj.pause(
+                    by=self.INACTIVE_AUTOPAUSE_BY,
+                    reason=(f"项目 {mins} 分钟无 chat 更新，"
+                             f"系统自动暂停以避免后台 token 浪费。"
+                             f"用户下次发送消息会自动恢复。"),
+                )
+                logger.info(
+                    "Auto-paused inactive project %s (idle %.0fs > %ds)",
+                    proj.id[:10], idle_s, threshold_s,
+                )
+                try:
+                    proj.post_message(
+                        sender="system", sender_name="System",
+                        content=(f"⏸️ 项目已自动暂停（{mins} 分钟无 chat 更新）。"
+                                  f"发送消息可立即恢复。"),
+                        msg_type="system",
+                    )
+                except Exception:
+                    pass
+                try:
+                    self._save_projects()
+                except Exception:
+                    pass
+            except Exception as _e:
+                logger.debug("inactivity-pause check failed for %s: %s",
+                             getattr(proj, "id", "?"), _e)
 
     def _maybe_wake_stuck_agent(self, agent) -> None:
         """Nudge an idle agent with an unfinished ExecutionPlan.
