@@ -3485,9 +3485,16 @@ function renderKnowledgeMemoryHubTech() {
   var _orig = document.getElementById('content');
   sc.id = 'content'; if (_orig !== sc) _orig.id = 'content-outer';
   try {
+    // 2026-05-08: tech-theme tab 'wiki' previously fell through to
+    // _renderKmShared (the legacy Shared-Knowledge renderer with the
+    // "(legacy)" banner) — the wiki Browser code never ran on tech
+    // theme. Fixed by routing 'wiki' to _renderKmWiki. SK content
+    // (which user has emptied) is no longer accessible from the tech
+    // theme menu — same effective state as the regular theme post-
+    // Step E retirement.
     if      (r.current === 'kb-list'  && typeof _renderKmPrivate === 'function') _renderKmPrivate();
     else if (r.current === 'memory'   && typeof _renderKmMemory === 'function') _renderKmMemory();
-    else if (r.current === 'wiki'     && typeof _renderKmShared === 'function') _renderKmShared();
+    else if (r.current === 'wiki'     && typeof _renderKmWiki === 'function') _renderKmWiki();
     else if (r.current === 'rag-prov' && typeof _renderKmRagProviders === 'function') _renderKmRagProviders();
     else sc.innerHTML = '<div class="tc-card tc-text-dim" style="padding:var(--s-lg)">Tab not yet implemented.</div>';
   } catch (e) {
