@@ -26036,7 +26036,8 @@ async function _renderKmWiki() {
       +     '<div style="font-size:12px;color:var(--text3);margin-top:2px">Agent 自动写入的经验 + Admin 整理的参考资料。每条带成功率追踪。</div>'
       +   '</div>'
       +   '<div style="display:flex;gap:8px">'
-      +     '<button class="btn btn-sm" onclick="_kmWikiShowCreate()"><span class="material-symbols-outlined" style="font-size:14px">add</span> 新建条目</button>'
+      +     '<button class="btn btn-sm" onclick="_kmWikiShowImport()"><span class="material-symbols-outlined" style="font-size:14px">upload_file</span> 导入文件</button>'
+      +     '<button class="btn btn-primary btn-sm" onclick="_kmWikiShowCreate()"><span class="material-symbols-outlined" style="font-size:14px">add</span> 新建条目</button>'
       +   '</div>'
       + '</div>';
 
@@ -26255,6 +26256,117 @@ async function _kmWikiSaveModal(isCreate) {
     _renderKmWiki();
   } catch (e) {
     alert((isCreate ? 'Create' : 'Save') + ' failed: ' + (e.message || e));
+  }
+}
+
+
+// ── Wiki: file/text import modal (Step B of wiki / SK merge plan) ──
+// Reuses the existing /api/portal/rag/parse-file backend for client-
+// side PDF / Word / HTML extraction (same pipeline as Shared Knowledge
+// import), but routes the final POST to /api/portal/wiki/import which
+// writes ONE wiki page (kind=reference by default) instead of
+// chunking into a vector store. Step D will add vector indexing on
+// top of the wiki layer; until then, imported pages are searchable
+// via WikiStore.search()'s keyword scorer.
+
+function _kmWikiShowImport() {
+  var html = ''
+    + '<div class="modal-overlay" id="km-import-modal" onclick="if(event.target===this)this.remove()">'
+    +   '<div class="modal" style="max-width:680px">'
+    +     '<h3>导入到 Wiki</h3>'
+    +     '<div style="font-size:12px;color:var(--text3);margin-bottom:14px">上传 PDF / Word / Markdown / HTML / TXT，或粘贴文本。整篇作为<b>一个 wiki 条目</b>写入（不分块）。</div>'
+
+    // File upload zone (reuses km-imp-* IDs and _kmParseFile helper)
+    +     '<div id="km-imp-file-zone" style="border:2px dashed var(--border);border-radius:10px;padding:24px;text-align:center;cursor:pointer;margin-bottom:14px;transition:all 0.2s;background:var(--surface)" onclick="document.getElementById(\'km-imp-file-input\').click()" ondragover="event.preventDefault();this.style.borderColor=\'var(--primary)\';this.style.background=\'var(--primary-tint-6)\'" ondragleave="this.style.borderColor=\'var(--border)\';this.style.background=\'var(--surface)\'" ondrop="event.preventDefault();this.style.borderColor=\'var(--border)\';this.style.background=\'var(--surface)\';_kmHandleFileDrop(event)">'
+    +       '<input type="file" id="km-imp-file-input" accept=".pdf,.docx,.doc,.html,.htm,.txt,.md,.csv,.tsv,.json,.log" style="display:none" onchange="_kmHandleFileSelect(this)">'
+    +       '<span class="material-symbols-outlined" style="font-size:36px;color:var(--text3);display:block;margin-bottom:8px">upload_file</span>'
+    +       '<div style="font-size:13px;color:var(--text2);font-weight:600">点击或拖拽文件</div>'
+    +       '<div style="font-size:11px;color:var(--text3);margin-top:4px">支持 PDF / Word / HTML / TXT / Markdown / CSV</div>'
+    +     '</div>'
+    +     '<div id="km-imp-file-info" style="display:none;padding:10px 14px;background:rgba(63,185,80,0.08);border:1px solid rgba(63,185,80,0.2);border-radius:8px;margin-bottom:14px;font-size:12px">'
+    +       '<div style="display:flex;align-items:center;gap:8px">'
+    +         '<span class="material-symbols-outlined" style="font-size:18px;color:#3fb950">description</span>'
+    +         '<span id="km-imp-file-name" style="font-weight:600;color:var(--text)"></span>'
+    +         '<span id="km-imp-file-size" style="color:var(--text3)"></span>'
+    +         '<span id="km-imp-file-method" style="color:var(--text3);font-size:10px;background:var(--surface2);padding:1px 6px;border-radius:4px"></span>'
+    +         '<button onclick="_kmClearFile()" style="margin-left:auto;background:none;border:none;cursor:pointer;color:var(--text3);font-size:11px">✕ 清除</button>'
+    +       '</div>'
+    +       '<div id="km-imp-file-preview" style="margin-top:6px;font-size:11px;color:var(--text3);max-height:60px;overflow:hidden"></div>'
+    +     '</div>'
+    +     '<div style="display:flex;align-items:center;gap:12px;margin-bottom:14px"><div style="flex:1;height:1px;background:var(--border)"></div><span style="font-size:11px;color:var(--text3)">或直接粘贴文本</span><div style="flex:1;height:1px;background:var(--border)"></div></div>'
+
+    // Wiki-specific fields
+    +     '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">'
+    +       '<div class="form-group"><label>Scope</label><select id="kmw-imp-scope">'
+    +         '<option value="global" selected>global (所有角色可见)</option>'
+    +         '<option value="role:pm">role:pm</option>'
+    +         '<option value="role:coder">role:coder</option>'
+    +         '<option value="role:reviewer">role:reviewer</option>'
+    +         '<option value="role:researcher">role:researcher</option>'
+    +         '<option value="role:general">role:general</option>'
+    +       '</select></div>'
+    +       '<div class="form-group"><label>Kind</label><select id="kmw-imp-kind">'
+    +         '<option value="reference" selected>reference（参考资料 — 推荐）</option>'
+    +         '<option value="methodology">methodology（方法论）</option>'
+    +         '<option value="template">template（模版）</option>'
+    +         '<option value="experience">experience（经验）</option>'
+    +         '<option value="pattern">pattern（设计模式）</option>'
+    +       '</select></div>'
+    +     '</div>'
+    +     '<div class="form-group"><label>标题</label><input id="km-imp-title" placeholder="如: PCI DSS 4.0 完整学习总结（上传文件时自动填入文件名）"></div>'
+    +     '<div class="form-group"><label>标签 (逗号分隔)</label><input id="km-imp-tags" placeholder="payments, security, audit"></div>'
+    +     '<div class="form-group"><label>正文 / Body (Markdown)</label><textarea id="km-imp-content" rows="8" placeholder="粘贴文本…\n上传文件后此处自动填入解析后的文本" style="font-family:Menlo,Monaco,monospace;font-size:12px"></textarea></div>'
+
+    +     '<div id="km-imp-status" style="display:none;padding:8px 12px;margin-bottom:10px;border-radius:6px;font-size:12px"></div>'
+    +     '<div class="form-actions">'
+    +       '<button class="btn btn-ghost" onclick="document.getElementById(\'km-import-modal\').remove()">取消</button>'
+    +       '<button class="btn btn-primary" id="km-imp-submit-btn" onclick="_kmWikiDoImport()">导入</button>'
+    +     '</div>'
+    +   '</div>'
+    + '</div>';
+  document.body.insertAdjacentHTML('beforeend', html);
+}
+
+async function _kmWikiDoImport() {
+  function _val(id) { var e = document.getElementById(id); return e ? e.value.trim() : ''; }
+  var scope = _val('kmw-imp-scope') || 'global';
+  var kind = _val('kmw-imp-kind') || 'reference';
+  var title = _val('km-imp-title') || 'Imported';
+  var content = (document.getElementById('km-imp-content') || {}).value || '';
+  var tags = _val('km-imp-tags').split(',').map(function(t){ return t.trim(); }).filter(Boolean);
+  if (!content.trim()) { alert('正文不能为空 — 请上传文件或粘贴文本'); return; }
+
+  var statusEl = document.getElementById('km-imp-status');
+  var submitBtn = document.getElementById('km-imp-submit-btn');
+  if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = '导入中…'; }
+  if (statusEl) {
+    statusEl.style.display = 'block';
+    statusEl.style.background = 'var(--primary-tint-8)';
+    statusEl.style.color = 'var(--primary)';
+    statusEl.textContent = '正在写入 wiki…';
+  }
+
+  try {
+    var res = await api('POST', '/api/portal/wiki/import', {
+      scope: scope, kind: kind,
+      title: title, body: content, tags: tags,
+      source: 'admin',
+    });
+    window._kmFileData = null;
+    var note = res.overwrote ? '（覆盖已有同名）' : '';
+    if (window._toast) window._toast('已导入 ' + (res.chars || content.length) + ' 字符 ' + note, 'success');
+    else alert('导入完成 ' + note);
+    var m = document.getElementById('km-import-modal'); if (m) m.remove();
+    if (_kmTab === 'wiki') _renderKmWiki();
+  } catch (e) {
+    if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = '导入'; }
+    if (statusEl) {
+      statusEl.style.background = 'rgba(248,81,73,0.08)';
+      statusEl.style.color = 'var(--error)';
+      statusEl.textContent = '导入失败: ' + (e.message || e);
+    } else {
+      alert('Import failed: ' + (e.message || e));
+    }
   }
 }
 

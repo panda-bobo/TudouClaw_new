@@ -402,6 +402,83 @@ async def delete_wiki_page(
     return {"ok": True}
 
 
+@router.post("/import")
+async def import_wiki_page(
+    body: dict = Body(...),
+    user: CurrentUser = Depends(get_current_user),
+    hub=Depends(get_hub),
+):
+    """Admin entry-point for ingesting external content into the wiki.
+
+    Mirrors ``wiki_ingest`` (the agent-facing tool) but is intended for
+    admin-driven imports — PDF / Word / Markdown / HTML / TXT files
+    that the admin uploads via the Portal. The frontend parses the file
+    client-side via ``/api/portal/rag/parse-file`` and posts the
+    extracted text here as ``body``.
+
+    Differences from POST /create:
+      - Tolerates very large bodies (no size cap; wiki pages can be
+        full reference documents).
+      - Stamps ``source=admin`` (or whatever caller passes; default
+        admin) into the wiki page tags so search/filter can later
+        distinguish admin-curated vs agent-authored entries.
+      - Auto-generates slug from title if omitted.
+      - 200 on success even when overwriting an existing slug (caller
+        is admin and presumably knows; otherwise use POST /edit).
+
+    Step B of the wiki / shared-knowledge merge plan. Step D will
+    hook the RAG indexer so imported pages auto-index for vector
+    retrieval — until then, imported pages are searchable via the
+    wiki layer's built-in keyword scorer (good enough for ≤thousands
+    of pages).
+    """
+    from ...knowledge.wiki_store import WikiPage, VALID_KINDS, slugify
+
+    scope = (body.get("scope") or "global").strip()
+    kind = (body.get("kind") or "reference").strip().lower()
+    if kind not in VALID_KINDS:
+        raise HTTPException(
+            400,
+            f"kind must be one of {sorted(VALID_KINDS)}, got {kind!r}",
+        )
+    title = (body.get("title") or "").strip()
+    if not title:
+        raise HTTPException(400, "title is required")
+    body_text = (body.get("body") or body.get("content") or "").strip()
+    if not body_text:
+        raise HTTPException(400, "body is required (markdown content)")
+
+    slug = (body.get("slug") or "").strip() or slugify(title)
+    tags = list(body.get("tags") or [])
+    # Stamp the source — used by future filters ("show me only
+    # admin-curated reference pages, hide agent-authored experiences").
+    source_tag = (body.get("source") or "admin").strip().lower()
+    if source_tag and source_tag not in tags:
+        tags.append(f"source:{source_tag}")
+
+    store = _get_store()
+    existing = store.read_page(scope, kind, slug)
+    overwrote = existing is not None
+    page = WikiPage(
+        scope=scope, kind=kind, slug=slug,
+        title=title, body=body_text,
+        tags=[str(t).strip() for t in tags if str(t).strip()],
+        sources=list(body.get("sources") or []),
+        related=list(body.get("related") or []),
+    )
+    store.write_page(page, log_action="import")
+    logger.info(
+        "wiki page imported: %s/%s/%s (%d chars, overwrote=%s) by %s",
+        scope, kind, slug, len(body_text), overwrote, user.username,
+    )
+    return {
+        "ok": True,
+        "page": _page_to_full(page),
+        "overwrote": overwrote,
+        "chars": len(body_text),
+    }
+
+
 @router.post("/toggle-valid")
 async def toggle_wiki_valid(
     body: dict = Body(...),
