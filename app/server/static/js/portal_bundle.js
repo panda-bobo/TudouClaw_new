@@ -35050,12 +35050,16 @@ async function renderSystemSettings(container) {
           })()
       + '</div>'
 
-      // 2026-05-08: Tech-theme path also needs the Sandbox readonly card
-      // (the legacy `c.innerHTML` branch below has it; without this, only
-      // legacy-theme users saw it). Re-uses the same _renderSandboxReadonlyCard
-      // helper — admins see identical content regardless of theme.
+      // 2026-05-08: Tech-theme path also needs the Sandbox cards
+      // (the legacy `c.innerHTML` branch below has them; without this,
+      // only legacy-theme users saw them). Re-uses the same helpers —
+      // admins see identical content regardless of theme.
       + '<div style="margin-top:var(--s-xl)">'
       +   _renderSandboxReadonlyCard(settings, defaults)
+      + '</div>'
+
+      + '<div style="margin-top:var(--s-xl)">'
+      +   _renderSandboxAllowedCard(settings, defaults)
       + '</div>'
 
       + '<div style="margin-top:var(--s-xl)">'
@@ -35093,6 +35097,8 @@ async function renderSystemSettings(container) {
 
     // ── Sandbox readonly directories (admin-maintained allowlist) ──
     +   _renderSandboxReadonlyCard(settings, defaults)
+    // ── Sandbox read+write directories (admin-maintained allowlist) ──
+    +   _renderSandboxAllowedCard(settings, defaults)
 
     +   '<button class="btn btn-ghost btn-sm" onclick="_systemSettingsResetDefaults()" '
     +     (anyDiverged ? '' : 'disabled style="opacity:0.5"')
@@ -35227,6 +35233,122 @@ async function _sandboxSavePaths(paths) {
     });
     if (window._toast) _toast('已保存 ' + paths.length + ' 条路径', 'success');
     renderSystemSettings();   // re-render so chips reflect the new state
+  } catch (e) {
+    var msg = (e && (e.message || e.detail || e.toString())) || 'unknown';
+    if (window._toast) _toast('Save failed: ' + msg, 'error');
+    else alert('Save failed: ' + msg);
+  }
+}
+
+// ── Sandbox ALLOWED (read+write) directories card ────────────────
+// Sister to _renderSandboxReadonlyCard. Same UX (chip + Enter add)
+// but the paths get full read+write access — for vault directories,
+// scratch dirs the agent needs to materialize files into.
+function _renderSandboxAllowedCard(settings, defaults) {
+  var sb = (settings && settings.sandbox) || {};
+  var rwDirs = Array.isArray(sb.allowed_dirs) ? sb.allowed_dirs : [];
+  var n = rwDirs.length;
+  var statusColor = n > 0 ? 'var(--secondary)' : 'var(--outline)';
+  var statusLabel = n > 0 ? 'CONFIGURED · ' + n : 'EMPTY';
+  var chipsHtml = rwDirs.length === 0
+    ? '<span class="tc-text-dim" style="font-size:11px;font-style:italic;padding:4px 0">— 暂无路径 — 在下方输入框输入并按 Enter 添加 —</span>'
+    : rwDirs.map(function(p) {
+        return '<span class="sandbox-rw-chip" data-path="' + esc(p) + '" '
+          +    'style="display:inline-flex;align-items:center;gap:6px;padding:5px 10px;'
+          +    'background:rgba(63,185,80,0.10);border:1px solid rgba(63,185,80,0.20);'
+          +    'border-radius:6px;font-size:11px;color:var(--on-surface);'
+          +    'font-family:Menlo,Monaco,monospace;max-width:100%;overflow:hidden">'
+          +      '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(p) + '">'
+          +         esc(p)
+          +      '</span>'
+          +      '<span onclick="_sandboxRwRemovePath(\'' + esc(p).replace(/'/g, "\\'") + '\')" '
+          +         'style="cursor:pointer;color:var(--text3);font-size:14px;line-height:1;'
+          +         'padding:0 2px;flex-shrink:0" title="移除">&times;</span>'
+          +    '</span>';
+      }).join('');
+  return ''
+    + '<div class="tc-card-glass" style="'
+    +     'padding:var(--s-lg);display:flex;flex-direction:column;gap:14px;'
+    +     'position:relative;overflow:hidden;border-top:1px solid rgba(255,255,255,0.15);'
+    +     'box-shadow:0 0 15px -3px rgba(63,185,80,0.10);'
+    +   '">'
+    +   '<div style="position:absolute;top:0;right:0;padding:14px;pointer-events:none">'
+    +     '<span class="material-symbols-outlined" style="font-size:64px;color:rgba(63,185,80,0.18);margin:-12px -12px 0 0">edit_note</span>'
+    +   '</div>'
+    +   '<div style="display:flex;justify-content:space-between;align-items:flex-start;position:relative">'
+    +     '<div style="padding:8px;background:rgba(63,185,80,0.10);border:1px solid rgba(63,185,80,0.20);border-radius:var(--r-md);display:inline-flex">'
+    +       '<span class="material-symbols-outlined" style="font-size:22px;color:#3fb950;font-variation-settings:\'FILL\' 1">drive_file_rename_outline</span>'
+    +     '</div>'
+    +     '<div style="display:flex;align-items:center;gap:6px;background:var(--surface-container-high);padding:4px 10px;border-radius:9999px;border:1px solid rgba(255,255,255,0.05)">'
+    +       '<span style="width:6px;height:6px;border-radius:50%;background:' + statusColor + ';animation:pulse-dot 2s infinite ease-in-out;box-shadow:0 0 6px ' + statusColor + '"></span>'
+    +       '<span class="tc-mono-label" style="font-size:10px;color:var(--on-surface);letter-spacing:0.05em">' + statusLabel + '</span>'
+    +     '</div>'
+    +   '</div>'
+    +   '<div style="position:relative">'
+    +     '<h3 style="font-family:var(--font-display);font-size:18px;font-weight:600;color:var(--on-surface);margin:0;letter-spacing:-0.01em;line-height:1.3">Sandbox 可读写路径</h3>'
+    +     '<p class="tc-text-dim" style="font-size:12px;line-height:1.5;margin:6px 0 0">'
+    +       '比 readonly 更进一步 — agent tool 在这些目录可以 <code style="font-family:var(--font-mono);font-size:11px;background:rgba(255,255,255,0.06);padding:1px 4px;border-radius:3px">read + write</code>。典型用途: Obsidian vault, 共享笔记目录, 项目导出目录。'
+    +       '支持 <code style="font-family:var(--font-mono);font-size:11px;background:rgba(255,255,255,0.06);padding:1px 4px;border-radius:3px">~</code> 和 <code style="font-family:var(--font-mono);font-size:11px;background:rgba(255,255,255,0.06);padding:1px 4px;border-radius:3px">$VAR</code> 展开。'
+    +     '</p>'
+    +   '</div>'
+    +   '<div id="sandbox-rw-chips" style="display:flex;flex-wrap:wrap;gap:6px;padding:12px;border-top:1px solid rgba(255,255,255,0.05);border-bottom:1px solid rgba(255,255,255,0.05);min-height:42px;align-items:center">'
+    +     chipsHtml
+    +   '</div>'
+    +   '<div style="display:flex;align-items:center;gap:8px;margin-top:auto">'
+    +     '<input id="sandbox-rw-input" type="text" '
+    +     '       placeholder="$HOME/Documents/Obsidian Vault/  ← 输入路径，按 Enter 添加" '
+    +     '       onkeydown="if(event.key===\'Enter\'){event.preventDefault();_sandboxRwAddPath();}" '
+    +     '       style="flex:1;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:var(--r-md);color:var(--text);font-size:12px;font-family:Menlo,Monaco,monospace">'
+    +     '<button onclick="_sandboxRwAddPath()" class="tc-mono-label" '
+    +     '        style="padding:8px 14px;background:rgba(63,185,80,0.10);border:1px solid rgba(63,185,80,0.20);border-radius:var(--r-md);color:#3fb950;font-size:10px;cursor:pointer;letter-spacing:0.05em;display:inline-flex;align-items:center;gap:6px;transition:all 0.15s" '
+    +     '        onmouseover="this.style.background=\'rgba(63,185,80,0.20)\'" '
+    +     '        onmouseout="this.style.background=\'rgba(63,185,80,0.10)\'">'
+    +       '<span class="material-symbols-outlined" style="font-size:14px">add</span> ADD'
+    +     '</button>'
+    +   '</div>'
+    + '</div>';
+}
+
+async function _sandboxRwAddPath() {
+  var input = document.getElementById('sandbox-rw-input');
+  if (!input) return;
+  var path = (input.value || '').trim();
+  if (!path) return;
+  var chips = document.querySelectorAll('#sandbox-rw-chips .sandbox-rw-chip');
+  var paths = [];
+  for (var i = 0; i < chips.length; i++) {
+    paths.push(chips[i].dataset.path);
+  }
+  if (paths.indexOf(path) !== -1) {
+    if (window._toast) _toast('该路径已存在', 'info');
+    input.value = '';
+    return;
+  }
+  paths.push(path);
+  await _sandboxRwSavePaths(paths);
+  input.value = '';
+  input.focus();
+}
+
+async function _sandboxRwRemovePath(path) {
+  var chips = document.querySelectorAll('#sandbox-rw-chips .sandbox-rw-chip');
+  var paths = [];
+  for (var i = 0; i < chips.length; i++) {
+    if (chips[i].dataset.path !== path) {
+      paths.push(chips[i].dataset.path);
+    }
+  }
+  await _sandboxRwSavePaths(paths);
+}
+
+async function _sandboxRwSavePaths(paths) {
+  try {
+    await api('PATCH', '/api/portal/system-settings', {
+      path: 'sandbox.allowed_dirs',
+      value: paths,
+    });
+    if (window._toast) _toast('已保存 ' + paths.length + ' 条读写路径', 'success');
+    renderSystemSettings();
   } catch (e) {
     var msg = (e && (e.message || e.detail || e.toString())) || 'unknown';
     if (window._toast) _toast('Save failed: ' + msg, 'error');

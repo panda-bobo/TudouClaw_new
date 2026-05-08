@@ -116,13 +116,13 @@ def _validate_value(path: str, value: Any) -> None:
             raise HTTPException(400, f"{path} must be in 10..1000")
         return
 
-    # ── Sandbox: admin-maintained readonly path allowlist ──
+    # ── Sandbox: admin-maintained readonly + read-write path allowlists ──
     # 2026-05-08: list of strings, each path expanded for ~ / $VAR
     # at sandbox-build time. We accept any list of non-empty strings
     # here — paths that don't exist are silently dropped at sandbox
     # build time, not at write time (admin can pre-stage entries
     # before a vault is created, etc.).
-    if path == "sandbox.readonly_dirs":
+    if path in ("sandbox.readonly_dirs", "sandbox.allowed_dirs"):
         if not isinstance(value, list):
             raise HTTPException(
                 400,

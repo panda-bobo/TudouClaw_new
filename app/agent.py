@@ -8821,14 +8821,15 @@ Write only the summary body. Do not include any preamble or prefix."""
         except Exception:
             pass
 
-        # ── Admin-maintained readonly paths (system_settings) ───────
+        # ── Admin-maintained readonly + read-write paths (system_settings) ──
         # 2026-05-08: User asked for a Settings-driven way to grant
         # agents read access to specific paths outside their jail
         # (e.g. obsidian skill needs ~/Library/Application Support/
-        # obsidian/obsidian.json). Maintained by admin via Portal →
-        # 系统配置 → Sandbox readonly. Each entry expands ~ and $VAR.
-        # Failures (missing settings store, bad path) silently skip
-        # — never break agent boot.
+        # obsidian/obsidian.json). Plus read+write to vault directories
+        # so the agent can actually save notes there.
+        # Maintained by admin via Portal → 系统配置 → Sandbox cards.
+        # Each entry expands ~ and $VAR. Failures (missing settings
+        # store, bad path) silently skip — never break agent boot.
         try:
             from .system_settings import get_store as _get_ss_store
             _ss = _get_ss_store()
@@ -8843,6 +8844,19 @@ Write only the summary body. Do not include any preamble or prefix."""
                             if _expanded and _os.path.exists(_expanded):
                                 if _expanded not in readonly_dirs:
                                     readonly_dirs.append(_expanded)
+                        except (TypeError, ValueError):
+                            continue
+                # Read+write paths
+                _admin_rw = _ss.get("sandbox.allowed_dirs", []) or []
+                if isinstance(_admin_rw, list):
+                    for _p in _admin_rw:
+                        try:
+                            _expanded = _os.path.expandvars(
+                                _os.path.expanduser(str(_p).strip())
+                            )
+                            if _expanded and _os.path.exists(_expanded):
+                                if _expanded not in allowed_dirs:
+                                    allowed_dirs.append(_expanded)
                         except (TypeError, ValueError):
                             continue
         except Exception:

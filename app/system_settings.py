@@ -69,7 +69,14 @@ DEFAULTS: dict[str, Any] = {
     #   "/etc/timezone",
     # ]
     "sandbox": {
+        # Read-only paths (agent.py:_build_sandbox_scope merges these
+        # into SandboxPolicy.readonly_dirs).
         "readonly_dirs": [],
+        # 2026-05-08: read+write paths. Use case: Obsidian vault
+        # outside agent working_dir — agent reads the config to find
+        # the vault, then needs to actually write .md files there.
+        # readonly_dirs only solves the read half.
+        "allowed_dirs": [],
     },
     # ── Agent runtime guardrails (read by tools_split + agent.py) ──
     "agent_guardrails": {
