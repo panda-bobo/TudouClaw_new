@@ -114,6 +114,25 @@ class WikiPage:
     last_applied_at: float = 0.0
     consecutive_fails: int = 0
     is_valid: bool = True
+    # ── Domain dimension (2026-05-08) ──
+    # User feedback: "global wiki 也不对，PCI 是 security 的，一个是
+    # PM 的". scope ("global" / "role:xx") only answers WHO can see the
+    # page; it doesn't carry WHAT subject the page is about. PCI DSS
+    # is global-visible but specifically about security/payments-
+    # compliance — coder agents asking about "deployment" shouldn't
+    # match it just because both contain English words.
+    #
+    # ``domains`` is an orthogonal axis (controlled vocabulary). Used
+    # by future Phase 3 / Step 4-5:
+    #   - knowledge_lookup boosts results whose domains intersect the
+    #     inferred-domain of the current task
+    #   - agent.expertise_scores accumulates by domain (across roles)
+    #   - prompt-block injection picks top experiences per domain
+    #
+    # Empty list = "domain unknown / general" — search treats it as
+    # neutral, neither boost nor penalty. Existing pages stay unchanged
+    # on first read (the field is only emitted when non-empty).
+    domains: list[str] = field(default_factory=list)
     # ── Optional structured fields (Gene-like, borrowed from
     # @evomap/evolver's gene schema). Filled when ``kind`` is
     # "experience" / "methodology" / "pattern" — gives downstream
@@ -165,6 +184,10 @@ class WikiPage:
             fm_lines.append(f"consecutive_fails: {self.consecutive_fails}")
         if not self.is_valid:
             fm_lines.append(f"is_valid: false")
+        if self.domains:
+            fm_lines.append(
+                f"domains: [{', '.join(_yaml_str(d) for d in self.domains)}]"
+            )
         if self.sources:
             fm_lines.append(f"sources: [{', '.join(_yaml_str(s) for s in self.sources)}]")
         if self.related:
@@ -413,6 +436,7 @@ class WikiStore:
             last_applied_at=float(fm.get("last_applied_at") or 0.0),
             consecutive_fails=int(fm.get("consecutive_fails") or 0),
             is_valid=_is_valid,
+            domains=list(fm.get("domains") or []),
         )
 
     # ── write ─────────────────────────────────────────────────────
