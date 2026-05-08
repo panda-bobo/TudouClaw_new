@@ -1143,14 +1143,44 @@ def _sanitize_messages_for_openai(messages: list[dict],
             continue
         final_pass.append(m)
 
-    # Empty payload guard. Better to error fast than send empty messages.
-    has_non_system = any(m.get("role") != "system" for m in final_pass)
-    if not has_non_system:
-        # Don't raise — some scenarios (initial ping, system probe) are OK.
-        # Just log a hint and let the caller decide.
-        logger.warning(
-            "Sanitizer: payload has no user/assistant message after sanitization. "
-            "This may cause provider 400. Original count: %d", len(messages))
+    # Empty payload guard with rescue. Provider 400s like a stone if
+    # we send only system + tool messages. A combination of upstream
+    # passes (history compaction → orphan-tool drop → near-duplicate
+    # collapse → tool-round folding) can collectively eat every
+    # user/assistant turn even when the agent had a real conversation
+    # going. Rather than punt the problem upstream (where it's
+    # already played out — by the time we get here, the data's
+    # gone), inject a minimal placeholder user message so the call
+    # actually completes. Log at ERROR so the underlying bug stays
+    # visible for diagnosis.
+    has_user_or_asst = any(
+        m.get("role") in ("user", "assistant") for m in final_pass
+    )
+    if not has_user_or_asst:
+        logger.error(
+            "Sanitizer: payload has no user/assistant message after "
+            "sanitization (orig=%d, after=%d). Injecting a placeholder "
+            "user message to prevent provider 400. This indicates an "
+            "earlier pipeline bug — investigate why every conversation "
+            "turn was dropped.", len(messages), len(final_pass),
+        )
+        # Insert AFTER any leading system/system_summary blocks so the
+        # message ordering looks like the LLM expects: system… → user.
+        sys_end = 0
+        for i, m in enumerate(final_pass):
+            if m.get("role") == "system":
+                sys_end = i + 1
+            else:
+                break
+        final_pass.insert(sys_end, {
+            "role": "user",
+            "content": (
+                "(continue with the most recent task — the conversation "
+                "history was compacted by the framework. Refer to the "
+                "[HISTORY_SUMMARY] block in the system prompt above for "
+                "what's been done so far.)"
+            ),
+        })
 
     return final_pass
 
