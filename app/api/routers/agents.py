@@ -854,6 +854,13 @@ async def update_agent_profile(
             agent.name = body["name"].strip()
         if "role" in body:
             agent.role = body["role"]
+        # 2026-05-10: department persisted here too. The dedicated
+        # /agent/{id}/department endpoint also exists, but the agent
+        # profile edit dialog in the UI sends ALL fields to /profile,
+        # including department. Without this, department changes via
+        # the dialog were silently dropped.
+        if "department" in body:
+            agent.department = (body.get("department") or "").strip()
         if "working_dir" in body:
             _raw_wd = (body.get("working_dir") or "").strip()
             if not _raw_wd:
