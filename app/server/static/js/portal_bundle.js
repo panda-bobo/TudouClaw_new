@@ -3672,8 +3672,14 @@ window._techBrandReset = _techBrandReset;
 async function renderProvidersTech(container) {
   var c = container || document.getElementById('content');
   if (!c) return;
-  var providers = [];
-  try { var data = await api('GET', '/api/portal/providers'); providers = (data && data.providers) || []; } catch (e) {}
+  // Reuse the GLOBAL providers array so click handlers (editProvider /
+  // deleteProvider) can find entries by id. Previously this used a local
+  // shadow var, which left the global empty whenever the user landed
+  // straight on the tech page — clicking Edit silently no-op'd.
+  try {
+    var data = await api('GET', '/api/portal/providers');
+    providers = (data && data.providers) || [];
+  } catch (e) { providers = providers || []; }
 
   // Bento-grid layout (stitch_16): glass-panel cards in 2-col grid.
   // Each card mimics the stitch "config inspector" feel — small icon
