@@ -2559,6 +2559,16 @@ function renderCurrentView() {
       renderSettingsHub();
       break;
     }
+    case 'cultivation': {
+      titleEl.textContent = t('nav.cultivation', 'Agent 专家养成系统');
+      var _techCv = false;
+      try { _techCv = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+      actionsEl.innerHTML = _techCv
+        ? ''
+        : '<button class="btn btn-primary btn-sm" onclick="showCreateSpecialtyTemplate()"><span class="material-symbols-outlined" style="font-size:16px">add</span> 新建养成模板</button>';
+      renderCultivationHub();
+      break;
+    }
     default: {
       c.innerHTML = '<div style="color:var(--text3);padding:40px;text-align:center">View "'+esc(currentView)+'" not found</div>';
       break;
@@ -7407,10 +7417,10 @@ function renderAgentChatTech(agentId) {
         '<span class="material-symbols-outlined" id="rag-icon-' + agentId + '">search</span>Rag</button>' +
       '<button class="ach-act" onclick="openVoiceMode(\'' + agentId + '\')" title="实时语音模式 — 点击进入沉浸式语音交互">' +
         '<span class="material-symbols-outlined">graphic_eq</span>Voice</button>' +
-      // ── 养成 (Cultivate): opens specialty cultivation modal directly from
-      // the tech-style action bar. Avoids wrapping the chat in workspace v2.
-      '<button class="ach-act" onclick="openCultivationModal(\'' + agentId + '\')" title="专业养成 — 选择 specialty 模板，启用 RAG / LoRA 训练流水线">' +
-        '<span class="material-symbols-outlined">school</span>养成</button>' +
+      // 养成 button removed 2026-05-10 — cultivation operations were
+      // promoted to a top-level "专家养成" page in the left sidebar.
+      // Agent header now only shows 段位条 status chip; clicking the
+      // chip jumps to the cultivation hub with this agent pre-selected.
     '</div>' +
 
     // ── Main section: chat (left) | right column [artifact (top) + tabs (bottom)] ──
@@ -39107,7 +39117,9 @@ function renderSettingsPage() {
     { id: 'nodes',      label: window.t('tab.settings.nodes',        'Nodes'),         icon: 'device_hub' },
     { id: 'channels',   label: window.t('tab.settings.channels',     'Channels'),      icon: 'cable' },
     { id: 'templates',  label: window.t('tab.settings.domains',      '专业领域'),      icon: 'library_books' },
-    { id: 'specialty_templates', label: '养成模板', icon: 'school' },
+    // 'specialty_templates' tab moved to top-level "专家养成" page in
+    // the left sidebar 2026-05-10. The renderSpecialtyTemplates function
+    // is still exposed (called from cultivation hub's 模板库 sub-tab).
     { id: 'policy',     label: window.t('tab.settings.policy',       '审批策略'),      icon: 'shield' },
     { id: 'tokens',     label: window.t('tab.settings.apiTokens',    'API Tokens'),    icon: 'key' },
   ];
@@ -39128,7 +39140,6 @@ function renderSettingsPage() {
     'channels':   '<button class="btn btn-primary btn-sm" onclick="showModal(\'add-channel\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> Add Channel</button>',
     'tokens':     '<button class="btn btn-primary btn-sm" onclick="showModal(\'create-token\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> Create Token</button>',
     'templates':  '<button class="btn btn-primary btn-sm" onclick="showCreateTemplate()"><span class="material-symbols-outlined" style="font-size:16px">add</span> New Template</button>',
-    'specialty_templates': '<button class="btn btn-primary btn-sm" onclick="showCreateSpecialtyTemplate()"><span class="material-symbols-outlined" style="font-size:16px">add</span> 新建养成模板</button>',
   };
   if (actionsEl) actionsEl.innerHTML = _tabActions[_settingsSubTab] || '';
   switch(_settingsSubTab) {
@@ -39144,11 +39155,169 @@ function renderSettingsPage() {
     case 'nodes': renderNodes(sc); break;
     case 'channels': renderChannels(sc); break;
     case 'templates': renderTemplateLibrary(sc); break;
-    case 'specialty_templates': renderSpecialtyTemplates(sc); break;
     case 'policy': renderPolicyConfig(sc); break;
     case 'tokens': renderTokens(sc); break;
     default: sc.innerHTML = '<div style="color:var(--text3);padding:20px">Select a settings tab</div>';
   }
+}
+
+// ============ Agent 专家养成系统 — top-level hub ============
+// Promoted to left-sidebar core feature 2026-05-10. Replaces the
+// per-agent toolbar entry. Three tabs:
+//   1. 我的专家 — cultivated agents, click → per-agent pipeline drill
+//   2. 模板库   — specialty templates (create / list / delete)
+//   3. 待养成   — uncultivated agents, click → pick a template to start
+//
+// Click a 段位条 chip in any agent's chat header → navigates here with
+// that agent pre-selected for the pipeline drill.
+let _cultHubTab = 'cultivated';   // 'cultivated' | 'templates' | 'uncultivated'
+
+async function renderCultivationHub(container) {
+  var c = container || document.getElementById('content');
+  c.innerHTML = '<div style="color:var(--text3);padding:20px">加载养成系统…</div>';
+
+  var tabs = [
+    { id: 'cultivated',   icon: 'school',          label: '我的专家' },
+    { id: 'templates',    icon: 'menu_book',       label: '模板库' },
+    { id: 'uncultivated', icon: 'add_circle',      label: '待养成' },
+  ];
+
+  function tabBtn(t) {
+    var active = _cultHubTab === t.id;
+    return '<button onclick="_cultHubTab=\'' + t.id + '\';renderCultivationHub()" '
+      + 'style="padding:8px 16px;border:none;background:' + (active ? 'var(--surface2)' : 'none') + ';'
+      + 'color:' + (active ? 'var(--cyber-magenta,#ff7adb)' : 'var(--text3)') + ';'
+      + 'font-size:12px;font-weight:' + (active ? '700' : '500') + ';cursor:pointer;'
+      + 'border-radius:8px;display:inline-flex;align-items:center;gap:6px;'
+      + 'font-family:inherit;white-space:nowrap;transition:all 0.15s">'
+      + '<span class="material-symbols-outlined" style="font-size:16px">' + t.icon + '</span>'
+      + esc(t.label) + '</button>';
+  }
+
+  // Header + tabs
+  c.innerHTML = ''
+    + '<div style="margin-bottom:18px;padding:18px 22px;background:linear-gradient(135deg,'
+    +     'rgba(255,122,219,0.08) 0%,rgba(74,252,255,0.06) 100%);'
+    +     'border:1px solid rgba(255,122,219,0.25);border-radius:12px">'
+    + '  <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">'
+    + '    <span class="material-symbols-outlined" '
+    +         'style="font-size:28px;color:var(--cyber-magenta,#ff7adb)">school</span>'
+    + '    <span style="font-size:18px;font-weight:600">Agent 专家养成系统</span>'
+    + '  </div>'
+    + '  <div style="font-size:12px;color:var(--text3);line-height:1.6;max-width:760px">'
+    +     '把通用 agent 养成某领域专家:选模板 → 装 packs/skills → 喂语料 → 用真实问答累积反馈 →'
+    +     '准确率达标自动推进段位(见习/熟手/专家/大师)。后期可触发 LoRA 训练把答题质量沉淀进权重。'
+    + '  </div>'
+    + '</div>'
+    + '<div style="display:flex;gap:6px;margin-bottom:18px;padding:6px;background:var(--surface);'
+    +     'border-radius:10px;border:1px solid var(--border-light);width:fit-content">'
+    +     tabs.map(tabBtn).join('')
+    + '</div>'
+    + '<div id="cult-hub-body"></div>';
+
+  var body = document.getElementById('cult-hub-body');
+  if (_cultHubTab === 'cultivated')        await _cultHubRenderCultivated(body);
+  else if (_cultHubTab === 'templates')    renderSpecialtyTemplates(body);
+  else if (_cultHubTab === 'uncultivated') await _cultHubRenderUncultivated(body);
+}
+window.renderCultivationHub = renderCultivationHub;
+
+async function _cultHubRenderCultivated(body) {
+  body.innerHTML = '<div style="color:var(--text3);padding:14px">加载…</div>';
+  // Pull all agents + filter to cultivated
+  var allAgents = (typeof agents !== 'undefined' && agents) || [];
+  var cultivated = allAgents.filter(function(a){ return !!a.expert_specialty; });
+  if (cultivated.length === 0) {
+    body.innerHTML = ''
+      + '<div style="padding:40px;text-align:center;background:var(--surface);'
+      +     'border:1px dashed var(--border);border-radius:10px;color:var(--text3)">'
+      + '  <div style="font-size:32px;margin-bottom:8px">🌱</div>'
+      + '  <div style="font-size:13px">尚无已养成的专家 agent</div>'
+      + '  <div style="font-size:11px;margin-top:6px">'
+      +     '切到「待养成」tab 选一个 agent + 模板开始'
+      + '  </div></div>';
+    return;
+  }
+  // Fetch /stats per agent in parallel for level computation
+  var stats = await Promise.all(cultivated.map(function(a){
+    return api('GET', '/api/portal/agent/' + a.id + '/expert/stats')
+      .catch(function(){ return null; });
+  }));
+  var rows = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:14px">';
+  cultivated.forEach(function(a, i) {
+    var s = stats[i] || {};
+    var levelKey = (typeof _cultLevelFromStats === 'function')
+      ? _cultLevelFromStats(s) : 'novice';
+    var lvl = (typeof _cultLevelMeta === 'function') ? _cultLevelMeta(levelKey)
+              : { label: '🌱 见习', pct: 25, color: 'var(--cyber-blue,#4afcff)' };
+    var fbTotal = (s.feedback_counts && (s.feedback_counts.up + s.feedback_counts.down)) || 0;
+    var fbUp = (s.feedback_counts && s.feedback_counts.up) || 0;
+    var posPct = fbTotal > 0 ? Math.round((fbUp / fbTotal) * 100) : 0;
+    rows += ''
+      + '<div style="background:var(--surface);border:1px solid ' + lvl.color + ';border-radius:10px;'
+      +     'padding:16px;display:flex;flex-direction:column;gap:10px">'
+      + '  <div style="display:flex;align-items:center;gap:10px">'
+      + '    <span style="font-size:24px">' + (lvl.label || '🌱').split(' ')[0] + '</span>'
+      + '    <div style="flex:1;min-width:0">'
+      + '      <div style="font-size:13px;font-weight:600">' + esc(a.name) + '</div>'
+      + '      <div style="font-size:10px;color:var(--text3);font-family:var(--font-mono,monospace)">'
+      +         esc(a.expert_specialty) + ' · ' + esc(a.expert_level || 'novice') + '</div>'
+      + '    </div>'
+      + '    <span style="color:' + lvl.color + ';font-weight:600;font-size:12px">' + lvl.pct + '%</span>'
+      + '  </div>'
+      + '  <div style="height:5px;background:rgba(255,255,255,0.08);border-radius:3px;overflow:hidden">'
+      + '    <div style="height:100%;width:' + lvl.pct + '%;background:' + lvl.color + '"></div>'
+      + '  </div>'
+      + '  <div style="font-size:11px;color:var(--text2);font-family:var(--font-mono,monospace);display:flex;gap:14px">'
+      + '    <span>👍 ' + fbUp + ' / 👎 ' + (fbTotal - fbUp) + '</span>'
+      + '    <span>' + (fbTotal > 0 ? (posPct + '% 准确率') : '尚无评分') + '</span>'
+      + '    <span style="margin-left:auto">trace: ' + (s.trace_count || 0) + '</span>'
+      + '  </div>'
+      + '  <div style="display:flex;gap:8px;border-top:1px solid var(--overlay-5);padding-top:10px;margin-top:auto">'
+      + '    <button class="btn btn-sm" onclick="openCultivationModal(\'' + esc(a.id) + '\')" '
+      +         'style="font-size:11px;flex:1">'
+      +         '<span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">timeline</span> Pipeline</button>'
+      + '    <button class="btn btn-sm btn-ghost" onclick="showAgentView(\'' + esc(a.id) + '\')" '
+      +         'style="font-size:11px"><span class="material-symbols-outlined" style="font-size:14px">chat</span></button>'
+      + '  </div>'
+      + '</div>';
+  });
+  rows += '</div>';
+  body.innerHTML = rows;
+}
+
+async function _cultHubRenderUncultivated(body) {
+  body.innerHTML = '<div style="color:var(--text3);padding:14px">加载…</div>';
+  var allAgents = (typeof agents !== 'undefined' && agents) || [];
+  var uncultivated = allAgents.filter(function(a){ return !a.expert_specialty; });
+  if (uncultivated.length === 0) {
+    body.innerHTML = '<div style="padding:30px;text-align:center;color:var(--text3)">'
+      + '所有 agent 都已养成</div>';
+    return;
+  }
+  var rows = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px">';
+  uncultivated.forEach(function(a){
+    rows += ''
+      + '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;'
+      +     'padding:14px;display:flex;flex-direction:column;gap:10px">'
+      + '  <div style="display:flex;align-items:center;gap:10px">'
+      + '    <span class="material-symbols-outlined" style="font-size:22px;color:var(--text3)">smart_toy</span>'
+      + '    <div style="flex:1;min-width:0">'
+      + '      <div style="font-size:13px;font-weight:600">' + esc(a.name) + '</div>'
+      + '      <div style="font-size:10px;color:var(--text3);font-family:var(--font-mono,monospace)">'
+      +         esc(a.role || 'general') + ' · 通用 agent</div>'
+      + '    </div>'
+      + '  </div>'
+      + '  <div style="font-size:11px;color:var(--text3);line-height:1.5">'
+      +     '尚未配置专家 specialty。点击下方按钮选择模板进入养成流程。</div>'
+      + '  <button class="btn btn-sm btn-primary" onclick="openCultivationModal(\'' + esc(a.id) + '\')" '
+      +         'style="background:var(--cyber-magenta,#ff7adb);border-color:var(--cyber-magenta,#ff7adb);'
+      +         'color:#000;font-size:11px">'
+      +         '<span class="material-symbols-outlined" style="font-size:14px">school</span> 开始养成</button>'
+      + '</div>';
+  });
+  rows += '</div>';
+  body.innerHTML = rows;
 }
 
 // ============ Specialty Templates (养成模板) ============
