@@ -1411,9 +1411,17 @@ h4, h5 { letter-spacing: -0.01em; }
         <span class="icon">smart_toy</span> <span data-i18n="nav.agents">智能体</span>
         <span class="badge" id="agent-count-badge">0</span>
       </div>
-      <div class="nav-item" data-view="knowledge-memory" onclick="showView('knowledge-memory',this)" title="知识与记忆">
+      <!-- "知识与记忆" sidebar entry removed 2026-05-10. Per user
+           direction the 4 sub-tabs were redistributed:
+             • Knowledge Bases → 专家养成 hub → 知识库 tab
+             • Wiki / 经验库  → 专家养成 hub → Wiki tab
+             • RAG Providers → 系统设置 → RAG Providers tab
+             • Agent Memory → agent page toolbar → 记忆 button
+           The view + renderKnowledgeMemoryHub function are kept around
+           in JS in case any deep links still hit them. -->
+      <!-- <div class="nav-item" data-view="knowledge-memory" onclick="showView('knowledge-memory',this)" title="知识与记忆">
         <span class="icon">psychology_alt</span> <span data-i18n="nav.knowledge">知识与记忆</span>
-      </div>
+      </div> -->
       <div class="nav-item" data-view="roles-skills" onclick="showView('roles-skills',this)" title="角色与技能">
         <span class="icon">workspace_premium</span> <span data-i18n="nav.rolesSkills">角色与技能</span>
       </div>

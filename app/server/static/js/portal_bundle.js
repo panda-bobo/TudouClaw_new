@@ -7421,6 +7421,11 @@ function renderAgentChatTech(agentId) {
       // promoted to a top-level "专家养成" page in the left sidebar.
       // Agent header now only shows 段位条 status chip; clicking the
       // chip jumps to the cultivation hub with this agent pre-selected.
+      // Memory drill — moved here 2026-05-10 from the K&M hub. Per
+      // user direction "Agent 记忆 挪到 agent 里面" — memory is per
+      // agent, so the entry lives on the agent's own page.
+      '<button class="ach-act" onclick="showAgentMemoryView(\'' + agentId + '\')" title="Agent 私有记忆 — L1/L2/L3 / Plans / Transcript">' +
+        '<span class="material-symbols-outlined">memory</span>记忆</button>' +
     '</div>' +
 
     // ── Main section: chat (left) | right column [artifact (top) + tabs (bottom)] ──
@@ -39094,6 +39099,9 @@ function renderSettingsPage() {
     { id: 'rules',      label: window.t('tab.settings.rules',        '规则引擎'),     icon: 'gavel' },
     { id: 'system',     label: window.t('tab.settings.system',       '系统配置'),     icon: 'tune' },
     { id: 'providers',  label: window.t('tab.settings.providers',    'LLM Providers'), icon: 'dns' },
+    // RAG providers — moved here from K&M hub 2026-05-10 per user
+    // direction "RAG Providers 挪到 setting 下面"
+    { id: 'rag_providers', label: 'RAG Providers', icon: 'cable' },
     // 'llm_tiers' tab hidden — replaced by per-agent LLM Router
     // (extra_llms + auto_route). Tier backend still exists but no UI
     // entry. See agent settings → "额外 LLM" for routing config.
@@ -39141,6 +39149,7 @@ function renderSettingsPage() {
     case 'nodes': renderNodes(sc); break;
     case 'channels': renderChannels(sc); break;
     case 'templates': renderTemplateLibrary(sc); break;
+    case 'rag_providers': _renderKmRagProviders(); break;
     case 'policy': renderPolicyConfig(sc); break;
     case 'tokens': renderTokens(sc); break;
     default: sc.innerHTML = '<div style="color:var(--text3);padding:20px">Select a settings tab</div>';
@@ -39165,6 +39174,10 @@ async function renderCultivationHub(container) {
   var tabs = [
     { id: 'cultivated',   icon: 'school',          label: '我的专家' },
     { id: 'templates',    icon: 'menu_book',       label: '模板库' },
+    // Merged from K&M hub 2026-05-10 per user direction:
+    //   "1 (Knowledge Bases) 融合养成里面" + "3 (Wiki) 是否也可以融合"
+    { id: 'knowledge',    icon: 'database',        label: '知识库' },
+    { id: 'wiki',         icon: 'auto_stories',    label: 'Wiki / 经验库' },
     { id: 'uncultivated', icon: 'add_circle',      label: '待养成' },
   ];
 
@@ -39202,9 +39215,23 @@ async function renderCultivationHub(container) {
     + '<div id="cult-hub-body"></div>';
 
   var body = document.getElementById('cult-hub-body');
+  // Merged-in renderers from K&M hub use document.getElementById('content')
+  // / 'km-content' as their target. Bridge by giving the body an 'id'
+  // they recognize while their render runs, then swap back.
+  function _withKmContainer(fn) {
+    var origId = body.id;
+    body.id = 'km-content';
+    try { fn(); } finally {
+      // Some renderers populate inside km-content asynchronously; rename
+      // back after a microtask to avoid clobbering before paint.
+      setTimeout(function(){ body.id = origId; }, 50);
+    }
+  }
   if (_cultHubTab === 'cultivated')        await _cultHubRenderCultivated(body);
   else if (_cultHubTab === 'templates')    renderSpecialtyTemplates(body);
   else if (_cultHubTab === 'uncultivated') await _cultHubRenderUncultivated(body);
+  else if (_cultHubTab === 'knowledge')    _withKmContainer(function(){ _renderKmPrivate(); });
+  else if (_cultHubTab === 'wiki')         _withKmContainer(function(){ _renderKmWiki(); });
 }
 window.renderCultivationHub = renderCultivationHub;
 
