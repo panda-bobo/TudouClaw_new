@@ -6070,24 +6070,16 @@ function _renderCultDrillPanel(agentId, t, status, modIdx) {
     );
   }
   if (modIdx === 3) {
-    var sources = (t.corpus_sources || []).map(function(c){
-      return '<div style="padding:6px 0;border-bottom:1px solid var(--overlay-5)">'
-        + '<code style="font-size:11px">' + esc(c.source_id || c.id || JSON.stringify(c).slice(0,50)) + '</code>'
-        + '<span style="font-size:10px;color:var(--text3);margin-left:10px">' + esc(c.kind || c.type || '') + '</span>'
-        + '</div>';
-    }).join('');
-    return panelShell('📚 Knowledge ⭐ — 知识库', 'V3 ingest + index',
-      '<div style="font-size:11px;color:var(--text3);margin-bottom:8px">CORPUS SOURCES (' + (t.corpus_sources || []).length + ')</div>'
-      + (sources || '<div style="color:var(--text3)">未配置语料源</div>')
-      + '<div style="margin-top:14px;padding:12px;background:rgba(255,255,255,0.03);border-radius:6px;font-size:11px;color:var(--text3);line-height:1.6">'
-      +   '👉 V3 vertical 上线后,这里会出现:<br>'
-      +   '  • 上传新语料文件按钮 (PDF / MD / 自定义 JSON)<br>'
-      +   '  • 添加 HuggingFace 数据集 / FLK / GitHub repo 来源<br>'
-      +   '  • 触发增量索引 / 查看 chunks 详情<br>'
-      +   '  • <b style="color:var(--cyber-magenta,#ff7adb)">⭐ 这是用户主动推进专家成熟度的关键操作</b>'
-      + '</div>',
-      ''
-    );
+    // V3 step 1 — fetch live corpus state and render with action buttons.
+    // The shell is rendered immediately with a loading placeholder; the
+    // actual content fills in async. We close over agentId so the buttons
+    // can call back into _knowledgeAddSource / _knowledgeReindex.
+    setTimeout(function(){ _knowledgeRefresh(agentId, t.id); }, 0);
+    var pendingHtml = '<div id="km-corpus-body" style="font-size:12px;color:var(--text3)">'
+      + '<span class="material-symbols-outlined" style="font-size:16px">refresh</span> Loading corpus state…'
+      + '</div>';
+    return panelShell('📚 Knowledge ⭐ — 知识库', 'V3 step 1: register · step 2: embed+index',
+      pendingHtml, '');
   }
   if (modIdx === 4) {
     var traceTarget = (t.training && t.training.raft_data_target) || 1000;
@@ -6151,6 +6143,134 @@ function _renderCultDrillPanel(agentId, t, status, modIdx) {
   return panelShell('Unknown module', '',
     '<div style="color:var(--error)">未知模块 ID: ' + modIdx + '</div>', '');
 }
+
+// ── V3: Knowledge module live actions ──────────────────────────
+// Called from the module-3 drill panel (📚 Knowledge). Fetches the live
+// corpus state (manifest on disk + template's expected sources) and
+// re-paints the panel with rows + an inline "add source" form.
+function _knowledgeRefresh(agentId, templateId) {
+  api('GET', '/api/portal/agent/' + agentId + '/expert/corpus')
+    .then(function(r){
+      var body = document.getElementById('km-corpus-body');
+      if (!body) return;
+      var sources = (r.manifest && r.manifest.sources) || [];
+      var tplSources = r.template_sources || [];
+      var rows = '';
+      // Indexed sources from manifest
+      if (sources.length === 0) {
+        rows = '<div style="padding:14px;text-align:center;color:var(--text3);'
+          + 'border:1px dashed var(--border);border-radius:6px;font-size:11px">'
+          + 'manifest 为空 - 先用下方表单注册一个 source'
+          + '</div>';
+      } else {
+        rows = '<div style="font-size:10px;color:var(--text3);text-transform:uppercase;'
+          + 'letter-spacing:0.05em;margin-bottom:8px">已注册 (manifest, ' + sources.length + ')</div>';
+        sources.forEach(function(s){
+          var status = (s.chunk_count > 0)
+            ? '<span style="color:var(--cyber-lime,#5cf08a)">✓ ' + s.chunk_count + ' chunks</span>'
+            : '<span style="color:var(--warning,#f59e0b)">⏳ pending ingest</span>';
+          rows += '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;'
+            +     'border-bottom:1px solid var(--overlay-5);font-size:11px">'
+            + '<code style="flex:1;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(s.source_id) + '">'
+            +   esc(s.source_id) + '</code>'
+            + '<span style="color:var(--text3)">' + esc(s.version || '—') + '</span>'
+            + status
+            + '</div>';
+        });
+      }
+      // Template expected sources (info)
+      if (tplSources.length > 0) {
+        rows += '<div style="margin-top:14px;font-size:10px;color:var(--text3);text-transform:uppercase;'
+          + 'letter-spacing:0.05em;margin-bottom:8px">模板预期 (template, ' + tplSources.length + ')</div>';
+        tplSources.forEach(function(s){
+          var sid = s.source_id || s.id || '?';
+          var registered = sources.some(function(m){ return m.source_id === sid; });
+          rows += '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;'
+            +     'border-bottom:1px solid var(--overlay-5);font-size:11px;opacity:'
+            +     (registered ? '0.5' : '1') + '">'
+            + '<code style="flex:1;color:var(--text2)">' + esc(sid) + '</code>'
+            + '<span style="color:var(--text3);font-size:10px">' + esc(s.kind || s.type || '') + '</span>'
+            + (registered
+                ? '<span style="color:var(--cyber-lime,#5cf08a);font-size:10px">已注册</span>'
+                : ('<button class="btn btn-sm" style="font-size:10px;padding:2px 8px" '
+                   +   'onclick="_knowledgeAddSource(\'' + esc(agentId) + '\',\'' + esc(templateId) + '\','
+                   +     '\'' + esc(sid) + '\',\'' + esc(s.version || '') + '\')">注册</button>'))
+            + '</div>';
+        });
+      }
+      // Manual add form
+      var manualForm = ''
+        + '<div style="margin-top:18px;padding:12px;background:rgba(255,255,255,0.02);'
+        +     'border:1px solid var(--border);border-radius:6px">'
+        + '  <div style="font-size:10px;color:var(--text3);text-transform:uppercase;'
+        +       'letter-spacing:0.05em;margin-bottom:8px">手工添加 source</div>'
+        + '  <div style="display:flex;gap:6px">'
+        + '    <input id="km-add-sid" placeholder="source_id (e.g. hf:my-dataset)" '
+        +         'style="flex:1;background:var(--bg2);border:1px solid var(--border);'
+        +         'border-radius:4px;padding:5px 8px;color:var(--text);font-size:11px;font-family:var(--font-mono,monospace)">'
+        + '    <input id="km-add-ver" placeholder="version" '
+        +         'style="width:120px;background:var(--bg2);border:1px solid var(--border);'
+        +         'border-radius:4px;padding:5px 8px;color:var(--text);font-size:11px">'
+        + '    <button class="btn btn-sm btn-primary" '
+        +         'onclick="_knowledgeAddManual(\'' + esc(agentId) + '\',\'' + esc(templateId) + '\')" '
+        +         'style="font-size:11px">添加</button>'
+        + '  </div>'
+        + '</div>';
+      // Reindex action
+      var reindexBtn = ''
+        + '<div style="margin-top:14px;display:flex;justify-content:flex-end">'
+        + '  <button class="btn btn-sm btn-ghost" '
+        +     'onclick="_knowledgeReindex(\'' + esc(agentId) + '\',\'' + esc(templateId) + '\')">'
+        + '    🔄 重建索引 (V3 step 2)'
+        + '  </button>'
+        + '</div>';
+      body.innerHTML = rows + manualForm + reindexBtn;
+    })
+    .catch(function(e){
+      var body = document.getElementById('km-corpus-body');
+      if (body) {
+        body.innerHTML = '<div style="color:var(--error);font-size:12px">'
+          + 'corpus load failed: ' + esc(e.message || String(e)) + '</div>';
+      }
+    });
+}
+window._knowledgeRefresh = _knowledgeRefresh;
+
+function _knowledgeAddSource(agentId, templateId, sourceId, version) {
+  api('POST', '/api/portal/agent/' + agentId + '/expert/corpus/ingest', {
+    source_id: sourceId, version: version,
+  })
+  .then(function(r){
+    if (typeof _toast === 'function') _toast('source 已注册: ' + sourceId, 'success');
+    _knowledgeRefresh(agentId, templateId);
+  })
+  .catch(function(e){
+    alert('注册失败: ' + (e.message || e));
+  });
+}
+window._knowledgeAddSource = _knowledgeAddSource;
+
+function _knowledgeAddManual(agentId, templateId) {
+  var sid = (document.getElementById('km-add-sid') || {}).value || '';
+  var ver = (document.getElementById('km-add-ver') || {}).value || '';
+  sid = sid.trim();
+  if (!sid) { alert('source_id 不能为空'); return; }
+  _knowledgeAddSource(agentId, templateId, sid, ver.trim());
+}
+window._knowledgeAddManual = _knowledgeAddManual;
+
+function _knowledgeReindex(agentId, templateId) {
+  api('POST', '/api/portal/agent/' + agentId + '/expert/corpus/reindex', {})
+    .then(function(r){
+      var msg = r.next || r.stage || 'ok';
+      if (typeof _toast === 'function') _toast('reindex: ' + msg, 'info');
+      _knowledgeRefresh(agentId, templateId);
+    })
+    .catch(function(e){
+      alert('reindex 失败: ' + (e.message || e));
+    });
+}
+window._knowledgeReindex = _knowledgeReindex;
 
 function _cultBackToOverview(agentId, templateId) {
   Promise.all([

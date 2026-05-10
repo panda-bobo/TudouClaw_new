@@ -391,25 +391,123 @@ async def delete_expert(
 
 # ── Corpus / RAG ──
 
-@router.post("/agent/{agent_id}/expert/corpus/ingest", summary="Ingest corpus source")
+@router.get("/agent/{agent_id}/expert/corpus", summary="List corpus sources for an agent")
+async def corpus_list(
+    agent_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    hub=Depends(get_hub),
+):
+    """V3 step 1. Returns the agent's corpus manifest plus the template's
+    pre-configured sources (so UI can show "configured but not yet
+    ingested" entries vs already-indexed ones).
+
+    Response:
+      {
+        "agent_id": ...,
+        "cultivated": bool,
+        "manifest": { sources: [...], total_chunks, total_bytes },
+        "template_sources": [ ... ],   # from SpecialtyTemplate.corpus_sources
+        "specialty": "legal"|"" ,
+      }
+    """
+    _check_enabled()
+    agent = hub.agents.get(agent_id) if hasattr(hub, "agents") else None
+    if agent is None:
+        raise HTTPException(404, f"agent {agent_id!r} not found")
+
+    cultivated = bool(getattr(agent, "expert_specialty", "") or "")
+    specialty = getattr(agent, "expert_specialty", "") or ""
+
+    # ── manifest on disk ──
+    from ..corpus.manifest import CorpusManifest
+    manifest = CorpusManifest.load(agent_id)
+
+    # ── template sources (for "configured but not yet ingested" view) ──
+    template_sources: list = []
+    if cultivated and specialty:
+        try:
+            from ..template_loader import (
+                load, load_all, TemplateNotFoundError,
+            )
+            tpl = None
+            try:
+                tpl = load(specialty)
+            except TemplateNotFoundError:
+                for cand in load_all():
+                    if cand.id == specialty or cand.specialty == specialty:
+                        tpl = cand
+                        break
+            if tpl is not None:
+                for cs in (tpl.corpus_sources or []):
+                    # CorpusSource is a dataclass; convert to plain dict
+                    if hasattr(cs, "__dict__"):
+                        template_sources.append(dict(cs.__dict__))
+                    elif isinstance(cs, dict):
+                        template_sources.append(dict(cs))
+                    else:
+                        template_sources.append({"raw": str(cs)})
+        except Exception as e:
+            logger.warning("template source enumeration failed for %s: %s",
+                           agent_id, e)
+
+    return {
+        "agent_id": agent_id,
+        "cultivated": cultivated,
+        "specialty": specialty,
+        "manifest": manifest.to_dict(),
+        "template_sources": template_sources,
+    }
+
+
+@router.post("/agent/{agent_id}/expert/corpus/ingest", summary="Ingest a corpus source")
 async def corpus_ingest(
     agent_id: str,
     body: dict = Body(...),
     user: CurrentUser = Depends(get_current_user),
     hub=Depends(get_hub),
 ):
-    _check_enabled()
-    raise HTTPException(501, "not implemented (V3 delivers)")
+    """V3 step 1. Register a corpus source in the agent's manifest.
 
+    Body: `{"source_id": "...", "version": "...", "chunker_strategy": "...",
+            "notes": "..."}`
 
-@router.get("/agent/{agent_id}/expert/corpus", summary="List ingested corpus sources")
-async def corpus_list(
-    agent_id: str,
-    user: CurrentUser = Depends(get_current_user),
-    hub=Depends(get_hub),
-):
+    V3 step 1 (this commit): the source is registered in the manifest with
+    chunk_count=0 / indexed_at=0 so the UI can show it as "pending ingest".
+    Real download + chunk + embed happens in V3 step 2 (when the embedder
+    + vector store land).
+
+    Returns the updated manifest.
+    """
     _check_enabled()
-    raise HTTPException(501, "not implemented (V3 delivers)")
+    agent = hub.agents.get(agent_id) if hasattr(hub, "agents") else None
+    if agent is None:
+        raise HTTPException(404, f"agent {agent_id!r} not found")
+
+    source_id = (body.get("source_id") or "").strip()
+    if not source_id:
+        raise HTTPException(400, "body must include 'source_id' (string)")
+
+    from ..corpus.manifest import CorpusManifest, CorpusSourceEntry
+    manifest = CorpusManifest.load(agent_id)
+    entry = CorpusSourceEntry(
+        source_id=source_id,
+        version=str(body.get("version") or ""),
+        chunk_count=0,           # 0 = pending ingest
+        bytes=0,
+        indexed_at=0.0,          # 0 = not yet indexed
+        chunker_strategy=str(body.get("chunker_strategy") or ""),
+        notes=str(body.get("notes") or "registered, awaiting V3 step 2 ingest"),
+    )
+    manifest.add_source(entry)
+    manifest.save()
+
+    return {
+        "agent_id": agent_id,
+        "added_source": entry.source_id,
+        "manifest": manifest.to_dict(),
+        "ok": True,
+        "stage": "registered",   # V3 step 2 will flip to "indexed"
+    }
 
 
 @router.post("/agent/{agent_id}/expert/corpus/reindex", summary="Rebuild vector index")
@@ -418,8 +516,22 @@ async def corpus_reindex(
     user: CurrentUser = Depends(get_current_user),
     hub=Depends(get_hub),
 ):
+    """V3 step 1. Stub — actual reindex (chunk + embed + write sqlite-vss)
+    lands in V3 step 2 once the embedder + store are wired into the live
+    request path. For now, returns the current manifest as a sanity check.
+    """
     _check_enabled()
-    raise HTTPException(501, "not implemented (V3 delivers)")
+    agent = hub.agents.get(agent_id) if hasattr(hub, "agents") else None
+    if agent is None:
+        raise HTTPException(404, f"agent {agent_id!r} not found")
+    from ..corpus.manifest import CorpusManifest
+    manifest = CorpusManifest.load(agent_id)
+    return {
+        "agent_id": agent_id,
+        "stage": "stub",
+        "manifest": manifest.to_dict(),
+        "next": "V3 step 2: bge-m3 embedder + sqlite-vss persistence",
+    }
 
 
 # ── Query + feedback ──
