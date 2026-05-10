@@ -157,6 +157,47 @@ async def get_expert_status(
                 payload["profile"] = p.to_dict()
         except Exception as e:
             logger.warning("ExpertProfile.load(%s) failed: %s", agent_id, e)
+
+    # ── feedback_counts + trace_count for 段位 (level) computation ──
+    # The level chip + modal pipeline both need these in the same payload
+    # so they can render synchronously without a second fetch. Cheap to
+    # compute here — single file scan each.
+    import json as _json
+    from .._config import expert_dir_for as _edir
+    edir = _edir(agent_id)
+    fb_up = fb_down = trace_count = 0
+    fb_path = os.path.join(edir, "feedback", "feedback.jsonl")
+    if os.path.isfile(fb_path):
+        try:
+            with open(fb_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = _json.loads(line)
+                        if rec.get("rating") == "up":
+                            fb_up += 1
+                        elif rec.get("rating") == "down":
+                            fb_down += 1
+                    except _json.JSONDecodeError:
+                        continue
+        except OSError:
+            pass
+    traces_dir = os.path.join(edir, "traces")
+    if os.path.isdir(traces_dir):
+        try:
+            for fname in os.listdir(traces_dir):
+                if not fname.endswith(".jsonl"):
+                    continue
+                with open(os.path.join(traces_dir, fname), "r", encoding="utf-8") as f:
+                    for line in f:
+                        if line.strip():
+                            trace_count += 1
+        except OSError:
+            pass
+    payload["feedback_counts"] = {"up": fb_up, "down": fb_down}
+    payload["trace_count"] = trace_count
     return payload
 
 
@@ -467,17 +508,25 @@ async def corpus_ingest(
     user: CurrentUser = Depends(get_current_user),
     hub=Depends(get_hub),
 ):
-    """V3 step 1. Register a corpus source in the agent's manifest.
+    """V3 step 2. Register + (optionally) chunk a corpus source.
 
-    Body: `{"source_id": "...", "version": "...", "chunker_strategy": "...",
-            "notes": "..."}`
+    Body shapes:
+      Register only (V3 step 1 behavior):
+        {"source_id": "...", "version": "...", "chunker_strategy": "..."}
+      → entry with chunk_count=0, indexed_at=0 (pending)
 
-    V3 step 1 (this commit): the source is registered in the manifest with
-    chunk_count=0 / indexed_at=0 so the UI can show it as "pending ingest".
-    Real download + chunk + embed happens in V3 step 2 (when the embedder
-    + vector store land).
+      Register + chunk content (V3 step 2):
+        {"source_id": "...", "content": "<raw text>", "chunker_strategy": "paragraph"}
+      → splits content via the registered chunker, writes
+        chunks.jsonl to ~/.tudou_claw/expert/<id>/corpus/<source_id>/,
+        updates manifest with chunk_count + bytes + indexed_at.
 
-    Returns the updated manifest.
+    Once chunk_count > 0, the UI bumps the agent from 见习 (25%) to
+    熟手 (50%) per design spec §3.6.6.
+
+    Real bge-m3 embedding + sqlite-vss vector store comes in V3 step 3.
+    Until then chunks live as plain JSONL — works for retrieval via
+    keyword/BM25 fallback in V4 step 2.
     """
     _check_enabled()
     agent = hub.agents.get(agent_id) if hasattr(hub, "agents") else None
@@ -488,16 +537,74 @@ async def corpus_ingest(
     if not source_id:
         raise HTTPException(400, "body must include 'source_id' (string)")
 
+    content = body.get("content") or ""
+    strategy = (body.get("chunker_strategy") or "paragraph").strip()
+
     from ..corpus.manifest import CorpusManifest, CorpusSourceEntry
     manifest = CorpusManifest.load(agent_id)
+
+    chunk_count = 0
+    bytes_ingested = 0
+    indexed_at = 0.0
+    notes = "registered, awaiting V3 step 2 ingest"
+
+    if content:
+        # ── Real chunking path (V3 step 2) ──
+        # Import chunker module side-effects: register paragraph + legal
+        # strategies. Lazy import keeps the endpoint fast when content
+        # isn't provided.
+        from ..corpus import chunker as ch
+        # Side-effect registration of the legal chunkers
+        try:
+            from ..corpus import chunker_legal as _  # noqa: F401
+        except Exception as e:
+            logger.info("legal chunkers not registered: %s", e)
+        # Resolve strategy with fallbacks: try as-is, then 'paragraph'.
+        # Template uses 'structural' which we don't have yet — fall back.
+        strategies_to_try = [strategy]
+        if strategy != "paragraph":
+            strategies_to_try.append("paragraph")
+        chunker_inst = None
+        for s in strategies_to_try:
+            try:
+                chunker_inst = ch.get(s)
+                strategy = s
+                break
+            except KeyError:
+                continue
+        if chunker_inst is None:
+            raise HTTPException(500, f"no chunker available for {strategy!r}")
+
+        # Run chunking
+        import json, time
+        from .._config import expert_dir_for
+        chunks_dir = os.path.join(expert_dir_for(agent_id), "corpus", source_id)
+        os.makedirs(chunks_dir, exist_ok=True)
+        chunks_jsonl = os.path.join(chunks_dir, "chunks.jsonl")
+        source_meta = {
+            "source_id": source_id,
+            "version": str(body.get("version") or ""),
+            "ingested_at": time.time(),
+        }
+        with open(chunks_jsonl, "w", encoding="utf-8") as f:
+            for chunk in chunker_inst.chunk(content, source_meta):
+                rec = {"text": chunk.text, "metadata": dict(chunk.metadata)}
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                chunk_count += 1
+                bytes_ingested += len(chunk.text.encode("utf-8"))
+        indexed_at = time.time()
+        notes = f"indexed {chunk_count} chunks via '{strategy}' chunker"
+    else:
+        notes = str(body.get("notes") or notes)
+
     entry = CorpusSourceEntry(
         source_id=source_id,
         version=str(body.get("version") or ""),
-        chunk_count=0,           # 0 = pending ingest
-        bytes=0,
-        indexed_at=0.0,          # 0 = not yet indexed
-        chunker_strategy=str(body.get("chunker_strategy") or ""),
-        notes=str(body.get("notes") or "registered, awaiting V3 step 2 ingest"),
+        chunk_count=chunk_count,
+        bytes=bytes_ingested,
+        indexed_at=indexed_at,
+        chunker_strategy=strategy,
+        notes=notes,
     )
     manifest.add_source(entry)
     manifest.save()
@@ -507,7 +614,9 @@ async def corpus_ingest(
         "added_source": entry.source_id,
         "manifest": manifest.to_dict(),
         "ok": True,
-        "stage": "registered",   # V3 step 2 will flip to "indexed"
+        "stage": "indexed" if chunk_count > 0 else "registered",
+        "chunk_count": chunk_count,
+        "bytes": bytes_ingested,
     }
 
 

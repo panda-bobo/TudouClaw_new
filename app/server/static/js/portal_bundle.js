@@ -5909,21 +5909,17 @@ function _renderCultivationWorkflowPage(agentId, t, status, drillModule) {
     { i: 6, icon: '🎯', name: 'Routing',   sub: Math.round(localRate * 100) + '% local', st: s6, prog: Math.min(100, localRate * 100 / 0.6 * 100) },
   ];
 
-  // Compute current 段位 (level) — see design §3.6.6
-  var doneCount = [mod1Done, mod2Done, mod3Done, mod4Done, mod5Done, mod6Done].filter(Boolean).length;
-  var levelKey = !mod1Done ? 'pre'
-              : (mod1Done && mod2Done && !mod3Done) ? 'novice'
-              : (mod3Done && !mod5Done) ? 'journeyman'
-              : (mod5Done && !mod6Done) ? 'expert'
-              : (mod6Done) ? 'master' : 'novice';
-  var levelMap = {
-    pre:        { label: '⏳ 未启动',     pct: 0,   nextHint: '先点击「确认初始化」激活配方' },
-    novice:     { label: '🌱 见习',       pct: 25,  nextHint: '完成 📚 Knowledge 索引 → 升熟手' },
-    journeyman: { label: '🌿 熟手',       pct: 50,  nextHint: '日常使用累积 trace + 训练 LoRA → 升专家' },
-    expert:     { label: '🎯 专家',       pct: 75,  nextHint: '调通 routing 让本地处理率 ≥ 60% → 升大师' },
-    master:     { label: '🏆 大师',       pct: 100, nextHint: '已达终点 — 持续 refresh LoRA 即可' },
-  };
-  var lvl = levelMap[levelKey] || levelMap.pre;
+  // 段位 driven by ANSWER ACCURACY, not pipeline checklist completion.
+  // Modal status from /expert may not include feedback_counts directly,
+  // but /expert/stats does — _renderCultivationWorkflowPage now passes
+  // status enriched with feedback_counts via the openCultivationModal /
+  // _awsCultivationPreview / _cultDrillModule fetch fan-out.
+  var levelKey = _cultLevelFromStats(status);
+  var lvl = _cultLevelMeta(levelKey);
+  var fbTotal = (status.feedback_counts
+                  && (status.feedback_counts.up + status.feedback_counts.down)) || 0;
+  var fbUp = (status.feedback_counts && status.feedback_counts.up) || 0;
+  var posPct = fbTotal > 0 ? Math.round((fbUp / fbTotal) * 100) : 0;
 
   // ─── Module card renderer ─────────────────────────────────────
   function modCard(m, isActive) {
@@ -5978,6 +5974,19 @@ function _renderCultivationWorkflowPage(agentId, t, status, drillModule) {
     + '  </div>'
     + '  <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text3);margin-top:6px">'
     + '    <span>🌱 见习</span><span>🌿 熟手</span><span>🎯 专家</span><span>🏆 大师</span>'
+    + '  </div>'
+    // Accuracy stats — the actual driver of level progression
+    + '  <div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--overlay-5);'
+    +       'display:flex;gap:14px;align-items:center;font-size:11px">'
+    + '    <span style="color:var(--text3)">答题反馈</span>'
+    + '    <span style="font-family:var(--font-mono,monospace);color:var(--text2)">'
+    +         '<span style="color:var(--cyber-lime,#5cf08a)">👍 ' + fbUp + '</span>'
+    +         ' / <span style="color:var(--error,#ef4444)">👎 ' + (fbTotal - fbUp) + '</span>'
+    +         ' = <span style="color:' + lvl.color + ';font-weight:600">'
+    +           (fbTotal > 0 ? (posPct + '% 准确率') : '尚无评分') + '</span>'
+    +     '</span>'
+    + '    <span style="margin-left:auto;color:var(--text3);font-size:10px">'
+    +       '总评分次数: ' + fbTotal + '</span>'
     + '  </div>'
     + '</div>';
 
@@ -6200,22 +6209,49 @@ function _knowledgeRefresh(agentId, templateId) {
             + '</div>';
         });
       }
-      // Manual add form
+      // Upload form — V3 step 2: paste/upload text content, real chunking
+      var uploadForm = ''
+        + '<div style="margin-top:18px;padding:12px;background:rgba(255,122,219,0.04);'
+        +     'border:1px solid rgba(255,122,219,0.30);border-radius:6px">'
+        + '  <div style="font-size:10px;color:var(--cyber-magenta,#ff7adb);'
+        +       'text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;font-weight:600">'
+        + '    📥 上传语料(推进 25% → 50%)</div>'
+        + '  <div style="display:flex;gap:6px;margin-bottom:8px">'
+        + '    <input id="km-up-sid" placeholder="source_id (e.g. my-legal-corpus)" '
+        +         'style="flex:1;background:var(--bg2);border:1px solid var(--border);'
+        +         'border-radius:4px;padding:5px 8px;color:var(--text);font-size:11px;font-family:var(--font-mono,monospace)">'
+        + '    <input type="file" id="km-up-file" accept=".txt,.md,.json" '
+        +         'onchange="_knowledgeFilePick(this)" style="font-size:11px;flex:1">'
+        + '  </div>'
+        + '  <textarea id="km-up-text" placeholder="或在此粘贴文本内容…" '
+        +         'style="width:100%;min-height:80px;background:var(--bg2);border:1px solid var(--border);'
+        +         'border-radius:4px;padding:6px 8px;color:var(--text);font-size:11px;'
+        +         'font-family:var(--font-mono,monospace);resize:vertical"></textarea>'
+        + '  <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">'
+        + '    <span style="font-size:10px;color:var(--text3)">'
+        +       'chunker: paragraph (V3 step 3 接 bge-m3 真向量)</span>'
+        + '    <button class="btn btn-sm btn-primary" '
+        +         'onclick="_knowledgeUpload(\'' + esc(agentId) + '\',\'' + esc(templateId) + '\')" '
+        +         'style="background:var(--cyber-magenta,#ff7adb);border-color:var(--cyber-magenta,#ff7adb);color:#000;font-size:11px">'
+        + '      🚀 上传并切分</button>'
+        + '  </div>'
+        + '</div>';
+      // Manual register-only form (no content)
       var manualForm = ''
-        + '<div style="margin-top:18px;padding:12px;background:rgba(255,255,255,0.02);'
+        + '<div style="margin-top:10px;padding:12px;background:rgba(255,255,255,0.02);'
         +     'border:1px solid var(--border);border-radius:6px">'
         + '  <div style="font-size:10px;color:var(--text3);text-transform:uppercase;'
-        +       'letter-spacing:0.05em;margin-bottom:8px">手工添加 source</div>'
+        +       'letter-spacing:0.05em;margin-bottom:8px">仅注册占位 source(不切分)</div>'
         + '  <div style="display:flex;gap:6px">'
-        + '    <input id="km-add-sid" placeholder="source_id (e.g. hf:my-dataset)" '
+        + '    <input id="km-add-sid" placeholder="source_id" '
         +         'style="flex:1;background:var(--bg2);border:1px solid var(--border);'
         +         'border-radius:4px;padding:5px 8px;color:var(--text);font-size:11px;font-family:var(--font-mono,monospace)">'
         + '    <input id="km-add-ver" placeholder="version" '
         +         'style="width:120px;background:var(--bg2);border:1px solid var(--border);'
         +         'border-radius:4px;padding:5px 8px;color:var(--text);font-size:11px">'
-        + '    <button class="btn btn-sm btn-primary" '
+        + '    <button class="btn btn-sm" '
         +         'onclick="_knowledgeAddManual(\'' + esc(agentId) + '\',\'' + esc(templateId) + '\')" '
-        +         'style="font-size:11px">添加</button>'
+        +         'style="font-size:11px">注册</button>'
         + '  </div>'
         + '</div>';
       // Reindex action
@@ -6223,10 +6259,10 @@ function _knowledgeRefresh(agentId, templateId) {
         + '<div style="margin-top:14px;display:flex;justify-content:flex-end">'
         + '  <button class="btn btn-sm btn-ghost" '
         +     'onclick="_knowledgeReindex(\'' + esc(agentId) + '\',\'' + esc(templateId) + '\')">'
-        + '    🔄 重建索引 (V3 step 2)'
+        + '    🔄 重建索引 (V3 step 3)'
         + '  </button>'
         + '</div>';
-      body.innerHTML = rows + manualForm + reindexBtn;
+      body.innerHTML = rows + uploadForm + manualForm + reindexBtn;
     })
     .catch(function(e){
       var body = document.getElementById('km-corpus-body');
@@ -6251,6 +6287,55 @@ function _knowledgeAddSource(agentId, templateId, sourceId, version) {
   });
 }
 window._knowledgeAddSource = _knowledgeAddSource;
+
+// V3 step 2: file picker → reads .txt/.md/.json into textarea, also
+// auto-fills source_id from filename if empty.
+function _knowledgeFilePick(input) {
+  var f = input.files && input.files[0];
+  if (!f) return;
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    var ta = document.getElementById('km-up-text');
+    var sid = document.getElementById('km-up-sid');
+    if (ta) ta.value = (e.target.result || '').toString();
+    if (sid && !sid.value) {
+      // Strip extension, replace whitespace with -
+      sid.value = (f.name || 'corpus').replace(/\.[^.]+$/, '').replace(/\s+/g, '-');
+    }
+  };
+  reader.readAsText(f);
+}
+window._knowledgeFilePick = _knowledgeFilePick;
+
+// V3 step 2: upload + chunk content. Calls POST /corpus/ingest with the
+// content body. Server runs the registered chunker, persists chunks.jsonl,
+// updates manifest.chunk_count. After success, refresh chip + drill panel
+// — user sees 段位 25% → 50% jump.
+function _knowledgeUpload(agentId, templateId) {
+  var sid = ((document.getElementById('km-up-sid') || {}).value || '').trim();
+  var content = ((document.getElementById('km-up-text') || {}).value || '');
+  if (!sid) { alert('source_id 不能为空'); return; }
+  if (!content || content.length < 30) {
+    alert('content 太短(< 30 字符) — 请粘贴完整文本或选文件'); return;
+  }
+  api('POST', '/api/portal/agent/' + agentId + '/expert/corpus/ingest', {
+    source_id: sid,
+    content: content,
+    chunker_strategy: 'paragraph',
+  })
+  .then(function(r){
+    var msg = '✓ 上传 ' + (r.chunk_count || 0) + ' chunks (' + (r.bytes || 0) + ' bytes)';
+    if (typeof _toast === 'function') _toast(msg, 'success');
+    // Clear the form
+    var ta = document.getElementById('km-up-text'); if (ta) ta.value = '';
+    var sf = document.getElementById('km-up-sid'); if (sf) sf.value = '';
+    // Refresh both panels: drill (knowledge) + chip (段位条)
+    _knowledgeRefresh(agentId, templateId);
+    try { _cultLevelChipRefresh(agentId); } catch(_) {}
+  })
+  .catch(function(e){ alert('上传失败: ' + (e.message || e)); });
+}
+window._knowledgeUpload = _knowledgeUpload;
 
 function _knowledgeAddManual(agentId, templateId) {
   var sid = (document.getElementById('km-add-sid') || {}).value || '';
@@ -6835,6 +6920,60 @@ function openCultivationModal(agentId) {
 }
 window.openCultivationModal = openCultivationModal;
 
+// Single source of truth for 段位 level computation. Both the header chip
+// and the modal pipeline 段位条 call this so they agree.
+//
+// Inputs: stats payload from GET /agent/{id}/expert/stats (must include
+//   `cultivated` / `specialty` / `feedback_counts: {up, down}`).
+//
+// Output: levelKey ∈ {pre, novice, journeyman, expert, master}.
+//
+// Rule:  level reflects ANSWER ACCURACY, not pipeline checklist completion.
+//   pre        — uncultivated agent
+//   novice     — < 20 rated answers OR positive_ratio < 60%
+//   journeyman — ≥ 20 answers AND positive_ratio ≥ 60%
+//   expert     — ≥ 50 answers AND positive_ratio ≥ 75%
+//   master     — ≥ 100 answers AND positive_ratio ≥ 85%
+//
+// Tunable thresholds: (n_min, ratio_min) per level. Bumping them later
+// won't break callers — they re-fetch /stats and re-compute.
+function _cultLevelFromStats(s) {
+  if (!s || !s.specialty) return 'pre';
+  var fb = s.feedback_counts || {up: 0, down: 0};
+  var up = fb.up || 0;
+  var down = fb.down || 0;
+  var total = up + down;
+  var ratio = total > 0 ? (up / total) : 0;
+  if (total >= 100 && ratio >= 0.85) return 'master';
+  if (total >= 50  && ratio >= 0.75) return 'expert';
+  if (total >= 20  && ratio >= 0.60) return 'journeyman';
+  return 'novice';
+}
+window._cultLevelFromStats = _cultLevelFromStats;
+
+// Common label/percent map — same display whether from chip or modal.
+function _cultLevelMeta(levelKey) {
+  return ({
+    pre:        { label: '⏳ 未启动',  shortLabel: '未启动', pct: 0,
+                  color: 'var(--text3)',
+                  nextHint: '先点击「确认初始化」激活配方' },
+    novice:     { label: '🌱 见习',    shortLabel: '见习',   pct: 25,
+                  color: 'var(--cyber-blue,#4afcff)',
+                  nextHint: '继续答题 + 拿到更多 👍 → 升熟手 (≥20 答 + ≥60% 满意)' },
+    journeyman: { label: '🌿 熟手',    shortLabel: '熟手',   pct: 50,
+                  color: 'var(--cyber-blue,#4afcff)',
+                  nextHint: '准确率冲到 75% (≥50 答) → 升专家' },
+    expert:     { label: '🎯 专家',    shortLabel: '专家',   pct: 75,
+                  color: 'var(--cyber-magenta,#ff7adb)',
+                  nextHint: '准确率稳定在 85% (≥100 答) → 升大师' },
+    master:     { label: '🏆 大师',    shortLabel: '大师',   pct: 100,
+                  color: 'var(--cyber-lime,#5cf08a)',
+                  nextHint: '已达终点 — 持续维持 ≥85% 满意率' },
+  })[levelKey] || { label: '⏳ 未启动', shortLabel: '未启动',
+                    pct: 0, color: 'var(--text3)', nextHint: '' };
+}
+window._cultLevelMeta = _cultLevelMeta;
+
 // Header 段位条 chip — paints "🌱 见习 25%" inline next to the agent name
 // in the tech-style header. Hidden when agent is uncultivated. Reads from
 // /expert/stats so it picks up live trace_count + lora state. The pill is
@@ -6852,26 +6991,14 @@ function _cultLevelChipRefresh(agentId) {
       // Compute 段位 + percentage from stats fields. Same logic as
       // _renderCultivationWorkflowPage so the header chip and the modal
       // never disagree.
-      var hasManifest = s.manifest && (s.manifest.sources || []).length > 0;
-      var corpusIndexed = hasManifest && (s.manifest.sources || [])
-        .some(function(src){ return (src.chunk_count || 0) > 0; });
-      var hasLora = !!s.active_lora;
-      var traceTarget = 1000;  // matches default in panel; V4 step 2
-                                // surfaces template's raft_data_target
-      var traceReady = (s.trace_count || 0) >= traceTarget;
-      var levelKey = !s.specialty       ? 'pre'
-                   : !corpusIndexed     ? 'novice'
-                   : !hasLora           ? 'journeyman'
-                   : !traceReady        ? 'expert'
-                   : 'master';
-      var levelMap = {
-        pre:        { label: '🌱',  name: '未启动', pct: 0,   color: 'var(--text3)' },
-        novice:     { label: '🌱',  name: '见习',   pct: 25,  color: 'var(--cyber-blue,#4afcff)' },
-        journeyman: { label: '🌿',  name: '熟手',   pct: 50,  color: 'var(--cyber-blue,#4afcff)' },
-        expert:     { label: '🎯',  name: '专家',   pct: 75,  color: 'var(--cyber-magenta,#ff7adb)' },
-        master:     { label: '🏆',  name: '大师',   pct: 100, color: 'var(--cyber-lime,#5cf08a)' },
-      };
-      var lvl = levelMap[levelKey] || levelMap.pre;
+      // 段位 = 答题准确度. See _cultLevelFromStats for thresholds.
+      var levelKey = _cultLevelFromStats(s);
+      var lvlMeta = _cultLevelMeta(levelKey);
+      // Total feedback count for the chip subtitle
+      var fbTotal = (s.feedback_counts && (s.feedback_counts.up + s.feedback_counts.down)) || 0;
+      var lvl = lvlMeta;
+      // Just the emoji prefix for compact display
+      var emoji = (lvl.label || '🌱').split(' ')[0];
       // Inline pill with mini progress bar
       el.style.display = 'inline-flex';
       el.style.alignItems = 'center';
@@ -6884,13 +7011,13 @@ function _cultLevelChipRefresh(agentId) {
       el.style.fontSize = '10px';
       el.style.fontFamily = 'var(--font-mono,monospace)';
       el.style.transition = 'all 0.15s';
-      el.title = '点击打开养成 pipeline';
+      el.title = '点击打开养成 pipeline · 答题反馈 ' + fbTotal + ' 次';
       el.onclick = function(){ openCultivationModal(agentId); };
       el.onmouseenter = function(){ el.style.background = 'rgba(255,255,255,0.08)'; };
       el.onmouseleave = function(){ el.style.background = 'rgba(255,255,255,0.04)'; };
       el.innerHTML = ''
-        + '<span style="font-size:11px">' + lvl.label + '</span>'
-        + '<span style="color:' + lvl.color + ';font-weight:600">' + esc(lvl.name) + '</span>'
+        + '<span style="font-size:11px">' + emoji + '</span>'
+        + '<span style="color:' + lvl.color + ';font-weight:600">' + esc(lvl.shortLabel) + '</span>'
         + '<span style="display:inline-block;width:32px;height:3px;background:rgba(255,255,255,0.08);border-radius:2px;overflow:hidden">'
         +   '<span style="display:block;height:100%;width:' + lvl.pct + '%;background:' + lvl.color + '"></span>'
         + '</span>'
