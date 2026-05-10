@@ -116,6 +116,43 @@ def _validate_value(path: str, value: Any) -> None:
             raise HTTPException(400, f"{path} must be in 10..1000")
         return
 
+    # ── STT engine selection ──
+    if path == "stt.engine":
+        # Built-in engines or a "__provider__:<llm_provider_id>" sentinel
+        # that points at an OpenAI-compatible /audio/transcriptions
+        # endpoint hosted by an existing LLM Provider.
+        if not isinstance(value, str):
+            raise HTTPException(400, "stt.engine must be a string")
+        if value in ("browser", "funasr", "mlx_whisper"):
+            return
+        if value.startswith("__provider__:"):
+            pid = value[len("__provider__:"):].strip()
+            if not pid:
+                raise HTTPException(
+                    400,
+                    "stt.engine: __provider__: sentinel needs a non-empty "
+                    "LLM provider id",
+                )
+            # Don't strict-check existence (provider could be created
+            # later, or admin pre-stages); /transcribe handles missing
+            # provider with a clear 503.
+            return
+        raise HTTPException(
+            400,
+            f"stt.engine must be browser/funasr/mlx_whisper or "
+            f"'__provider__:<id>', got {value!r}",
+        )
+    if path == "stt.mlx_whisper_repo":
+        if not isinstance(value, str) or not value.strip():
+            raise HTTPException(400, "stt.mlx_whisper_repo must be a non-empty string")
+        return
+    if path == "stt.provider_model":
+        if not isinstance(value, str):
+            raise HTTPException(400, "stt.provider_model must be a string")
+        if len(value) > 200:
+            raise HTTPException(400, "stt.provider_model too long")
+        return
+
     # ── Sandbox: admin-maintained readonly + read-write path allowlists ──
     # 2026-05-08: list of strings, each path expanded for ~ / $VAR
     # at sandbox-build time. We accept any list of non-empty strings

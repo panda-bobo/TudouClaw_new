@@ -1224,12 +1224,22 @@ class Hub:
                 agent.granted_skills = cur_skills
 
             cur_packs = list(getattr(agent, "bound_prompt_packs", []) or [])
+            # 2026-05-10: respect explicit user unbinds. If the user has
+            # unbound a role-default pack, this tombstone list keeps the
+            # auto-migration from re-adding it (previously every restart
+            # silently undid the user's unbind, which they reported as
+            # "unbind 是假的").
+            unbound_tombstones = list(getattr(agent, "unbound_role_packs", []) or [])
             packs_changed = False
             for pid in want_packs:
-                if pid not in cur_packs:
-                    cur_packs.append(pid)
-                    added_packs_total += 1
-                    packs_changed = True
+                if pid in cur_packs:
+                    continue
+                if pid in unbound_tombstones:
+                    # User explicitly removed this — leave it removed.
+                    continue
+                cur_packs.append(pid)
+                added_packs_total += 1
+                packs_changed = True
             if packs_changed:
                 agent.bound_prompt_packs = cur_packs
                 added_here = True

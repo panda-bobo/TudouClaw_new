@@ -1808,6 +1808,30 @@ h4, h5 { letter-spacing: -0.01em; }
           <option value="">Default (global)</option>
         </select>
       </div>
+      <div class="form-group" style="grid-column:1/-1;border-top:1px dashed var(--outline-variant);padding-top:14px;margin-top:4px">
+        <label>
+          <span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle;color:var(--secondary)">graphic_eq</span>
+          TTS Provider · 语音合成
+          <span style="color:var(--text3);font-weight:normal;font-size:11px">— 不选 Provider = 浏览器内置 Web Speech；选了 = 走云端 (复用 LLM Provider 的 base_url + api_key)</span>
+        </label>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-top:6px">
+          <!-- Provider 切换会动态重填 Voice / Model 列表（_eaOnTtsProviderChange） -->
+          <select id="ea-tts-provider" onchange="_eaOnTtsProviderChange()">
+            <option value="">默认（浏览器 Web Speech）</option>
+          </select>
+          <!-- Voice / Model options are populated by _eaOnTtsProviderChange
+               based on whether the selected provider is browser or cloud. -->
+          <select id="ea-tts-voice" onchange="_eaTtsCustomCheck(this)">
+            <option value="">默认</option>
+          </select>
+          <select id="ea-tts-model" onchange="_eaTtsCustomCheck(this)">
+            <option value="">默认</option>
+          </select>
+        </div>
+        <div id="ea-tts-hint" style="font-size:10px;color:var(--text3);margin-top:6px;line-height:1.5">
+          选 Provider 后 Voice / Model 会自动切换到对应可选项。
+        </div>
+      </div>
     </div>
     <div class="form-group">
       <label>Working Directory</label>

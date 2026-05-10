@@ -469,35 +469,97 @@ async def manage_prompt_packs(
 
         if action == "catalog":
             # -----------------------------------------------------------
-            # Browse community_skills.json catalog (matches old server)
+            # Browse merged catalogs (community + future Anthropic plugins).
+            #
+            # 2026-05-10: rebuilt to support multi-source + faceted filter.
+            # Each catalog file lives under app/data/*_catalog.json (or the
+            # legacy community_skills.json) and contributes its skills to
+            # a unified pool. Each item carries its `source` so the
+            # frontend can show source chips with counts and let users
+            # filter by source/category/search at once.
+            #
+            # Body params:
+            #   source       — exact source id ("" = all)
+            #   category     — exact category id ("" = all)
+            #   search       — substring match against name/description
+            #   page         — 1-based
+            #   per_page     — default 24 (3-col × 8-row grid)
+            #
+            # Response:
+            #   skills        list[{id, name, description, icon, category, source}]
+            #   categories    list[{id, count}]      (counts post-source-filter)
+            #   sources       list[{id, count}]      (always full counts)
+            #   total         int (matching results count, post-all-filters)
+            #   page, per_page
             # -----------------------------------------------------------
             import json as _json
             from pathlib import Path as _Path
-            catalog_path = _Path(__file__).resolve().parent.parent.parent / "data" / "community_skills.json"
-            try:
-                with open(catalog_path, "r", encoding="utf-8") as f:
-                    catalog = _json.load(f)
-            except FileNotFoundError:
-                return {"skills": [], "categories": [], "total": 0}
+            from collections import Counter as _Counter
 
-            category_filter = body.get("category", "")
-            search_query = body.get("search", "").lower()
-            page = body.get("page", 1)
-            per_page = body.get("per_page", 20)
+            data_dir = _Path(__file__).resolve().parent.parent.parent / "data"
+            # Discover catalog files: legacy community_skills.json plus any
+            # *_catalog.json sibling. This makes adding the Anthropic
+            # catalog later a zero-code drop-in.
+            catalog_files = []
+            legacy = data_dir / "community_skills.json"
+            if legacy.exists():
+                catalog_files.append(legacy)
+            for f in sorted(data_dir.glob("*_catalog.json")):
+                catalog_files.append(f)
 
-            skills = catalog.get("skills", [])
+            all_skills: list[dict] = []
+            all_categories: list[str] = []
+            for cf in catalog_files:
+                try:
+                    with open(cf, "r", encoding="utf-8") as fh:
+                        cat = _json.load(fh)
+                except Exception as e:
+                    logger.warning("catalog load failed (%s): %s", cf.name, e)
+                    continue
+                # Inherit catalog-level source as the per-skill default if
+                # the entry doesn't already have its own.
+                file_source = (cat.get("source") or "").strip() or cf.stem
+                for s in cat.get("skills", []):
+                    if not isinstance(s, dict):
+                        continue
+                    item = dict(s)
+                    item.setdefault("source", file_source)
+                    all_skills.append(item)
+                for c in cat.get("categories", []) or []:
+                    if c not in all_categories:
+                        all_categories.append(c)
+
+            # Source / category facet counts (BEFORE search filter so the
+            # chip counts don't flicker as user types — but DO honor source
+            # filter for category counts so categories reflect the
+            # currently-selected source).
+            source_counts = _Counter(s.get("source", "?") for s in all_skills)
+
+            source_filter = (body.get("source") or "").strip()
+            category_filter = (body.get("category") or "").strip()
+            search_query = (body.get("search") or "").lower().strip()
+            page = max(1, int(body.get("page") or 1))
+            per_page = max(1, min(200, int(body.get("per_page") or 24)))
+
+            # Apply source filter for category counts
+            scoped = all_skills if not source_filter \
+                else [s for s in all_skills if s.get("source") == source_filter]
+            category_counts = _Counter(s.get("category", "?") for s in scoped)
+
+            # Apply remaining filters for the actual result list
+            filtered = scoped
             if category_filter:
-                skills = [s for s in skills if s.get("category") == category_filter]
+                filtered = [s for s in filtered if s.get("category") == category_filter]
             if search_query:
-                skills = [
-                    s for s in skills
+                filtered = [
+                    s for s in filtered
                     if search_query in s.get("name", "").lower()
                     or search_query in s.get("description", "").lower()
                 ]
 
-            total = len(skills)
+            total = len(filtered)
             start = (page - 1) * per_page
-            paginated = skills[start : start + per_page]
+            paginated = filtered[start : start + per_page]
 
             result = [
                 {
@@ -506,15 +568,31 @@ async def manage_prompt_packs(
                     "description": s.get("description", ""),
                     "icon": s.get("icon", ""),
                     "category": s.get("category", ""),
+                    "source": s.get("source", ""),
                 }
                 for s in paginated
             ]
+            # Sort categories list to ensure all known categories appear
+            # even with 0 count under the selected source.
+            for c in all_categories:
+                category_counts.setdefault(c, 0)
             return {
                 "skills": result,
-                "categories": catalog.get("categories", []),
+                "categories": [
+                    {"id": k, "count": v}
+                    for k, v in sorted(category_counts.items(),
+                                       key=lambda kv: (-kv[1], kv[0]))
+                    if v > 0 or k in all_categories
+                ],
+                "sources": [
+                    {"id": k, "count": v}
+                    for k, v in sorted(source_counts.items(),
+                                       key=lambda kv: (-kv[1], kv[0]))
+                ],
                 "total": total,
                 "page": page,
                 "per_page": per_page,
+                "grand_total": len(all_skills),
             }
 
         elif action == "create":

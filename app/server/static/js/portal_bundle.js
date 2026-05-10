@@ -2380,17 +2380,6 @@ function renderCurrentView() {
       // take care of keeping side panels fresh.
       var existingChat = document.getElementById('chat-msgs-' + currentAgent);
       if (existingChat) {
-        // 2026-05-08 (bug "chat 框变小了"): the unconditional style reset
-        // above (lines 2343-2346) wipes the flex+height that
-        // renderAgentChat set on first mount. Without this restore the
-        // chat container collapses to natural content height, leaving
-        // a huge empty area below the input. Symptom user reported
-        // after clearAgent → refresh → renderCurrentView → early-break
-        // path. Restore the chat-layout styles before bailing out.
-        c.style.padding = '0';
-        c.style.display = 'flex';
-        c.style.flexDirection = 'column';
-        c.style.height = '100%';
         try { loadAgentEventLog(currentAgent); } catch(e) {}
         try { _pollChatNewMessages(currentAgent); } catch(e) {}
         try { loadExecutionSteps(currentAgent); } catch(e) {}
@@ -3496,16 +3485,9 @@ function renderKnowledgeMemoryHubTech() {
   var _orig = document.getElementById('content');
   sc.id = 'content'; if (_orig !== sc) _orig.id = 'content-outer';
   try {
-    // 2026-05-08: tech-theme tab 'wiki' previously fell through to
-    // _renderKmShared (the legacy Shared-Knowledge renderer with the
-    // "(legacy)" banner) — the wiki Browser code never ran on tech
-    // theme. Fixed by routing 'wiki' to _renderKmWiki. SK content
-    // (which user has emptied) is no longer accessible from the tech
-    // theme menu — same effective state as the regular theme post-
-    // Step E retirement.
     if      (r.current === 'kb-list'  && typeof _renderKmPrivate === 'function') _renderKmPrivate();
     else if (r.current === 'memory'   && typeof _renderKmMemory === 'function') _renderKmMemory();
-    else if (r.current === 'wiki'     && typeof _renderKmWiki === 'function') _renderKmWiki();
+    else if (r.current === 'wiki'     && typeof _renderKmShared === 'function') _renderKmShared();
     else if (r.current === 'rag-prov' && typeof _renderKmRagProviders === 'function') _renderKmRagProviders();
     else sc.innerHTML = '<div class="tc-card tc-text-dim" style="padding:var(--s-lg)">Tab not yet implemented.</div>';
   } catch (e) {
@@ -5394,7 +5376,797 @@ window._applyInitialBottomTab = function(agentId) {
   }
 };
 
+// ═══════════════════════════════════════════════════════
+// SP-0 · UNIFIED AGENT WORKSPACE                          (start)
+// Per spec docs/superpowers/specs/2026-05-10-agent-specialty-cultivation-design.md §4
+// 5-tab agent workspace replacing scattered modals (Capabilities popup,
+// Prompt Pack market, Edit Agent, etc.). Pure UI integration; backend
+// untouched. Toggle via localStorage 'tudou_workspace_v2' ('1' = new
+// shell, default; '0' = legacy UI).
+// ═══════════════════════════════════════════════════════
+
+// State for the active workspace per agent. Keyed by agentId.
+var _aws = {};  // _aws[agentId] = { activeTab, scrollByTab: {}, historySubTab }
+
+function _awsEnabled() {
+  try {
+    return localStorage.getItem('tudou_workspace_v2') !== '0';
+  } catch (e) { return true; }
+}
+
+function _awsGetState(agentId) {
+  if (!_aws[agentId]) {
+    _aws[agentId] = { activeTab: 'chat', scrollByTab: {} };
+  }
+  return _aws[agentId];
+}
+
+function renderAgentWorkspace(agentId) {
+  if (!_awsEnabled()) return null;  // signal "use old UI"
+  var state = _awsGetState(agentId);
+  var c = document.getElementById('content');
+  if (!c) return false;
+  // Reset content style — agent chat sets these and we want a clean slate.
+  c.style.padding = '0';
+  c.style.display = 'flex';
+  c.style.flexDirection = 'column';
+  c.style.height = '100%';
+  c.style.overflow = 'hidden';
+  c.innerHTML = ''
+    + '<div id="aws-root" data-agent-id="' + esc(agentId) + '" '
+    +     'style="display:flex;flex-direction:column;height:100%;background:var(--surface,#1a1a24);overflow:hidden">'
+    + '  <div id="aws-header" style="flex-shrink:0;padding:10px 22px;'
+    +       'border-bottom:1px solid var(--overlay-8,#333);'
+    +       'display:flex;justify-content:space-between;align-items:center;background:var(--bg2,#15151e)">'
+    + '    <div style="display:flex;align-items:center;gap:10px">'
+    + '      <button class="btn btn-sm btn-ghost" onclick="renderDashboard()" '
+    +             'style="padding:4px 10px"><span class="material-symbols-outlined" '
+    +             'style="font-size:16px;vertical-align:middle">arrow_back</span> Back</button>'
+    + '      <span id="aws-agent-name" style="font-size:14px;font-weight:600">'
+    +              esc(agentId) + '</span>'
+    + '    </div>'
+    + '    <div style="display:flex;align-items:center;gap:6px">'
+    + '      <button class="btn btn-sm btn-ghost" onclick="_awsLaunchVoiceMode(\'' + esc(agentId) + '\')" '
+    +             'title="Voice mode (STT input)" style="padding:4px 10px">'
+    + '        <span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">mic</span> Voice'
+    + '      </button>'
+    + '      <span style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px">workspace v2</span>'
+    + '      <button class="btn btn-sm btn-ghost" onclick="_awsToggleLegacyUi()" '
+    +             'title="Switch back to classic UI" style="padding:4px 8px">'
+    + '        <span class="material-symbols-outlined" style="font-size:16px">undo</span>'
+    + '      </button>'
+    + '    </div>'
+    + '  </div>'
+    + '  <nav id="aws-tabs" role="tablist" style="flex-shrink:0;padding:0 22px;'
+    +       'border-bottom:1px solid var(--overlay-8,#333);display:flex;gap:2px;background:var(--bg2,#15151e)">'
+    +     _awsTabBtn('chat', '💬', '对话', state.activeTab === 'chat')
+    +     _awsTabBtn('capabilities', '🧰', '能力', state.activeTab === 'capabilities')
+    +     _awsTabBtn('cultivation', '🎓', '养成', state.activeTab === 'cultivation')
+    +     _awsTabBtn('history', '📊', '历史', state.activeTab === 'history')
+    +     _awsTabBtn('settings', '⚙️', '配置', state.activeTab === 'settings')
+    + '  </nav>'
+    + '  <main id="aws-main" style="flex:1;overflow:hidden;position:relative">'
+    + '  </main>'
+    + '</div>';
+  _awsLoadAgentMeta(agentId);
+  _awsRenderTab(agentId, state.activeTab);
+  return true;
+}
+
+function _awsTabBtn(tabId, icon, label, active) {
+  var color = active ? 'var(--primary,#a78bfa)' : 'var(--text3)';
+  var border = active ? '2px solid var(--primary,#a78bfa)' : '2px solid transparent';
+  return '<button role="tab" aria-selected="' + (active ? 'true' : 'false') + '" '
+    + 'data-tab="' + esc(tabId) + '" '
+    + 'onclick="_awsSwitchTab(this.dataset.tab)" '
+    + 'style="background:none;border:none;border-bottom:' + border + ';'
+    +   'padding:10px 16px;color:' + color + ';font-size:13px;cursor:pointer;'
+    +   'display:inline-flex;align-items:center;gap:6px;font-weight:'
+    +   (active ? '600' : '500') + ';margin-bottom:-1px">'
+    +   '<span style="font-size:14px">' + icon + '</span>'
+    +   esc(label)
+    + '</button>';
+}
+
+function _awsSwitchTab(tabId) {
+  var root = document.getElementById('aws-root');
+  if (!root) return;
+  var agentId = root.dataset.agentId;
+  if (!agentId) return;
+  var state = _awsGetState(agentId);
+  // Save current scroll position for the outgoing tab
+  var main = document.getElementById('aws-main');
+  if (main && state.activeTab) {
+    state.scrollByTab[state.activeTab] = main.scrollTop || 0;
+  }
+  state.activeTab = tabId;
+  // Update tab styles in place (no full re-render of nav)
+  var btns = document.querySelectorAll('#aws-tabs button');
+  btns.forEach(function(b){
+    var act = b.dataset.tab === tabId;
+    b.style.borderBottom = act
+      ? '2px solid var(--primary,#a78bfa)'
+      : '2px solid transparent';
+    b.style.color = act ? 'var(--primary,#a78bfa)' : 'var(--text3)';
+    b.style.fontWeight = act ? '600' : '500';
+    b.setAttribute('aria-selected', act ? 'true' : 'false');
+  });
+  _awsRenderTab(agentId, tabId);
+}
+
+function _awsRenderTab(agentId, tabId) {
+  var main = document.getElementById('aws-main');
+  if (!main) return;
+  if (tabId === 'chat') {
+    _awsRenderChatTab(agentId, main);
+  } else if (tabId === 'capabilities') {
+    _awsRenderCapabilitiesTab(agentId, main);
+  } else if (tabId === 'settings') {
+    _awsRenderSettingsTab(agentId, main);
+  } else if (tabId === 'cultivation') {
+    _awsRenderCultivationTab(agentId, main);
+  } else if (tabId === 'history') {
+    _awsRenderHistoryTab(agentId, main);
+  } else {
+    main.style.overflow = 'hidden';
+    main.style.display = 'block';
+    main.innerHTML = '<div style="padding:60px;text-align:center;color:var(--text3)">'
+      + '<div style="font-size:32px;margin-bottom:12px">🚧</div>'
+      + 'Tab "' + esc(tabId) + '" coming soon (SP-0 work in progress)'
+      + '</div>';
+  }
+  // Restore scroll position for incoming tab
+  var state = _awsGetState(agentId);
+  var saved = state.scrollByTab[tabId];
+  if (saved) setTimeout(function(){ if (main) main.scrollTop = saved; }, 0);
+}
+
+// SP-0: 历史 tab — sub-tabs for events / tools / plans. Each sub-tab
+// reuses an existing per-agent renderer (loadAgentEventLog,
+// loadExecutionSteps, ...) by hosting the same DOM IDs they write into.
+function _awsRenderHistoryTab(agentId, main) {
+  main.style.overflow = 'hidden';
+  main.style.display = 'flex';
+  main.style.flexDirection = 'column';
+  main.style.padding = '0';
+  var subTab = _awsGetState(agentId).historySubTab || 'events';
+  main.innerHTML = ''
+    + '<div style="flex-shrink:0;padding:0 22px;'
+    +   'border-bottom:1px solid var(--overlay-8);display:flex;gap:2px;background:var(--bg2)">'
+    +   _awsSubTabBtn('events', '对话事件', subTab === 'events')
+    +   _awsSubTabBtn('tools', '工具调用', subTab === 'tools')
+    +   _awsSubTabBtn('plans', 'Plan 执行', subTab === 'plans')
+    + '</div>'
+    + '<div id="aws-history-body" style="flex:1;overflow-y:auto;padding:14px 22px">'
+    +   '<div id="agent-event-log-' + esc(agentId) + '" style="display:none;'
+    +     'font-family:monospace;font-size:11px;line-height:1.7;color:var(--text3)"></div>'
+    +   '<div id="execution-steps-' + esc(agentId) + '" style="display:none;'
+    +     'flex-direction:column;gap:6px"></div>'
+    +   '<div id="plans-' + esc(agentId) + '" style="display:none"></div>'
+    + '</div>';
+  _awsHistoryShow(agentId, subTab);
+}
+
+function _awsSubTabBtn(id, label, active) {
+  var color = active ? '#4afcff' : 'var(--text3)';
+  var border = active ? '2px solid #4afcff' : '2px solid transparent';
+  return '<button onclick="_awsSwitchHistorySub(\'' + esc(id) + '\')" '
+    + 'style="background:none;border:none;border-bottom:' + border + ';'
+    +   'padding:8px 14px;color:' + color + ';font-size:12px;cursor:pointer;'
+    +   'margin-bottom:-1px;font-weight:' + (active ? '600' : '500') + '">'
+    + esc(label) + '</button>';
+}
+
+function _awsSwitchHistorySub(subId) {
+  var root = document.getElementById('aws-root');
+  if (!root) return;
+  var agentId = root.dataset.agentId;
+  if (!agentId) return;
+  _awsGetState(agentId).historySubTab = subId;
+  _awsRenderTab(agentId, 'history');
+}
+
+function _awsHistoryShow(agentId, subTab) {
+  // Hide all panels
+  ['agent-event-log-', 'execution-steps-', 'plans-'].forEach(function(prefix){
+    var el = document.getElementById(prefix + agentId);
+    if (el) el.style.display = 'none';
+  });
+  if (subTab === 'events') {
+    var el = document.getElementById('agent-event-log-' + agentId);
+    if (el) el.style.display = 'block';
+    if (typeof loadAgentEventLog === 'function') {
+      try { loadAgentEventLog(agentId); } catch(e) {}
+    }
+  } else if (subTab === 'tools') {
+    var el2 = document.getElementById('execution-steps-' + agentId);
+    if (el2) {
+      el2.style.display = 'flex';
+      el2.style.flexDirection = 'column';
+    }
+    if (typeof loadExecutionSteps === 'function') {
+      try { loadExecutionSteps(agentId); } catch(e) {}
+    }
+  } else if (subTab === 'plans') {
+    var el3 = document.getElementById('plans-' + agentId);
+    if (el3) {
+      el3.style.display = 'block';
+      // No existing loadPlans renderer — show an explanatory placeholder.
+      el3.innerHTML = '<div style="padding:30px;color:var(--text3);text-align:center;font-size:13px">'
+        + '<div style="font-size:24px;margin-bottom:10px">📋</div>'
+        + 'Plan 执行历史将在 SP-2 (state-machine planning V3) 上线后填充此处。'
+        + '</div>';
+    }
+  }
+}
+
+window._awsSwitchHistorySub = _awsSwitchHistorySub;
+
+// V1 (2026-05-10): 养成 tab live data
+// Loads expert state for this agent + the catalog of available specialty
+// templates from the new /api/portal/expert/* endpoints. Renders one of:
+//   • "Cultivated" card with current specialty + level + expert details
+//   • "Pick a specialty" picker grid for uncultivated agents
+// V2 will add the [Initialize] flow (POST /agent/{id}/expert/initialize).
+function _awsRenderCultivationTab(agentId, main) {
+  main.style.overflowY = 'auto';
+  main.style.overflowX = 'hidden';
+  main.style.display = 'block';
+  main.style.padding = '0';
+  main.innerHTML = '<div style="padding:30px;color:var(--text3);text-align:center">'
+    + '<span class="material-symbols-outlined" style="font-size:24px">refresh</span><br>'
+    + 'Loading…</div>';
+  // Parallel fetch: expert status for this agent + full template catalog
+  Promise.all([
+    api('GET', '/api/portal/agent/' + agentId + '/expert')
+      .catch(function(e){ return { _error: e }; }),
+    api('GET', '/api/portal/specialty-templates')
+      .catch(function(e){ return { _error: e }; }),
+  ]).then(function(results){
+    var status = results[0] || {};
+    var catalog = results[1] || {};
+    var current = document.getElementById('aws-main');
+    if (!current) return;
+    if (status._error) {
+      current.innerHTML = '<div style="padding:30px;color:var(--error)">'
+        + 'Cultivation status load failed: ' + esc(String(status._error.message || status._error)) + '</div>';
+      return;
+    }
+    if (status.cultivated) {
+      current.innerHTML = _awsCultivationCultivatedCard(agentId, status);
+    } else {
+      current.innerHTML = _awsCultivationPickerCard(agentId, status, catalog);
+    }
+  });
+}
+
+// Card shown for already-cultivated agent. Read-only summary in V1; V2/V3
+// add corpus / training / routing controls inline below.
+function _awsCultivationCultivatedCard(agentId, status) {
+  var levelLabel = ({
+    'novice':     '🌱 见习',
+    'journeyman': '🌿 熟手',
+    'expert':     '🎯 专家',
+    'master':     '🏆 大师',
+  })[status.expert_level] || ('🌱 ' + status.expert_level);
+  var initDate = status.expert_initialized_at
+    ? new Date(status.expert_initialized_at * 1000).toLocaleDateString()
+    : '—';
+  return ''
+    + '<div style="padding:30px 32px;max-width:880px;margin:0 auto">'
+    + '  <div style="display:flex;align-items:center;gap:14px;margin-bottom:24px">'
+    + '    <div style="width:56px;height:56px;background:rgba(255,122,219,0.15);'
+    +        'border:1px solid rgba(255,122,219,0.5);border-radius:12px;'
+    +        'display:flex;align-items:center;justify-content:center;font-size:30px">🎓</div>'
+    + '    <div>'
+    + '      <div style="font-size:11px;color:#ff7adb;text-transform:uppercase;'
+    +        'letter-spacing:0.05em;font-weight:600">CULTIVATED EXPERT</div>'
+    + '      <h2 style="margin:2px 0 0;font-size:22px;font-weight:600">'
+    +        esc(status.agent_name || agentId) + ' · ' + esc(status.expert_specialty) + '</h2>'
+    + '    </div>'
+    + '    <div style="margin-left:auto;text-align:right">'
+    + '      <div style="font-size:11px;color:var(--text3)">CURRENT LEVEL</div>'
+    + '      <div style="font-size:18px;font-weight:600;color:var(--primary)">' + esc(levelLabel) + '</div>'
+    + '    </div>'
+    + '  </div>'
+
+    + '  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:20px">'
+    +      _awsStatTile('Template', esc(status.expert_template_version || '—'), 'var(--cyber-blue,#4afcff)')
+    +      _awsStatTile('LoRA', esc(status.expert_lora_version || '(none)'), 'var(--cyber-lime,#5cf08a)')
+    +      _awsStatTile('Initialized', esc(initDate), 'var(--cyber-magenta,#ff7adb)')
+    +      _awsStatTile('Profile', status.profile ? '✓ on disk' : '— not yet', 'var(--primary,#a78bfa)')
+    + '  </div>'
+
+    + '  <div style="background:rgba(255,255,255,0.03);border:1px solid var(--border);'
+    +     'border-radius:8px;padding:18px;margin-bottom:14px">'
+    + '    <div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:10px">PIPELINE STATUS</div>'
+    + '    <div style="font-size:13px;color:var(--text2);line-height:1.7">'
+    + '      🟢 Bundle 已应用 (V2 落地后会列出每个 pack/skill 的 grant 状态)<br>'
+    + '      ⏳ Corpus 索引 (V3 落地)<br>'
+    + '      ⏳ LoRA 训练 (V4/SP-2 落地)<br>'
+    + '      ⏳ 路由策略 (SP-3 落地)'
+    + '    </div>'
+    + '  </div>'
+
+    + '  <div style="display:flex;gap:10px;margin-top:16px">'
+    + '    <button class="btn btn-sm btn-ghost" onclick="_awsCultivationDisable(\''
+    +        esc(agentId) + '\', true)" style="color:var(--warning)">🟡 禁用专家化(保留数据)</button>'
+    + '    <button class="btn btn-sm btn-ghost" onclick="_awsCultivationDisable(\''
+    +        esc(agentId) + '\', false)" style="color:var(--error);margin-left:auto">🗑️ 完全卸载(删数据)</button>'
+    + '  </div>'
+    + '</div>';
+}
+
+function _awsStatTile(label, value, accent) {
+  return '<div style="background:rgba(255,255,255,0.02);border:1px solid var(--border);'
+    + 'border-radius:8px;padding:12px 14px">'
+    + '  <div style="font-size:9px;color:' + accent + ';text-transform:uppercase;'
+    +    'letter-spacing:0.06em;font-weight:600">' + esc(label) + '</div>'
+    + '  <div style="font-size:16px;font-weight:600;color:var(--text);margin-top:4px">' + value + '</div>'
+    + '</div>';
+}
+
+// Card shown for uncultivated agent — specialty template picker.
+function _awsCultivationPickerCard(agentId, status, catalog) {
+  var templates = (catalog && catalog.templates) || [];
+  var loadErr = (catalog && catalog._error)
+    ? '<div style="color:var(--error);font-size:12px;margin-bottom:12px">Template catalog load failed: '
+        + esc(String(catalog._error.message || catalog._error)) + '</div>'
+    : '';
+  var templateGrid = '';
+  if (templates.length === 0 && !loadErr) {
+    templateGrid = '<div style="padding:30px;text-align:center;color:var(--text3);'
+      + 'border:1px dashed var(--border);border-radius:8px">'
+      + '尚未注册任何 specialty 模板。'
+      + '将 yaml 放入 <code>app/data/specialty_templates/</code> 即可。'
+      + '</div>';
+  } else {
+    templateGrid = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px">';
+    templates.forEach(function(t){
+      templateGrid += '<div style="background:rgba(255,255,255,0.03);border:1px solid var(--border);'
+        + 'border-radius:10px;padding:18px;display:flex;flex-direction:column;gap:10px;'
+        + 'transition:border-color 0.15s,transform 0.1s" '
+        + 'onmouseenter="this.style.borderColor=\'var(--primary)\';this.style.transform=\'translateY(-1px)\'" '
+        + 'onmouseleave="this.style.borderColor=\'\';this.style.transform=\'\'">'
+        + '  <div style="display:flex;align-items:flex-start;gap:10px">'
+        + '    <div style="font-size:32px;line-height:1;flex-shrink:0">' + esc(t.icon || '🎓') + '</div>'
+        + '    <div style="flex:1;min-width:0">'
+        + '      <div style="font-size:14px;font-weight:600">' + esc(t.name) + '</div>'
+        + '      <div style="font-size:10px;color:var(--text3);font-family:var(--font-mono,monospace);margin-top:2px">'
+        +          esc(t.id) + ' v' + esc(t.version) + '</div>'
+        + '    </div>'
+        + '  </div>'
+        + '  <div style="font-size:12px;color:var(--text2);line-height:1.55;flex:1;min-height:40px">'
+        +     esc(t.description || '') + '</div>'
+        + '  <div style="display:flex;gap:6px;flex-wrap:wrap;font-size:10px;color:var(--text3);font-family:var(--font-mono,monospace)">'
+        + '    <span title="prompt packs">📝 ' + t.required_packs_count + ' packs</span>'
+        + '    <span title="skills">🛠 ' + t.required_skills_count + ' skills</span>'
+        + '    <span title="levels">🎯 ' + t.level_count + ' levels</span>'
+        + '  </div>'
+        + '  <button class="btn btn-sm btn-primary" '
+        +    'onclick="_awsCultivationPreview(\'' + esc(agentId) + '\',\'' + esc(t.id) + '\')" '
+        +    'style="font-size:12px;background:rgba(167,139,250,0.20);'
+        +    'border:1px solid rgba(167,139,250,0.50);color:var(--primary,#a78bfa);margin-top:auto">'
+        + '    ➕ 选这个模板专家化'
+        + '  </button>'
+        + '</div>';
+    });
+    templateGrid += '</div>';
+  }
+  return ''
+    + '<div style="padding:30px 32px;max-width:1100px;margin:0 auto">'
+    + '  <div style="display:flex;align-items:center;gap:14px;margin-bottom:8px">'
+    + '    <div style="width:56px;height:56px;background:rgba(167,139,250,0.10);'
+    +        'border:1px dashed rgba(167,139,250,0.40);border-radius:12px;'
+    +        'display:flex;align-items:center;justify-content:center;font-size:30px">🌱</div>'
+    + '    <div>'
+    + '      <div style="font-size:11px;color:var(--primary);text-transform:uppercase;'
+    +        'letter-spacing:0.05em;font-weight:600">UNCULTIVATED AGENT</div>'
+    + '      <h2 style="margin:2px 0 0;font-size:20px">'
+    +          esc(status.agent_name || agentId) + ' · 选择 specialty 开始养成</h2>'
+    + '    </div>'
+    + '  </div>'
+    + '  <p style="font-size:13px;color:var(--text2);line-height:1.7;margin:8px 0 24px;max-width:680px">'
+    + '    选择下面任一模板,agent 会渐进式地获得该领域的能力包(prompt packs / skills / 知识库 / RAG / LoRA 训练)。<br>'
+    + '    <span style="color:var(--text3);font-size:12px">注:V1 仅展示状态,「初始化」按钮的实际应用流程在 V2 vertical 上线。</span>'
+    + '  </p>'
+    +    loadErr
+    +    templateGrid
+    + '</div>';
+}
+
+// V1 stub: clicking "选这个模板" — preview / placeholder for V2.
+function _awsCultivationPreview(agentId, templateId) {
+  api('GET', '/api/portal/specialty-templates/' + encodeURIComponent(templateId))
+    .then(function(t){
+      var summary = '模板预览(V2 上线后,确认按钮会真应用 bundle):\n\n'
+        + '  ID: ' + (t.id || '?') + '\n'
+        + '  Version: ' + (t.version || '?') + '\n'
+        + '  Required prompt packs: ' + ((t.required_packs || []).length + (t.required_anthropic_packs || []).length) + '\n'
+        + '  Required skills: ' + (t.required_skills || []).length + '\n'
+        + '  Eval suite: ' + ((t.eval_suite || []).map(function(e){return e.runner_id;}).join(', ') || '(none)') + '\n'
+        + '  Levels: ' + ((t.level_rules || []).length);
+      alert(summary);
+    })
+    .catch(function(e){
+      alert('Template preview failed: ' + (e.message || e));
+    });
+}
+
+// V1: disable / fully delete cultivation — wired to DELETE endpoint.
+async function _awsCultivationDisable(agentId, keepData) {
+  var msg = keepData
+    ? '禁用此 agent 的专家化?(corpus / LoRA / traces 数据保留,可后续恢复)'
+    : '⚠️ 完全卸载?这将永久删除 corpus / LoRA / traces 全部数据。';
+  if (!confirm(msg)) return;
+  try {
+    var r = await api('DELETE', '/api/portal/agent/' + encodeURIComponent(agentId)
+      + '/expert?keep_data=' + (keepData ? 'true' : 'false'));
+    if (r && r.ok) {
+      var label = keepData ? '已禁用(数据保留)' : '已完全卸载';
+      if (window._toast) _toast(label, 'success');
+      // Re-render to show uncultivated state
+      _awsRenderCultivationTab(agentId, document.getElementById('aws-main'));
+    } else {
+      alert('禁用失败: ' + JSON.stringify(r));
+    }
+  } catch(e) {
+    alert('禁用失败: ' + (e.message || e));
+  }
+}
+
+// SP-0: 配置 tab — agent profile readout + launcher for the full Edit
+// Agent dialog. The dialog is a complex multi-section form (LLM slots,
+// preprocessor, RAG bindings, MCP env, etc.) defined as static HTML in
+// portal.html; reimplementing it here would 2x the file. Instead we
+// surface a quick summary card and a "Open Settings" button that fires
+// the existing editAgentProfile() flow. Once SP-1 lands, this tab will
+// gain inline cultivation controls; the Edit Agent dialog stays as the
+// place for low-level LLM/MCP config.
+function _awsRenderSettingsTab(agentId, main) {
+  main.style.overflowY = 'auto';
+  main.style.overflowX = 'hidden';
+  main.style.display = 'block';
+  main.style.padding = '0';
+  main.innerHTML = '<div style="padding:30px;color:var(--text3);text-align:center">'
+    + '<span class="material-symbols-outlined" style="font-size:24px">refresh</span><br>'
+    + 'Loading…</div>';
+  api('GET', '/api/portal/agent/' + agentId).then(function(a){
+    a = a || {};
+    var prof = a.profile || {};
+    var parts = [];
+    function row(label, value) {
+      parts.push('<div style="display:flex;padding:8px 0;border-bottom:1px solid var(--overlay-5);font-size:13px">'
+        + '  <div style="width:160px;color:var(--text3);font-size:11px;text-transform:uppercase;'
+        +     'letter-spacing:0.5px;flex-shrink:0">' + esc(label) + '</div>'
+        + '  <div style="flex:1;color:var(--text);min-width:0;word-break:break-word">' + (value || '<span style="color:var(--text3)">—</span>') + '</div>'
+        + '</div>');
+    }
+    row('Name', esc(a.name || ''));
+    row('Role', esc(a.role || 'general'));
+    row('Department', esc(a.department || ''));
+    row('Provider', esc(a.provider || ''));
+    row('Model', esc(a.model || ''));
+    row('Working dir', a.working_dir
+      ? '<code style="font-family:monospace;font-size:12px;color:var(--primary)">' + esc(a.working_dir) + '</code>' : '');
+    row('Expertise', (prof.expertise || []).map(esc).join(', '));
+    var skills = (a.granted_skills || []).length;
+    var mcps = (a.mcp_servers || []).length;
+    row('Counts', '<span style="color:#a78bfa">' + skills + ' skills</span> · '
+      + '<span style="color:#a78bfa">' + mcps + ' MCPs</span>');
+    var current = document.getElementById('aws-main');
+    if (!current) return;
+    current.innerHTML = ''
+      + '<div style="padding:24px 30px;max-width:780px;margin:0 auto">'
+      + '  <div style="display:flex;justify-content:space-between;align-items:flex-start;'
+      +     'margin-bottom:18px;gap:16px">'
+      + '    <div>'
+      + '      <h3 style="margin:0 0 4px;font-size:16px">Agent Settings</h3>'
+      + '      <div style="font-size:11px;color:var(--text3)">Profile · LLM · Skills · MCP</div>'
+      + '    </div>'
+      + '    <button class="btn btn-primary" onclick="editAgentProfile(\'' + esc(agentId) + '\')">'
+      + '      <span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle">edit</span>'
+      + '      编辑配置 Open Settings…'
+      + '    </button>'
+      + '  </div>'
+      + '  <div style="border:1px solid var(--border);border-radius:8px;background:rgba(255,255,255,0.02);'
+      +     'padding:14px 22px">'
+      +    parts.join('')
+      + '  </div>'
+      + '  <div style="margin-top:18px;font-size:11px;color:var(--text3);line-height:1.6">'
+      + '    LLM 多路由 / Preprocessor / RAG 绑定 / MCP env 等高级配置都在 Open Settings 弹窗里。'
+      + '    后续 SP-1 会把养成相关字段(specialty / lora 路径)直接搬到本页。'
+      + '  </div>'
+      + '</div>';
+  }).catch(function(e){
+    var current = document.getElementById('aws-main');
+    if (current) {
+      current.innerHTML = '<div style="padding:30px;color:var(--error)">'
+        + 'Settings load failed: ' + esc(e.message || String(e)) + '</div>';
+    }
+  });
+}
+
+function _awsRenderCapabilitiesTab(agentId, main) {
+  main.style.overflowY = 'auto';
+  main.style.overflowX = 'hidden';
+  main.style.display = 'block';
+  main.style.padding = '0';
+  main.innerHTML = '<div style="padding:30px;color:var(--text3);text-align:center">'
+    + '<span class="material-symbols-outlined" style="font-size:24px;'
+    +   'animation:spin 1.5s linear infinite">refresh</span><br>'
+    + 'Loading capabilities…</div>';
+  Promise.all([
+    api('GET', '/api/portal/agent/' + agentId + '/skill-pkgs').catch(function(){ return {skills:[]}; }),
+    api('GET', '/api/portal/agent/' + agentId + '/prompt-packs').catch(function(){ return {bound_skills:[]}; }),
+    api('GET', '/api/portal/agent/' + agentId).catch(function(){ return {}; }),
+  ]).then(function(results){
+    var granted = (results[0] && results[0].skills) || [];
+    var boundPacks = (results[1] && results[1].bound_skills) || [];
+    var agDetail = results[2] || {};
+    var mcpList = agDetail.mcp_servers || [];
+    // Cache for downstream handlers (revokeGrantedSkill etc. expect this).
+    window._currentAgentForSkillPanel = agDetail;
+    var current = document.getElementById('aws-main');
+    if (!current) return;
+    current.innerHTML = _capabilitiesBodyHTML(agentId, agDetail, granted, boundPacks, mcpList, /*forModal*/false);
+  }).catch(function(e){
+    var current = document.getElementById('aws-main');
+    if (current) {
+      current.innerHTML = '<div style="padding:30px;color:var(--error)">'
+        + 'Capabilities load failed: ' + esc(e.message || String(e)) + '</div>';
+    }
+  });
+}
+
+// Embed the existing agent chat (legacy renderer) inside aws-main by
+// temporarily swapping the renderer's #content target. We give aws-main
+// the #content id, run the legacy renderer, then restore the swap. All
+// downstream IDs (chat-msgs-<id> / lt-pane-* / etc.) keep their original
+// names so existing handlers (sendAgentMsg, loadAgentChat, etc.) still
+// bind correctly.
+function _awsRenderChatTab(agentId, main) {
+  // Disable workspace overflow:hidden so the legacy layout (which uses
+  // height:100% + flex inside #content) can size itself correctly.
+  main.style.overflow = 'hidden';
+  main.style.padding = '0';
+  main.style.height = '100%';
+  main.style.display = 'flex';
+  main.style.flexDirection = 'column';
+  // Capture the real #content element (the workspace shell's parent).
+  var realContent = document.getElementById('content');
+  if (!realContent) {
+    main.innerHTML = '<div style="padding:30px;color:var(--error)">No #content target found.</div>';
+    return;
+  }
+  // Borrow the id: legacy renderers do `document.getElementById("content")`
+  // for their write target. We swap aws-main into the id while keeping the
+  // outer #content node in place; restore right after the renderer returns.
+  realContent.removeAttribute('id');
+  realContent.setAttribute('data-aws-original-content', '1');
+  main.id = 'content';
+  var renderer = (function(){
+    try {
+      if (localStorage.getItem('tudou_theme') === 'tech') return renderAgentChatTech;
+    } catch(e){}
+    return renderAgentChat;
+  })();
+  // The legacy renderAgentChat() short-circuits to renderAgentWorkspace
+  // (we added that hook in task 1) — we need to bypass that here, since
+  // we ARE the workspace and want the legacy chat content. The tech variant
+  // doesn't have the hook, but renderAgentChat() does. So we call the body
+  // helper directly via _awsLegacyChatBody.
+  try {
+    _awsLegacyChatBody(agentId);
+  } catch (e) {
+    console.error('legacy chat body render failed:', e);
+    main.innerHTML = '<div style="padding:30px;color:var(--error)">Chat render failed: '
+      + esc(e.message || String(e)) + '</div>';
+  } finally {
+    // Restore the id swap
+    main.id = 'aws-main';
+    realContent.setAttribute('id', 'content');
+    realContent.removeAttribute('data-aws-original-content');
+  }
+}
+
+// Run the legacy chat-page body skipping the workspace short-circuit.
+// Distinct from renderAgentChat() so we don't recurse infinitely.
+function _awsLegacyChatBody(agentId) {
+  try {
+    if (localStorage.getItem('tudou_theme') === 'tech') return renderAgentChatTech(agentId);
+  } catch (e) {}
+  // Inline the legacy renderer but skip its workspace-redirect (which is
+  // _the_ block at the very top of renderAgentChat). We do this by setting
+  // a one-shot flag the redirect respects.
+  window._awsBypassWorkspace = true;
+  try {
+    renderAgentChat(agentId);
+  } finally {
+    window._awsBypassWorkspace = false;
+  }
+}
+window._awsLegacyChatBody = _awsLegacyChatBody;
+
+function _awsLoadAgentMeta(agentId) {
+  // Best-effort name lookup — first from in-memory list, then fall back
+  // to API. Keeps the header label fresh even after profile edits.
+  var ag = (typeof agents !== 'undefined' && Array.isArray(agents))
+    ? agents.find(function(a){ return a && a.id === agentId; }) : null;
+  if (ag && ag.name) {
+    var el = document.getElementById('aws-agent-name');
+    if (el) el.textContent = ag.name;
+  }
+  if (typeof api === 'function') {
+    api('GET', '/api/portal/agent/' + agentId).then(function(a){
+      var nameEl = document.getElementById('aws-agent-name');
+      if (nameEl && a && a.name) nameEl.textContent = a.name;
+    }).catch(function(){});
+  }
+}
+
+function _awsToggleLegacyUi() {
+  try { localStorage.setItem('tudou_workspace_v2', '0'); } catch (e) {}
+  alert('已切回经典 UI。刷新页面生效。');
+  location.reload();
+}
+
+// SP-0 task 9: Voice mode launcher. The plan called for a full-screen
+// voice overlay; that doesn't exist in this codebase yet. Pragmatic
+// adaptation: ensure the chat tab is active (so the input bar with the
+// STT button is mounted), then trigger the existing _toggleSTT() which
+// starts continuous speech-to-text into chat-input-<id>. Once a real
+// voice overlay lands, this launcher is the single point that needs to
+// switch to it.
+function _awsLaunchVoiceMode(agentId) {
+  var st = _awsGetState(agentId);
+  if (st.activeTab !== 'chat') {
+    // Switch to chat tab first so the chat input (and its STT btn) exists.
+    st.activeTab = 'chat';
+    // Re-render to ensure DOM is set up; then call STT after a tick.
+    renderAgentWorkspace(agentId);
+    setTimeout(function(){
+      try { if (typeof _toggleSTT === 'function') _toggleSTT(agentId); } catch (e) {}
+    }, 250);
+    return;
+  }
+  try {
+    if (typeof _toggleSTT === 'function') _toggleSTT(agentId);
+    else alert('Voice input is not supported in this browser.');
+  } catch (e) {
+    alert('Voice mode failed: ' + (e.message || e));
+  }
+}
+
+// SP-0: inline skill picker — lists all installed skill packages that
+// haven't been granted to this agent yet. Clicking [授权] on a row calls
+// the existing grant API and flips the row to a green confirmation state.
+async function _capEmbedSkillPicker(agentId, hostId) {
+  var host = document.getElementById(hostId);
+  if (!host) return;
+  host.innerHTML = '<div style="padding:14px 16px;border:1px solid var(--border);'
+    + 'border-radius:8px;background:rgba(255,255,255,0.02);color:var(--text3);font-size:12px">'
+    + 'Loading skills…</div>';
+  try {
+    var pair = await Promise.all([
+      api('GET', '/api/portal/skill-pkgs').catch(function(){ return {skills:[]}; }),
+      api('GET', '/api/portal/agent/' + agentId + '/skill-pkgs').catch(function(){ return {skills:[]}; }),
+    ]);
+    var allSkills = (pair[0] && pair[0].skills) || [];
+    var grantedArr = (pair[1] && pair[1].skills) || [];
+    var grantedIds = new Set(grantedArr.map(function(s){ return s.id; }));
+    var available = allSkills.filter(function(s){ return !grantedIds.has(s.id); });
+    if (!available.length) {
+      host.innerHTML = '<div style="padding:18px 16px;border:1px solid var(--border);'
+        + 'border-radius:8px;background:rgba(255,255,255,0.02);color:var(--text3);'
+        + 'font-size:12px;text-align:center">'
+        + '所有已安装的 skill 都已授权。要安装新 skill,请去 <b>Skills (全局)</b> 页。'
+        + '</div>';
+      return;
+    }
+    var rows = available.map(function(s){
+      var m = s.manifest || {};
+      var name = m.name || s.id || '';
+      var desc = m.description || '';
+      return '<div style="background:var(--surface);border:1px solid var(--border);'
+        + 'border-radius:8px;padding:10px 12px;margin-bottom:6px;display:flex;'
+        + 'justify-content:space-between;align-items:center;gap:10px">'
+        + '  <div style="flex:1;min-width:0">'
+        + '    <div style="font-size:12px;font-weight:600">' + esc(name) + '</div>'
+        + '    <div style="font-size:11px;color:var(--text3);margin-top:2px">'
+        +        esc(desc) + '</div>'
+        + '  </div>'
+        + '  <button class="btn btn-sm btn-primary" style="font-size:10px;white-space:nowrap" '
+        +     'onclick="_capGrantSkillInline(\'' + esc(agentId) + '\',\''
+        +       esc(s.id) + '\', this)">授权</button>'
+        + '</div>';
+    }).join('');
+    host.innerHTML = '<div style="padding:14px 16px;border:1px solid var(--border);'
+      + 'border-radius:8px;background:rgba(255,255,255,0.02)">'
+      + '<div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;'
+      +   'letter-spacing:0.5px;margin-bottom:10px">'
+      + '可授权的 SKILLS (' + available.length + ')</div>'
+      + rows
+      + '</div>';
+  } catch (e) {
+    host.innerHTML = '<div style="padding:14px;color:var(--error);font-size:12px">'
+      + 'Failed: ' + esc(e.message || String(e)) + '</div>';
+  }
+}
+
+async function _capGrantSkillInline(agentId, skillId, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '...'; }
+  try {
+    await api('POST', '/api/portal/skill-pkgs/' + encodeURIComponent(skillId) + '/grant',
+              { agent_id: agentId });
+    if (btn) {
+      btn.textContent = '✓ 已授权';
+      btn.style.background = 'rgba(16,185,129,0.20)';
+      btn.style.borderColor = 'rgba(16,185,129,0.50)';
+      btn.style.color = '#10b981';
+    }
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = '授权'; }
+    alert('授权失败: ' + (e.message || e));
+  }
+}
+
+window._capEmbedSkillPicker = _capEmbedSkillPicker;
+window._capGrantSkillInline = _capGrantSkillInline;
+
+// SP-0: toggle for inline expansions inside the 能力 tab (Prompt Pack
+// market / discovered / skill picker). Each click on a section button
+// either opens the inline panel below the bound list, or — if that same
+// kind is already open — collapses it.
+function _capToggleEmbed(agentId, kind) {
+  var hostId = 'cap-embed-' + agentId;
+  var host = document.getElementById(hostId);
+  if (!host) return;
+  // Toggle: clicking the same kind again collapses
+  if (host.dataset.kind === kind) {
+    host.innerHTML = '';
+    host.dataset.kind = '';
+    return;
+  }
+  host.dataset.kind = kind;
+  if (kind === 'pp-market') {
+    if (typeof ppOpenCatalog === 'function') ppOpenCatalog(agentId, hostId);
+  } else if (kind === 'pp-discovered') {
+    if (typeof ppOpenDiscovered === 'function') ppOpenDiscovered(agentId, hostId);
+  } else if (kind === 'skill-picker') {
+    if (typeof _capEmbedSkillPicker === 'function') _capEmbedSkillPicker(agentId, hostId);
+  }
+}
+
+// Expose to window for inline onclick handlers
+window.renderAgentWorkspace = renderAgentWorkspace;
+window._awsSwitchTab = _awsSwitchTab;
+window._awsRenderTab = _awsRenderTab;
+window._awsToggleLegacyUi = _awsToggleLegacyUi;
+window._awsEnabled = _awsEnabled;
+window._awsGetState = _awsGetState;
+window._awsLaunchVoiceMode = _awsLaunchVoiceMode;
+window._capToggleEmbed = _capToggleEmbed;
+
+// ═══════════════════════════════════════════════════════
+// SP-0 · UNIFIED AGENT WORKSPACE                          (end)
+// ═══════════════════════════════════════════════════════
+
 function renderAgentChat(agentId) {
+  // SP-0 workspace v2 short-circuit — if the unified-workspace flag is
+  // on (default), render the tabbed shell instead of the legacy 3-section
+  // page. Returning here skips all legacy chrome; workspace tab handlers
+  // call into the same loaders/binders as before to preserve behavior.
+  // The bypass flag lets _awsLegacyChatBody() reuse this renderer to
+  // populate the workspace's chat tab without infinite-recursing into
+  // renderAgentWorkspace().
+  if (!window._awsBypassWorkspace) {
+    try {
+      if (typeof renderAgentWorkspace === 'function' && renderAgentWorkspace(agentId) === true) {
+        return;
+      }
+    } catch (e) { console.warn('workspace render failed, falling back:', e); }
+  }
   // Phased rollout: dispatch to the tech-themed variant when the user
   // has opted into the tech theme. Same DOM IDs so all loaders below
   // (loadAgentChat / loadTasks / loadAgentEventLog / loadExecutionSteps)
@@ -5677,12 +6449,14 @@ function renderAgentChatTech(agentId) {
       '</div>' +
     '</div>' +
 
-    // ── Action sub-bar (Soul / Summarize / TTS / Wake / RAG) ──
+    // ── Action sub-bar (Soul / Summarize / TTS / Wake / RAG / Voice) ──
     // Renamed Think → Summarize 2026-05-05: the underlying call is
     // `/think-now` which summarizes the recent N turns and inserts the
     // summary as an assistant bubble (NOT real-time reasoning). The
     // live-thinking display lives on the Thinking toggle next to the
     // chat input.
+    // 2026-05-09: added Voice — enters realtime voice mode (orb UI +
+    // continuous STT with auto-send-after-silence + auto-TTS reply).
     '<div class="agent-chat-actbar">' +
       '<button class="ach-act" onclick="showSoulEditor(\'' + agentId + '\')" title="Edit SOUL.md">' +
         '<span class="material-symbols-outlined">auto_awesome</span>Soul</button>' +
@@ -5694,6 +6468,8 @@ function renderAgentChatTech(agentId) {
         '<span class="material-symbols-outlined">notifications_active</span>Wake</button>' +
       '<button id="rag-btn-' + agentId + '" class="ach-act" onclick="_toggleRagOnly(\'' + agentId + '\')" title="Toggle RAG-only mode">' +
         '<span class="material-symbols-outlined" id="rag-icon-' + agentId + '">search</span>Rag</button>' +
+      '<button class="ach-act" onclick="openVoiceMode(\'' + agentId + '\')" title="实时语音模式 — 点击进入沉浸式语音交互">' +
+        '<span class="material-symbols-outlined">graphic_eq</span>Voice</button>' +
     '</div>' +
 
     // ── Main section: chat (left) | right column [artifact (top) + tabs (bottom)] ──
@@ -9941,6 +10717,17 @@ async function _streamTaskEvents(agentId, taskId, thinkDiv, progressBar) {
               // Track the latest timestamp from streaming deltas
               if (evt.timestamp) msgDiv._timestamp = evt.timestamp;
               msgDiv.textContent = fullText;  // Plain text during streaming for speed
+              // ── Voice mode: stream TTS sentence-by-sentence ──
+              // 2026-05-09: don't wait for full reply before TTS — feed
+              // each sentence to the synth pipeline as soon as a
+              // boundary char appears. Drops first-audio latency from
+              // ~10s (full reply + full synth) to ~2s (first sentence
+              // + its synth time). _voiceModeStreamingTTSFeed handles
+              // queueing + sequential playback.
+              if (typeof _voiceModeStreamingTTSFeed === 'function') {
+                try { _voiceModeStreamingTTSFeed(agentId, evt.content); }
+                catch (_e) { console.warn('streaming TTS feed err:', _e); }
+              }
             } else if(evt.type==='text') {
               var textContent = evt.content || '';
               if (!textContent.trim()) continue;  // Skip empty text events
@@ -12512,6 +13299,26 @@ function showModalHTML(html) {
   overlay.onclick = function(e) { if (e.target === overlay) overlay.remove(); };
 }
 
+// Big-screen modal for catalog/library views where 550px is too small.
+// Caller's html is responsible for its own internal sizing (90vw etc.) —
+// this just provides the overlay and removes the default max-width clamp.
+function showModalHTMLLarge(html) {
+  document.querySelectorAll('#modal-overlay').forEach(function(o){ o.remove(); });
+  var overlay = document.createElement('div');
+  overlay.id = 'modal-overlay';
+  overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;'
+    + 'background:rgba(0,0,0,0.7);backdrop-filter:blur(4px);'
+    + 'display:flex;align-items:center;justify-content:center;z-index:1000';
+  document.body.appendChild(overlay);
+  // Wrapper has only the outer aesthetic (shadow + border). The caller
+  // controls width/height/border-radius via inline styles on its outer
+  // element, so we don't double-impose them.
+  overlay.innerHTML = '<div style="box-shadow:0 20px 60px rgba(0,0,0,0.5);'
+    + 'border:1px solid var(--border-light);border-radius:12px;overflow:hidden">'
+    + html + '</div>';
+  overlay.onclick = function(e) { if (e.target === overlay) overlay.remove(); };
+}
+
 // ============ Template Library ============
 function renderTemplateLibrary(container) {
   const c = container || document.getElementById('content');
@@ -14218,6 +15025,16 @@ async function removeEnhItem(agentId, action, idKey, idVal) {
 // PromptEnhancer) are shown as a collapsible secondary section.
 // Catalog browsing / installation lives in the left-nav "技能商店 Store" page.
 async function showSkillPanel(agentId) {
+  // SP-0: in workspace v2 mode, navigate to the 能力 tab instead of
+  // opening the popup. Legacy popup mode is preserved as fallback.
+  if (typeof _awsEnabled === 'function' && _awsEnabled()) {
+    var st = _awsGetState(agentId);
+    st.activeTab = 'capabilities';
+    if (typeof renderAgentWorkspace === 'function') {
+      renderAgentWorkspace(agentId);
+    }
+    return;
+  }
   // Primary data: real granted skill packages for this agent
   var granted = [];
   try {
@@ -14237,7 +15054,30 @@ async function showSkillPanel(agentId) {
   var agDetail = window._currentAgentForSkillPanel || {};
   var mcpList = agDetail.mcp_servers || [];
 
-  var html = '<div style="padding:20px;max-width:900px;min-width:600px">';
+  // ── Tech theme branch ──
+  var _techCaps = false;
+  try { _techCaps = localStorage.getItem('tudou_theme') === 'tech'; } catch(e) {}
+  if (_techCaps) {
+    return _showSkillPanelTech(agentId, agDetail, granted, boundPacks, mcpList);
+  }
+
+  var html = _capabilitiesBodyHTML(agentId, agDetail, granted, boundPacks, mcpList, /*forModal*/true);
+  showModalHTML(html);
+}
+
+// SP-0: Capabilities body builder. Returns the HTML body for the
+// Capabilities panel — used in two contexts:
+//   * forModal=true  → wrap with modal padding + Close footer (legacy popup)
+//   * forModal=false → embed inside 能力 tab (workspace v2)
+function _capabilitiesBodyHTML(agentId, agDetail, granted, boundPacks, mcpList, forModal) {
+  agDetail = agDetail || {};
+  granted = granted || [];
+  boundPacks = boundPacks || [];
+  mcpList = mcpList || [];
+
+  var html = '<div style="padding:' + (forModal ? '20px' : '22px 26px')
+    + ';max-width:' + (forModal ? '900px' : '1100px')
+    + ';min-width:0;margin:0 auto">';
   html += '<h3 style="margin-bottom:4px"><span class="material-symbols-outlined" style="vertical-align:middle;color:#a78bfa">build_circle</span> 能力扩展 Capabilities</h3>';
   html += '<p style="font-size:11px;color:var(--text3);margin-bottom:16px">Real capabilities this Agent can use: granted skill packs, MCP services, and Prompt Packs.</p>';
 
@@ -14256,7 +15096,12 @@ async function showSkillPanel(agentId) {
   html += '<div style="margin-bottom:18px">';
   html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">';
   html += '<div style="font-size:13px;font-weight:700;color:var(--text)">Granted Skills <span style="color:var(--text3);font-weight:400">(' + granted.length + ')</span></div>';
-  html += '<button class="btn btn-sm" style="font-size:10px" onclick="showView(\'roles-skills\', document.querySelector(\'[data-view=roles-skills]\'));closeModal();">+ Grant more from Store</button>';
+  if (forModal) {
+    html += '<button class="btn btn-sm" style="font-size:10px" onclick="showView(\'roles-skills\', document.querySelector(\'[data-view=roles-skills]\'));closeModal();">+ Grant more from Store</button>';
+  } else {
+    // SP-0 workspace v2: inline skill picker rather than navigating away.
+    html += '<button class="btn btn-sm" style="font-size:10px" onclick="_capToggleEmbed(\''+esc(agentId)+'\',\'skill-picker\')"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:middle">add</span> 从 Store 授权</button>';
+  }
   html += '</div>';
   if (!granted.length) {
     html += '<div style="color:var(--text3);font-size:12px;padding:20px;text-align:center;border:1px dashed var(--border);border-radius:8px">No executable skills granted to this Agent yet.<br>Go to the <a href="#" onclick="showView(\'roles-skills\', document.querySelector(\'[data-view=roles-skills]\'));closeModal();return false;" style="color:var(--primary)">Skill Store</a> to grant executable skill packs.</div>';
@@ -14301,8 +15146,15 @@ async function showSkillPanel(agentId) {
   html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">';
   html += '<div style="font-size:11px;color:var(--text3)">注入到 system prompt 的参考文档，不是可执行代码。用来给 agent 提供背景知识或行为规范。</div>';
   html += '<div style="display:flex;gap:6px;flex-shrink:0;margin-left:10px">';
-  html += '<button class="btn btn-sm" style="font-size:10px" onclick="ppOpenCatalog(\''+agentId+'\')"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:middle">storefront</span> 市场</button>';
-  html += '<button class="btn btn-sm" style="font-size:10px" onclick="ppOpenDiscovered(\''+agentId+'\')"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:middle">inventory_2</span> 已发现</button>';
+  if (forModal) {
+    // Legacy popup mode: market/discovered launch a separate 90vw popup.
+    html += '<button class="btn btn-sm" style="font-size:10px" onclick="ppOpenCatalog(\''+agentId+'\')"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:middle">storefront</span> 市场</button>';
+    html += '<button class="btn btn-sm" style="font-size:10px" onclick="ppOpenDiscovered(\''+agentId+'\')"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:middle">inventory_2</span> 已发现</button>';
+  } else {
+    // Workspace v2: market/discovered expand inline below the bound list.
+    html += '<button class="btn btn-sm" style="font-size:10px" onclick="_capToggleEmbed(\''+esc(agentId)+'\',\'pp-market\')"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:middle">storefront</span> 市场</button>';
+    html += '<button class="btn btn-sm" style="font-size:10px" onclick="_capToggleEmbed(\''+esc(agentId)+'\',\'pp-discovered\')"><span class="material-symbols-outlined" style="font-size:13px;vertical-align:middle">inventory_2</span> 已发现</button>';
+  }
   html += '</div></div>';
 
   // Bound packs list
@@ -14334,6 +15186,222 @@ async function showSkillPanel(agentId) {
   html += '</div></div>';
 
   showModalHTML(html);
+}
+
+// ============ Tech-style Capabilities Panel ============
+// Tech theme: full-screen-ish modal (90vw × 88vh), 4-stat grid header,
+// glass cards per section, status pulse-dots, monospace section labels,
+// 2-col grid for skill cards. Mirrors the catalog modal aesthetic.
+function _showSkillPanelTech(agentId, agDetail, granted, boundPacks, mcpList) {
+  var agName = (agDetail && agDetail.name) || agentId.slice(0, 8);
+  var totalCaps = mcpList.length + granted.length + boundPacks.length;
+  var readyGranted = granted.filter(function(s){ return (s.status === 'ready'); }).length;
+  var needDeps = granted.filter(function(s){ return (s.status === 'needs_dependencies'); }).length;
+
+  // Glass card primitive — each section gets one
+  function _section(label, statusDot, statusText, headerActions, body) {
+    return ''
+      + '<div class="tc-card-glass" style="padding:var(--s-lg);position:relative;overflow:hidden;'
+      +     'border-top:1px solid rgba(255,255,255,0.15);box-shadow:0 0 12px -3px rgba(192,193,255,0.10);margin-bottom:14px">'
+      + '  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;gap:12px;flex-wrap:wrap">'
+      + '    <div style="display:flex;align-items:center;gap:10px">'
+      + '      <span style="width:6px;height:6px;border-radius:50%;background:'+statusDot+';animation:pulse-dot 2s infinite ease-in-out;flex-shrink:0"></span>'
+      + '      <div class="tc-mono-label" style="color:'+statusDot+';font-size:10px">'+esc(label)+'</div>'
+      + '      <div class="tc-text-dim" style="font-size:11px">'+esc(statusText)+'</div>'
+      + '    </div>'
+      + '    <div style="display:flex;gap:6px">'+headerActions+'</div>'
+      + '  </div>'
+      + body
+      + '</div>';
+  }
+
+  // Stat tile primitive — 4-up grid at top
+  function _stat(icon, value, label, color) {
+    return ''
+      + '<div class="tc-card-glass" style="padding:14px 16px;display:flex;flex-direction:column;gap:4px;'
+      +     'border-top:1px solid '+color+'40;position:relative;overflow:hidden">'
+      + '  <div style="display:flex;align-items:center;gap:8px">'
+      + '    <span class="material-symbols-outlined" style="font-size:18px;color:'+color+'">'+icon+'</span>'
+      + '    <div class="tc-mono-label" style="font-size:9px;color:'+color+'">'+esc(label)+'</div>'
+      + '  </div>'
+      + '  <div style="font-family:var(--font-display,inherit);font-size:28px;font-weight:600;color:var(--on-surface)">'+value+'</div>'
+      + '</div>';
+  }
+
+  // ── Header ──
+  var html = ''
+    + '<div style="display:flex;flex-direction:column;width:90vw;max-width:1280px;height:88vh;background:var(--bg,#1a1a24);overflow:hidden;border-radius:12px">'
+    + '  <div style="flex-shrink:0;padding:18px 22px 0;border-bottom:1px solid var(--outline-variant,#333)">'
+    + '    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px">'
+    + '      <div style="flex:1;min-width:0">'
+    + '        <div class="tc-mono-label" style="color:var(--cyber-magenta,#ff7adb);display:flex;align-items:center;gap:8px"><span>AGENT CAPABILITIES</span><span style="width:6px;height:6px;border-radius:50%;background:var(--cyber-magenta,#ff7adb);animation:pulse-dot 2s infinite ease-in-out"></span></div>'
+    + '        <h2 class="tc-h3" style="margin:6px 0 4px;font-size:22px;font-weight:600;display:flex;align-items:center;gap:10px">'
+    + '          <span class="material-symbols-outlined" style="font-size:28px;color:var(--cyber-magenta,#ff7adb)">build_circle</span>'
+    + '          能力扩展'
+    + '        </h2>'
+    + '        <div class="tc-text-dim" style="font-size:12px">'
+    + '          <span style="color:var(--on-surface)">'+esc(agName)+'</span>'
+    + '          <span style="opacity:0.5"> · </span>'
+    + '          <span style="font-family:var(--font-mono);font-size:10px;opacity:0.7">'+esc(agentId)+'</span>'
+    + '          <span style="opacity:0.5"> · </span>'
+    + '          共 '+totalCaps+' 个能力模块'
+    + '        </div>'
+    + '      </div>'
+    + '      <button class="btn btn-sm btn-ghost" onclick="closeModal()" style="padding:4px 10px"><span class="material-symbols-outlined" style="font-size:18px;vertical-align:middle">close</span></button>'
+    + '    </div>'
+    // ── Stats grid ──
+    + '    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin:14px 0 14px">'
+    +        _stat('hub', mcpList.length, 'MCP SERVICES', 'var(--cyber-blue,#4afcff)')
+    +        _stat('extension', granted.length + ' / ' + (granted.length || '0'),
+                  'GRANTED SKILLS', 'var(--cyber-lime,#5cf08a)')
+    +        _stat('auto_awesome', boundPacks.length, 'PROMPT PACKS', 'var(--cyber-magenta,#ff7adb)')
+    +        _stat('verified', readyGranted, 'READY', 'var(--primary,#a78bfa)')
+    + '    </div>'
+    + '  </div>'
+    // ── Body (scrollable) ──
+    + '  <div style="flex:1;overflow-y:auto;padding:18px 22px;background:var(--bg)">';
+
+  // ── MCP Services section ──
+  var mcpDot = mcpList.length ? 'var(--cyber-blue,#4afcff)' : 'var(--outline,#555)';
+  var mcpStatus = mcpList.length
+    ? mcpList.length + ' 个连接中'
+    : '未绑定 MCP service';
+  var mcpBody;
+  if (mcpList.length) {
+    mcpBody = '<div style="display:flex;flex-wrap:wrap;gap:6px">';
+    mcpList.forEach(function(m){
+      var name = (typeof m === 'string') ? m : (m.name || m.id || '');
+      mcpBody += '<span style="background:rgba(74,252,255,0.10);border:1px solid rgba(74,252,255,0.30);color:var(--cyber-blue,#4afcff);'
+        +    'padding:4px 10px;border-radius:4px;font-size:11px;font-family:var(--font-mono,monospace)">'+esc(name)+'</span>';
+    });
+    mcpBody += '</div>';
+  } else {
+    mcpBody = '<div class="tc-text-dim" style="text-align:center;padding:20px;font-size:11px;border:1px dashed var(--outline-variant);border-radius:8px">'
+      + '该 Agent 未绑定任何 MCP service。在 MCP 配置面板里挂载来扩展工具能力。'
+      + '</div>';
+  }
+  html += _section('MCP SERVICES', mcpDot, mcpStatus, '', mcpBody);
+
+  // ── Granted Skills section ──
+  var gDot = granted.length
+    ? (needDeps ? 'var(--cyber-orange,#ffb84a)' : 'var(--cyber-lime,#5cf08a)')
+    : 'var(--outline,#555)';
+  var gStatus = !granted.length
+    ? '尚未授权可执行 skill'
+    : (needDeps
+        ? readyGranted + ' 就绪 · ' + needDeps + ' 缺依赖'
+        : granted.length + ' 个全部就绪');
+  var gActions = '<button class="btn btn-sm" onclick="showView(\'roles-skills\', document.querySelector(\'[data-view=roles-skills]\'));closeModal();" '
+    +    'style="font-size:10px;display:inline-flex;align-items:center;gap:4px">'
+    +    '<span class="material-symbols-outlined" style="font-size:13px">add</span> 从 Store 授权'
+    + '</button>';
+  var gBody;
+  if (!granted.length) {
+    gBody = '<div class="tc-text-dim" style="text-align:center;padding:24px 20px;font-size:12px;border:1px dashed var(--outline-variant);border-radius:8px">'
+      + '<div style="font-size:24px;margin-bottom:8px;opacity:0.5">📦</div>'
+      + '该 Agent 尚未授权任何可执行 skill 包。<br>'
+      + '<a href="#" onclick="showView(\'roles-skills\', document.querySelector(\'[data-view=roles-skills]\'));closeModal();return false;" '
+      +    'style="color:var(--primary);text-decoration:underline">前往 Skill Store 授权</a>'
+      + '</div>';
+  } else {
+    gBody = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px">';
+    granted.forEach(function(s){
+      var manifest = s.manifest || {};
+      var name = manifest.name || s.id || '';
+      var desc = manifest.description || '';
+      if (desc.length > 90) desc = desc.slice(0, 90) + '…';
+      var runtime = manifest.runtime || '';
+      var mcpDeps = (manifest.depends_on && manifest.depends_on.mcp) || [];
+      var status = s.status || 'installed';
+      var sColor = status === 'ready' ? 'var(--cyber-lime,#5cf08a)'
+                  : status === 'needs_dependencies' ? 'var(--cyber-orange,#ffb84a)'
+                  : 'var(--text3)';
+      gBody += '<div style="background:rgba(255,255,255,0.02);border:1px solid var(--outline-variant);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:8px">'
+        + '  <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px">'
+        + '    <div style="font-size:13px;font-weight:600;line-height:1.3">'+esc(name)+'</div>'
+        + '    <span class="tc-mono-label" style="font-size:9px;color:'+sColor+';border:1px solid '+sColor+';padding:2px 6px;border-radius:3px;white-space:nowrap;flex-shrink:0">'+esc(status)+'</span>'
+        + '  </div>'
+        + '  <div class="tc-text-dim" style="font-size:11px;line-height:1.5;flex:1;min-height:30px">'+esc(desc)+'</div>'
+        + '  <div style="font-size:10px;color:var(--text3);font-family:var(--font-mono,monospace);display:flex;flex-wrap:wrap;gap:4px">';
+      if (runtime) gBody += '<span>runtime=<span style="color:var(--cyber-blue,#4afcff)">'+esc(runtime)+'</span></span>';
+      if (mcpDeps.length) {
+        gBody += '<span>·</span><span>mcp=';
+        mcpDeps.forEach(function(m, i) {
+          var mname = (typeof m === 'string') ? m : (m.name || m.id || '');
+          gBody += '<span style="color:var(--cyber-magenta,#ff7adb)">'+esc(mname)+'</span>'+(i<mcpDeps.length-1?',':'');
+        });
+        gBody += '</span>';
+      }
+      gBody += '</div>'
+        + '  <div style="display:flex;justify-content:flex-end;border-top:1px solid var(--outline-variant);padding-top:8px">'
+        + '    <button class="btn btn-sm btn-ghost" style="font-size:10px;color:var(--error)" '
+        +        'onclick="revokeGrantedSkill(\''+agentId+'\',\''+esc(s.id)+'\')">'
+        + '      <span class="material-symbols-outlined" style="font-size:13px;vertical-align:middle">delete</span> Revoke'
+        + '    </button>'
+        + '  </div>'
+        + '</div>';
+    });
+    gBody += '</div>';
+  }
+  html += _section('GRANTED SKILLS · 可执行', gDot, gStatus, gActions, gBody);
+
+  // ── Prompt Packs section ──
+  var ppDot = boundPacks.length ? 'var(--cyber-magenta,#ff7adb)' : 'var(--outline,#555)';
+  var ppStatus = boundPacks.length
+    ? boundPacks.length + ' 个 pack 已绑定'
+    : '尚未绑定 prompt pack';
+  var ppActions = ''
+    + '<button class="btn btn-sm" style="font-size:10px;display:inline-flex;align-items:center;gap:4px" onclick="ppOpenCatalog(\''+agentId+'\')">'
+    +   '<span class="material-symbols-outlined" style="font-size:13px">storefront</span> 市场'
+    + '</button>'
+    + '<button class="btn btn-sm" style="font-size:10px;display:inline-flex;align-items:center;gap:4px" onclick="ppOpenDiscovered(\''+agentId+'\')">'
+    +   '<span class="material-symbols-outlined" style="font-size:13px">inventory_2</span> 已发现'
+    + '</button>';
+  var ppBody;
+  if (!boundPacks.length) {
+    ppBody = '<div class="tc-text-dim" style="text-align:center;padding:24px 20px;font-size:12px;border:1px dashed var(--outline-variant);border-radius:8px">'
+      + '<div style="font-size:24px;margin-bottom:8px;opacity:0.5">📝</div>'
+      + 'Prompt Packs 是注入到 system prompt 的参考文档（不可执行代码）。<br>'
+      + '点上面的「📦 市场」浏览社区/Anthropic 目录，或「📥 已发现」选已扫描到的本地 pack。'
+      + '</div>';
+  } else {
+    ppBody = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px">';
+    boundPacks.forEach(function(s){
+      var name = s.name || '';
+      var desc = s.description || '';
+      if (desc.length > 90) desc = desc.slice(0, 90) + '…';
+      var src = s.source || '';
+      ppBody += '<div style="background:rgba(255,122,219,0.04);border:1px solid rgba(255,122,219,0.20);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:8px">'
+        + '  <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px">'
+        + '    <div style="font-size:13px;font-weight:600;line-height:1.3">'+esc(name)+'</div>'
+        +      (src ? '<span style="font-size:9px;background:rgba(255,255,255,0.06);color:var(--text3);padding:2px 6px;border-radius:3px;font-family:var(--font-mono,monospace);white-space:nowrap">'+esc(src)+'</span>' : '')
+        + '  </div>'
+        + '  <div class="tc-text-dim" style="font-size:11px;line-height:1.5;flex:1;min-height:30px">'+esc(desc)+'</div>'
+        + '  <div style="display:flex;justify-content:flex-end;border-top:1px solid var(--outline-variant);padding-top:8px">'
+        + '    <button class="btn btn-sm btn-ghost" style="font-size:10px;color:var(--error)" '
+        +        'onclick="unbindSkill(\''+agentId+'\',\''+esc(s.skill_id||'')+'\')">'
+        + '      <span class="material-symbols-outlined" style="font-size:13px;vertical-align:middle">link_off</span> Unbind'
+        + '    </button>'
+        + '  </div>'
+        + '</div>';
+    });
+    ppBody += '</div>';
+  }
+  html += _section('PROMPT PACKS · 提示词增强', ppDot, ppStatus, ppActions, ppBody);
+
+  html += '  </div>';
+  // ── Footer ──
+  html += '  <div style="flex-shrink:0;padding:12px 22px;border-top:1px solid var(--outline-variant);'
+       + 'display:flex;justify-content:space-between;align-items:center;background:var(--surface-container,#22222e)">';
+  html += '    <div class="tc-text-dim" style="font-size:10px;font-family:var(--font-mono,monospace)">'
+       + '<span class="material-symbols-outlined" style="font-size:12px;vertical-align:middle">info</span> '
+       + 'Capabilities apply at the agent\'s next turn — no restart needed.'
+       + '</div>';
+  html += '    <button class="btn" onclick="closeModal()">关闭</button>';
+  html += '  </div>';
+  html += '</div>';
+
+  showModalHTMLLarge(html);
 }
 
 // Revoke a granted skill package from an agent (uses the existing skill-pkgs
@@ -14585,92 +15653,440 @@ async function ppImportLocal(agentId) {
   } catch(e) { _ppFlash(agentId, false, 'Import failed:' + (e.message || e)); }
 }
 
+// ── Prompt Pack Catalog ── 大屏 catalog 弹窗（多源 + 分类 + 检索 + 分页）
+// 2026-05-10: 旧版本是 720×55vh 的小弹窗加单选 dropdown，191+ 个 skill 时
+// 完全没法用。重做：90vw × 88vh 全屏弹窗，源/分类两层 chip 过滤，实时搜索
+// （300ms 防抖），3 列卡片网格，底部分页。每个卡片显示来源 badge。
+//
+// 状态机：模块级 _PPCat 持有 page / source / category / search / data
+// 用户改任何一项 → _ppCatalogReload(true=resetPage) → 后端返回时重渲。
+var _PPCat = null;
+
 async function ppOpenCatalog(agentId) {
-  var html = '<div style="padding:20px;max-width:720px;min-width:520px">' +
-    '<h3 style="margin:0 0 6px"><span class="material-symbols-outlined" style="vertical-align:middle">storefront</span> Prompt Pack 市场</h3>' +
-    '<div style="font-size:11px;color:var(--text3);margin-bottom:14px">从社区目录中选择并一键导入到当前 Agent</div>' +
-    '<div style="display:flex;gap:8px;margin-bottom:12px">' +
-      '<select id="pp-cat-filter" style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-size:12px"><option value="">全部分类</option></select>' +
-      '<input id="pp-cat-search" placeholder="搜索..." style="flex:1;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-size:12px">' +
-      '<button class="btn btn-sm" onclick="_ppCatalogReload(\''+agentId+'\')">搜索</button>' +
-    '</div>' +
-    '<div id="pp-cat-list" style="max-height:55vh;overflow:auto"><div style="color:var(--text3);font-size:12px;padding:20px;text-align:center">加载中...</div></div>' +
-    '<div style="display:flex;justify-content:flex-end;margin-top:14px"><button class="btn" onclick="closeModal()">关闭</button></div>' +
-  '</div>';
-  showModalHTML(html);
-  // Wire enter-key search
-  setTimeout(function(){
-    var s = document.getElementById('pp-cat-search');
-    if (s) s.addEventListener('keyup', function(ev){ if (ev.key === 'Enter') _ppCatalogReload(agentId); });
-  }, 30);
-  _ppCatalogReload(agentId);
+  _PPCat = {
+    agentId: agentId,
+    page: 1,
+    perPage: 24,
+    source: '',     // "" = 全部
+    category: '',   // "" = 全部
+    search: '',
+    searchTimer: null,
+    data: null,
+  };
+  // Tech 主题 — 沿用 Capabilities 弹窗的 cyber-magenta 主色调 + 脉冲点 +
+  // mono-label section 头。CSS 类来自 theme-tech.css；颜色用 var() +
+  // hex 兜底，主题缺失变量也不会塌。
+  var html = ''
+    + '<div id="pp-cat-modal" style="display:flex;flex-direction:column;'
+    +     'width:90vw;max-width:1280px;height:88vh;'
+    +     'background:var(--bg,#1a1a24);overflow:hidden;border-radius:12px">'
+    // ── Header ──
+    + '  <div style="flex-shrink:0;padding:18px 22px 12px;'
+    +       'border-bottom:1px solid var(--outline-variant,#333)">'
+    + '    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px">'
+    + '      <div style="flex:1;min-width:0">'
+    + '        <div class="tc-mono-label" style="color:var(--cyber-magenta,#ff7adb);'
+    +              'display:flex;align-items:center;gap:8px;font-size:11px">'
+    + '          <span>PROMPT PACK MARKETPLACE</span>'
+    + '          <span style="width:6px;height:6px;border-radius:50%;'
+    +                'background:var(--cyber-magenta,#ff7adb);'
+    +                'animation:pulse-dot 2s infinite ease-in-out"></span>'
+    + '        </div>'
+    + '        <h2 class="tc-h3" style="margin:6px 0 4px;font-size:22px;font-weight:600;'
+    +              'display:flex;align-items:center;gap:10px">'
+    + '          <span class="material-symbols-outlined" '
+    +                'style="font-size:28px;color:var(--cyber-magenta,#ff7adb)">storefront</span>'
+    + '          Prompt Pack 市场'
+    + '        </h2>'
+    + '        <div id="pp-cat-subtitle" class="tc-text-dim" style="font-size:12px">加载中...</div>'
+    + '      </div>'
+    + '      <button class="btn btn-sm btn-ghost" onclick="closeModal()" '
+    +              'style="padding:4px 10px">'
+    + '        <span class="material-symbols-outlined" '
+    +              'style="font-size:18px;vertical-align:middle">close</span>'
+    + '      </button>'
+    + '    </div>'
+    // ── Search bar (glass-style) ──
+    + '    <div style="margin-top:14px;position:relative">'
+    + '      <span class="material-symbols-outlined" '
+    +            'style="position:absolute;left:12px;top:50%;transform:translateY(-50%);'
+    +              'color:var(--cyber-magenta,#ff7adb);font-size:18px;pointer-events:none;opacity:0.7">search</span>'
+    + '      <input id="pp-cat-search" placeholder="搜索 prompt pack 名称或描述..." '
+    +              'style="width:100%;background:rgba(255,255,255,0.04);'
+    +                'border:1px solid var(--outline-variant,#333);border-radius:8px;'
+    +                'padding:10px 14px 10px 38px;color:var(--on-surface,#eee);'
+    +                'font-size:13px;outline:none;transition:border-color 0.15s,box-shadow 0.15s" '
+    +              'onfocus="this.style.borderColor=\'var(--cyber-magenta,#ff7adb)\';this.style.boxShadow=\'0 0 0 3px rgba(255,122,219,0.15)\'" '
+    +              'onblur="this.style.borderColor=\'var(--outline-variant,#333)\';this.style.boxShadow=\'none\'" '
+    +              'oninput="_ppCatalogOnSearch()">'
+    + '    </div>'
+    // ── Source filter ──
+    + '    <div style="margin-top:12px">'
+    + '      <div class="tc-mono-label" style="color:var(--cyber-blue,#4afcff);'
+    +            'font-size:9px;margin-bottom:6px;display:flex;align-items:center;gap:6px">'
+    + '        <span style="width:4px;height:4px;border-radius:50%;background:var(--cyber-blue,#4afcff)"></span>'
+    + '        来源 SOURCE'
+    + '      </div>'
+    + '      <div id="pp-cat-source-chips" style="display:flex;flex-wrap:wrap;gap:6px"></div>'
+    + '    </div>'
+    // ── Category filter ──
+    + '    <div style="margin-top:10px">'
+    + '      <div class="tc-mono-label" style="color:var(--cyber-lime,#5cf08a);'
+    +            'font-size:9px;margin-bottom:6px;display:flex;align-items:center;gap:6px">'
+    + '        <span style="width:4px;height:4px;border-radius:50%;background:var(--cyber-lime,#5cf08a)"></span>'
+    + '        分类 CATEGORY'
+    + '      </div>'
+    + '      <div id="pp-cat-cat-chips" style="display:flex;flex-wrap:wrap;gap:6px;'
+    +            'max-height:80px;overflow-y:auto"></div>'
+    + '    </div>'
+    + '  </div>'
+    // ── Content (scrollable card grid) ──
+    + '  <div id="pp-cat-list" style="flex:1;overflow-y:auto;padding:18px 22px;background:var(--bg)"></div>'
+    // ── Footer (pagination + status line) ──
+    + '  <div id="pp-cat-pager" style="flex-shrink:0;padding:12px 22px;'
+    +       'border-top:1px solid var(--outline-variant,#333);'
+    +       'display:flex;justify-content:space-between;align-items:center;'
+    +       'background:var(--surface-container,#22222e)"></div>'
+    + '</div>';
+  showModalHTMLLarge(html);
+  _ppCatalogReload(true);
 }
 
-async function _ppCatalogReload(agentId) {
+function _ppCatalogOnSearch() {
+  if (!_PPCat) return;
+  var inp = document.getElementById('pp-cat-search');
+  if (!inp) return;
+  if (_PPCat.searchTimer) clearTimeout(_PPCat.searchTimer);
+  _PPCat.searchTimer = setTimeout(function(){
+    _PPCat.search = inp.value || '';
+    _ppCatalogReload(true);
+  }, 280);
+}
+
+function _ppCatalogPickSource(src) {
+  if (!_PPCat) return;
+  _PPCat.source = src;
+  _PPCat.category = '';   // 切源时清掉分类（计数会变）
+  _ppCatalogReload(true);
+}
+
+function _ppCatalogPickCategory(cat) {
+  if (!_PPCat) return;
+  _PPCat.category = cat;
+  _ppCatalogReload(true);
+}
+
+function _ppCatalogGotoPage(p) {
+  if (!_PPCat || p < 1) return;
+  _PPCat.page = p;
+  _ppCatalogReload(false);
+}
+
+async function _ppCatalogReload(resetPage) {
+  if (!_PPCat) return;
+  if (resetPage) _PPCat.page = 1;
   var list = document.getElementById('pp-cat-list');
   if (!list) return;
-  var catEl = document.getElementById('pp-cat-filter');
-  var qEl = document.getElementById('pp-cat-search');
-  var category = catEl ? catEl.value : '';
-  var search = qEl ? qEl.value : '';
-  list.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:20px;text-align:center">加载中...</div>';
+  list.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:30px;text-align:center">加载中...</div>';
   try {
-    var r = await api('POST', '/api/portal/prompt-packs', {action: 'catalog', category: category, search: search});
-    var skills = (r && r.skills) || [];
-    var cats = (r && r.categories) || [];
-    // Populate categories on first load
-    if (catEl && catEl.options.length <= 1 && cats.length) {
-      cats.forEach(function(c){
-        var o = document.createElement('option'); o.value = c; o.textContent = c; catEl.appendChild(o);
-      });
-    }
-    if (!skills.length) {
-      list.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:20px;text-align:center">无匹配的 Prompt Pack</div>';
-      return;
-    }
-    var html = '';
-    skills.forEach(function(s){
-      var sid = esc(s.id||'');
-      html += '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:6px;display:flex;align-items:flex-start;gap:10px">' +
-        '<div style="font-size:20px;line-height:1">'+esc(s.icon||'📦')+'</div>' +
-        '<div style="flex:1;min-width:0">' +
-          '<div style="font-size:13px;font-weight:600">'+esc(s.name||'')+'</div>' +
-          '<div style="font-size:11px;color:var(--text3);margin-top:2px">'+esc(s.description||'')+'</div>' +
-          (s.category?'<span style="display:inline-block;font-size:10px;background:var(--primary);color:white;padding:2px 8px;border-radius:4px;margin-top:4px">'+esc(s.category)+'</span>':'') +
-        '</div>' +
-        '<button class="btn btn-sm btn-primary" style="font-size:10px;white-space:nowrap" onclick="_ppCatalogImport(\''+agentId+'\',\''+sid+'\', this)">导入并绑定</button>' +
-      '</div>';
+    var r = await api('POST', '/api/portal/prompt-packs', {
+      action: 'catalog',
+      source: _PPCat.source,
+      category: _PPCat.category,
+      search: _PPCat.search,
+      page: _PPCat.page,
+      per_page: _PPCat.perPage,
     });
-    list.innerHTML = html;
+    _PPCat.data = r;
+    _ppCatalogRender();
   } catch(e) {
-    list.innerHTML = '<div style="color:var(--error);font-size:12px;padding:20px;text-align:center">Load failed:'+esc(e.message||String(e))+'</div>';
+    list.innerHTML = '<div style="color:var(--error);font-size:12px;padding:30px;text-align:center">加载失败：'+esc(e.message||String(e))+'</div>';
   }
+}
+
+function _ppCatalogRender() {
+  if (!_PPCat || !_PPCat.data) return;
+  var d = _PPCat.data;
+  var skills = d.skills || [];
+  var sources = d.sources || [];
+  var categories = d.categories || [];
+  var total = d.total || 0;
+  var grand = d.grand_total || total;
+  var page = d.page || 1;
+  var perPage = d.per_page || _PPCat.perPage;
+  var totalPages = Math.max(1, Math.ceil(total / perPage));
+
+  // Subtitle
+  var sub = document.getElementById('pp-cat-subtitle');
+  if (sub) {
+    var hasFilter = !!(_PPCat.source || _PPCat.category || _PPCat.search);
+    sub.innerHTML = '共 <span style="color:var(--on-surface);font-weight:600">'
+      + grand + '</span> 个 prompt pack'
+      + (hasFilter
+          ? ' <span style="opacity:0.5">·</span> 当前匹配 '
+            + '<span style="color:var(--cyber-magenta,#ff7adb);font-weight:600">'
+            + total + '</span>'
+          : '');
+  }
+
+  // Source chips — cyber-blue accent (matches header dot)
+  var srcBox = document.getElementById('pp-cat-source-chips');
+  if (srcBox) {
+    var srcHTML = _ppChip('全部', '', _PPCat.source === '', grand,
+      "_ppCatalogPickSource('')", 'source-all', 'cyber-blue');
+    sources.forEach(function(s){
+      srcHTML += _ppChip(s.id, s.id, _PPCat.source === s.id, s.count,
+        "_ppCatalogPickSource('"+_jsEsc(s.id)+"')", null, 'cyber-blue');
+    });
+    srcBox.innerHTML = srcHTML;
+  }
+
+  // Category chips — cyber-lime accent
+  var catBox = document.getElementById('pp-cat-cat-chips');
+  if (catBox) {
+    var visibleCats = categories.filter(function(c){ return c.count > 0; });
+    var catHTML = _ppChip('全部', '', _PPCat.category === '',
+      visibleCats.reduce(function(a, c){ return a + c.count; }, 0),
+      "_ppCatalogPickCategory('')", 'cat-all', 'cyber-lime');
+    visibleCats.forEach(function(c){
+      catHTML += _ppChip(c.id, c.id, _PPCat.category === c.id, c.count,
+        "_ppCatalogPickCategory('"+_jsEsc(c.id)+"')", null, 'cyber-lime');
+    });
+    catBox.innerHTML = catHTML;
+  }
+
+  // Card grid — tech-style glass cards
+  var list = document.getElementById('pp-cat-list');
+  if (!list) return;
+  if (!skills.length) {
+    list.innerHTML = ''
+      + '<div style="color:var(--text3);font-size:12px;padding:80px 40px;text-align:center">'
+      + '  <div style="font-size:36px;margin-bottom:14px;opacity:0.6">🔍</div>'
+      + '  <div class="tc-mono-label" style="font-size:10px;color:var(--cyber-magenta,#ff7adb);'
+      +       'letter-spacing:0.08em;margin-bottom:8px">NO MATCHES</div>'
+      + '  <div style="margin-bottom:20px">当前过滤条件下没有匹配的 prompt pack</div>'
+      + '  <button class="btn btn-sm" '
+      +          'onclick="_PPCat.source=\'\';_PPCat.category=\'\';_PPCat.search=\'\';'
+      +                  'document.getElementById(\'pp-cat-search\').value=\'\';_ppCatalogReload(true)">'
+      + '    <span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">refresh</span> '
+      + '    清除所有过滤'
+      + '  </button>'
+      + '</div>';
+  } else {
+    var grid = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px">';
+    skills.forEach(function(s){
+      var sid = esc(s.id || '');
+      var sname = esc(s.name || '');
+      var sdesc = esc(s.description || '');
+      var ssrc = esc(s.source || '');
+      var scat = esc(s.category || '');
+      // Truncate long descriptions for grid view
+      if (sdesc.length > 140) sdesc = sdesc.slice(0, 140) + '…';
+      // Source-tinted accent: anthropic = magenta, agency = cyan, fallback = primary
+      var accent = /anthropic/.test(ssrc) ? 'rgba(255,122,219,0.22)'
+                  : /agency/.test(ssrc) ? 'rgba(74,252,255,0.22)'
+                  : 'rgba(167,139,250,0.18)';
+      var accentBorder = /anthropic/.test(ssrc) ? 'rgba(255,122,219,0.40)'
+                  : /agency/.test(ssrc) ? 'rgba(74,252,255,0.40)'
+                  : 'rgba(167,139,250,0.30)';
+      grid += ''
+        + '<div class="tc-card-glass" style="padding:14px;display:flex;flex-direction:column;gap:10px;'
+        +     'transition:border-color 0.15s,box-shadow 0.15s,transform 0.1s;cursor:default" '
+        +     'onmouseenter="this.style.borderColor=\''+accentBorder+'\';this.style.boxShadow=\'0 0 18px -4px '+accentBorder+'\'" '
+        +     'onmouseleave="this.style.borderColor=\'\';this.style.boxShadow=\'\'">'
+        + '  <div style="display:flex;align-items:flex-start;gap:10px">'
+        + '    <div style="font-size:24px;line-height:1;flex-shrink:0;'
+        +          'width:40px;height:40px;display:flex;align-items:center;justify-content:center;'
+        +          'background:'+accent+';border:1px solid '+accentBorder+';border-radius:8px">'
+        +        esc(s.icon || '📦')
+        + '    </div>'
+        + '    <div style="flex:1;min-width:0">'
+        + '      <div style="font-size:13px;font-weight:600;line-height:1.3;color:var(--on-surface)">'+sname+'</div>'
+        + '      <div style="display:flex;gap:4px;margin-top:5px;flex-wrap:wrap">'
+        +          (scat
+                    ? '<span style="font-size:9px;background:rgba(92,240,138,0.12);'
+                    +     'color:var(--cyber-lime,#5cf08a);padding:2px 7px;border-radius:3px;'
+                    +     'font-weight:500;font-family:var(--font-mono,monospace)">'+scat+'</span>'
+                    : '')
+        +          (ssrc
+                    ? '<span class="tc-mono-label" style="font-size:9px;'
+                    +     'background:rgba(74,252,255,0.10);color:var(--cyber-blue,#4afcff);'
+                    +     'padding:2px 7px;border-radius:3px;letter-spacing:0.04em">'+ssrc+'</span>'
+                    : '')
+        + '      </div>'
+        + '    </div>'
+        + '  </div>'
+        + '  <div class="tc-text-dim" style="font-size:11px;line-height:1.55;flex:1;min-height:36px">'+sdesc+'</div>'
+        + '  <button class="btn btn-sm" style="font-size:11px;'
+        +     'background:rgba(255,122,219,0.10);border:1px solid rgba(255,122,219,0.40);'
+        +     'color:var(--cyber-magenta,#ff7adb);font-weight:600;'
+        +     'display:inline-flex;align-items:center;justify-content:center;gap:4px;'
+        +     'transition:background 0.15s" '
+        +     'onmouseover="this.style.background=\'rgba(255,122,219,0.20)\'" '
+        +     'onmouseout="this.style.background=\'rgba(255,122,219,0.10)\'" '
+        +     'onclick="_ppCatalogImport(\''+esc(_PPCat.agentId)+'\',\''+sid+'\', this)">'
+        + '    <span class="material-symbols-outlined" style="font-size:14px">add_circle</span> '
+        + '    导入并绑定'
+        + '  </button>'
+        + '</div>';
+    });
+    grid += '</div>';
+    list.innerHTML = grid;
+  }
+
+  // Pager — tech-style with mono-label page indicator
+  var pager = document.getElementById('pp-cat-pager');
+  if (pager) {
+    var first = (page - 1) * perPage + 1;
+    var last = Math.min(total, page * perPage);
+    var pagerHTML = '';
+    pagerHTML += '<div class="tc-text-dim" style="font-size:11px;font-family:var(--font-mono,monospace)">';
+    if (total > 0) {
+      pagerHTML += '<span style="color:var(--on-surface)">'+first+'</span>'
+        + '<span style="opacity:0.5">–</span>'
+        + '<span style="color:var(--on-surface)">'+last+'</span>'
+        + ' <span style="opacity:0.5">/</span> '
+        + grand;
+    } else {
+      pagerHTML += '0 results';
+    }
+    pagerHTML += '</div>';
+    pagerHTML += '<div style="display:flex;align-items:center;gap:8px">';
+    pagerHTML += '<button class="btn btn-sm btn-ghost" '
+      + (page <= 1 ? 'disabled' : 'onclick="_ppCatalogGotoPage('+(page-1)+')"')
+      + ' style="padding:4px 10px;font-size:11px;'
+      +    (page <= 1 ? 'opacity:0.35;cursor:not-allowed' : '') + '">'
+      + '<span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">chevron_left</span>'
+      + '</button>';
+    pagerHTML += '<span class="tc-mono-label" style="font-size:10px;color:var(--cyber-magenta,#ff7adb);'
+      +     'background:rgba(255,122,219,0.08);padding:4px 10px;border-radius:4px;'
+      +     'border:1px solid rgba(255,122,219,0.25);min-width:60px;text-align:center">'
+      + 'P ' + page + ' / ' + totalPages
+      + '</span>';
+    pagerHTML += '<button class="btn btn-sm btn-ghost" '
+      + (page >= totalPages ? 'disabled' : 'onclick="_ppCatalogGotoPage('+(page+1)+')"')
+      + ' style="padding:4px 10px;font-size:11px;'
+      +    (page >= totalPages ? 'opacity:0.35;cursor:not-allowed' : '') + '">'
+      + '<span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">chevron_right</span>'
+      + '</button>';
+    pagerHTML += '</div>';
+    pager.innerHTML = pagerHTML;
+  }
+}
+
+// Single chip — used for both source and category filter.
+// 2026-05-10: tech style — chips use cyber-color accents (passed via
+// tone arg: 'cyber-blue', 'cyber-lime', 'cyber-magenta'). Active state
+// fills with the accent color; inactive shows just a tinted border.
+function _ppChip(label, value, active, count, onclickAttr, idAttr, tone) {
+  // Map tone keyword to actual color values
+  var toneMap = {
+    'cyber-blue':    {color: 'var(--cyber-blue,#4afcff)',   rgb: '74,252,255'},
+    'cyber-lime':    {color: 'var(--cyber-lime,#5cf08a)',   rgb: '92,240,138'},
+    'cyber-magenta': {color: 'var(--cyber-magenta,#ff7adb)', rgb: '255,122,219'},
+  };
+  var t = toneMap[tone] || toneMap['cyber-magenta'];
+  var bg = active
+    ? 'rgba('+t.rgb+',0.20)'
+    : 'rgba(255,255,255,0.04)';
+  var fg = active ? t.color : 'var(--on-surface,#eee)';
+  var border = active
+    ? t.color
+    : 'var(--outline-variant,#444)';
+  var countBg = active
+    ? 'rgba('+t.rgb+',0.30)'
+    : 'rgba(255,255,255,0.08)';
+  var countFg = active ? t.color : 'var(--text3,#888)';
+  var glow = active ? 'box-shadow:0 0 10px -2px rgba('+t.rgb+',0.45);' : '';
+  return '<button '
+    + (idAttr ? 'id="pp-chip-'+esc(idAttr)+'" ' : '')
+    + 'onclick="'+onclickAttr+'" style="'
+    + 'background:'+bg+';color:'+fg+';border:1px solid '+border+';'
+    + 'padding:4px 10px;border-radius:14px;font-size:11px;cursor:pointer;'
+    + 'display:inline-flex;align-items:center;gap:6px;'
+    + 'font-weight:'+(active?'600':'500')+';transition:all 0.15s;' + glow + '">'
+    + esc(label)
+    + '<span style="background:'+countBg+';padding:1px 6px;border-radius:8px;font-size:10px;font-family:monospace">'+count+'</span>'
+    + '</button>';
+}
+
+// JS-string escape for inline onclick (single quotes)
+function _jsEsc(s) {
+  return String(s || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
 async function _ppCatalogImport(agentId, skillId, btn) {
-  if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
+  // Save original button HTML so we can restore on failure
+  var origHTML = btn ? btn.innerHTML : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="material-symbols-outlined" style="font-size:14px;animation:spin 0.8s linear infinite">progress_activity</span> Importing…';
+  }
   try {
-    var r = await api('POST', '/api/portal/agent/' + agentId + '/prompt-packs', {action: 'import_from_catalog', skill_ids: [skillId]});
-    if (r && r.ok) {
-      if (btn) { btn.textContent = '✓ 已导入'; btn.style.background = '#10b981'; }
+    var r = await api('POST', '/api/portal/agent/' + agentId + '/prompt-packs', {
+      action: 'import_from_catalog', skill_ids: [skillId],
+    });
+    // 2026-05-10: success criterion fixed. Old code accepted r.ok=true and
+    // showed "✓已导入" even when imported=0 (backend couldn't find the
+    // skill, e.g. Anthropic id wasn't searchable in the legacy code).
+    // Now we require imported>0 OR the skill was already bound.
+    var ok = !!(r && r.ok);
+    var imported = (r && r.imported) || 0;
+    var alreadyBound = (r && r.already_bound) || 0;
+    var notFound = (r && r.not_found) || [];
+
+    if (ok && (imported > 0 || alreadyBound > 0)) {
+      if (btn) {
+        var label = alreadyBound > 0 && imported === 0
+          ? '✓ 已绑定'
+          : '✓ 已导入';
+        btn.innerHTML = '<span class="material-symbols-outlined" style="font-size:14px">check_circle</span> '+label;
+        btn.style.background = 'rgba(92,240,138,0.18)';
+        btn.style.borderColor = 'rgba(92,240,138,0.50)';
+        btn.style.color = 'var(--cyber-lime,#5cf08a)';
+      }
     } else {
-      if (btn) { btn.disabled = false; btn.textContent = '导入并绑定'; }
-      alert('Import failed:' + ((r && r.error) || 'Unknown error'));
+      if (btn) { btn.disabled = false; btn.innerHTML = origHTML; }
+      var msg;
+      if (notFound.length) {
+        msg = 'Skill 未在任何 catalog 找到：' + notFound.join(', ')
+          + '\n（检查 app/data/*_catalog.json 是否包含此 id）';
+      } else if (r && r.error) {
+        msg = '导入失败：' + r.error;
+      } else {
+        msg = '导入失败（imported=' + imported + '）';
+      }
+      alert(msg);
     }
   } catch(e) {
-    if (btn) { btn.disabled = false; btn.textContent = '导入并绑定'; }
-    alert('Import failed:' + (e.message || e));
+    if (btn) { btn.disabled = false; btn.innerHTML = origHTML; }
+    alert('Import failed: ' + (e.message || e));
   }
 }
 
-async function ppOpenDiscovered(agentId) {
-  var html = '<div style="padding:20px;max-width:720px;min-width:520px">' +
-    '<h3 style="margin:0 0 6px"><span class="material-symbols-outlined" style="vertical-align:middle">inventory_2</span> 已发现的 Prompt Packs</h3>' +
+async function ppOpenDiscovered(agentId, hostElId) {
+  // SP-0: when hostElId provided, render inside that element (workspace
+  // v2 inline expansion). Otherwise fall back to the legacy popup.
+  var inline = !!hostElId;
+  var html = '<div style="padding:' + (inline ? '14px 16px' : '20px')
+    + ';max-width:' + (inline ? 'none' : '720px')
+    + ';min-width:' + (inline ? '0' : '520px')
+    + ';background:' + (inline ? 'rgba(255,255,255,0.02)' : 'transparent')
+    + ';border:' + (inline ? '1px solid var(--border)' : 'none')
+    + ';border-radius:' + (inline ? '8px' : '0') + '">' +
+    '<h3 style="margin:0 0 6px;font-size:' + (inline ? '14px' : 'inherit') + '"><span class="material-symbols-outlined" style="vertical-align:middle">inventory_2</span> 已发现的 Prompt Packs</h3>' +
     '<div style="font-size:11px;color:var(--text3);margin-bottom:14px">已通过本地扫描或之前导入注册的 pack。可直接绑定到当前 Agent。</div>' +
-    '<div id="pp-disc-list" style="max-height:55vh;overflow:auto"><div style="color:var(--text3);font-size:12px;padding:20px;text-align:center">加载中...</div></div>' +
-    '<div style="display:flex;justify-content:flex-end;margin-top:14px"><button class="btn" onclick="closeModal()">关闭</button></div>' +
+    '<div id="pp-disc-list" style="max-height:' + (inline ? '50vh' : '55vh') + ';overflow:auto"><div style="color:var(--text3);font-size:12px;padding:20px;text-align:center">加载中...</div></div>' +
+    (inline
+      ? ''
+      : '<div style="display:flex;justify-content:flex-end;margin-top:14px"><button class="btn" onclick="closeModal()">关闭</button></div>') +
   '</div>';
-  showModalHTML(html);
+  if (inline) {
+    var host = document.getElementById(hostElId);
+    if (host) host.innerHTML = html;
+  } else {
+    showModalHTML(html);
+  }
   try {
     var pair = await Promise.all([
       api('GET', '/api/portal/prompt-packs'),
@@ -15473,6 +16889,314 @@ function populateProviderSelects() {
       sel.appendChild(opt);
     });
   });
+}
+
+// 2026-05-09: TTS reuses the LLM Provider list — same registry, same
+// base_url + api_key. Calls go to {base_url}/audio/speech (OpenAI
+// compatible). If the user's chosen LLM provider doesn't actually
+// support /audio/speech, the synthesize call returns an error and
+// the frontend falls back to browser Web Speech API.
+// Sentinel values for built-in TTS engines. These are treated
+// specially by both the frontend (custom voice/model presets) and
+// backend (route to dedicated adapters instead of looking up an LLM
+// provider).
+//   __local_voxcpm__  → app.tts_providers._voxcpm_tts (local 5GB model)
+//   __edge_tts__      → app.tts_providers._edge_tts   (free MS service)
+var TTS_SENTINEL_VOXCPM = '__local_voxcpm__';
+var TTS_SENTINEL_EDGE = '__edge_tts__';
+
+function _populateTtsProviderSelect(currentValue) {
+  var sel = document.getElementById('ea-tts-provider');
+  if (!sel) return;
+  // Built-in engines at the top, then cloud (LLM) providers.
+  // The empty value means "browser Web Speech" (frontend uses
+  // window.speechSynthesis directly, no server call).
+  var html = (
+    '<optgroup label="本地 / 内置 (Built-in) — 零配置">' +
+    '<option value="">浏览器 Web Speech · 免费·完全离线</option>' +
+    '<option value="' + TTS_SENTINEL_EDGE + '">Edge TTS · 免费·微软神经语音·联网</option>' +
+    '<option value="' + TTS_SENTINEL_VOXCPM + '">VoxCPM · 本机 GPU/MPS·高音质·不联网</option>' +
+    '</optgroup>'
+  );
+  if ((_providerList || []).length) {
+    html += '<optgroup label="云端 (Cloud) — 复用 LLM Provider">';
+    _providerList.forEach(function(p) {
+      if (p.enabled === false) return;
+      var sel2 = (currentValue && currentValue === p.id) ? ' selected' : '';
+      html += '<option value="' + p.id + '"' + sel2 + '>' +
+        esc(p.name) + '</option>';
+    });
+    html += '</optgroup>';
+  }
+  sel.innerHTML = html;
+  // Restore selected value (covers the local options too)
+  if (currentValue !== undefined && currentValue !== null) {
+    sel.value = currentValue;
+  }
+}
+
+// ── TTS Voice / Model dropdown — dynamic based on Provider ─────────
+// When TTS Provider is "" (browser Web Speech), Voice options come
+// from speechSynthesis.getVoices() and Model is disabled (browser
+// has no model concept). When a cloud provider is picked, we show
+// the cloud-TTS preset list (OpenAI / Azure / Edge / ElevenLabs).
+// All selects keep an "✏️ 自定义..." escape hatch at the end so
+// custom names (e.g. self-hosted voice IDs) still work.
+var _TTS_CLOUD_VOICES = [
+  { label: 'OpenAI / 兼容协议', items: [
+    ['alloy',   'alloy · 中性'],
+    ['echo',    'echo · 男声沉稳'],
+    ['fable',   'fable · 英式故事'],
+    ['onyx',    'onyx · 深沉'],
+    ['nova',    'nova · 女声活泼'],
+    ['shimmer', 'shimmer · 温柔'],
+  ]},
+  // Edge TTS / Azure 中文 voice — list updated 2026-05-09 to match
+  // Microsoft's currently-available zh-CN voices (verified via
+  // edge_tts.list_voices()). Voices like Xiaomo / Xiaoxuan / Xiaohan
+  // were retired and now return 503 on synthesis attempts.
+  { label: 'Edge / Azure 中文（标准普通话）', items: [
+    ['zh-CN-XiaoxiaoNeural', '晓晓 · 女声·多情感（推荐）'],
+    ['zh-CN-XiaoyiNeural',   '晓伊 · 女声·温柔'],
+    ['zh-CN-YunxiNeural',    '云希 · 男声·温暖'],
+    ['zh-CN-YunxiaNeural',   '云霞 · 男声·少年'],
+    ['zh-CN-YunyangNeural',  '云扬 · 男声·专业播音'],
+    ['zh-CN-YunjianNeural',  '云健 · 男声·体育解说'],
+  ]},
+  { label: 'Edge / Azure 中文（方言）', items: [
+    ['zh-CN-liaoning-XiaobeiNeural', '晓北 · 东北话女声'],
+    ['zh-CN-shaanxi-XiaoniNeural',   '晓妮 · 陕西话女声'],
+  ]},
+  { label: 'Azure / Edge 英文', items: [
+    ['en-US-AriaNeural',  'Aria · 女声美式'],
+    ['en-US-GuyNeural',   'Guy · 男声美式'],
+    ['en-US-JennyNeural', 'Jenny · 女声友好'],
+    ['en-GB-SoniaNeural', 'Sonia · 女声英式'],
+  ]},
+];
+var _TTS_CLOUD_MODELS = [
+  { label: 'OpenAI', items: [
+    ['tts-1',    'tts-1 · 快·标准质量'],
+    ['tts-1-hd', 'tts-1-hd · 慢·高质量'],
+  ]},
+  { label: 'ElevenLabs', items: [
+    ['eleven_multilingual_v2', 'eleven_multilingual_v2 · 多语言'],
+    ['eleven_turbo_v2_5',      'eleven_turbo_v2_5 · 低延迟'],
+    ['eleven_monolingual_v1',  'eleven_monolingual_v1 · 英文专用'],
+  ]},
+];
+
+// Browser voices populate async on first call — listen once for the
+// voiceschanged event so the dropdown re-renders when they arrive.
+var _ttsBrowserVoicesReady = false;
+function _eaEnsureBrowserVoices() {
+  if (_ttsBrowserVoicesReady) return;
+  if (!window.speechSynthesis) return;
+  var voices = window.speechSynthesis.getVoices() || [];
+  if (voices.length > 0) { _ttsBrowserVoicesReady = true; return; }
+  // Empty list — subscribe and re-render on arrival
+  try {
+    window.speechSynthesis.addEventListener('voiceschanged', function onVC() {
+      _ttsBrowserVoicesReady = true;
+      window.speechSynthesis.removeEventListener('voiceschanged', onVC);
+      // Only re-populate if the modal is still open
+      var modal = document.getElementById('modal-edit-agent');
+      if (modal && !modal.classList.contains('hidden')) {
+        _eaOnTtsProviderChange();
+      }
+    });
+  } catch(_) {}
+}
+
+function _eaTtsAddOption(sel, value, text) {
+  var opt = document.createElement('option');
+  opt.value = value;
+  opt.textContent = text;
+  sel.appendChild(opt);
+  return opt;
+}
+
+function _eaTtsAddOptgroup(sel, label, items) {
+  var grp = document.createElement('optgroup');
+  grp.label = label;
+  items.forEach(function(it) {
+    var opt = document.createElement('option');
+    opt.value = it[0];
+    opt.textContent = it[1];
+    grp.appendChild(opt);
+  });
+  sel.appendChild(grp);
+}
+
+// VoxCPM2 Control Instruction presets. The voice string is prepended
+// to the text in parentheses — VoxCPM parses "(描述)文本" to steer
+// timbre/style/emotion. Chinese works as well as English.
+// Examples taken from VoxCPM upstream demo (app.py).
+var _TTS_VOXCPM_VOICES = [
+  // 女声
+  ['年轻女性，温柔甜美',           '🌸 年轻女声 · 温柔甜美'],
+  ['成熟女性，知性优雅',           '🌷 成熟女声 · 知性优雅'],
+  ['活泼少女，俏皮可爱',           '✨ 活泼少女 · 俏皮可爱'],
+  // 男声
+  ['年轻男性，阳光开朗',           '🌞 年轻男声 · 阳光开朗'],
+  ['成熟男性，低沉磁性',           '🌊 成熟男声 · 低沉磁性'],
+  ['专业播音员，标准播报',         '🎙️ 专业播音 · 标准播报'],
+  // 个性
+  ['暴躁老哥，语速飞快',           '🔥 暴躁老哥 · 语速飞快'],
+  ['冷静主持人，缓慢清晰',         '❄️ 冷静主持 · 缓慢清晰'],
+];
+
+// Repopulate Voice + Model selects based on the chosen Provider.
+// Four modes:
+//   1. browser   (provider="")                 → browser Web Speech voices
+//   2. voxcpm    (provider=__local_voxcpm__)   → natural-language descriptions
+//   3. edge      (provider=__edge_tts__)       → MS Neural voice list
+//   4. cloud     (provider=<llm-provider-id>)  → OpenAI-compat presets
+function _eaOnTtsProviderChange() {
+  var providerSel = document.getElementById('ea-tts-provider');
+  var voiceSel = document.getElementById('ea-tts-voice');
+  var modelSel = document.getElementById('ea-tts-model');
+  var hintEl = document.getElementById('ea-tts-hint');
+  if (!providerSel || !voiceSel || !modelSel) return;
+  var pid = providerSel.value || '';
+  var mode = !pid ? 'browser'
+    : pid === TTS_SENTINEL_VOXCPM ? 'voxcpm'
+    : pid === TTS_SENTINEL_EDGE ? 'edge'
+    : 'cloud';
+  // Save current values for round-trip restoration after rebuild.
+  var prevVoice = voiceSel.value === '__custom__' ? '' : voiceSel.value;
+  var prevModel = modelSel.value === '__custom__' ? '' : modelSel.value;
+
+  // ── Voice select rebuild ──
+  voiceSel.innerHTML = '';
+  if (mode === 'browser') {
+    _eaTtsAddOption(voiceSel, '', '默认（系统默认 voice）');
+    _eaEnsureBrowserVoices();
+    var voices = (window.speechSynthesis && window.speechSynthesis.getVoices()) || [];
+    if (voices.length) {
+      var byFamily = {};
+      voices.forEach(function(v) {
+        var fam = ((v.lang || 'unknown').split('-')[0] || 'other').toLowerCase();
+        if (!byFamily[fam]) byFamily[fam] = [];
+        byFamily[fam].push(v);
+      });
+      var families = Object.keys(byFamily).sort(function(a, b) {
+        if (a === 'zh') return -1; if (b === 'zh') return 1;
+        if (a === 'en') return -1; if (b === 'en') return 1;
+        return a.localeCompare(b);
+      });
+      families.forEach(function(fam) {
+        var items = byFamily[fam].map(function(v) {
+          return [v.name, v.name + ' · ' + v.lang + (v.default ? ' (default)' : '')];
+        });
+        _eaTtsAddOptgroup(voiceSel, fam.toUpperCase() + ' · ' + byFamily[fam].length + ' 个', items);
+      });
+    } else {
+      _eaTtsAddOption(voiceSel, '', '(浏览器 voice 列表加载中…)');
+    }
+    _eaTtsAddOption(voiceSel, '__custom__', '✏️ 自定义 Voice 名...');
+  } else if (mode === 'voxcpm') {
+    _eaTtsAddOption(voiceSel, '', '⚠️ 不选 = 每次随机音色，请挑一个 ↓');
+    _eaTtsAddOptgroup(voiceSel, 'Voice Design 预设（自然语言描述）', _TTS_VOXCPM_VOICES);
+    _eaTtsAddOption(voiceSel, '__custom__', '✏️ 自定义描述（如 "calm narrator with slight echo"）...');
+  } else if (mode === 'edge') {
+    // Edge TTS — same neural-voice naming convention as Azure (zh-CN-XiaoxiaoNeural etc.)
+    _eaTtsAddOption(voiceSel, '', '默认 · zh-CN-XiaoxiaoNeural');
+    _TTS_CLOUD_VOICES.forEach(function(g) {
+      // Skip OpenAI voices (alloy/echo/...) — not valid for Edge TTS
+      if (/openai/i.test(g.label)) return;
+      _eaTtsAddOptgroup(voiceSel, g.label, g.items);
+    });
+    _eaTtsAddOption(voiceSel, '__custom__', '✏️ 自定义 Voice ID（如 zh-HK-HiuMaanNeural）...');
+  } else {
+    // cloud
+    _eaTtsAddOption(voiceSel, '', '默认（Provider 默认 voice）');
+    _TTS_CLOUD_VOICES.forEach(function(g) {
+      _eaTtsAddOptgroup(voiceSel, g.label, g.items);
+    });
+    _eaTtsAddOption(voiceSel, '__custom__', '✏️ 自定义 Voice ID...');
+  }
+
+  // ── Model select rebuild ──
+  modelSel.innerHTML = '';
+  if (mode === 'browser') {
+    _eaTtsAddOption(modelSel, '', '— 不适用（浏览器 Web Speech 没有 model 概念）');
+    modelSel.disabled = true;
+    modelSel.style.opacity = '0.45';
+  } else if (mode === 'voxcpm') {
+    modelSel.disabled = false;
+    modelSel.style.opacity = '';
+    _eaTtsAddOption(modelSel, '', '默认 · openbmb/VoxCPM2');
+    _eaTtsAddOption(modelSel, 'openbmb/VoxCPM2', 'openbmb/VoxCPM2 · 2B 多语言');
+    _eaTtsAddOption(modelSel, '__custom__', '✏️ 自定义 HuggingFace 模型 ID...');
+  } else if (mode === 'edge') {
+    _eaTtsAddOption(modelSel, '', '— 不适用（Edge TTS 模型由 voice 名内嵌）');
+    modelSel.disabled = true;
+    modelSel.style.opacity = '0.45';
+  } else {
+    modelSel.disabled = false;
+    modelSel.style.opacity = '';
+    _eaTtsAddOption(modelSel, '', '默认（tts-1）');
+    _TTS_CLOUD_MODELS.forEach(function(g) {
+      _eaTtsAddOptgroup(modelSel, g.label, g.items);
+    });
+    _eaTtsAddOption(modelSel, '__custom__', '✏️ 自定义 Model ID...');
+  }
+
+  // ── Hint text ──
+  if (hintEl) {
+    if (mode === 'browser') {
+      hintEl.innerHTML = '<b>浏览器 Web Speech API</b> · 免费·零配置·依赖 OS 内置语音。Model 不适用。';
+    } else if (mode === 'voxcpm') {
+      hintEl.innerHTML = '<b>VoxCPM</b> · 本机 GPU/MPS 推理 · 首次合成下载 ~5GB 到 <code style="color:var(--secondary)">~/.tudou_claw/hf_cache/</code> · Voice 用自然语言描述（生成式音色）';
+    } else if (mode === 'edge') {
+      hintEl.innerHTML = '<b>Edge TTS</b> · 微软神经语音 · <span style="color:var(--cyber-lime)">免费·无需 API key</span> · 联网（~500ms/句）· 中文音色质量极高';
+    } else {
+      hintEl.innerHTML = '<b>云端 TTS</b> · 复用 LLM Provider 的 base_url + api_key 调 <code style="color:var(--secondary)">/audio/speech</code>（OpenAI 兼容协议）';
+    }
+  }
+
+  // Restore selections if still applicable
+  _eaTtsSetSelectValue(voiceSel, prevVoice);
+  if (mode !== 'browser') _eaTtsSetSelectValue(modelSel, prevModel);
+}
+
+function _eaTtsCustomCheck(sel) {
+  if (sel.value !== '__custom__') return;
+  var label = sel.id.indexOf('voice') >= 0 ? 'Voice ID' : 'Model ID';
+  var custom = window.prompt('输入自定义 ' + label + ' （直接回车取消）:', '');
+  if (custom && custom.trim()) {
+    _eaTtsSetSelectValue(sel, custom.trim());
+  } else {
+    sel.value = '';
+  }
+}
+
+// Set a select's value, dynamically appending a custom option if the
+// value isn't already in the dropdown. Used to (a) restore
+// previously-saved custom values when the modal re-opens, and (b)
+// commit user-typed values from the prompt.
+function _eaTtsSetSelectValue(sel, value) {
+  if (!sel) return;
+  if (!value) { sel.value = ''; return; }
+  // Search existing options
+  for (var i = 0; i < sel.options.length; i++) {
+    if (sel.options[i].value === value) {
+      sel.value = value;
+      return;
+    }
+  }
+  // Not found — insert before the "__custom__" sentinel option
+  var customOpt = null;
+  for (var j = 0; j < sel.options.length; j++) {
+    if (sel.options[j].value === '__custom__') { customOpt = sel.options[j]; break; }
+  }
+  var opt = document.createElement('option');
+  opt.value = value;
+  opt.textContent = '✏️ ' + value;
+  if (customOpt) sel.insertBefore(opt, customOpt);
+  else sel.appendChild(opt);
+  sel.value = value;
 }
 
 function updateModelSelect(providerSelectId, modelSelectId, currentModel) {
@@ -17283,6 +19007,16 @@ async function editAgentProfile(agentId) {
   // Populate provider and model selects
   document.getElementById('ea-provider').value = agent.provider || '';
   updateModelSelect('ea-provider', 'ea-model', agent.model || '');
+  // TTS provider — reuses the LLM provider list (already loaded into
+  // _providerList by populateProviderSelects). Synthesize calls the
+  // chosen provider's {base_url}/audio/speech endpoint.
+  _populateTtsProviderSelect(agent.tts_provider_id || '');
+  // Voice / Model are populated based on Provider (browser vs cloud).
+  // Trigger the change handler first to fill the right preset list,
+  // then restore the saved values (which may include custom entries).
+  _eaOnTtsProviderChange();
+  _eaTtsSetSelectValue(document.getElementById('ea-tts-voice'), agent.tts_voice || '');
+  _eaTtsSetSelectValue(document.getElementById('ea-tts-model'), agent.tts_model || '');
   // Extra LLM Slots (unified multi-slot). Legacy learning_/multimodal_/
   // coding_ provider fields are no longer surfaced — if present in the
   // agent record, they stay in the DB but the UI doesn't show them.
@@ -17484,6 +19218,9 @@ async function saveAgentProfile() {
       knowledge_templates: _eaCollectKnowledgeTemplates(),
       desktop_enabled: !!(document.getElementById('ea-desktop-enabled') || {}).checked,
       desktop_lottie_url: ((document.getElementById('ea-desktop-lottie') || {}).value || '').trim(),
+      tts_provider_id: ((document.getElementById('ea-tts-provider') || {}).value || '').trim(),
+      tts_voice: ((document.getElementById('ea-tts-voice') || {}).value || '').trim(),
+      tts_model: ((document.getElementById('ea-tts-model') || {}).value || '').trim(),
     };
 
     // Merge tool permission state from the new UI (nov 2026)
@@ -18651,6 +20388,27 @@ function switchProjectTab(projId, tabKey) {
     // safe to call repeatedly on tab re-entries).
     try { _attachProjectScrollDownBtn(projId); } catch(e) {}
   }
+  // When switching INTO chat: jump to the bottom so the user sees the
+  // newest message, not page-top. The initial loadProjectChat (in
+  // renderProjectDetail) already sets el.scrollTop = scrollHeight, but
+  // that runs while the pane is display:none — scroll on a hidden
+  // element is a no-op, so once display flips to 'flex' the scrollbar
+  // is back at 0. requestAnimationFrame waits one paint so layout has
+  // computed the real scrollHeight before we scroll.
+  if (tabKey === 'chat') {
+    var msgsEl = document.getElementById('project-chat-msgs-' + projId);
+    if (msgsEl) {
+      var scrollToBottom = function(){ msgsEl.scrollTop = msgsEl.scrollHeight; };
+      try {
+        requestAnimationFrame(function(){
+          requestAnimationFrame(scrollToBottom);  // 2 frames for layout settle
+        });
+      } catch(e) { setTimeout(scrollToBottom, 0); }
+    }
+    // Attach the floating scroll-down button's listener (idempotent —
+    // safe to call repeatedly on tab re-entries).
+    try { _attachProjectScrollDownBtn(projId); } catch(e) {}
+  }
   // Update tab-bar highlighting in place — no full re-render. The old
   // implementation called renderProjectDetail() which re-fetched the
   // project, rebuilt every pane, and on a 429 wiped the chat sidebar
@@ -18985,6 +20743,31 @@ function _renderProjectGoals(projId, goals) {
   '</div>';
 }
 
+function _msForceCloseSwitch(projId, msId) {
+  // Renders an iOS/Material-style toggle that fires forceCloseMilestone
+  // when clicked. Only the OFF state is ever rendered — once the
+  // milestone is closed, status becomes terminal and the actions row
+  // is not drawn at all (caller skips the switch).
+  // 2026-05-09: changed from a button to a toggle on user request
+  // ("改成开关形式") for a more discoverable, modern affordance.
+  return (
+    '<label class="tc-ms-toggle" ' +
+      'style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;' +
+      'font-size:11px;color:var(--text3);user-select:none;padding:2px 4px" ' +
+      'onclick="event.preventDefault();event.stopPropagation();' +
+      'forceCloseMilestone(\''+projId+'\',\''+msId+'\')" ' +
+      'title="管理员手动关闭 — 跳过 agent 完成/确认流程,直接置为 confirmed">' +
+      '<span style="position:relative;display:inline-block;width:28px;height:14px;' +
+        'background:var(--overlay-12,#3a3a3a);border-radius:7px;' +
+        'transition:background .2s" class="tc-ms-toggle-track">' +
+        '<span style="position:absolute;top:2px;left:2px;width:10px;height:10px;' +
+          'background:var(--text3,#999);border-radius:50%;' +
+          'transition:left .2s,background .2s" class="tc-ms-toggle-thumb"></span>' +
+      '</span>' +
+      '<span style="font-size:11px">手动关闭</span>' +
+    '</label>'
+  );
+}
 function _renderProjectMilestonesTab(projId, milestones) {
   var rows = (milestones||[]).map(function(m){
     var statusIcon = m.status==='confirmed'?'✅':m.status==='completed'?'☑️':m.status==='rejected'?'❌':m.status==='in_progress'?'⏳':'○';
@@ -18993,17 +20776,18 @@ function _renderProjectMilestonesTab(projId, milestones) {
     //   - non-terminal (pending/in_progress/blocked) → [手动关闭] for
     //     admin override; useful when responsible agent has stalled
     //   - confirmed/rejected → no actions (terminal states)
+    // 2026-05-09: 手动关闭 changed from button → toggle switch
     var actions = '';
     if (m.status === 'completed') {
-      actions = '<div style="display:flex;gap:6px;margin-top:8px">' +
+      actions = '<div style="display:flex;gap:8px;margin-top:8px;align-items:center">' +
         '<button class="btn btn-primary btn-xs" onclick="confirmMilestone(\''+projId+'\',\''+m.id+'\')">Confirm</button>' +
         '<button class="btn btn-ghost btn-xs" style="color:var(--error)" onclick="rejectMilestone(\''+projId+'\',\''+m.id+'\')">Reject</button>' +
-        '<button class="btn btn-ghost btn-xs" style="color:var(--text3)" onclick="forceCloseMilestone(\''+projId+'\',\''+m.id+'\')" title="跳过 agent 流程,管理员直接关闭">🔒 手动关闭</button>' +
+        _msForceCloseSwitch(projId, m.id) +
       '</div>';
     } else if (m.status !== 'confirmed' && m.status !== 'rejected') {
       // pending / in_progress / blocked / etc — admin can force close
-      actions = '<div style="display:flex;gap:6px;margin-top:8px">' +
-        '<button class="btn btn-ghost btn-xs" style="color:var(--text3)" onclick="forceCloseMilestone(\''+projId+'\',\''+m.id+'\')" title="跳过 agent 流程,管理员直接关闭"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:middle">lock</span> 手动关闭</button>' +
+      actions = '<div style="display:flex;gap:8px;margin-top:8px;align-items:center">' +
+        _msForceCloseSwitch(projId, m.id) +
       '</div>';
     }
     return '<div style="background:var(--surface);border-radius:10px;padding:14px 16px;border:1px solid var(--overlay-6);margin-bottom:10px">' +
@@ -21659,6 +23443,55 @@ function _attachProjectScrollDownBtn(projId) {
 }
 window._attachProjectScrollDownBtn = _attachProjectScrollDownBtn;
 
+// ── Floating "scroll to bottom" button — generic helpers ────────────
+// Pop the button when the user has scrolled up >150px from the bottom
+// of the messages container; hide when within threshold. Clicking
+// jumps to bottom and hides the button. Used by project chat, agent
+// chat, and meeting chat — all three share these helpers.
+
+// Generic: scroll any chat-msgs element to the bottom + hide its
+// associated scroll-down button.
+window._scrollMsgsToBottom = function(msgsId, btnId) {
+  var msgs = document.getElementById(msgsId);
+  if (!msgs) return;
+  msgs.scrollTop = msgs.scrollHeight;
+  if (btnId) {
+    var btn = document.getElementById(btnId);
+    if (btn) btn.style.display = 'none';
+  }
+};
+
+// Generic: bind a passive scroll listener that toggles the button's
+// visibility based on distance from the bottom. Idempotent — safe
+// to call repeatedly on polling re-renders / tab re-entries.
+window._attachScrollDownBtn = function(msgsId, btnId) {
+  var msgs = document.getElementById(msgsId);
+  var btn = document.getElementById(btnId);
+  if (!msgs || !btn) return;
+  if (msgs.dataset.scrollBtnBound === '1') return;
+  msgs.dataset.scrollBtnBound = '1';
+  var update = function() {
+    var fromBottom = msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight;
+    btn.style.display = (fromBottom > 150) ? 'flex' : 'none';
+  };
+  msgs.addEventListener('scroll', update, { passive: true });
+  setTimeout(update, 0);  // initial state
+};
+
+// Project-chat thin wrappers (legacy names — kept for the inline
+// onclick generated in chat pane HTML).
+window._projScrollToBottom = function(projId) {
+  window._scrollMsgsToBottom(
+    'project-chat-msgs-' + projId,
+    'proj-scroll-bottom-' + projId);
+};
+function _attachProjectScrollDownBtn(projId) {
+  window._attachScrollDownBtn(
+    'project-chat-msgs-' + projId,
+    'proj-scroll-bottom-' + projId);
+}
+window._attachProjectScrollDownBtn = _attachProjectScrollDownBtn;
+
 function _projInputChange(projId) {
   var input = document.getElementById('project-chat-input-'+projId);
   if (!input) return;
@@ -22312,7 +24145,14 @@ function _toggleTTS(agentId) {
 }
 
 function _autoSpeak(agentId, text) {
-  // Called when agent finishes a reply — auto-speak if TTS toggle is on
+  // Called when agent finishes a reply — three-way routing:
+  //   1. Realtime Voice Mode for THIS agent → speak + chain back to STT
+  //   2. Per-agent TTS toggle on → speak via browser
+  //   3. Otherwise → no-op
+  if (typeof _voiceModeOnAgentReply === 'function'
+      && _voiceModeOnAgentReply(agentId, text)) {
+    return;
+  }
   if (!_ttsEnabled[agentId]) return;
   if (!text || !text.trim()) return;
   if (!window.speechSynthesis) return;
@@ -22413,6 +24253,2114 @@ function _toggleSTT(agentId) {
   }
 }
 var _sttRecognition = null;
+
+// ============ Realtime Voice Mode (anthropomorphic orb UI) ============
+// Sci-fi anthropomorphic agent presence: a glowing emission-style sphere
+// with breathing animation, orbital particles, and state-driven color.
+// Continuous STT auto-sends after 1.5s silence; agent reply is auto-
+// spoken via server TTS provider (if configured) or browser fallback.
+//
+// State machine:  idle → listening → processing → speaking → listening
+// Color scheme (designed by user 2026-05-09):
+//   idle       — ice blue (calm presence)
+//   listening  — bright cyan + amplitude ripples
+//   processing — purple (thinking)
+//   speaking   — soft pink (responding)
+//   error      — red
+// Breathing freq: ~14 BPM (period 4.3s) — physiological resting rate.
+
+var _VoiceMode = null;  // singleton — one mode active at a time
+
+// Color palette aligned with reference design (Three.js sci-fi demo):
+//   normal/idle  → 0x3a86ff  ice blue
+//   thinking/processing → 0x9d4edd  electric purple
+//   listening/speaking  → 0x4afcff  cyan plasma
+//   error → 0xff4d6d  warning red
+var _VOICE_COLORS = {
+  idle:       { r:  58, g: 134, b: 255 },
+  listening:  { r:  74, g: 252, b: 255 },
+  processing: { r: 157, g:  78, b: 221 },
+  speaking:   { r:  74, g: 252, b: 255 },
+  error:      { r: 255, g:  77, b: 109 },
+};
+
+var _VOICE_LABELS = {
+  idle:       '准备就绪',
+  listening:  '聆听中…',
+  processing: '思考中…',
+  speaking:   '回应中…',
+  error:      '出错了',
+};
+
+function openVoiceMode(agentId) {
+  if (_VoiceMode) closeVoiceMode();
+  _VoiceMode = {
+    agentId: agentId,
+    state: 'idle',
+    transcript: '',
+    finalText: '',
+    silenceTimer: null,
+    audioCtx: null,
+    analyser: null,
+    micStream: null,
+    recognition: null,
+    activeAudio: null,
+    rafId: 0,
+    t: 0,
+    breath: 0,
+    amp: 0.05,
+    targetAmp: 0.05,
+    particles: [],
+    ripples: [],
+    color: { r: 140, g: 200, b: 245 },
+    targetColor: { r: 140, g: 200, b: 245 },
+    overlay: null,
+    canvas: null,
+    ctx: null,
+    stateLabel: null,
+    transcriptEl: null,
+    serverTTS: false,
+    ttsProvider: null,
+  };
+  _voiceModeRender();
+  _voiceModeInitParticles();
+  _voiceModeStartLoop();
+  _voiceModeCheckTTS();
+  _voiceModeStartMic();
+  _voiceModeStartSTT();
+  // Poll the agent's plan/steps every 2s so the right column reflects
+  // live tool calls (mirrors the existing chat-page execution-steps panel).
+  _voiceModeLoadExecSteps();
+  _VoiceMode.execTimer = setInterval(_voiceModeLoadExecSteps, 2000);
+  // Tick the thinking-time card every 0.1s so the displayed seconds
+  // count up smoothly while the agent is processing.
+  _VoiceMode.thinkTimer = setInterval(_voiceModeTickThinking, 100);
+}
+
+function closeVoiceMode() {
+  if (!_VoiceMode) return;
+  var v = _VoiceMode;
+  // Stop streaming TTS pipeline (cancels in-flight synth, drops queued sentences)
+  try { _voiceModeStreamingTTSCancel(); } catch(_){}
+  if (v.rafId) cancelAnimationFrame(v.rafId);
+  if (v.recognition) { try { v.recognition.stop(); } catch(_){} }
+  if (v.silenceTimer) clearTimeout(v.silenceTimer);
+  if (v.execTimer) clearInterval(v.execTimer);
+  if (v.thinkTimer) clearInterval(v.thinkTimer);
+  if (v.resizeListener) { try { window.removeEventListener('resize', v.resizeListener); } catch(_){} }
+  if (v.activeAudio) { try { v.activeAudio.pause(); } catch(_){} }
+  if (v.micStream) { try { v.micStream.getTracks().forEach(function(t){ t.stop(); }); } catch(_){} }
+  if (v.audioCtx) { try { v.audioCtx.close(); } catch(_){} }
+  if (window.speechSynthesis && speechSynthesis.speaking) speechSynthesis.cancel();
+  if (v.overlay && v.overlay.parentNode) v.overlay.parentNode.removeChild(v.overlay);
+  _VoiceMode = null;
+}
+
+// 3-column tech-themed layout (designed 2026-05-09 from user reference).
+// Pipeline stages drive both the sphere color and the left-side timeline.
+var _VOICE_STEPS = [
+  { id: 'listen',  num: '01', label: 'LISTEN',  desc: 'Capturing voice input' },
+  { id: 'process', num: '02', label: 'PROCESS', desc: 'Querying LLM agent' },
+  { id: 'respond', num: '03', label: 'RESPOND', desc: 'Synthesizing audio reply' },
+];
+var _VOICE_STAGE_BADGE = {
+  idle:       'IDLE',
+  listening:  'LIVE',
+  processing: 'SYNCING…',
+  speaking:   'RESPONDING',
+  error:      'ERROR',
+};
+
+function _voiceModeSetState(s) {
+  if (!_VoiceMode) return;
+  var prev = _VoiceMode.state;
+  _VoiceMode.state = s;
+  _VoiceMode.targetColor = _VOICE_COLORS[s] || _VOICE_COLORS.idle;
+  if (_VoiceMode.stateLabel) {
+    var dot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;' +
+      'background:rgb(' + _VOICE_COLORS[s].r + ',' + _VOICE_COLORS[s].g + ',' + _VOICE_COLORS[s].b + ');' +
+      'box-shadow:0 0 8px rgb(' + _VOICE_COLORS[s].r + ',' + _VOICE_COLORS[s].g + ',' + _VOICE_COLORS[s].b + ');' +
+      (s === 'listening' || s === 'processing' ? 'animation:vm-pulse-dot 1.4s ease-in-out infinite' : '') +
+      '"></span>';
+    _VoiceMode.stateLabel.innerHTML = dot + (_VOICE_LABELS[s] || '');
+  }
+  if (_VoiceMode.stageBadge) {
+    _VoiceMode.stageBadge.textContent = _VOICE_STAGE_BADGE[s] || s.toUpperCase();
+  }
+  _voiceModeRenderSteps();
+  // Thinking-time tracking: start clock on processing/speaking, accumulate
+  // when transitioning back to listening/idle.
+  if (prev !== s) {
+    var wasThink = (prev === 'processing' || prev === 'speaking');
+    var isThink = (s === 'processing' || s === 'speaking');
+    if (!wasThink && isThink) {
+      _VoiceMode.thinkStartTs = Date.now();
+    } else if (wasThink && !isThink) {
+      if (_VoiceMode.thinkStartTs) {
+        _VoiceMode.thinkAccum += Date.now() - _VoiceMode.thinkStartTs;
+      }
+      _VoiceMode.thinkStartTs = 0;
+    }
+    // Clear send-in-flight guard when we return to a receptive state.
+    if (s === 'listening' || s === 'idle') {
+      _VoiceMode.sendInFlight = false;
+    }
+    _voiceModeLog('STATE_TRANSITION → ' + s.toUpperCase());
+  }
+  _voiceModeTickThinking();
+}
+
+function _voiceModeRender() {
+  var v = _VoiceMode;
+  var ag = (typeof agents !== 'undefined') && agents.find
+    ? agents.find(function(a){ return a.id === v.agentId; }) : null;
+  var agentName = (ag && ag.name) || 'AGENT';
+  var agentRole = (ag && ag.role) || 'general';
+  var agentDesc = (ag && ag.profile && ag.profile.personality)
+    || (ag && ag.profile && ag.profile.communication_style)
+    || 'Realtime voice interface — listens to your speech, dispatches '
+       + 'to the LLM agent, and replies via cloud or browser TTS.';
+  var providerLabel = (ag && ag.tts_provider_id) ? 'CLOUD_TTS' : 'BROWSER_TTS';
+  // Resolve the agent portrait. Prefer Aether (tech-theme) art when
+  // the helper is available so the avatar matches the rest of the
+  // theme. Falls back to the standard /static/robots/*.png render.
+  var avatarUrl = '';
+  try {
+    if (typeof _aetherAvatarFor === 'function') {
+      avatarUrl = _aetherAvatarFor(ag);
+    } else if (typeof _robotIconUrl === 'function') {
+      avatarUrl = _robotIconUrl((ag && ag.robot_avatar)
+        || ('robot_' + ((ag && ag.role) || 'general')));
+    }
+  } catch (_) { avatarUrl = ''; }
+
+  var ov = document.createElement('div');
+  ov.id = 'voice-mode-overlay';
+  // 3-column grid: agent panel (280) | center (flex) | preview panel (380).
+  // All three share the same dark indigo background; outline-variant
+  // dividers keep the column boundaries visible without heavy chrome.
+  ov.style.cssText = (
+    'position:fixed;inset:0;z-index:99999;' +
+    'background:radial-gradient(circle at 50% 40%, ' +
+      'color-mix(in srgb, var(--primary,#c0c1ff) 6%, var(--background,#13131b)) 0%, ' +
+      'var(--background,#13131b) 60%, #08080d 100%);' +
+    'display:grid;grid-template-columns:280px 1fr 380px;' +
+    'font-family:var(--font-display, Inter, -apple-system, sans-serif);' +
+    'color:var(--on-surface,#e4e1ed);' +
+    'animation:voice-fade-in 0.4s ease-out'
+  );
+  ov.tabIndex = 0;
+  ov.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeVoiceMode();
+  });
+  ov.innerHTML = (
+    '<style>' +
+      '@keyframes voice-fade-in { from {opacity:0} to {opacity:1} }' +
+      '@keyframes vm-pulse-dot { 0%,100% {opacity:1} 50% {opacity:0.35} }' +
+      '@keyframes vm-grid-drift { from {background-position:0 0} to {background-position:48px 48px} }' +
+      '.vm-mono { font-family:var(--font-mono,"Space Grotesk","SF Mono",Menlo,monospace);' +
+        'font-size:11px;font-weight:500;letter-spacing:0.08em;text-transform:uppercase;' +
+        'color:var(--on-surface-variant,#c7c4d7) }' +
+      '.vm-corner { position:absolute;width:14px;height:14px;border:1px solid ' +
+        'var(--outline-variant,#464554);pointer-events:none;opacity:0.7 }' +
+      '.vm-btn-icon { background:transparent;border:1px solid var(--outline-variant,#464554);' +
+        'color:var(--on-surface-variant,#c7c4d7);width:32px;height:32px;border-radius:4px;' +
+        'cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s }' +
+      '.vm-btn-icon:hover { border-color:var(--primary,#c0c1ff);color:var(--primary,#c0c1ff) }' +
+      '.vm-pill { display:inline-flex;align-items:center;gap:6px;padding:5px 12px;' +
+        'background:var(--surface-container,#1f1f27);border:1px solid var(--outline-variant,#464554);' +
+        'border-radius:99px;font-size:10px;color:var(--on-surface-variant,#c7c4d7);' +
+        'font-family:var(--font-mono,"Space Grotesk",monospace);' +
+        'text-transform:uppercase;letter-spacing:0.08em }' +
+      '.vm-tile { background:var(--surface-container,#1f1f27);' +
+        'border:1px solid var(--outline-variant,#464554);border-radius:6px;padding:10px 12px }' +
+      '.vm-card { background:var(--surface-container,#1f1f27);' +
+        'border:1px solid var(--outline-variant,#464554);border-radius:6px;padding:14px }' +
+      '#vm-input::placeholder { color:var(--on-surface-variant,#c7c4d7);opacity:0.5 }' +
+      '#vm-chat::-webkit-scrollbar, #vm-log::-webkit-scrollbar { width:4px }' +
+      '#vm-chat::-webkit-scrollbar-thumb, #vm-log::-webkit-scrollbar-thumb { background:var(--outline-variant,#464554);border-radius:2px }' +
+    '</style>' +
+
+    // ── Subtle grid overlay (covers all 3 columns) ──
+    '<div style="position:absolute;inset:0;pointer-events:none;opacity:0.025;' +
+      'background-image:linear-gradient(var(--outline,#908fa0) 1px,transparent 1px),' +
+      'linear-gradient(90deg,var(--outline,#908fa0) 1px,transparent 1px);' +
+      'background-size:48px 48px;' +
+      'animation:vm-grid-drift 25s linear infinite;z-index:0"></div>' +
+
+    // ╔════════════════════════════════════════════════════════════════╗
+    // ║ LEFT COLUMN  — TOP 40%: avatar + name + description            ║
+    // ║              — BOTTOM 60%: process logic + thinking time       ║
+    // ╚════════════════════════════════════════════════════════════════╝
+    '<div style="position:relative;border-right:1px solid var(--outline-variant,#464554);' +
+        'display:grid;grid-template-rows:40% 60%;overflow:hidden;z-index:1">' +
+      // ── TOP 40%: centered avatar + name + description ──
+      '<div style="padding:28px 24px;display:flex;flex-direction:column;align-items:center;' +
+          'gap:16px;justify-content:center;text-align:center;border-bottom:1px solid var(--outline-variant,#464554)">' +
+        // Big robot avatar (140×140 circular, glowing primary halo).
+        // Uses the agent's Aether portrait when available — that's the
+        // large character art rendered for tech-theme cards. If the
+        // image fails to load we swap to the material smart_toy icon
+        // (always visible even if assets 404).
+        '<div style="position:relative;width:140px;height:140px;' +
+          'background:radial-gradient(circle at 35% 30%,' +
+            'color-mix(in srgb,var(--primary,#c0c1ff) 25%,var(--surface-container,#1f1f27)) 0%,' +
+            'var(--surface-container,#1f1f27) 80%);' +
+          'border:1px solid var(--primary,#c0c1ff);border-radius:50%;' +
+          'overflow:hidden;display:flex;align-items:center;justify-content:center;' +
+          'box-shadow:0 0 32px color-mix(in srgb,var(--primary,#c0c1ff) 35%,transparent)">' +
+          (avatarUrl
+            ? '<img src="' + esc(avatarUrl) + '" alt="" ' +
+              'style="width:100%;height:100%;object-fit:cover;display:block" ' +
+              'onerror="this.outerHTML=\'<span class=&quot;material-symbols-outlined&quot; style=&quot;font-size:64px;color:var(--primary,#c0c1ff)&quot;>smart_toy</span>\'">'
+            : '<span class="material-symbols-outlined" style="font-size:64px;color:var(--primary,#c0c1ff)">smart_toy</span>'
+          ) +
+        '</div>' +
+        // Name
+        '<div>' +
+          '<div style="font-size:20px;font-weight:700;letter-spacing:0.02em;line-height:1.1;' +
+            'word-break:break-all">' + esc(agentName.toUpperCase()) + '</div>' +
+          '<div class="vm-mono" style="color:var(--secondary,#89ceff);margin-top:6px;font-size:10px">VOICE_LINK_ACTIVE</div>' +
+        '</div>' +
+        // Description
+        '<div style="font-size:12px;color:var(--on-surface-variant,#c7c4d7);font-style:italic;' +
+          'line-height:1.5;max-width:230px">' + esc(agentDesc) + '</div>' +
+      '</div>' +
+
+      // ── BOTTOM 60%: process logic + thinking time ──
+      '<div style="padding:20px 24px;display:flex;flex-direction:column;gap:16px;overflow-y:auto;min-height:0">' +
+        // Header + stage badge
+        '<div style="display:flex;align-items:center;justify-content:space-between">' +
+          '<div class="vm-mono" style="display:flex;align-items:center;gap:8px;color:var(--on-surface,#e4e1ed);font-size:12px">' +
+            '<span class="material-symbols-outlined" style="font-size:14px;color:var(--secondary,#89ceff)">network_node</span>' +
+            'PROCESS_LOGIC' +
+          '</div>' +
+          '<span id="vm-stage-badge" class="vm-mono" style="background:var(--surface-container,#1f1f27);' +
+            'border:1px solid var(--outline-variant,#464554);padding:3px 8px;border-radius:3px;' +
+            'font-size:9px;color:var(--secondary,#89ceff)">IDLE</span>' +
+        '</div>' +
+        // Steps timeline
+        '<div id="vm-steps" style="display:flex;flex-direction:column;gap:14px"></div>' +
+        // Spacer
+        '<div style="flex:1;min-height:8px"></div>' +
+        // Thinking-time card (active during processing/speaking)
+        '<div class="vm-card" style="padding:12px 14px">' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">' +
+            '<div class="vm-mono" style="color:var(--on-surface-variant,#c7c4d7);opacity:0.6;font-size:9px">THINKING_TIME</div>' +
+            '<span id="vm-think-status" class="vm-mono" style="color:var(--cyber-blue,#2e90ff);font-size:9px">—</span>' +
+          '</div>' +
+          '<div id="vm-think-time" style="font-size:22px;font-weight:700;font-family:var(--font-mono,Space Grotesk,monospace)">0.0<span style="font-size:13px;color:var(--on-surface-variant,#c7c4d7);margin-left:3px">s</span></div>' +
+        '</div>' +
+        // Telemetry footer
+        '<div style="border-top:1px solid var(--outline-variant,#464554);padding-top:12px;display:flex;flex-direction:column;gap:8px;font-size:11px">' +
+          '<div style="display:flex;justify-content:space-between;align-items:center">' +
+            '<span style="color:var(--on-surface-variant,#c7c4d7)">Telemetry</span>' +
+            '<span class="vm-mono" style="color:var(--cyber-lime,#adff2f);font-size:9px">' + providerLabel + '</span>' +
+          '</div>' +
+          '<div style="display:flex;justify-content:space-between;align-items:center">' +
+            '<span style="color:var(--on-surface-variant,#c7c4d7)">Archival</span>' +
+            '<span class="vm-mono" style="color:var(--cyber-lime,#adff2f);font-size:9px">STABLE</span>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+    '</div>' +
+
+    // ╔════════════════════════════════════════════════════════════════╗
+    // ║ MIDDLE COLUMN — single layer: canvas fills full height,        ║
+    // ║ chat overlays in the bottom 50% (no visual divider).           ║
+    // ╚════════════════════════════════════════════════════════════════╝
+    // 2026-05-09: restructured per user feedback — background is
+    // one continuous canvas (sphere + halo bleed everywhere); chat
+    // sits as a transparent overlay in the bottom half so messages
+    // appear in-place but the visual stays unified.
+    '<div style="position:relative;overflow:hidden;z-index:1">' +
+      // Canvas fills the entire middle column
+      '<canvas id="voice-mode-canvas" ' +
+        'style="position:absolute;inset:0;width:100%;height:100%;display:block;background:transparent"></canvas>' +
+
+      // Pills + state label — positioned at the vertical center of the
+      // top half (just below the sphere's lower halo)
+      '<div style="position:absolute;left:0;right:0;top:48%;' +
+          'transform:translateY(-50%);' +
+          'display:flex;flex-direction:column;align-items:center;gap:10px;' +
+          'pointer-events:none;z-index:2">' +
+        '<div style="display:flex;gap:10px">' +
+          '<span class="vm-pill">' +
+            '<span style="display:inline-block;width:6px;height:6px;border-radius:50%;' +
+              'background:var(--cyber-lime,#adff2f);box-shadow:0 0 6px var(--cyber-lime,#adff2f);' +
+              'animation:vm-pulse-dot 1.4s ease-in-out infinite"></span>LINKED</span>' +
+          '<span class="vm-pill">' +
+            '<span class="material-symbols-outlined" style="font-size:11px;color:var(--secondary,#89ceff)">shield</span>' +
+            'SECURE</span>' +
+        '</div>' +
+        '<div id="voice-mode-state" class="vm-mono" style="height:14px;display:flex;align-items:center;gap:8px;font-size:12px;letter-spacing:0.18em"></div>' +
+      '</div>' +
+
+      // Chat history — absolute-positioned overlay on the bottom 50%.
+      // Subtle gradient mask at top so messages "fade up" out of the
+      // sphere area without an abrupt cutoff line.
+      '<div style="position:absolute;left:0;right:0;bottom:0;height:50%;' +
+          'display:flex;flex-direction:column;padding:24px 24px 24px;' +
+          'overflow:hidden;z-index:2;' +
+          'mask-image:linear-gradient(to bottom,transparent 0,black 8%);' +
+          '-webkit-mask-image:linear-gradient(to bottom,transparent 0,black 8%)">' +
+        '<div id="vm-chat" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:14px;padding:4px;min-height:0">' +
+          '<div id="vm-chat-empty" class="vm-mono" style="text-align:center;color:var(--on-surface-variant,#c7c4d7);' +
+            'opacity:0.35;padding:24px;font-size:11px">' +
+            '— SESSION_READY · 开始说话 —' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+    '</div>' +
+
+    // ╔════════════════════════════════════════════════════════════════╗
+    // ║ RIGHT COLUMN — Agent's actual execution steps (live tool calls) ║
+    // ╚════════════════════════════════════════════════════════════════╝
+    '<div style="position:relative;border-left:1px solid var(--outline-variant,#464554);' +
+        'padding:24px;display:flex;flex-direction:column;gap:14px;overflow:hidden;z-index:1">' +
+      // Header + close button
+      '<div style="display:flex;align-items:center;justify-content:space-between;flex-shrink:0">' +
+        '<div class="vm-mono" style="display:flex;align-items:center;gap:8px;color:var(--on-surface,#e4e1ed);font-size:12px">' +
+          '<span class="material-symbols-outlined" style="font-size:14px;color:var(--secondary,#89ceff)">monitoring</span>' +
+          'EXECUTION_PROCESS' +
+        '</div>' +
+        '<button onclick="closeVoiceMode()" class="vm-btn-icon" title="Exit (ESC)">' +
+          '<span class="material-symbols-outlined" style="font-size:14px">close</span>' +
+        '</button>' +
+      '</div>' +
+
+      // Plan banner (shows current goal + status pulled from /plans)
+      '<div id="vm-plan-banner" class="vm-card" style="flex-shrink:0;display:none">' +
+        '<div class="vm-mono" style="color:var(--on-surface-variant,#c7c4d7);opacity:0.6;font-size:9px;margin-bottom:6px">CURRENT_PLAN</div>' +
+        '<div id="vm-plan-goal" style="font-size:13px;line-height:1.4">—</div>' +
+        '<div id="vm-plan-progress" style="margin-top:8px;display:flex;align-items:center;gap:8px">' +
+          '<div style="flex:1;height:3px;background:var(--surface-container-low,#1b1b23);border-radius:2px;overflow:hidden">' +
+            '<div id="vm-plan-bar" style="height:100%;background:var(--cyber-blue,#2e90ff);width:0%;transition:width 0.3s"></div>' +
+          '</div>' +
+          '<span id="vm-plan-pct" class="vm-mono" style="color:var(--cyber-blue,#2e90ff);font-size:10px">0%</span>' +
+        '</div>' +
+      '</div>' +
+
+      // Execution steps list (live polling)
+      '<div class="vm-card" style="flex:1;display:flex;flex-direction:column;min-height:0;overflow:hidden">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-shrink:0">' +
+          '<div class="vm-mono" style="color:var(--on-surface-variant,#c7c4d7);opacity:0.6;font-size:9px">STEP_TIMELINE</div>' +
+          '<div id="vm-exec-status" class="vm-mono" style="color:var(--cyber-blue,#2e90ff);font-size:9px">POLLING…</div>' +
+        '</div>' +
+        '<div id="vm-exec-steps" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:8px">' +
+          '<div class="vm-mono" style="color:var(--on-surface-variant,#c7c4d7);opacity:0.4;text-align:center;padding:24px;font-size:10px">' +
+            '— NO_ACTIVE_PLAN —' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+
+      // Compact event log footer (streaming voice mode events)
+      '<div class="vm-card" style="flex-shrink:0;height:140px;display:flex;flex-direction:column;overflow:hidden">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
+          '<div class="vm-mono" style="color:var(--on-surface-variant,#c7c4d7);opacity:0.6;font-size:9px">VOICE_EVENT_LOG</div>' +
+          '<div class="vm-mono" style="color:var(--cyber-lime,#adff2f);font-size:9px">_ STREAMING</div>' +
+        '</div>' +
+        '<div id="vm-log" style="flex:1;overflow-y:auto;' +
+          'font-family:var(--font-mono,"Space Grotesk",monospace);font-size:10px;line-height:1.6;' +
+          'color:var(--on-surface-variant,#c7c4d7)"></div>' +
+      '</div>' +
+    '</div>'
+  );
+  document.body.appendChild(ov);
+  v.overlay = ov;
+  v.canvas = ov.querySelector('#voice-mode-canvas');
+  v.ctx = v.canvas.getContext('2d');
+  v.stateLabel = ov.querySelector('#voice-mode-state');
+  v.transcriptEl = ov.querySelector('#vm-chat');
+  v.logEl = ov.querySelector('#vm-log');
+  v.stepsEl = ov.querySelector('#vm-steps');
+  v.stageBadge = ov.querySelector('#vm-stage-badge');
+  v.turnCount = 0;
+  // Right-column execution-process panel refs
+  v.execStepsEl = ov.querySelector('#vm-exec-steps');
+  v.execStatusEl = ov.querySelector('#vm-exec-status');
+  v.planBannerEl = ov.querySelector('#vm-plan-banner');
+  v.planGoalEl = ov.querySelector('#vm-plan-goal');
+  v.planBarEl = ov.querySelector('#vm-plan-bar');
+  v.planPctEl = ov.querySelector('#vm-plan-pct');
+  // Left-column thinking-time refs
+  v.thinkTimeEl = ov.querySelector('#vm-think-time');
+  v.thinkStatusEl = ov.querySelector('#vm-think-status');
+  v.thinkStartTs = 0;     // epoch ms when current think began
+  v.thinkAccum = 0;       // total ms spent thinking this session
+
+  // Initial steps render + boot log
+  _voiceModeRenderSteps();
+  _voiceModeLog('VOICE_INTERFACE_INITIALIZED');
+  _voiceModeLog('AGENT = ' + agentName + ' · TTS = ' + providerLabel);
+
+  // Dynamic canvas resize — sphere now fills the entire top half of
+  // the middle column (no fixed 420×420 box). Call once after layout
+  // settles, then re-run on window resize.
+  setTimeout(_voiceModeResizeCanvas, 30);
+  window.addEventListener('resize', _voiceModeResizeCanvas);
+  v.resizeListener = _voiceModeResizeCanvas;
+
+  setTimeout(function() { try { ov.focus(); } catch(_) {} }, 50);
+  _voiceModeSetState('idle');
+}
+
+// Resize the voice-mode canvas to match its parent's pixel size.
+// Applies devicePixelRatio so retina screens stay sharp. Safe to
+// call multiple times (idempotent).
+function _voiceModeResizeCanvas() {
+  if (!_VoiceMode || !_VoiceMode.canvas) return;
+  var parent = _VoiceMode.canvas.parentElement;
+  if (!parent) return;
+  var rect = parent.getBoundingClientRect();
+  if (rect.width < 50 || rect.height < 50) return;
+  var dpr = window.devicePixelRatio || 1;
+  var w = Math.max(1, Math.floor(rect.width));
+  var h = Math.max(1, Math.floor(rect.height));
+  // Avoid resetting transform every frame — only when dimensions change
+  if (_VoiceMode.canvas.width === w * dpr && _VoiceMode.canvas.height === h * dpr) return;
+  _VoiceMode.canvas.style.width = w + 'px';
+  _VoiceMode.canvas.style.height = h + 'px';
+  _VoiceMode.canvas.width = w * dpr;
+  _VoiceMode.canvas.height = h * dpr;
+  // Setting canvas.width resets the transform — re-apply DPR scale
+  if (dpr > 1) _VoiceMode.ctx.scale(dpr, dpr);
+}
+
+// ── Helper: render the left-side process timeline ──
+function _voiceModeRenderSteps() {
+  if (!_VoiceMode || !_VoiceMode.stepsEl) return;
+  var STATE_TO_ACTIVE = { idle: -1, listening: 0, processing: 1, speaking: 2, error: -1 };
+  var activeIdx = STATE_TO_ACTIVE[_VoiceMode.state];
+  if (activeIdx === undefined) activeIdx = -1;
+  var html = _VOICE_STEPS.map(function(step, idx) {
+    var status = (activeIdx > idx) ? 'done'
+      : (activeIdx === idx ? 'active' : 'pending');
+    var iconName, iconColor, descColor, numColor;
+    if (status === 'done') {
+      iconName = 'check_circle';
+      iconColor = 'var(--cyber-lime,#adff2f)';
+      descColor = 'var(--on-surface,#e4e1ed)';
+      numColor = 'var(--on-surface-variant,#c7c4d7)';
+    } else if (status === 'active') {
+      iconName = 'progress_activity';
+      iconColor = 'var(--secondary,#89ceff)';
+      descColor = 'var(--on-surface,#e4e1ed)';
+      numColor = 'var(--secondary,#89ceff)';
+    } else {
+      iconName = 'radio_button_unchecked';
+      iconColor = 'var(--outline-variant,#464554)';
+      descColor = 'var(--on-surface-variant,#c7c4d7)';
+      numColor = 'var(--on-surface-variant,#c7c4d7)';
+    }
+    return (
+      '<div style="display:flex;gap:12px;align-items:flex-start;opacity:' +
+        (status === 'pending' ? '0.55' : '1') + '">' +
+        '<span class="material-symbols-outlined" style="font-size:18px;color:' +
+          iconColor + ';margin-top:1px;' +
+          (status === 'active' ? 'animation:vm-pulse-dot 1.4s ease-in-out infinite' : '') +
+          '">' + iconName + '</span>' +
+        '<div style="flex:1;min-width:0">' +
+          '<div class="vm-mono" style="color:' + numColor + ';font-size:10px;margin-bottom:2px;opacity:0.85">' +
+            step.num + ' // ' + step.label + '</div>' +
+          '<div style="font-size:13px;color:' + descColor + '">' + step.desc + '</div>' +
+        '</div>' +
+      '</div>'
+    );
+  }).join('');
+  _VoiceMode.stepsEl.innerHTML = html;
+}
+
+// ── Helper: append entry to event log (right column) ──
+function _voiceModeLog(msg) {
+  if (!_VoiceMode || !_VoiceMode.logEl) return;
+  var d = new Date();
+  var ts = '[' + String(d.getHours()).padStart(2,'0') + ':' +
+    String(d.getMinutes()).padStart(2,'0') + ':' +
+    String(d.getSeconds()).padStart(2,'0') + ']';
+  var line = document.createElement('div');
+  line.innerHTML = '<span style="color:var(--secondary,#89ceff)">' + ts + '</span>' +
+    ' ' + esc(String(msg));
+  _VoiceMode.logEl.appendChild(line);
+  _VoiceMode.logEl.scrollTop = _VoiceMode.logEl.scrollHeight;
+  // Cap at 60 entries to bound memory
+  while (_VoiceMode.logEl.children.length > 60) {
+    _VoiceMode.logEl.removeChild(_VoiceMode.logEl.firstChild);
+  }
+}
+
+// ── Helper: append a chat bubble (middle column) ──
+function _voiceModeAppendChat(role, text) {
+  if (!_VoiceMode || !_VoiceMode.transcriptEl || !text) return;
+  // Drop the empty-state placeholder on first message
+  var emptyEl = document.getElementById('vm-chat-empty');
+  if (emptyEl && emptyEl.parentNode) emptyEl.parentNode.removeChild(emptyEl);
+  var isUser = role === 'user';
+  var d = new Date();
+  var ts = String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+  var div = document.createElement('div');
+  div.style.cssText = 'display:flex;gap:10px;align-items:flex-start;' +
+    (isUser ? 'flex-direction:row-reverse' : '');
+  var iconBg = isUser ? 'var(--primary,#c0c1ff)' : 'var(--surface-container-high,#292932)';
+  var iconColor = isUser ? 'var(--on-primary,#1000a9)' : 'var(--secondary,#89ceff)';
+  var icon = isUser ? 'person' : 'smart_toy';
+  div.innerHTML = (
+    '<div style="width:32px;height:32px;background:' + iconBg + ';color:' + iconColor +
+      ';border-radius:6px;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:2px">' +
+      '<span class="material-symbols-outlined" style="font-size:16px">' + icon + '</span>' +
+    '</div>' +
+    '<div style="flex:1;display:flex;flex-direction:column;gap:4px;min-width:0;align-items:' +
+      (isUser ? 'flex-end' : 'flex-start') + '">' +
+      '<div class="vm-bubble-body" style="background:var(--surface-container,#1f1f27);' +
+        'border:1px solid var(--outline-variant,#464554);' +
+        'padding:10px 14px;border-radius:8px;max-width:90%;font-size:13px;line-height:1.5;' +
+        'word-wrap:break-word;white-space:pre-wrap">' + esc(text) + '</div>' +
+      '<div class="vm-mono" style="font-size:9px;opacity:0.5">' + ts + '</div>' +
+    '</div>'
+  );
+  _VoiceMode.transcriptEl.appendChild(div);
+  _VoiceMode.transcriptEl.scrollTop = _VoiceMode.transcriptEl.scrollHeight;
+  return div;
+}
+
+// 2026-05-10 user-reported "声音出来了，文字没出来" — vm-chat agent
+// bubble was only created at END of stream (via _voiceModeOnAgentReply
+// → _voiceModeAppendChat). With long replies (89s thinking + 20s+ TTS)
+// users hear voice but see no text for a minute+. Fix: create the
+// bubble on the FIRST text_delta and update its content live as more
+// deltas arrive. The end-of-stream bubble append becomes a no-op when
+// we already have a streaming bubble.
+function _voiceModeUpsertAgentChat(fullText) {
+  if (!_VoiceMode || !_VoiceMode.transcriptEl || !fullText) return null;
+  // Reuse existing live bubble if streaming the same turn
+  if (_VoiceMode._liveAgentBubble && _VoiceMode._liveAgentBubble.parentNode) {
+    var bodyEl = _VoiceMode._liveAgentBubble.querySelector('.vm-bubble-body');
+    if (bodyEl) {
+      bodyEl.textContent = fullText;
+      _VoiceMode.transcriptEl.scrollTop = _VoiceMode.transcriptEl.scrollHeight;
+    }
+    return _VoiceMode._liveAgentBubble;
+  }
+  // Create a fresh bubble for this turn
+  var div = _voiceModeAppendChat('agent', fullText);
+  _VoiceMode._liveAgentBubble = div;
+  return div;
+}
+
+// Mark the live bubble as "finalized" so the next text_delta starts a
+// fresh bubble. Called when this turn's stream ends.
+function _voiceModeFinalizeAgentChat() {
+  if (_VoiceMode) _VoiceMode._liveAgentBubble = null;
+}
+
+// ── Helper: manual text-send via the input bar (fallback when STT
+// fails or user wants to type a command instead of speaking) ──
+function _voiceModeManualSend() {
+  if (!_VoiceMode) return;
+  var inp = document.getElementById('vm-input');
+  if (!inp) return;
+  var text = inp.value.trim();
+  if (!text) return;
+  inp.value = '';
+  if (_VoiceMode.silenceTimer) clearTimeout(_VoiceMode.silenceTimer);
+  _VoiceMode.finalText = text;
+  _voiceModeAutoSend();
+}
+
+// ── Helper: poll the agent's plan/steps and render in right column ──
+async function _voiceModeLoadExecSteps() {
+  if (!_VoiceMode) return;
+  try {
+    var data = await api('GET', '/api/portal/agent/' + _VoiceMode.agentId + '/plans');
+    if (!_VoiceMode) return;  // closed during fetch
+    var plan = data && data.current_plan;
+    if (!plan || !plan.steps || !plan.steps.length) {
+      if (_VoiceMode.planBannerEl) _VoiceMode.planBannerEl.style.display = 'none';
+      if (_VoiceMode.execStepsEl) {
+        _VoiceMode.execStepsEl.innerHTML = '<div class="vm-mono" style="' +
+          'color:var(--on-surface-variant,#c7c4d7);opacity:0.4;text-align:center;' +
+          'padding:24px;font-size:10px">— NO_ACTIVE_PLAN —</div>';
+      }
+      if (_VoiceMode.execStatusEl) _VoiceMode.execStatusEl.textContent = 'IDLE';
+      return;
+    }
+    // Plan banner
+    if (_VoiceMode.planBannerEl) _VoiceMode.planBannerEl.style.display = '';
+    if (_VoiceMode.planGoalEl) {
+      _VoiceMode.planGoalEl.textContent = plan.goal || plan.title || '(no goal)';
+    }
+    var total = plan.steps.length;
+    var done = plan.steps.filter(function(s){
+      return s.status === 'completed' || s.status === 'done';
+    }).length;
+    var pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    if (_VoiceMode.planBarEl) _VoiceMode.planBarEl.style.width = pct + '%';
+    if (_VoiceMode.planPctEl) _VoiceMode.planPctEl.textContent = pct + '%';
+    if (_VoiceMode.execStatusEl) {
+      _VoiceMode.execStatusEl.textContent =
+        plan.status === 'completed' ? 'COMPLETED' : 'RUNNING';
+    }
+    // Step list (latest 12, newest first for compactness)
+    var html = plan.steps.slice(-12).reverse().map(function(s) {
+      var status = s.status || 'pending';
+      var iconName, iconColor, textOpacity;
+      if (status === 'completed' || status === 'done') {
+        iconName = 'check_circle'; iconColor = 'var(--cyber-lime,#adff2f)'; textOpacity = '1';
+      } else if (status === 'in_progress' || status === 'running') {
+        iconName = 'progress_activity'; iconColor = 'var(--cyber-blue,#2e90ff)'; textOpacity = '1';
+      } else if (status === 'failed' || status === 'error') {
+        iconName = 'error'; iconColor = 'var(--error,#ffb4ab)'; textOpacity = '1';
+      } else {
+        iconName = 'radio_button_unchecked'; iconColor = 'var(--outline-variant,#464554)'; textOpacity = '0.55';
+      }
+      var title = s.title || s.description || s.tool || s.name || '(step)';
+      var detail = s.tool ? s.tool : '';
+      var animation = (status === 'in_progress' || status === 'running')
+        ? 'animation:vm-pulse-dot 1.4s ease-in-out infinite' : '';
+      return (
+        '<div style="display:flex;gap:10px;align-items:flex-start;opacity:' + textOpacity + '">' +
+          '<span class="material-symbols-outlined" style="font-size:16px;color:' +
+            iconColor + ';margin-top:1px;flex-shrink:0;' + animation + '">' + iconName + '</span>' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-size:12px;line-height:1.4;color:var(--on-surface,#e4e1ed);' +
+              'overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(title) + '</div>' +
+            (detail ? '<div class="vm-mono" style="font-size:9px;color:var(--secondary,#89ceff);opacity:0.7;margin-top:2px">' + esc(detail) + '</div>' : '') +
+          '</div>' +
+        '</div>'
+      );
+    }).join('');
+    if (_VoiceMode.execStepsEl) _VoiceMode.execStepsEl.innerHTML = html;
+  } catch (e) {
+    if (_VoiceMode && _VoiceMode.execStatusEl) {
+      _VoiceMode.execStatusEl.textContent = 'ERR';
+    }
+  }
+}
+
+// ── Helper: tick the thinking-time card (left column) ──
+function _voiceModeTickThinking() {
+  if (!_VoiceMode || !_VoiceMode.thinkTimeEl) return;
+  var s = _VoiceMode.state;
+  var elapsed = _VoiceMode.thinkAccum;
+  var status = '—';
+  if (s === 'processing' && _VoiceMode.thinkStartTs) {
+    elapsed += Date.now() - _VoiceMode.thinkStartTs;
+    status = 'PROCESSING';
+  } else if (s === 'speaking' && _VoiceMode.thinkStartTs) {
+    elapsed += Date.now() - _VoiceMode.thinkStartTs;
+    status = 'RESPONDING';
+  } else if (_VoiceMode.thinkAccum > 0) {
+    status = 'IDLE';
+  }
+  var sec = (elapsed / 1000).toFixed(1);
+  _VoiceMode.thinkTimeEl.innerHTML =
+    sec + '<span style="font-size:13px;color:var(--on-surface-variant,#c7c4d7);margin-left:3px">s</span>';
+  if (_VoiceMode.thinkStatusEl) _VoiceMode.thinkStatusEl.textContent = status;
+}
+
+function _voiceModeInitParticles() {
+  var v = _VoiceMode;
+  // ── Volume-filled particle cloud (uniform 3D distribution) ──────
+  // 2500 particles spread throughout the sphere VOLUME (not just the
+  // surface). Algorithm: cube-root of random radius gives uniform
+  // density per unit volume (else density piles at the center).
+  // Each particle stores its base position; per-frame wave displacement
+  // (see _voiceModeDraw) gives the cloud a "breathing tissue" feel.
+  // Reference: user-supplied Three.js demo (8000 particles, GPU-cheap;
+  // we use 2500 for Canvas 2D budget — visually equivalent at orb
+  // size since 8000 vs 2500 stops mattering once dot density saturates).
+  v.surfacePts = [];
+  var N = 2500;
+  for (var i = 0; i < N; i++) {
+    // Uniform spherical surface direction
+    var u = Math.random();
+    var vRand = Math.random();
+    var theta = 2 * Math.PI * u;
+    var phi = Math.acos(2 * vRand - 1);
+    // Cube-root radius → uniform volume density
+    var radius = Math.cbrt(Math.random());
+    var sinPhi = Math.sin(phi);
+    v.surfacePts.push({
+      x: radius * sinPhi * Math.cos(theta),
+      y: radius * sinPhi * Math.sin(theta),
+      z: radius * Math.cos(phi),
+      // Per-particle twinkle phase
+      tw: Math.random() * Math.PI * 2,
+    });
+  }
+  // ── Orbital particles (3D — orbit on tilted planes) ──
+  // Each particle rides on a static orbital plane in 3D space. The
+  // plane is parameterised by two orthonormal in-plane basis vectors
+  // (u, w) so position(angle) = orbitR · (cos·u + sin·w). At draw
+  // time these get rotated by the same camera (rotY, rotX) as the
+  // surface points so the whole scene moves coherently.
+  v.particles = [];
+  for (var k = 0; k < 28; k++) {
+    // Random plane normal n (azimuth/polar)
+    var nTheta = Math.random() * Math.PI * 2;
+    var nPhi = (Math.random() - 0.5) * 1.2;
+    var nx = Math.cos(nTheta) * Math.cos(nPhi);
+    var ny = Math.sin(nPhi);
+    var nz = Math.sin(nTheta) * Math.cos(nPhi);
+    // Build u perpendicular to n: cross with whichever world axis is
+    // least parallel — guarantees a non-zero result.
+    var ax = Math.abs(nx), ay = Math.abs(ny), az = Math.abs(nz);
+    var rx, ry, rz;
+    if (ax <= ay && ax <= az) { rx = 1; ry = 0; rz = 0; }
+    else if (ay <= az)        { rx = 0; ry = 1; rz = 0; }
+    else                      { rx = 0; ry = 0; rz = 1; }
+    var ux = ny * rz - nz * ry;
+    var uy = nz * rx - nx * rz;
+    var uz = nx * ry - ny * rx;
+    var ulen = Math.sqrt(ux*ux + uy*uy + uz*uz) || 1;
+    ux /= ulen; uy /= ulen; uz /= ulen;
+    // w = n × u (orthogonal, completes the basis)
+    var wx = ny * uz - nz * uy;
+    var wy = nz * ux - nx * uz;
+    var wz = nx * uy - ny * ux;
+    v.particles.push({
+      orbitR: 1.35 + Math.random() * 0.65,  // 1.35..2.0 × sphere R
+      angle: Math.random() * Math.PI * 2,
+      speed: 0.005 + Math.random() * 0.008,
+      ux: ux, uy: uy, uz: uz,
+      wx: wx, wy: wy, wz: wz,
+      r: 1.0 + Math.random() * 1.4,
+      alpha: 0.55 + Math.random() * 0.4,
+    });
+  }
+  // Camera / rotation state
+  v.rotY = 0;
+  v.rotX = 0.18;          // slight pitch so we look slightly down at the equator
+}
+
+function _voiceModeStartLoop() {
+  // Defensive RAF loop — wrap draw in try/catch so a single bad frame
+  // (e.g. analyser read after audioCtx suspended during processing
+  // state) does NOT permanently freeze the sphere. Re-schedule even
+  // when an exception bubbles up; the next frame will recover once
+  // the transient condition clears.
+  function frame() {
+    if (!_VoiceMode) return;
+    try {
+      _voiceModeDraw();
+    } catch (e) {
+      console.warn('voice mode draw error (recovering):', e);
+    }
+    if (_VoiceMode) _VoiceMode.rafId = requestAnimationFrame(frame);
+  }
+  _VoiceMode.rafId = requestAnimationFrame(frame);
+}
+
+function _voiceModeDraw() {
+  var v = _VoiceMode;
+  // Read logical CSS dimensions (canvas.style.width is set in render
+  // when DPR > 1; fall back to canvas.width for non-retina screens).
+  var W = parseInt(v.canvas.style.width, 10) || v.canvas.width;
+  var H = parseInt(v.canvas.style.height, 10) || v.canvas.height;
+  // Canvas now fills the full middle column height (sphere + chat
+  // overlay share the same canvas), so center vertically at 28% of H
+  // — places the orb in the upper area, leaving the bottom ~50% for
+  // the chat overlay to sit on top of the (already faded-out) halo.
+  var cx = W / 2;
+  var cy = H * 0.28;
+  // Sphere radius scales with the SHORTER dimension so the orb stays
+  // proportional even when the canvas is wider than tall.
+  var baseR = Math.min(W, H * 0.6) * 0.32;
+  var ctx = v.ctx;
+  v.t += 1/60;
+
+  // Smooth color lerp
+  v.color.r += (v.targetColor.r - v.color.r) * 0.07;
+  v.color.g += (v.targetColor.g - v.color.g) * 0.07;
+  v.color.b += (v.targetColor.b - v.color.b) * 0.07;
+  var cr = Math.round(v.color.r), cg = Math.round(v.color.g), cb = Math.round(v.color.b);
+
+  // Mic amplitude (RMS) + VAD silence tracking when listening.
+  // Wrapped in try/catch because the AudioContext can transition to
+  // "suspended" during state changes (Chrome auto-suspends when no
+  // audio stream is consumed for a while).
+  if (v.analyser && v.state === 'listening') {
+    try {
+      var n = v.analyser.fftSize;
+      var data = new Uint8Array(n);
+      v.analyser.getByteTimeDomainData(data);
+      var sum = 0;
+      for (var i = 0; i < n; i++) {
+        var d = (data[i] - 128) / 128;
+        sum += d * d;
+      }
+      var rms = Math.sqrt(sum / n);
+      v.targetAmp = rms;
+      // VAD: track when amplitude drops below the silence threshold.
+      // Threshold tuned for typical desktop mic ambient noise (~0.015).
+      // The smart auto-send checker reads silenceStartTs to decide
+      // whether the user has actually stopped speaking.
+      var SILENCE_RMS = 0.020;
+      if (rms < SILENCE_RMS) {
+        if (!v.silenceStartTs) v.silenceStartTs = performance.now();
+      } else {
+        v.silenceStartTs = 0;
+      }
+    } catch (_) {
+      v.targetAmp = 0.05;
+    }
+  } else if (v.state === 'speaking') {
+    v.silenceStartTs = 0;
+    // ── Speech-like envelope (simulates voice pulse pattern) ──
+    // If we have an HTMLAudioElement playing server TTS via Web Audio,
+    // read its real RMS. Otherwise fall back to a multi-frequency
+    // pseudo-envelope: word-rate + syllable-rate + jitter — looks much
+    // more natural than a single sine wave because real speech has
+    // overlapping prosodic and articulatory rhythms.
+    var realAmp = -1;
+    if (v.ttsAnalyser) {
+      try {
+        var nT = v.ttsAnalyser.fftSize;
+        var dT = new Uint8Array(nT);
+        v.ttsAnalyser.getByteTimeDomainData(dT);
+        var sT = 0;
+        for (var iT = 0; iT < nT; iT++) {
+          var dd = (dT[iT] - 128) / 128;
+          sT += dd * dd;
+        }
+        realAmp = Math.sqrt(sT / nT);
+      } catch (_) {}
+    }
+    if (realAmp > 0.001) {
+      v.targetAmp = realAmp * 1.6;  // gain it up so the orb visibly pulses
+    } else {
+      // Synthetic envelope — three superimposed waves + noise
+      var word = Math.sin(v.t * 3.7);
+      var syl  = Math.sin(v.t * 11.3 + 1.2);
+      var fast = Math.sin(v.t * 23.1 + 2.7);
+      var noise = (Math.random() - 0.5) * 0.08;
+      // Map sin*sin*sin into [0..1]-ish, exaggerate peaks
+      var env = Math.abs(word) * 0.5 + Math.abs(syl) * 0.3 + Math.abs(fast) * 0.15 + 0.05;
+      // Random "pause" beats — drop to near-zero ~10% of frames
+      if (Math.random() < 0.012) env *= 0.25;
+      v.targetAmp = Math.max(0.06, Math.min(0.55, env + noise));
+    }
+  } else if (v.state === 'processing') {
+    v.targetAmp = 0.14 + 0.04 * Math.abs(Math.sin(v.t * 4));
+  } else {
+    v.targetAmp = 0.04;
+  }
+  v.amp += (v.targetAmp - v.amp) * 0.18;
+
+  // Breathing: 14 BPM = period 4.3s
+  v.breath = 0.5 + 0.5 * Math.sin(v.t * 2 * Math.PI / 4.3);
+
+  // Clear to fully transparent so the page's radial-gradient
+  // background bleeds through — no visible "canvas window" rectangle.
+  // (Previously a dark fillRect created the boxy edges the user noticed.)
+  ctx.clearRect(0, 0, W, H);
+
+  // Sphere radius — breath pulse + amp pulse (so it physically
+  // expands/contracts with the speech envelope during 'speaking',
+  // mic input during 'listening', and the synthetic processing pulse).
+  var R = baseR * (0.90 + 0.06 * v.breath + v.amp * 0.20);
+
+  // Halo glow — ONE smooth radial gradient (replaces the previous 6
+  // stacked filled circles which created visible concentric rings).
+  // Fades smoothly from sphere edge out to canvas border.
+  var haloA = 0.14 + 0.06 * v.breath;
+  // Halo brightness reacts to amp in ALL active states (was listening-only,
+  // which made the orb look frozen during agent speech).
+  if (v.state === 'listening')      haloA *= (1 + v.amp * 2.5);
+  else if (v.state === 'speaking')  haloA *= (1 + v.amp * 3.0);
+  else if (v.state === 'processing')haloA *= (1 + v.amp * 1.5);
+  var haloGrad = ctx.createRadialGradient(cx, cy, R * 0.85, cx, cy, R * 3.2);
+  haloGrad.addColorStop(0,
+    'rgba(' + cr + ',' + cg + ',' + cb + ',' + haloA.toFixed(3) + ')');
+  haloGrad.addColorStop(0.55,
+    'rgba(' + cr + ',' + cg + ',' + cb + ',' + (haloA * 0.35).toFixed(3) + ')');
+  haloGrad.addColorStop(1,
+    'rgba(' + cr + ',' + cg + ',' + cb + ',0)');
+  ctx.fillStyle = haloGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Ripples — spawn during listening (mic input) AND speaking (TTS output).
+  // Both visualize amplitude bursts radiating from the sphere.
+  if (v.state === 'listening' || v.state === 'speaking') {
+    var spawnThresh = v.state === 'speaking' ? 0.10 : 0.06;
+    var spawnProb   = v.state === 'speaking' ? v.amp * 0.55 : v.amp * 0.8;
+    if (v.ripples.length < 8 && v.amp > spawnThresh && Math.random() < spawnProb) {
+      v.ripples.push({ r: R * 1.05, alpha: 0.7 });
+    }
+    for (var ri = v.ripples.length - 1; ri >= 0; ri--) {
+      var rip = v.ripples[ri];
+      rip.r += 1.6 + v.amp * 4;
+      rip.alpha *= 0.96;
+      ctx.beginPath();
+      ctx.arc(cx, cy, rip.r, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(' + cr + ',' + cg + ',' + cb + ',' + rip.alpha.toFixed(3) + ')';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      if (rip.alpha < 0.02 || rip.r > R * 3) v.ripples.splice(ri, 1);
+    }
+  } else {
+    v.ripples = [];
+  }
+
+  // ── 3D rotation update — slow steady spin (matches reference) ──
+  // Reference uses 0.06 rad/sec ≈ 0.001/frame at 60fps. We bump
+  // slightly with state activity so engagement is still readable.
+  var rotSpeed = 0.0015;
+  if (v.state === 'processing') rotSpeed = 0.005;
+  else if (v.state === 'speaking') rotSpeed = 0.003;
+  else if (v.state === 'listening') rotSpeed = 0.0015 + v.amp * 0.015;
+  v.rotY += rotSpeed;
+  v.rotX = 0.15;  // fixed slight pitch — no wobble (cleaner)
+  var sinY = Math.sin(v.rotY), cosY = Math.cos(v.rotY);
+  var sinX = Math.sin(v.rotX), cosX = Math.cos(v.rotX);
+
+  // ── Volume-filled particle cloud with surface wave displacement ──
+  // For each particle:
+  //   1. Add per-axis sin-wave offset (the "speech ripple" effect from
+  //      the reference); strength scales with state activity + voice.
+  //   2. Apply Y then X rotation (camera).
+  //   3. Project orthographically; depth drives alpha + size for a
+  //      genuine 3D look (front-bright, back-dim).
+  // Wave parameters chosen to feel like organic tissue motion at scale,
+  // not a uniform sphere expansion.
+  var pts = v.surfacePts;
+  // Wave amplitude per state (matches reference's `strength`):
+  //   normal 0.02 / thinking 0.06 / listening 0.12+amp / error 0.24
+  var waveStr = 0.02;
+  if (v.state === 'processing') waveStr = 0.06;
+  else if (v.state === 'speaking') waveStr = 0.12 + v.amp * 0.10;
+  else if (v.state === 'listening') waveStr = 0.04 + v.amp * 0.18;
+  else if (v.state === 'error') waveStr = 0.24;
+  var t5_5 = v.t * 5.5;
+  var t5_8 = v.t * 5.8;
+  var t5_2 = v.t * 5.2;
+  // Tiny dot size — emulates the reference's super-fine 0.025 size
+  var BASE_DOT = 0.9;
+  for (var si = 0; si < pts.length; si++) {
+    var pt = pts[si];
+    // Wave displacement (each axis driven by a different frequency
+    // sampled at its own coordinate — looks like 3D noise without
+    // an actual perlin/simplex implementation)
+    var dx = Math.sin(pt.x * 4.5 + t5_5) * waveStr;
+    var dy = Math.sin(pt.y * 4.0 + t5_8) * waveStr;
+    var dz = Math.sin(pt.z * 4.2 + t5_2) * waveStr;
+    var px = pt.x + dx, py = pt.y + dy, pz = pt.z + dz;
+    // Rotate Y, then X
+    var rxA = px * cosY - pz * sinY;
+    var rzA = px * sinY + pz * cosY;
+    var ryB = py * cosX - rzA * sinX;
+    var rzB = py * sinX + rzA * cosX;
+    // Project (R already includes breath + amp pulse)
+    var sx = cx + rxA * R;
+    var sy = cy + ryB * R;
+    // Depth in [-1..+1] → [0..1]
+    var depth = (rzB + 1) / 2;
+    // Distance from center (volume-filled so inner particles exist)
+    // — particles closer to center are slightly dimmer so the surface
+    // shell stays the visual focus.
+    var rDist = Math.sqrt(pt.x*pt.x + pt.y*pt.y + pt.z*pt.z);
+    // Tiny dot — fixed pixel size, no twinkle scale (cleaner look)
+    var dotR = BASE_DOT * (0.6 + depth * 0.6);
+    // Alpha: depth-driven (front 1.0, back 0.10)
+    var alpha = 0.12 + depth * 0.78;
+    // Slight inner-fade so volume feels less dense than surface
+    alpha *= 0.55 + rDist * 0.45;
+    ctx.beginPath();
+    ctx.arc(sx, sy, dotR, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(' + cr + ',' + cg + ',' + cb + ',' + alpha.toFixed(3) + ')';
+    ctx.fill();
+  }
+
+  // ── 3D orbital particles ──
+  var spdMul = 1.0;
+  if (v.state === 'processing') spdMul = 3.5;
+  else if (v.state === 'speaking') spdMul = 2.0;
+  else if (v.state === 'listening') spdMul = 1.0 + v.amp * 4;
+  for (var pi = 0; pi < v.particles.length; pi++) {
+    var p = v.particles[pi];
+    p.angle += p.speed * spdMul;
+    var ca = Math.cos(p.angle), sa = Math.sin(p.angle);
+    // Position in plane: orbitR · (cos·u + sin·w)
+    var px = p.orbitR * (ca * p.ux + sa * p.wx);
+    var py = p.orbitR * (ca * p.uy + sa * p.wy);
+    var pz = p.orbitR * (ca * p.uz + sa * p.wz);
+    // Same camera rotation as surface points (so scene moves coherently)
+    var prx = px * cosY - pz * sinY;
+    var prz = px * sinY + pz * cosY;
+    var pry = py * cosX - prz * sinX;
+    var prz2 = py * sinX + prz * cosX;
+    var psx = cx + prx * R;
+    var psy = cy + pry * R;
+    var pdepth = (prz2 + 1) / 2;
+    var ppr = p.r * (0.4 + pdepth * 0.9);
+    var ppa = p.alpha * (0.25 + pdepth * 0.75);
+    ctx.beginPath();
+    ctx.arc(psx, psy, ppr, 0, Math.PI * 2);
+    var pbr = Math.min(255, cr + 30);
+    var pbg = Math.min(255, cg + 30);
+    var pbb = Math.min(255, cb + 30);
+    ctx.fillStyle = 'rgba(' + pbr + ',' + pbg + ',' + pbb + ',' + ppa.toFixed(3) + ')';
+    ctx.fill();
+  }
+}
+
+function _voiceModeCheckTTS() {
+  // Per-agent TTS resolution (2026-05-09):
+  //   - If the agent has tts_provider_id set, use it (server TTS).
+  //   - Otherwise, fall back to browser Web Speech API.
+  if (!_VoiceMode) return;
+  var aid = _VoiceMode.agentId;
+  var ag = (typeof agents !== 'undefined') && agents.find
+    ? agents.find(function(a){ return a.id === aid; })
+    : null;
+  var pid = (ag && ag.tts_provider_id) || '';
+  _VoiceMode.ttsVoice = (ag && ag.tts_voice) || '';
+  _VoiceMode.ttsModel = (ag && ag.tts_model) || '';
+  if (pid) {
+    _VoiceMode.serverTTS = true;
+    _VoiceMode.ttsProviderId = pid;
+  } else {
+    _VoiceMode.serverTTS = false;
+    _VoiceMode.ttsProviderId = '';
+  }
+}
+
+async function _voiceModeStartMic() {
+  if (!_VoiceMode) return;
+  try {
+    var stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    if (!_VoiceMode) { stream.getTracks().forEach(function(t){t.stop();}); return; }
+    _VoiceMode.micStream = stream;
+    var AC = window.AudioContext || window.webkitAudioContext;
+    var ac = new AC();
+    var src = ac.createMediaStreamSource(stream);
+    var an = ac.createAnalyser();
+    an.fftSize = 1024;
+    src.connect(an);
+    _VoiceMode.audioCtx = ac;
+    _VoiceMode.analyser = an;
+  } catch(e) {
+    console.warn('voice mode mic failed:', e);
+    _voiceModeSetState('error');
+    _voiceModeLog('MIC_PERMISSION_DENIED');
+  }
+}
+
+// ── STT engine selection — FunASR first, browser fallback ────────
+// `_voiceModeStartSTT` probes the local FunASR backend (must use the
+// `api()` helper so the auth cookie/header is included — raw fetch
+// returned 401 in early testing). If reachable + MediaRecorder works
+// → FunASR path. Otherwise → browser webkitSpeechRecognition.
+async function _voiceModeStartSTT() {
+  if (!_VoiceMode) return;
+  // Wait for mic to be ready (race fix — _voiceModeStartMic runs async,
+  // micStream is null for ~200-1000ms while getUserMedia resolves).
+  var waitStart = performance.now();
+  while (_VoiceMode && !_VoiceMode.micStream &&
+         (performance.now() - waitStart) < 3000) {
+    await new Promise(function(r){ setTimeout(r, 100); });
+  }
+  if (!_VoiceMode) return;
+  // Engine is decided by the server via system_settings.stt.engine.
+  // Default = 'funasr'. Possible values: browser / funasr / mlx_whisper.
+  // Frontend respects whatever the server reports; if the server-side
+  // engine fails (load_failed=true) we fall back to browser anyway.
+  var engine = 'browser';
+  try {
+    var hdata = await api('GET', '/api/portal/stt/health');
+    if (hdata && hdata.engine) engine = hdata.engine;
+    _voiceModeLog('STT_PROBE → engine=' + engine
+      + ' loaded=' + !!hdata.loaded
+      + ' load_failed=' + !!hdata.load_failed);
+    // If admin chose browser explicitly, or server engine has failed
+    // permanently, force browser STT.
+    if (engine === 'browser' || (hdata && hdata.load_failed)) {
+      engine = 'browser';
+    }
+  } catch (e) {
+    _voiceModeLog('STT_PROBE_FAILED ' + (e && e.message || ''));
+    engine = 'browser';
+  }
+  // MediaRecorder support is required for any server-side path.
+  if (engine !== 'browser' && (!window.MediaRecorder || !_VoiceMode.micStream)) {
+    _voiceModeLog('STT_FORCED → browser (no MediaRecorder/mic)');
+    engine = 'browser';
+  }
+  _VoiceMode.sttEngine = engine;
+  _voiceModeLog('STT_ENGINE = ' + engine);
+  if (engine === 'browser') {
+    _voiceModeStartBrowserSTT();
+  } else {
+    // Both funasr and mlx_whisper share the same client-side flow:
+    // VAD-driven MediaRecorder → POST /api/portal/stt/transcribe.
+    // The server picks the actual engine based on system_settings.
+    _voiceModeStartFunASRSTT();
+  }
+}
+
+// ── FunASR-backed STT ────────────────────────────────────────────
+// Continuous MediaRecorder on the mic stream, segmented by VAD
+// (audio amplitude). Speech start → recorder.start; sustained
+// silence → recorder.stop → POST /api/portal/stt/transcribe.
+// FunASR (paraformer-zh) handles Chinese homophones (叫/教 etc.)
+// dramatically better than browser Web Speech.
+function _voiceModeStartFunASRSTT() {
+  if (!_VoiceMode) return;
+  if (!_VoiceMode.micStream) {
+    setTimeout(_voiceModeStartFunASRSTT, 200);
+    return;
+  }
+  _VoiceMode.sttEngine = 'funasr';
+  _VoiceMode.recordingActive = false;
+  _VoiceMode.recorder = null;
+  _VoiceMode.recordedChunks = [];
+  _VoiceMode.vadSpeakingMs = 0;
+  _VoiceMode.vadSilenceMs = 0;
+  _VoiceMode.vadLastTs = performance.now();
+  // Generation counter — every restart bumps this. Old loops self-
+  // terminate when they see _VoiceMode.vadGen > their captured gen.
+  _VoiceMode.vadGen = (_VoiceMode.vadGen || 0) + 1;
+  _voiceModeVadLoop(_VoiceMode.vadGen);
+  _voiceModeSetState('listening');
+}
+
+// ── Browser webkitSpeechRecognition fallback (original implementation) ──
+function _voiceModeStartBrowserSTT() {
+  if (!_VoiceMode) return;
+  var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    _voiceModeSetState('error');
+    _voiceModeLog('STT_NOT_SUPPORTED — try Chrome desktop');
+    return;
+  }
+  _VoiceMode.sttEngine = 'browser';
+  var r = new SR();
+  r.lang = 'zh-CN';
+  r.continuous = true;
+  r.interimResults = true;
+  r.onstart = function() {
+    if (_VoiceMode && _VoiceMode.state !== 'speaking' && _VoiceMode.state !== 'processing') {
+      _voiceModeSetState('listening');
+    }
+  };
+  r.onresult = function(e) {
+    if (!_VoiceMode) return;
+    if (_VoiceMode.state !== 'listening' && _VoiceMode.state !== 'idle') return;
+    var interim = '', finalChunk = '';
+    for (var i = e.resultIndex; i < e.results.length; i++) {
+      var t = e.results[i][0].transcript;
+      if (e.results[i].isFinal) finalChunk += t;
+      else interim += t;
+    }
+    var combined = (finalChunk + ' ' + interim).trim();
+    _VoiceMode.transcript = combined;
+    _VoiceMode.lastResultTs = performance.now();
+    if (finalChunk) {
+      _VoiceMode.finalText = (_VoiceMode.finalText + ' ' + finalChunk).trim();
+    }
+    if (!_VoiceMode.silenceTimer) {
+      _VoiceMode.silenceTimer = setTimeout(_voiceModeSmartCheck, 250);
+    }
+  };
+  r.onerror = function(e) {
+    console.warn('voice STT error:', e.error);
+    if (e.error === 'no-speech' || e.error === 'aborted' || e.error === 'audio-capture') return;
+    _voiceModeSetState('error');
+    _voiceModeLog('STT_ERROR ' + e.error);
+  };
+  r.onend = function() {
+    if (!_VoiceMode) return;
+    if (_VoiceMode.state === 'listening' || _VoiceMode.state === 'idle') {
+      try { r.start(); } catch(_) {}
+    }
+  };
+  try { r.start(); } catch(e) { console.warn('voice STT start failed:', e); }
+  _VoiceMode.recognition = r;
+}
+
+// VAD poller: reads RAW RMS directly from analyser (not the smoothed
+// `_VoiceMode.amp` used for visuals — that lags ~80ms behind reality).
+// Uses a short rolling-max window so quiet syllables / inter-word
+// gaps don't falsely trigger the silence-stop path mid-sentence.
+function _voiceModeVadLoop(myGen) {
+  if (!_VoiceMode || _VoiceMode.sttEngine !== 'funasr') return;
+  // Self-terminate if a newer VAD loop has been spawned (e.g. resumeMic
+  // rebuilt the pipeline) — prevents zombie loops contending for the
+  // same recordingActive flag.
+  if (myGen !== undefined && _VoiceMode.vadGen !== myGen) return;
+  setTimeout(function(){ _voiceModeVadLoop(myGen); }, 80);
+  var v = _VoiceMode;
+  v.vadLastTickTs = performance.now();
+  if (v.state !== 'listening' && v.state !== 'idle') return;
+  var now = v.vadLastTickTs;
+  var dt = now - (v.vadLastTs || now);
+  v.vadLastTs = now;
+
+  // ── Read RAW RMS directly (independent of orb's smoothed amp) ──
+  var rms = 0;
+  if (v.analyser) {
+    try {
+      var n = v.analyser.fftSize;
+      var data = new Uint8Array(n);
+      v.analyser.getByteTimeDomainData(data);
+      var sum = 0;
+      for (var i = 0; i < n; i++) {
+        var d = (data[i] - 128) / 128;
+        sum += d * d;
+      }
+      rms = Math.sqrt(sum / n);
+    } catch (_) {}
+  }
+
+  // ── Rolling max over a LARGER window (1500ms) ──
+  // Mid-sentence pauses in Chinese can be 1-2 seconds at clause
+  // boundaries. A short window misses these and falsely declares
+  // "user stopped". 1.5s window means: if there was speech anywhere
+  // in the last 1.5s, we're still in an utterance.
+  if (!v.vadHistory) v.vadHistory = [];
+  v.vadHistory.push({ t: now, rms: rms });
+  while (v.vadHistory.length && (now - v.vadHistory[0].t) > 1500) {
+    v.vadHistory.shift();
+  }
+  var peakRms = 0;
+  for (var hi = 0; hi < v.vadHistory.length; hi++) {
+    if (v.vadHistory[hi].rms > peakRms) peakRms = v.vadHistory[hi].rms;
+  }
+
+  // ── Tunable thresholds (further loosened 2026-05-09) ──
+  // Lower threshold catches quiet starts ("小组…"); longer silence
+  // trigger tolerates 3-second mid-sentence pauses (rare but real).
+  var SPEAK_THRESHOLD = 0.015;
+  var SPEAK_TRIGGER_MS = 80;
+  var SILENCE_TRIGGER_MS = 3500;
+
+  if (peakRms > SPEAK_THRESHOLD) {
+    v.vadSpeakingMs += dt;
+    v.vadSilenceMs = 0;
+    if (!v.recordingActive && v.vadSpeakingMs > SPEAK_TRIGGER_MS) {
+      _voiceModeRecorderStart();
+    }
+  } else {
+    v.vadSilenceMs += dt;
+    if (v.recordingActive && v.vadSilenceMs > SILENCE_TRIGGER_MS) {
+      _voiceModeRecorderStop();
+    }
+    if (v.vadSilenceMs > 600) v.vadSpeakingMs = 0;
+  }
+}
+
+function _voiceModeRecorderStart() {
+  if (!_VoiceMode || _VoiceMode.recordingActive || !_VoiceMode.micStream) return;
+  try {
+    var rec = new MediaRecorder(_VoiceMode.micStream, {
+      mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : (MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : ''),
+    });
+    _VoiceMode.recordedChunks = [];
+    rec.ondataavailable = function(e) {
+      if (e.data && e.data.size > 0) _VoiceMode.recordedChunks.push(e.data);
+    };
+    rec.onstop = _voiceModeUploadAudio;
+    rec.start();
+    _VoiceMode.recorder = rec;
+    _VoiceMode.recordingActive = true;
+    _voiceModeLog('REC_START');
+  } catch (e) {
+    console.warn('recorder start failed:', e);
+    _voiceModeLog('REC_ERROR ' + (e && e.message || e));
+  }
+}
+
+function _voiceModeRecorderStop() {
+  if (!_VoiceMode || !_VoiceMode.recordingActive) return;
+  _VoiceMode.recordingActive = false;
+  _VoiceMode.vadSpeakingMs = 0;
+  _VoiceMode.vadSilenceMs = 0;
+  try {
+    if (_VoiceMode.recorder && _VoiceMode.recorder.state !== 'inactive') {
+      _VoiceMode.recorder.stop();
+    }
+  } catch (_) {}
+  _voiceModeLog('REC_STOP → uploading');
+  // 2026-05-09 — DON'T set state='processing' here. The transcribe call
+  // can take 20+ seconds (MLX Whisper first warmup), and `processing`
+  // is reserved for "agent is replying". Setting it too early made
+  // _voiceModeAutoSend's state-guard reject the eventual send. Keep
+  // the visual cue subtle by updating the stage badge only.
+  if (_VoiceMode.stageBadge) {
+    _VoiceMode.stageBadge.textContent = 'TRANSCRIBING…';
+  }
+}
+
+async function _voiceModeUploadAudio() {
+  if (!_VoiceMode) return;
+  var chunks = _VoiceMode.recordedChunks || [];
+  _VoiceMode.recordedChunks = [];
+  if (!chunks.length) {
+    _voiceModeResumeMic();
+    return;
+  }
+  var blob = new Blob(chunks, { type: chunks[0].type || 'audio/webm' });
+  if (blob.size < 1500) {
+    // Sub-1.5KB blob = essentially no audio; skip
+    _voiceModeLog('REC_TOO_SHORT (' + blob.size + 'B)');
+    _voiceModeResumeMic();
+    return;
+  }
+  // 2026-05-09 user-suggested fix for "前后端不一致" — per-call
+  // correlation token. Frontend stamps it, server echoes it. On mismatch
+  // (in-flight race, multipart bug, stale response from previous
+  // utterance, etc.) we drop the response so the chat / agent only ever
+  // sees the result that actually corresponds to THIS upload.
+  var reqId = 'r-' + Date.now().toString(36)
+    + '-' + Math.random().toString(36).slice(2, 8);
+  var fd = new FormData();
+  fd.append('audio', blob, 'utterance.webm');
+  fd.append('lang', 'zh');
+  fd.append('req_id', reqId);
+  try {
+    var resp = await fetch('/api/portal/stt/transcribe', {
+      method: 'POST',
+      body: fd,
+      credentials: 'same-origin',
+    });
+    if (!resp.ok) {
+      var err = await resp.text();
+      _voiceModeLog('STT_HTTP_' + resp.status + ' ' + err.slice(0, 80));
+      // 503 means FunASR isn't available (model failed to load,
+      // not installed, etc.) — switch permanently to browser STT
+      // for the rest of this session.
+      if (resp.status === 503) {
+        _voiceModeLog('FALLBACK → browser STT');
+        _VoiceMode.sttEngine = 'browser-fallback';
+        _voiceModeStartBrowserSTT();
+        return;
+      }
+      _voiceModeResumeMic();
+      return;
+    }
+    var data = await resp.json();
+    // ── ID guard ── If server's echoed req_id doesn't match what we
+    // sent, treat the response as untrusted and drop it. Don't touch
+    // finalText / transcript / chat — they should reflect ONLY the
+    // result that corresponds to THIS audio upload.
+    if (!data || data.req_id !== reqId) {
+      _voiceModeLog('STT_ID_MISMATCH sent=' + reqId.slice(0, 14)
+        + ' got=' + ((data && data.req_id) || '∅').slice(0, 14)
+        + ' — dropping');
+      _voiceModeResumeMic();
+      return;
+    }
+    var text = (data.text || '').trim();
+    if (!text) {
+      _voiceModeLog('STT_EMPTY (' + (data.duration_ms || 0) + 'ms)');
+      _voiceModeResumeMic();
+      return;
+    }
+    // ── Front-end transcript guards (2026-05-10 user request) ──
+    // (a) Reject < 10 chars — most hallucinations & VAD-misfires from
+    //     silence/breath fall under this floor.
+    // (b) Require terminal punctuation (。！？.!?) — guarantees a
+    //     "complete sentence". Whisper-large-v3-turbo reliably adds
+    //     terminal punct on real utterances; absence usually signals a
+    //     fragment / cut-off / hallucinated stub.
+    // Both must pass. Failures are logged with the offending text so
+    // we can tune the rules from real-session log evidence.
+    if (text.length < 10) {
+      _voiceModeLog('STT_TOO_SHORT len=' + text.length
+        + ' → ignored: ' + JSON.stringify(text));
+      _voiceModeResumeMic();
+      return;
+    }
+    if (!/[。！？!?.]\s*$/.test(text)) {
+      _voiceModeLog('STT_NO_TERMINAL_PUNCT → ignored: '
+        + JSON.stringify(text.slice(0, 40)));
+      _voiceModeResumeMic();
+      return;
+    }
+    // (c) Single-char dominance — Whisper failure mode where confidence
+    // collapses into one repeated character: "嗯嗯嗯嗯嗯嗯嗯嗯嗯。" or
+    // "啊啊啊啊啊啊啊啊啊。" (also "Sean Sean Sean…" via the server-
+    // side repeat-half rule, but that one needs spaces). Strip
+    // punctuation/whitespace, count chars, drop if the most frequent
+    // char takes > 60% of the body.
+    var stripped = text.replace(
+      /[\s。！？，,;；:：!?.\-—()（）【】\[\]"'""·…　]/g, '');
+    if (stripped.length >= 4) {
+      var counts = {};
+      var maxC = 0, dominant = '';
+      for (var i = 0; i < stripped.length; i++) {
+        var ch = stripped.charAt(i);
+        counts[ch] = (counts[ch] || 0) + 1;
+        if (counts[ch] > maxC) { maxC = counts[ch]; dominant = ch; }
+      }
+      var ratio = maxC / stripped.length;
+      if (ratio > 0.6) {
+        _voiceModeLog('STT_REPEAT_DOMINANT "' + dominant + '" '
+          + maxC + '/' + stripped.length
+          + ' (' + Math.round(ratio * 100) + '%) → ignored: '
+          + JSON.stringify(text.slice(0, 40)));
+        _voiceModeResumeMic();
+        return;
+      }
+    }
+    _voiceModeLog('STT → ' + text + ' (' + (data.duration_ms || 0)
+      + 'ms id=' + reqId.slice(0, 10) + ')');
+    _VoiceMode.finalText = text;
+    _VoiceMode.transcript = text;
+    _voiceModeAutoSend();
+  } catch (e) {
+    console.warn('STT upload failed:', e);
+    _voiceModeLog('STT_NET_ERROR → falling back to browser');
+    // Network errors → fall back to browser STT too
+    _VoiceMode.sttEngine = 'browser-fallback';
+    _voiceModeStartBrowserSTT();
+  }
+}
+
+// Smart end-of-utterance detector. Polled every 250ms.
+// Combines four signals:
+//   1. SENTENCE-FINAL PUNCTUATION  (。 ！ ？ . ! ?)
+//   2. SOFT PUNCTUATION            (， ; : 等)
+//   3. VAD SILENCE                 (mic RMS < threshold for ≥ N ms)
+//   4. MEANINGFUL CHAR COUNT       (filtered text length)
+//
+// 2026-05-09 (revised after "我想…" misfires): user reported partial
+// captures like "我想" being sent before they finished saying "我想知道
+// 宇宙的秘密". Root cause: 1.8s silence + 2-char floor was too eager
+// when user paused mid-sentence to think. Fix:
+//   - Bump every silence threshold ~40%
+//   - Require ≥4 meaningful (non-punct/non-space) chars to auto-send
+//     when there's no sentence-final punctuation
+//   - Hard cap raised 3.5s → 6s for absolute timeout
+//
+// Decision matrix:
+//   ends-with-period + 700ms silence + ≥2 chars  → send (高置信)
+//   ends-with-comma  + 1800ms silence + ≥4 chars → send (中停顿)
+//   no punct         + 2800ms silence + ≥4 chars → send (clear pause)
+//   silence ≥ 4000ms + ≥4 chars                  → send (long pause)
+//   no STT result ≥ 6000ms                        → send (STT stalled)
+function _voiceModeSmartCheck() {
+  if (!_VoiceMode) return;
+  _VoiceMode.silenceTimer = null;
+  if (_VoiceMode.state !== 'listening' && _VoiceMode.state !== 'idle') {
+    return;
+  }
+  var text = (_VoiceMode.finalText || _VoiceMode.transcript || '').trim();
+  if (!text) {
+    _VoiceMode.silenceTimer = setTimeout(_voiceModeSmartCheck, 250);
+    return;
+  }
+  // Count "meaningful" chars — strips punctuation + whitespace so "我想"
+  // (2 chars, no punct) doesn't trigger send via no-punct path.
+  var meaningful = text.replace(/[\s。！？，,;；:：!?.\-—]/g, '').length;
+  if (meaningful < 2) {
+    _VoiceMode.silenceTimer = setTimeout(_voiceModeSmartCheck, 250);
+    return;
+  }
+  var now = performance.now();
+  var sinceResult = now - (_VoiceMode.lastResultTs || now);
+  var silenceMs = _VoiceMode.silenceStartTs
+    ? (now - _VoiceMode.silenceStartTs) : 0;
+  var endsHard = /[。！？!?]\s*$/.test(text);
+  var endsSoft = /[，,;；:：]\s*$/.test(text);
+  var send = false;
+  if (endsHard && silenceMs > 700 && meaningful >= 2)             send = true;
+  else if (endsSoft && silenceMs > 1800 && meaningful >= 4)       send = true;
+  else if (silenceMs > 2800 && meaningful >= 4)                   send = true;
+  else if (silenceMs > 4000 && meaningful >= 4)                   send = true;
+  else if (sinceResult > 6000 && meaningful >= 4)                 send = true;
+  if (send) {
+    _voiceModeAutoSend();
+    return;
+  }
+  _VoiceMode.silenceTimer = setTimeout(_voiceModeSmartCheck, 250);
+}
+
+async function _voiceModeAutoSend() {
+  if (!_VoiceMode) return;
+  // Re-entrancy guard — without this, two fast onresult events that both
+  // schedule silence timers could each fire autoSend and post the same
+  // message twice. Cleared when state goes back to listening.
+  if (_VoiceMode.sendInFlight) {
+    _voiceModeLog('AUTO_SEND_BLOCKED (already sending)');
+    return;
+  }
+  // Only auto-send while we're in a state where listening was active —
+  // protects against a stale silence timer firing during processing/speaking.
+  if (_VoiceMode.state !== 'listening' && _VoiceMode.state !== 'idle') {
+    _voiceModeLog('AUTO_SEND_BLOCKED (state=' + _VoiceMode.state + ')');
+    return;
+  }
+  var text = (_VoiceMode.finalText || _VoiceMode.transcript || '').trim();
+  if (!text) return;
+  // Skip noise / STT misfires — single chars or 1-char fragments
+  // ("嗯", "啊", random clicks) shouldn't trigger an LLM call.
+  // Threshold: 2 Chinese chars (3 bytes-ish) or 4 ASCII chars.
+  if (text.length < 2) {
+    _VoiceMode.finalText = '';
+    _VoiceMode.transcript = '';
+    var inpReset = document.getElementById('vm-input');
+    if (inpReset) inpReset.value = '';
+    _voiceModeLog('AUTO_SEND_SKIPPED text=' + JSON.stringify(text) + ' (too short)');
+    return;
+  }
+  _VoiceMode.finalText = '';
+  _VoiceMode.transcript = '';
+  var vmInp = document.getElementById('vm-input');
+  if (vmInp) vmInp.value = '';
+  _VoiceMode.sendInFlight = true;
+  _voiceModeAppendChat('user', text);
+  _voiceModeLog('USER_INPUT → ' + (text.length > 60 ? text.slice(0, 60) + '…' : text));
+  _VoiceMode.turnCount = (_VoiceMode.turnCount || 0) + 1;
+  _voiceModeSetState('processing');
+  // Pause STT immediately while waiting for the reply (don't pick up our own TTS).
+  if (_VoiceMode.recognition) { try { _VoiceMode.recognition.abort(); } catch(_) {} }
+  if (_VoiceMode.audioCtx && _VoiceMode.audioCtx.state === 'running') {
+    try { _VoiceMode.audioCtx.suspend(); } catch(_) {}
+  }
+
+  // Send via the existing agent-chat send pipeline. The actual send
+  // function is `sendAgentMsg(agentId)` (per _renderUnifiedChatInput's
+  // `sendFnName: 'sendAgentMsg'` config) — it reads the chat-input-{id}
+  // element's value and posts the message through the SSE pipeline,
+  // which eventually fires _autoSpeak → _voiceModeOnAgentReply on
+  // stream completion.
+  // 2026-05-09: prepend a voice-mode hint so the LLM produces a
+  // conversational, brief reply instead of a long markdown answer with
+  // bullet lists / "我会去做X" filler. The hint is short enough to be
+  // tolerable in chat history but explicit enough to shift the
+  // model's style. The voice-mode bubble (`vm-chat`) shows the user's
+  // raw text — only the underlying input/backend sees the prefix.
+  var aid = _VoiceMode.agentId;
+  var inp = document.getElementById('chat-input-' + aid);
+  // Voice-mode prompt prefix — short to keep history small.
+  // 2026-05-09: removed the "don't call tools" line — it conflicted
+  // with the framework's own tool-nudge rule (which fires when the
+  // agent says "我来…" without calling a tool), creating a token-bloat
+  // death spiral where each turn forced an extra ~8k-token tool call
+  // followed by a system_nudge correction.
+  var voiceHint = '(语音模式·1-2句口语化回复) ';
+  if (inp) {
+    inp.value = voiceHint + text;
+    try { _autoGrowChatInput(inp); } catch(_) {}
+  }
+  if (typeof sendAgentMsg === 'function') {
+    try {
+      _voiceModeLog('DISPATCH → sendAgentMsg(' + aid + ')');
+      sendAgentMsg(aid);
+    } catch (e) {
+      _voiceModeLog('SEND_ERROR ' + (e && e.message || e));
+      _voiceModeSetState('error');
+    }
+  } else {
+    _voiceModeLog('SEND_ERROR sendAgentMsg not found');
+    _voiceModeSetState('error');
+  }
+}
+
+// Hook from _autoSpeak — called when an agent reply finishes streaming.
+function _voiceModeOnAgentReply(agentId, text) {
+  if (!_VoiceMode || _VoiceMode.agentId !== agentId) return false;
+
+  // ═══ MIC FEEDBACK GUARD ═══
+  // Prevent the agent's TTS from being picked up by STT and re-sent.
+  // We DON'T fully suspend audioCtx anymore (caused the analyser to
+  // freeze post-resume → VAD broken on round 2). Instead:
+  //   1. Browser STT: recognition.abort() (still needed)
+  //   2. FunASR/MLX: state-based guard already blocks recording while
+  //      state != 'listening' (VAD loop early-returns)
+  //   3. Stop any in-flight recorder + clear pending text
+  if (_VoiceMode.recognition) {
+    try { _VoiceMode.recognition.abort(); } catch (_) {}
+  }
+  if (_VoiceMode.recorder && _VoiceMode.recordingActive) {
+    try { _VoiceMode.recorder.stop(); } catch (_) {}
+    _VoiceMode.recordingActive = false;
+    _VoiceMode.recordedChunks = [];
+  }
+  _VoiceMode.finalText = '';
+  _VoiceMode.transcript = '';
+  if (_VoiceMode.silenceTimer) {
+    clearTimeout(_VoiceMode.silenceTimer);
+    _VoiceMode.silenceTimer = null;
+  }
+
+  // Fallback: text_delta accumulator (`fullText`) misses messages
+  // emitted via non-stream channels (safety warnings, error events).
+  // Walk back through assistant bubbles and find the most recent one
+  // that has actual TEXT (not a file-attachment card / tool-result
+  // panel — those surface as `description granted_skills.md document
+  // · 484 B preview download` when textContent'd, which is gibberish
+  // when read by TTS).
+  if (!text || !text.trim()) {
+    try {
+      var msgs = document.querySelectorAll(
+        '#chat-msgs-' + agentId + ' .chat-msg-content');
+      for (var i = msgs.length - 1; i >= 0; i--) {
+        var node = msgs[i];
+        // Heuristic for "real text bubble":
+        //   - has _rawText (set by the streaming markdown renderer), OR
+        //   - has direct text content with no file/tool decorators
+        var rawT = (node._rawText || '').trim();
+        if (rawT && rawT.length >= 4) {
+          text = rawT;
+          _voiceModeLog('AGENT_REPLY (fallback from bubble #' + i + ')');
+          break;
+        }
+        // Skip nodes that contain file-card or tool-call markup
+        var hasFile = node.querySelector(
+          '.file-card, .file-attachment, .tool-call-block, ' +
+          '.tool-result-block, [data-file-name]'
+        );
+        if (hasFile) continue;
+        // Plain textContent only if no embedded card
+        var plain = (node.textContent || '').trim();
+        if (plain && plain.length >= 4 && plain.length < 4000
+            // exclude common file-card label patterns
+            && !/document\s*[·•]\s*\d+\s*[BKMG]B?$/i.test(plain)) {
+          text = plain;
+          _voiceModeLog('AGENT_REPLY (fallback plain #' + i + ')');
+          break;
+        }
+      }
+    } catch (_) {}
+  }
+  if (!text || !text.trim()) {
+    _voiceModeLog('AGENT_REPLY (empty)');
+    _voiceModeResumeMic();
+    return true;
+  }
+  // 2026-05-10: if streaming TTS has been drawing a live bubble during
+  // the stream (via _voiceModeUpsertAgentChat in
+  // _voiceModeStreamingTTSFeed), upsert one final time with the
+  // canonical full text and finalize so the next turn starts a new
+  // bubble. Avoids the "blank bubble for 89s then text appears" UX.
+  if (_VoiceMode && _VoiceMode._liveAgentBubble) {
+    try { _voiceModeUpsertAgentChat(text); } catch (_) {}
+    _voiceModeFinalizeAgentChat();
+  } else {
+    // No live bubble (e.g. browser fallback TTS) — fall back to the
+    // legacy "create bubble at end of stream" path.
+    _voiceModeAppendChat('agent', text);
+  }
+  _voiceModeLog('AGENT_REPLY → ' + (text.length > 60 ? text.slice(0, 60) + '…' : text));
+  _voiceModeSetState('speaking');
+  _voiceModeSpeak(text);
+  return true;
+}
+
+// Full audio-pipeline rebuild after TTS finishes. User-reported bug:
+// "第二轮就没有了" — round 2 silent. Various subtle state-residue
+// theories didn't fix it; nuclear option: rebuild EVERYTHING.
+//
+// Tear down: recorder, analyser, audioCtx, micStream
+// Build up:  fresh getUserMedia → new audioCtx → new analyser →
+//            relaunch VAD loop
+//
+// This is heavier than ideal (re-prompts mic permission? — no, the
+// stream re-create is silent for already-granted origins) but
+// guarantees a clean slate.
+async function _voiceModeResumeMic() {
+  if (!_VoiceMode) return;
+  var v = _VoiceMode;
+  _voiceModeLog('MIC_REBUILD start');
+
+  // ── 1. Clear logical state ──
+  v.recordingActive = false;
+  v.recordedChunks = [];
+  v.vadHistory = [];
+  v.vadSpeakingMs = 0;
+  v.vadSilenceMs = 0;
+  v.vadLastTs = performance.now();
+  v.sendInFlight = false;
+  v.finalText = '';
+  v.transcript = '';
+  v.activeAudio = null;
+  v.ttsAnalyser = null;
+  if (v.silenceTimer) {
+    clearTimeout(v.silenceTimer);
+    v.silenceTimer = null;
+  }
+
+  // ── 2. Tear down old recorder ──
+  if (v.recorder) {
+    try {
+      if (v.recorder.state !== 'inactive') v.recorder.stop();
+    } catch (_) {}
+    v.recorder = null;
+  }
+
+  // ── 3. Rebuild audio pipeline (FunASR/MLX path only) ──
+  // Browser STT path doesn't use the analyser graph for capture.
+  if (v.sttEngine !== 'browser') {
+    // Stop old micStream tracks
+    if (v.micStream) {
+      try {
+        v.micStream.getTracks().forEach(function(t){ t.stop(); });
+      } catch (_) {}
+      v.micStream = null;
+    }
+    // Close old audioCtx
+    if (v.audioCtx) {
+      try { v.audioCtx.close(); } catch (_) {}
+      v.audioCtx = null;
+      v.analyser = null;
+    }
+    // Fresh getUserMedia + audioCtx + analyser
+    try {
+      var stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!_VoiceMode) { stream.getTracks().forEach(function(t){t.stop();}); return; }
+      v.micStream = stream;
+      var AC = window.AudioContext || window.webkitAudioContext;
+      var ac = new AC();
+      var src = ac.createMediaStreamSource(stream);
+      var an = ac.createAnalyser();
+      an.fftSize = 1024;
+      src.connect(an);
+      v.audioCtx = ac;
+      v.analyser = an;
+      _voiceModeLog('MIC_REBUILD ok (new stream + analyser)');
+    } catch (e) {
+      _voiceModeLog('MIC_REBUILD failed: ' + (e && e.message || e));
+      _voiceModeSetState('error');
+      return;
+    }
+  }
+
+  // ── 4. State → listening ──
+  _voiceModeSetState('listening');
+
+  // ── 5. Restart capture engine ──
+  if (v.sttEngine === 'browser') {
+    if (v.recognition) {
+      try { v.recognition.start(); } catch (_) {
+        try { _voiceModeStartBrowserSTT(); } catch (_) {}
+      }
+    } else {
+      try { _voiceModeStartBrowserSTT(); } catch (_) {}
+    }
+  } else {
+    // Always restart FunASR/MLX VAD loop on a fresh pipeline. The old
+    // loop will see sttEngine still === 'funasr' and keep polling, but
+    // the new one is what actually drives recording. Old loop is harmless
+    // — it'll see recordingActive=false and just observe.
+    try { _voiceModeStartFunASRSTT(); } catch (e) {
+      _voiceModeLog('STT_RESTART failed: ' + (e && e.message || e));
+    }
+  }
+  _voiceModeLog('MIC_RESUMED → ready');
+}
+
+// Clean text for TTS — strip markdown noise so the engine doesn't
+// read "asterisk asterisk hash hash" literally. Does NOT truncate
+// the reply (earlier truncation cut off mid-thought; brevity is
+// enforced via the voice-mode prompt prefix instead).
+function _voiceModeShortenForSpeech(text) {
+  if (!text) return '';
+  text = String(text).trim();
+  text = text
+    .replace(/```[\s\S]*?```/g, ' ')    // fenced code blocks
+    .replace(/`([^`]+)`/g, '$1')         // inline code
+    .replace(/\*\*([^*]+)\*\*/g, '$1')   // bold
+    .replace(/\*([^*]+)\*/g, '$1')       // italic
+    .replace(/__([^_]+)__/g, '$1')       // bold (alt)
+    .replace(/^#{1,6}\s+/gm, '')         // headings
+    .replace(/^[-*•]\s+/gm, '')          // list bullets
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')  // [text](url) → text
+    .replace(/\n{2,}/g, '。')            // double-newline → sentence break
+    .trim();
+  return text;
+}
+
+// ── Sentence-level streaming TTS pipeline ────────────────────────────
+// 2026-05-09: built to fix "agent reply slow" complaint. Strategy:
+//   text_delta → buffer until sentence-final char (。！？.!?\n)
+//   on hit → push sentence to queue → pump pulls one at a time, fetches
+//   TTS audio, plays it; while playing, the next sentence is already
+//   being synthesized in parallel (separate fetch promise). Net effect:
+//   user hears first sentence after one synth round-trip (~1.5-3s on
+//   VoxCPM) instead of waiting for the full reply + full synth.
+//
+// State on _VoiceMode.streamingTTS:
+//   { agentId, buf, queue, playing, finished, started, currentAudio }
+// Lifecycle:
+//   first text_delta of a turn → init state, set state='speaking'
+//   text_delta arrives → append to buf, drain complete sentences to queue
+//   stream end (handled by _voiceModeOnAgentReply) → flush buf, mark finished
+//   queue empty + finished → cleanup + resumeMic
+
+function _voiceModeIsStreamingTTSActive() {
+  return !!(_VoiceMode && _VoiceMode.streamingTTS
+    && !_VoiceMode.streamingTTS.cancelled);
+}
+
+function _voiceModeStreamingTTSFeed(agentId, delta) {
+  // Only run if voice mode is active for THIS agent and a server-side
+  // TTS provider is configured. Browser SpeechSynthesis can't accept
+  // text mid-stream gracefully, so for browser TTS we fall back to the
+  // old path (waits until end → speaks once).
+  // 2026-05-09: removed the `_ttsEnabled[agentId]` gate — that flag is
+  // the *chat-page* "auto-read" toggle (top-right speaker icon on the
+  // assistant's bubble). Voice mode has its own TTS channel and is
+  // ALWAYS auto-speak by definition; gating on the chat-page toggle
+  // accidentally suppressed streaming TTS for users who hadn't turned
+  // that icon on.
+  if (!_VoiceMode || _VoiceMode.agentId !== agentId) return;
+  if (!_VoiceMode.ttsProviderId) return;  // browser fallback: skip
+  if (!_VoiceMode.streamingTTS) {
+    _VoiceMode.streamingTTS = {
+      agentId: agentId,
+      buf: '',
+      queue: [],
+      playing: false,
+      finished: false,
+      cancelled: false,
+      started: performance.now(),
+      sentenceCount: 0,
+      // 2026-05-10: accumulate the full reply text so we can render the
+      // live vm-chat bubble. Previously the bubble only appeared at end
+      // of stream (~30s+ for long replies).
+      fullText: '',
+    };
+    _voiceModeLog('STREAM_TTS_BEGIN');
+    _voiceModeSetState('speaking');
+  }
+  var st = _VoiceMode.streamingTTS;
+  if (st.cancelled || st.agentId !== agentId) return;
+  st.buf += delta;
+  st.fullText += delta;
+  // Live-update the agent bubble as text flows in (creates the bubble
+  // on first delta of this turn).
+  try { _voiceModeUpsertAgentChat(st.fullText); } catch (_) {}
+  // Drain complete sentences. Match up to (and including) any
+  // sentence-final boundary char; remainder stays in buf for next call.
+  var SENT_BOUNDARY = /([。！？!?]+|\n+)/;
+  while (true) {
+    var m = SENT_BOUNDARY.exec(st.buf);
+    if (!m) break;
+    var end = m.index + m[0].length;
+    var sentence = st.buf.slice(0, end);
+    st.buf = st.buf.slice(end);
+    var clean = _voiceModeShortenForSpeech(sentence);
+    if (clean) {
+      st.queue.push(clean);
+      st.sentenceCount++;
+    }
+  }
+  // Heuristic: if buf has grown long without a hard boundary, flush at
+  // a soft pause (， ; :) — don't let one rambly sentence delay the
+  // first audio. ≥40 chars is roughly "user has been waiting too long".
+  if (!st.queue.length && st.buf.length >= 40) {
+    var soft = /([，,;；:：]+)/.exec(st.buf);
+    if (soft) {
+      var sEnd = soft.index + soft[0].length;
+      var fragment = st.buf.slice(0, sEnd);
+      st.buf = st.buf.slice(sEnd);
+      var fc = _voiceModeShortenForSpeech(fragment);
+      if (fc) { st.queue.push(fc); st.sentenceCount++; }
+    }
+  }
+  if (st.queue.length && !st.playing) _voiceModeStreamingTTSPump();
+}
+
+function _voiceModeStreamingTTSFinish() {
+  // Called when LLM stream ends. Flushes any tail buffer and lets the
+  // pump know no more sentences will arrive. Cleanup happens after the
+  // last sentence finishes playing (in pump).
+  if (!_VoiceMode || !_VoiceMode.streamingTTS) return;
+  var st = _VoiceMode.streamingTTS;
+  if (st.cancelled) return;
+  if (st.buf.trim()) {
+    var tail = _voiceModeShortenForSpeech(st.buf);
+    if (tail) {
+      st.queue.push(tail);
+      st.sentenceCount++;
+    }
+    st.buf = '';
+  }
+  st.finished = true;
+  if (!st.playing) _voiceModeStreamingTTSPump();
+}
+
+function _voiceModeStreamingTTSCancel() {
+  // Called if voice mode exits or user interrupts mid-reply.
+  if (!_VoiceMode || !_VoiceMode.streamingTTS) return;
+  var st = _VoiceMode.streamingTTS;
+  st.cancelled = true;
+  st.queue = [];
+  st.buf = '';
+  if (_VoiceMode.activeAudio) {
+    try { _VoiceMode.activeAudio.pause(); } catch(_) {}
+    _VoiceMode.activeAudio = null;
+  }
+  _VoiceMode.streamingTTS = null;
+  // Finalize any partial live bubble so the next turn starts fresh.
+  try { _voiceModeFinalizeAgentChat(); } catch (_) {}
+}
+
+async function _voiceModeStreamingTTSPump() {
+  if (!_VoiceMode || !_VoiceMode.streamingTTS) return;
+  var st = _VoiceMode.streamingTTS;
+  if (st.cancelled || st.playing) return;
+  if (!st.queue.length) {
+    if (st.finished) {
+      // All sentences played → cleanup, resume mic.
+      var elapsed = ((performance.now() - st.started) / 1000).toFixed(1);
+      _voiceModeLog('STREAM_TTS_DONE n=' + st.sentenceCount
+        + ' total=' + elapsed + 's');
+      _VoiceMode.streamingTTS = null;
+      _VoiceMode.ttsAnalyser = null;
+      _voiceModeResumeMic();
+    }
+    return;
+  }
+  var sentence = st.queue.shift();
+  st.playing = true;
+  var t0 = performance.now();
+  try {
+    var resp = await fetch('/api/portal/tts/synthesize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: sentence,
+        lang: 'zh-CN',
+        provider_id: _VoiceMode.ttsProviderId,
+        voice: _VoiceMode.ttsVoice || '',
+        model: _VoiceMode.ttsModel || '',
+      }),
+    });
+    if (st.cancelled) { st.playing = false; return; }
+    if (!resp.ok) throw new Error('http ' + resp.status);
+    var blob = await resp.blob();
+    if (st.cancelled) { st.playing = false; return; }
+    var url = URL.createObjectURL(blob);
+    var au = new Audio(url);
+    au.crossOrigin = 'anonymous';
+    _VoiceMode.activeAudio = au;
+    // Hook orb amplitude analyser onto this audio element.
+    try {
+      if (!_VoiceMode.ttsAudioCtx) {
+        var ACt = window.AudioContext || window.webkitAudioContext;
+        _VoiceMode.ttsAudioCtx = new ACt();
+      }
+      var srcN = _VoiceMode.ttsAudioCtx.createMediaElementSource(au);
+      var anN = _VoiceMode.ttsAudioCtx.createAnalyser();
+      anN.fftSize = 1024;
+      srcN.connect(anN);
+      anN.connect(_VoiceMode.ttsAudioCtx.destination);
+      _VoiceMode.ttsAnalyser = anN;
+    } catch (e) { /* analyser is best-effort */ }
+    var dt = ((performance.now() - t0) / 1000).toFixed(2);
+    _voiceModeLog('STREAM_TTS_PLAY ' + (sentence.length > 30
+      ? sentence.slice(0, 30) + '…' : sentence) + ' (synth=' + dt + 's)');
+    var advance = function() {
+      try { URL.revokeObjectURL(url); } catch(_) {}
+      st.playing = false;
+      _voiceModeStreamingTTSPump();
+    };
+    au.onended = advance;
+    au.onerror = advance;
+    await au.play();
+  } catch(e) {
+    console.warn('streaming TTS sentence failed:', e);
+    st.playing = false;
+    setTimeout(_voiceModeStreamingTTSPump, 50);
+  }
+}
+
+async function _voiceModeSpeak(text) {
+  if (!_VoiceMode) return;
+  // ── Streaming-TTS short-circuit ──
+  // If sentence-streaming has already been chunking + speaking this
+  // reply, the final _voiceModeSpeak call (from _voiceModeOnAgentReply)
+  // would re-speak the whole thing. Skip the full-text path; just flush
+  // the streaming pipeline's tail and let it resume mic when done.
+  if (_voiceModeIsStreamingTTSActive()) {
+    _voiceModeStreamingTTSFinish();
+    return;
+  }
+  // Use shortened text for TTS (user feedback: too verbose in voice mode)
+  text = _voiceModeShortenForSpeech(text);
+  if (!text) {
+    _voiceModeResumeMic();
+    return;
+  }
+  var resumeListening = function() {
+    if (!_VoiceMode) return;
+    _VoiceMode.activeAudio = null;
+    // Resume mic + STT (was hard-shutdown in _voiceModeOnAgentReply
+    // before TTS started — see the comment block there for why).
+    _voiceModeResumeMic();
+  };
+  // Three TTS routes by tts_provider_id:
+  //   1. ""                    → browser Web Speech (skip server, use speechSynthesis directly)
+  //   2. "__local_voxcpm__"    → server-side local VoxCPM
+  //   3. <other id>            → server-side cloud TTS via that LLM provider
+  if (_VoiceMode.ttsProviderId) {
+    try {
+      var resp = await fetch('/api/portal/tts/synthesize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: text,
+          lang: 'zh-CN',
+          provider_id: _VoiceMode.ttsProviderId,
+          voice: _VoiceMode.ttsVoice || '',
+          model: _VoiceMode.ttsModel || '',
+        }),
+      });
+      if (!resp.ok) throw new Error('http ' + resp.status);
+      var blob = await resp.blob();
+      var url = URL.createObjectURL(blob);
+      var au = new Audio(url);
+      au.crossOrigin = 'anonymous';
+      _VoiceMode.activeAudio = au;
+      // Pipe TTS audio through Web Audio so the orb can read its
+      // actual amplitude (drives the speech-rhythm visualization).
+      try {
+        // Use a fresh AudioContext for TTS so it's independent of the
+        // mic context (which we suspended to avoid feedback).
+        if (!_VoiceMode.ttsAudioCtx) {
+          var ACt = window.AudioContext || window.webkitAudioContext;
+          _VoiceMode.ttsAudioCtx = new ACt();
+        }
+        var srcNode = _VoiceMode.ttsAudioCtx.createMediaElementSource(au);
+        var anNode = _VoiceMode.ttsAudioCtx.createAnalyser();
+        anNode.fftSize = 1024;
+        srcNode.connect(anNode);
+        anNode.connect(_VoiceMode.ttsAudioCtx.destination);
+        _VoiceMode.ttsAnalyser = anNode;
+      } catch (e) {
+        console.warn('TTS analyser hookup failed (orb will use synthetic envelope):', e);
+      }
+      au.onended = function() {
+        URL.revokeObjectURL(url);
+        _VoiceMode.ttsAnalyser = null;
+        resumeListening();
+      };
+      au.onerror = function() {
+        URL.revokeObjectURL(url);
+        _VoiceMode.ttsAnalyser = null;
+        resumeListening();
+      };
+      await au.play();
+      return;
+    } catch(e) {
+      console.warn('server TTS failed, fallback to browser:', e);
+    }
+  }
+  // Browser fallback
+  if (!window.speechSynthesis) { resumeListening(); return; }
+  speechSynthesis.cancel();
+  var utt = new SpeechSynthesisUtterance(text);
+  utt.lang = 'zh-CN';
+  utt.rate = 1.0;
+  utt.onend = resumeListening;
+  utt.onerror = resumeListening;
+  speechSynthesis.speak(utt);
+}
 
 var _audioFetching = false;  // Guard against overlapping audio poll requests
 function _startAudioPolling() {
@@ -25627,22 +29575,13 @@ function _formatNum(n) {
 }
 
 // ---- Knowledge & Memory Hub (redesigned with RAG integration) ----
-// Default tab: Wiki (Step E demoted Shared Knowledge to read-only legacy
-// — new entries go to Wiki). Existing users land here on first open.
-var _kmTab = 'wiki';
+var _kmTab = 'shared';
 
 function renderKnowledgeMemoryHub() {
   try { if (localStorage.getItem('tudou_theme') === 'tech') return renderKnowledgeMemoryHubTech(); } catch (e) {}
   var c = document.getElementById('content');
-  // 2026-05-08 (Step E): "Shared Knowledge" demoted to "(legacy)" —
-  // its content was migrated into the Wiki layer (see Step C). Keeping
-  // the tab around in read-only-ish form so admins can verify the
-  // migration before deleting; new entries should go to the Wiki tab
-  // (which has the same import flow + structured fields + outcome
-  // tracking + RAG indexing). legacy_kb.py also marked deprecated.
   var tabs = [
-    { id: 'wiki',    label: window.t('tab.km.wiki',    'Wiki / 经验库'),  icon: 'menu_book' },
-    { id: 'shared',  label: window.t('tab.km.shared',  '共享知识库 (legacy)'), icon: 'public' },
+    { id: 'shared',  label: window.t('tab.km.shared',  '共享知识库'),     icon: 'public' },
     { id: 'private', label: window.t('tab.km.private', '专业领域知识库'), icon: 'school' },
     { id: 'rag',     label: window.t('tab.km.rag',     'RAG 提供方'),     icon: 'cloud' },
     { id: 'memory',  label: window.t('tab.km.memory',  'Agent 私有记忆'), icon: 'psychology' },
@@ -25656,7 +29595,6 @@ function renderKnowledgeMemoryHub() {
     + '<div id="km-content"></div>';
 
   if (_kmTab === 'shared') _renderKmShared();
-  else if (_kmTab === 'wiki') _renderKmWiki();
   else if (_kmTab === 'private') _renderKmPrivate();
   else if (_kmTab === 'rag') _renderKmRagProviders();
   else if (_kmTab === 'memory') _renderKmMemory();
@@ -25673,6 +29611,23 @@ async function _renderKmShared() {
     sc = document.getElementById('tech-hub-km-body') || document.getElementById('content');
   }
   if (!sc) return;
+  // Step E (2026-05-08): legacy banner. The migration from Shared
+  // Knowledge → Wiki happened in 361f04b; new content should land on
+  // the Wiki tab. We keep this view live so admins can verify the
+  // migration / spot anything they want to clean up before fully
+  // dropping the legacy_kb store.
+  var _legacyBanner = ''
+    + '<div style="padding:12px 14px;margin-bottom:14px;background:rgba(255,180,0,0.08);'
+    +              'border:1px solid rgba(255,180,0,0.25);border-radius:8px;'
+    +              'display:flex;align-items:flex-start;gap:10px;font-size:12px;color:var(--text2)">'
+    +   '<span class="material-symbols-outlined" style="font-size:18px;color:#e6a700;flex-shrink:0">history</span>'
+    +   '<div style="flex:1">'
+    +     '<div style="font-weight:700;color:var(--text);margin-bottom:2px">这个 tab 已迁出 (legacy)</div>'
+    +     '内容已经迁到 <b>Wiki / 经验库</b> tab,新条目请去那边添加。本视图保留供你核对迁移结果,后续会移除。'
+    +   '</div>'
+    +   '<button class="btn btn-sm" onclick="_kmTab=\'wiki\';renderKnowledgeMemoryHub()" '
+    +     'style="flex-shrink:0">去 Wiki tab →</button>'
+    + '</div>';
   // Step E (2026-05-08): legacy banner. The migration from Shared
   // Knowledge → Wiki happened in 361f04b; new content should land on
   // the Wiki tab. We keep this view live so admins can verify the
@@ -25795,7 +29750,6 @@ async function _renderKmShared() {
           '<button class="btn btn-primary btn-sm" onclick="_kmShowAddEntry()"><span class="material-symbols-outlined" style="font-size:14px">add</span> 新增条目</button>' +
         '</div>';
     sc.innerHTML = ''
-      + _legacyBanner
       + '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;gap:12px;flex-wrap:wrap">'
         + sharedHeader
         + sharedActions
@@ -26541,6 +30495,134 @@ async function _kmWikiRebuildIndex() {
     else alert(msg);
   } catch (e) {
     alert('Rebuild failed: ' + (e.message || e));
+  }
+}
+
+
+// ── Wiki: rebuild RAG index (Step D of merge plan) ──
+async function _kmWikiRebuildIndex() {
+  if (!confirm('重建 RAG 向量索引？所有 valid 的 wiki 页面会被重新写入 collection=wiki。\n仅需在内容大幅变化或迁移后执行一次。')) return;
+  try {
+    var r = await api('POST', '/api/portal/wiki/index', {
+      provider_id: '',  // empty = use default/local
+      collection: 'wiki',
+    });
+    var msg = '已重建索引: ' + r.indexed_count + ' 篇 wiki 页 (跳过 invalid: ' + r.skipped_invalid + ')';
+    if (window._toast) window._toast(msg, 'success');
+    else alert(msg);
+  } catch (e) {
+    alert('Rebuild failed: ' + (e.message || e));
+  }
+}
+
+
+// ── Wiki: file/text import modal (Step B of wiki / SK merge plan) ──
+// Reuses the existing /api/portal/rag/parse-file backend for client-
+// side PDF / Word / HTML extraction (same pipeline as Shared Knowledge
+// import), but routes the final POST to /api/portal/wiki/import which
+// writes ONE wiki page (kind=reference by default) instead of
+// chunking into a vector store. Step D will add vector indexing on
+// top of the wiki layer; until then, imported pages are searchable
+// via WikiStore.search()'s keyword scorer.
+
+function _kmWikiShowImport() {
+  var html = ''
+    + '<div class="modal-overlay" id="km-import-modal" onclick="if(event.target===this)this.remove()">'
+    +   '<div class="modal" style="max-width:680px">'
+    +     '<h3>导入到 Wiki</h3>'
+    +     '<div style="font-size:12px;color:var(--text3);margin-bottom:14px">上传 PDF / Word / Markdown / HTML / TXT，或粘贴文本。整篇作为<b>一个 wiki 条目</b>写入（不分块）。</div>'
+
+    // File upload zone (reuses km-imp-* IDs and _kmParseFile helper)
+    +     '<div id="km-imp-file-zone" style="border:2px dashed var(--border);border-radius:10px;padding:24px;text-align:center;cursor:pointer;margin-bottom:14px;transition:all 0.2s;background:var(--surface)" onclick="document.getElementById(\'km-imp-file-input\').click()" ondragover="event.preventDefault();this.style.borderColor=\'var(--primary)\';this.style.background=\'var(--primary-tint-6)\'" ondragleave="this.style.borderColor=\'var(--border)\';this.style.background=\'var(--surface)\'" ondrop="event.preventDefault();this.style.borderColor=\'var(--border)\';this.style.background=\'var(--surface)\';_kmHandleFileDrop(event)">'
+    +       '<input type="file" id="km-imp-file-input" accept=".pdf,.docx,.doc,.html,.htm,.txt,.md,.csv,.tsv,.json,.log" style="display:none" onchange="_kmHandleFileSelect(this)">'
+    +       '<span class="material-symbols-outlined" style="font-size:36px;color:var(--text3);display:block;margin-bottom:8px">upload_file</span>'
+    +       '<div style="font-size:13px;color:var(--text2);font-weight:600">点击或拖拽文件</div>'
+    +       '<div style="font-size:11px;color:var(--text3);margin-top:4px">支持 PDF / Word / HTML / TXT / Markdown / CSV</div>'
+    +     '</div>'
+    +     '<div id="km-imp-file-info" style="display:none;padding:10px 14px;background:rgba(63,185,80,0.08);border:1px solid rgba(63,185,80,0.2);border-radius:8px;margin-bottom:14px;font-size:12px">'
+    +       '<div style="display:flex;align-items:center;gap:8px">'
+    +         '<span class="material-symbols-outlined" style="font-size:18px;color:#3fb950">description</span>'
+    +         '<span id="km-imp-file-name" style="font-weight:600;color:var(--text)"></span>'
+    +         '<span id="km-imp-file-size" style="color:var(--text3)"></span>'
+    +         '<span id="km-imp-file-method" style="color:var(--text3);font-size:10px;background:var(--surface2);padding:1px 6px;border-radius:4px"></span>'
+    +         '<button onclick="_kmClearFile()" style="margin-left:auto;background:none;border:none;cursor:pointer;color:var(--text3);font-size:11px">✕ 清除</button>'
+    +       '</div>'
+    +       '<div id="km-imp-file-preview" style="margin-top:6px;font-size:11px;color:var(--text3);max-height:60px;overflow:hidden"></div>'
+    +     '</div>'
+    +     '<div style="display:flex;align-items:center;gap:12px;margin-bottom:14px"><div style="flex:1;height:1px;background:var(--border)"></div><span style="font-size:11px;color:var(--text3)">或直接粘贴文本</span><div style="flex:1;height:1px;background:var(--border)"></div></div>'
+
+    // Wiki-specific fields
+    +     '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">'
+    +       '<div class="form-group"><label>Scope</label><select id="kmw-imp-scope">'
+    +         '<option value="global" selected>global (所有角色可见)</option>'
+    +         '<option value="role:pm">role:pm</option>'
+    +         '<option value="role:coder">role:coder</option>'
+    +         '<option value="role:reviewer">role:reviewer</option>'
+    +         '<option value="role:researcher">role:researcher</option>'
+    +         '<option value="role:general">role:general</option>'
+    +       '</select></div>'
+    +       '<div class="form-group"><label>Kind</label><select id="kmw-imp-kind">'
+    +         '<option value="reference" selected>reference（参考资料 — 推荐）</option>'
+    +         '<option value="methodology">methodology（方法论）</option>'
+    +         '<option value="template">template（模版）</option>'
+    +         '<option value="experience">experience（经验）</option>'
+    +         '<option value="pattern">pattern（设计模式）</option>'
+    +       '</select></div>'
+    +     '</div>'
+    +     '<div class="form-group"><label>标题</label><input id="km-imp-title" placeholder="如: PCI DSS 4.0 完整学习总结（上传文件时自动填入文件名）"></div>'
+    +     '<div class="form-group"><label>标签 (逗号分隔)</label><input id="km-imp-tags" placeholder="payments, security, audit"></div>'
+    +     '<div class="form-group"><label>正文 / Body (Markdown)</label><textarea id="km-imp-content" rows="8" placeholder="粘贴文本…\n上传文件后此处自动填入解析后的文本" style="font-family:Menlo,Monaco,monospace;font-size:12px"></textarea></div>'
+
+    +     '<div id="km-imp-status" style="display:none;padding:8px 12px;margin-bottom:10px;border-radius:6px;font-size:12px"></div>'
+    +     '<div class="form-actions">'
+    +       '<button class="btn btn-ghost" onclick="document.getElementById(\'km-import-modal\').remove()">取消</button>'
+    +       '<button class="btn btn-primary" id="km-imp-submit-btn" onclick="_kmWikiDoImport()">导入</button>'
+    +     '</div>'
+    +   '</div>'
+    + '</div>';
+  document.body.insertAdjacentHTML('beforeend', html);
+}
+
+async function _kmWikiDoImport() {
+  function _val(id) { var e = document.getElementById(id); return e ? e.value.trim() : ''; }
+  var scope = _val('kmw-imp-scope') || 'global';
+  var kind = _val('kmw-imp-kind') || 'reference';
+  var title = _val('km-imp-title') || 'Imported';
+  var content = (document.getElementById('km-imp-content') || {}).value || '';
+  var tags = _val('km-imp-tags').split(',').map(function(t){ return t.trim(); }).filter(Boolean);
+  if (!content.trim()) { alert('正文不能为空 — 请上传文件或粘贴文本'); return; }
+
+  var statusEl = document.getElementById('km-imp-status');
+  var submitBtn = document.getElementById('km-imp-submit-btn');
+  if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = '导入中…'; }
+  if (statusEl) {
+    statusEl.style.display = 'block';
+    statusEl.style.background = 'var(--primary-tint-8)';
+    statusEl.style.color = 'var(--primary)';
+    statusEl.textContent = '正在写入 wiki…';
+  }
+
+  try {
+    var res = await api('POST', '/api/portal/wiki/import', {
+      scope: scope, kind: kind,
+      title: title, body: content, tags: tags,
+      source: 'admin',
+    });
+    window._kmFileData = null;
+    var note = res.overwrote ? '（覆盖已有同名）' : '';
+    if (window._toast) window._toast('已导入 ' + (res.chars || content.length) + ' 字符 ' + note, 'success');
+    else alert('导入完成 ' + note);
+    var m = document.getElementById('km-import-modal'); if (m) m.remove();
+    if (_kmTab === 'wiki') _renderKmWiki();
+  } catch (e) {
+    if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = '导入'; }
+    if (statusEl) {
+      statusEl.style.background = 'rgba(248,81,73,0.08)';
+      statusEl.style.color = 'var(--error)';
+      statusEl.textContent = '导入失败: ' + (e.message || e);
+    } else {
+      alert('Import failed: ' + (e.message || e));
+    }
   }
 }
 
@@ -35304,6 +39386,10 @@ async function renderSystemSettings(container) {
       + '</div>'
 
       + '<div style="margin-top:var(--s-xl)">'
+      +   _renderSttEngineCard(settings, defaults)
+      + '</div>'
+
+      + '<div style="margin-top:var(--s-xl)">'
       +   '<button class="tc-mono-label" onclick="_systemSettingsResetDefaults()" '
       +     (anyDiverged
               ? 'style="padding:8px 16px;background:rgba(255,180,171,0.06);border:1px solid rgba(255,180,171,0.20);border-radius:var(--r-md);color:var(--error);font-size:10px;cursor:pointer;letter-spacing:0.05em;display:inline-flex;align-items:center;gap:6px;transition:all 0.15s" onmouseover="this.style.background=\'rgba(255,180,171,0.14)\'" onmouseout="this.style.background=\'rgba(255,180,171,0.06)\'"'
@@ -35340,6 +39426,8 @@ async function renderSystemSettings(container) {
     +   _renderSandboxReadonlyCard(settings, defaults)
     // ── Sandbox read+write directories (admin-maintained allowlist) ──
     +   _renderSandboxAllowedCard(settings, defaults)
+    // ── STT engine selection ──
+    +   _renderSttEngineCard(settings, defaults)
 
     +   '<button class="btn btn-ghost btn-sm" onclick="_systemSettingsResetDefaults()" '
     +     (anyDiverged ? '' : 'disabled style="opacity:0.5"')
@@ -35548,6 +39636,147 @@ function _renderSandboxAllowedCard(settings, defaults) {
     +     '</button>'
     +   '</div>'
     + '</div>';
+}
+
+// ─────────────────────────────────────────────────────────────────
+// STT Engine selector (System Settings → STT card)
+// ─────────────────────────────────────────────────────────────────
+// Reads system_settings.stt.engine; fetches the engine list from
+// /api/portal/stt/engines (which checks pip availability). Saves via
+// _systemSettingsPatch('stt.engine', ...) — the same path other
+// system-settings cards use, so the diverged-from-default detection
+// + Reset button work uniformly.
+function _renderSttEngineCard(settings, defaults) {
+  var st = (settings && settings.stt) || {};
+  var sd = (defaults && defaults.stt) || {};
+  var current = st.engine || sd.engine || 'funasr';
+  var defaultEng = sd.engine || 'funasr';
+  var diverged = current !== defaultEng;
+
+  // Engine card uses a placeholder while we async-fetch the engine
+  // availability list; the fetch updates the dropdown in-place.
+  setTimeout(_sttCardRefreshEngines, 0);
+
+  var statusColor = diverged ? 'var(--secondary)' : 'var(--outline)';
+  // Provider sentinels can be long; show a short summary in the badge.
+  var shortCurrent = (current.indexOf('__provider__:') === 0)
+    ? 'PROVIDER:' + current.slice('__provider__:'.length).slice(0, 6).toUpperCase()
+    : current.toUpperCase();
+  var statusLabel = diverged
+    ? 'OVERRIDDEN · ' + shortCurrent
+    : 'DEFAULT · ' + defaultEng.toUpperCase();
+
+  return ''
+    + '<div class="tc-card-glass" style="'
+    +     'padding:var(--s-lg);display:flex;flex-direction:column;gap:14px;'
+    +     'position:relative;overflow:hidden;border-top:1px solid rgba(255,255,255,0.15);'
+    +     'box-shadow:0 0 15px -3px rgba(192,193,255,0.10);'
+    +   '">'
+    +   '<div style="position:absolute;top:0;right:0;padding:14px;pointer-events:none">'
+    +     '<span class="material-symbols-outlined" style="font-size:64px;color:rgba(74,252,255,0.18);margin:-12px -12px 0 0">graphic_eq</span>'
+    +   '</div>'
+    +   '<div style="display:flex;justify-content:space-between;align-items:flex-start;position:relative">'
+    +     '<div style="display:flex;flex-direction:column;gap:4px">'
+    +       '<div class="tc-h3" style="font-size:15px;font-weight:600">语音转文字 · STT 引擎</div>'
+    +       '<div class="tc-text-dim" style="font-size:11px;line-height:1.5;max-width:560px">'
+    +         'Voice 模式录音后用哪个引擎识别。<b>browser</b>：前端 Web Speech 直接出文本（不进 server）；'
+    +         '<b>funasr</b> 中文最准；<b>mlx_whisper</b> 多语言最快。也可以选用 LLM Provider 里任意 OpenAI 兼容服务（如 OpenAI Whisper、Groq Whisper），配置完全复用 LLM Provider 的 base_url + api_key。'
+    +       '</div>'
+    +     '</div>'
+    +     '<div style="display:flex;align-items:center;gap:6px;padding:4px 10px;background:rgba(' +
+            (diverged ? '137,206,255' : '255,255,255') + ',0.10);border:1px solid rgba(' +
+            (diverged ? '137,206,255' : '255,255,255') + ',0.20);border-radius:4px">'
+    +       '<span style="width:6px;height:6px;border-radius:50%;background:' + statusColor + ';animation:' + (diverged ? 'pulse-dot 2s infinite' : 'none') + '"></span>'
+    +       '<span class="tc-mono-label" style="font-size:9px;color:' + statusColor + '">' + statusLabel + '</span>'
+    +     '</div>'
+    +   '</div>'
+    +   '<div id="stt-engine-card-body" style="display:flex;flex-direction:column;gap:10px;position:relative">'
+    +     '<div class="tc-text-dim" style="font-size:11px;font-style:italic">加载引擎列表…</div>'
+    +   '</div>'
+    + '</div>';
+}
+
+// Async fetch + populate the engine dropdown. Called after the card
+// HTML is in the DOM (via setTimeout 0 in _renderSttEngineCard).
+async function _sttCardRefreshEngines() {
+  var body = document.getElementById('stt-engine-card-body');
+  if (!body) return;
+  var data;
+  try {
+    data = await api('GET', '/api/portal/stt/engines');
+  } catch (e) {
+    body.innerHTML = '<div style="color:var(--error);font-size:12px">'
+      + 'Engine list fetch failed: ' + esc(String(e && e.message || e))
+      + '</div>';
+    return;
+  }
+  var current = (data && data.current) || 'funasr';
+  var engines = (data && data.engines) || [];
+  var providers = (data && data.providers) || [];
+
+  function _row(e, isProvider) {
+    var disabled = !e.available && e.id !== 'browser';
+    var checked = e.id === current ? ' checked' : '';
+    var dim = disabled ? 'opacity:0.45' : '';
+    var statusBadge;
+    if (isProvider) {
+      statusBadge = '<span class="tc-mono-label" style="color:var(--cyber-magenta,#ff7adb);font-size:9px">CLOUD</span>';
+    } else if (e.id === 'browser') {
+      statusBadge = '<span class="tc-mono-label" style="color:var(--cyber-blue);font-size:9px">BUILTIN</span>';
+    } else if (e.available) {
+      statusBadge = '<span class="tc-mono-label" style="color:var(--cyber-lime);font-size:9px">INSTALLED</span>';
+    } else {
+      statusBadge = '<span class="tc-mono-label" style="color:var(--error);font-size:9px">NOT_INSTALLED</span>';
+    }
+    var hint = '';
+    if (e.id === 'funasr' && !e.available) hint = '<br>install: <code>pip install funasr</code>';
+    if (e.id === 'mlx_whisper' && !e.available) hint = '<br>install: <code>pip install mlx-whisper</code>';
+    if (isProvider && e.base_url) hint = '<br><code style="opacity:0.65">' + esc(e.base_url) + '</code>';
+    return '<label style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;'
+      + 'background:rgba(255,255,255,0.02);border:1px solid var(--outline-variant);'
+      + 'border-radius:6px;cursor:' + (disabled ? 'not-allowed' : 'pointer') + ';' + dim + '">'
+      +   '<input type="radio" name="stt-engine" value="' + esc(e.id) + '"' + checked
+      +     (disabled ? ' disabled' : '')
+      +     ' onchange="_sttSelectEngine(this.value)"'
+      +     ' style="margin-top:3px">'
+      +   '<div style="flex:1;min-width:0">'
+      +     '<div style="display:flex;align-items:center;gap:8px">'
+      +       '<span style="font-size:13px;font-weight:600">' + esc(e.label) + '</span>'
+      +       statusBadge
+      +     '</div>'
+      +     '<div class="tc-text-dim" style="font-size:11px;margin-top:3px;line-height:1.5">'
+      +       '速度: ' + esc(e.speed) + ' · 准确度: ' + esc(e.accuracy)
+      +       hint
+      +     '</div>'
+      +   '</div>'
+      + '</label>';
+  }
+
+  var localRows = engines.map(function(e){ return _row(e, false); }).join('');
+  var providerRows = providers.length
+    ? '<div class="tc-mono-label" style="font-size:10px;margin:8px 0 2px;color:var(--cyber-magenta,#ff7adb);letter-spacing:0.08em">— LLM Provider · 第三方 ——</div>'
+        + providers.map(function(p){ return _row(p, true); }).join('')
+    : '<div class="tc-text-dim" style="font-size:10px;margin-top:6px;font-style:italic">提示：在 Provider 配置里添加 OpenAI 兼容 LLM 后，会出现在这里作为云端 STT 选项（base_url 与 api_key 直接复用）。</div>';
+
+  body.innerHTML = localRows + providerRows
+    + '<div class="tc-text-dim" style="font-size:10px;margin-top:6px;font-style:italic">'
+    + '切换后下次进入 voice mode 自动生效。当前 server 已加载的模型不会被卸载。'
+    + '</div>';
+}
+
+async function _sttSelectEngine(engineId) {
+  if (!engineId) return;
+  try {
+    // Use the same PATCH path that other system-settings cards use,
+    // and the existing helper so toast/error handling is unified.
+    await _systemSettingsPatch('stt.engine', engineId);
+    if (window._toast) window._toast(
+      '已切换到 ' + engineId + ' (下次 voice 生效)', 'success');
+    if (typeof renderSystemSettings === 'function') renderSystemSettings();
+  } catch (e) {
+    if (window._toast) window._toast(
+      '切换失败: ' + (e && e.message || e), 'error');
+  }
 }
 
 async function _sandboxRwAddPath() {

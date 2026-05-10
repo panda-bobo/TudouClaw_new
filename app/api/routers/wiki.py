@@ -394,7 +394,7 @@ async def edit_wiki_page(
                 f"target already exists: {new_scope}/{kind}/{slug}. "
                 f"Delete or rename it first.",
             )
-        # Write to new path
+        # Write to new path (this appends a "move" entry to NEW scope's log.md)
         page.scope = new_scope
         store.write_page(page, log_action="move")
         # Delete old file
@@ -402,6 +402,18 @@ async def edit_wiki_page(
         try:
             if os.path.exists(old_path):
                 os.remove(old_path)
+            # Append a "moved-out" entry to the OLD scope's log.md so
+            # the audit trail captures both sides of the relocation.
+            # rebuild_index does NOT log, so we have to call _append_log
+            # explicitly — same pattern as delete (see below).
+            try:
+                store._append_log(
+                    scope, "move-out",
+                    f"{kind}/{slug} → {new_scope}/{kind}/{slug}",
+                    page.title or slug,
+                )
+            except Exception as e:
+                logger.warning("append move-out log entry skipped: %s", e)
             store.rebuild_index(scope)
         except OSError as e:
             logger.warning("scope-move old-file cleanup failed: %s", e)
@@ -434,10 +446,27 @@ async def delete_wiki_page(
     path = store._page_path(scope, kind, slug)
     if not os.path.exists(path):
         raise HTTPException(404, f"page not found: {scope}/{kind}/{slug}")
+    # Capture title BEFORE delete so the audit log records what the page
+    # was, not just its slug. Falls back to slug if read_page fails for
+    # any reason (corrupt frontmatter etc.) — we still want to log.
+    try:
+        page_for_log = store.read_page(scope, kind, slug)
+        title_for_log = (page_for_log.title if page_for_log else slug) or slug
+    except Exception:
+        title_for_log = slug
     try:
         os.remove(path)
     except OSError as e:
         raise HTTPException(500, f"delete failed: {e}")
+    # Append a "delete" entry to log.md so admins can audit removals.
+    # 2026-05-09: previously delete was silent — pages would vanish from
+    # disk but log.md still showed only "ingest", giving false impression
+    # of "ghost ingestions". rebuild_index does NOT log, so we have to
+    # call _append_log explicitly.
+    try:
+        store._append_log(scope, "delete", f"{kind}/{slug}", title_for_log)
+    except Exception as e:
+        logger.warning("append delete log entry skipped: %s", e)
     # Refresh the scope index so the deleted entry vanishes from it.
     try:
         store.rebuild_index(scope)

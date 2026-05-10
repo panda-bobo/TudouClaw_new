@@ -178,6 +178,24 @@ DEFAULTS: dict[str, Any] = {
     # reaches the underlying tool function); logged to agent events for
     # debugging. Token cost: ~50 tok/tool in tools[] payload, ~30 tok per
     # actual tool call. Disable if your model handles wandering well.
+    # ── STT (Speech-to-Text) engine selection ──
+    # Voice mode's transcription backend. Browser uses webkitSpeech-
+    # Recognition (no server call), funasr/mlx_whisper run server-side
+    # via FunASR or mlx-whisper packages. If chosen engine fails to
+    # load (not installed / OOM), the request returns 503 and frontend
+    # falls back to browser STT for the rest of the session.
+    #
+    # Schema:
+    #   engine: "browser" | "funasr" | "mlx_whisper"
+    #         | "__provider__:<llm_provider_id>"
+    #   mlx_whisper_repo: HF id, used only when engine == mlx_whisper
+    #   provider_model: optional Whisper model name override sent to the
+    #                   third-party endpoint (default "whisper-1")
+    "stt": {
+        "engine": "funasr",
+        "mlx_whisper_repo": "mlx-community/whisper-large-v3-turbo",
+        "provider_model": "",
+    },
     "tool_reason": {
         "enabled": True,
         "max_chars": 100,

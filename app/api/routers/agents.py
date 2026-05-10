@@ -912,6 +912,14 @@ async def update_agent_profile(
             agent.coding_provider = str(body.get("coding_provider") or "")
         if "coding_model" in body:
             agent.coding_model = str(body.get("coding_model") or "")
+        if "tts_provider_id" in body:
+            # Empty string is a valid value — clears the binding so the
+            # frontend falls back to browser Web Speech API.
+            agent.tts_provider_id = str(body.get("tts_provider_id") or "")
+        if "tts_voice" in body:
+            agent.tts_voice = str(body.get("tts_voice") or "").strip()
+        if "tts_model" in body:
+            agent.tts_model = str(body.get("tts_model") or "").strip()
         if "extra_llms" in body:
             raw_slots = body.get("extra_llms") or []
             if not isinstance(raw_slots, list):
@@ -3017,16 +3025,39 @@ async def manage_prompt_packs(
 
     if action == "bind":
         skill_id = body.get("skill_id", "")
+        changed = False
         if skill_id and skill_id not in agent.bound_prompt_packs:
             agent.bound_prompt_packs.append(skill_id)
+            changed = True
+        # Re-binding clears the tombstone so auto-migrate behaviour is
+        # restored (no-op if not in the tombstone list).
+        if skill_id and skill_id in (agent.unbound_role_packs or []):
+            agent.unbound_role_packs.remove(skill_id)
+            changed = True
+        if changed:
             hub._save_agents()
         return {"ok": True, "bound_prompt_packs": agent.bound_prompt_packs}
     elif action == "unbind":
         skill_id = body.get("skill_id", "")
+        changed = False
         if skill_id in agent.bound_prompt_packs:
             agent.bound_prompt_packs.remove(skill_id)
+            changed = True
+        # 2026-05-10 tombstone — record explicit unbind so the role-
+        # default auto-migration on next agent load doesn't re-add it.
+        if skill_id:
+            if not isinstance(agent.unbound_role_packs, list):
+                agent.unbound_role_packs = []
+            if skill_id not in agent.unbound_role_packs:
+                agent.unbound_role_packs.append(skill_id)
+                changed = True
+        if changed:
             hub._save_agents()
-        return {"ok": True, "bound_prompt_packs": agent.bound_prompt_packs}
+        return {
+            "ok": True,
+            "bound_prompt_packs": agent.bound_prompt_packs,
+            "unbound_role_packs": agent.unbound_role_packs,
+        }
     elif action == "discover":
         scan_dirs = body.get("scan_dirs", [])
         if agent.working_dir:
@@ -3048,47 +3079,134 @@ async def manage_prompt_packs(
             "scan_dirs": registry.store._scan_dirs,
         }
     elif action == "import_from_catalog":
+        # 2026-05-10: rebuilt for multi-source catalog support.
+        # Old code only looked in community_skills.json — Anthropic catalog
+        # entries silently fell through to imported=0 while still returning
+        # ok:True, so the UI showed "✓ 已导入" but no actual import happened.
+        # Now scans all `app/data/*_catalog.json` (auto-discovers Anthropic
+        # + any future catalog files) PLUS the legacy community_skills.json.
+        # Two entry formats:
+        #   • Anthropic-style: entry has `skill_md_content` = full SKILL.md body
+        #   • Community-style: entry has `entries[]` block list (legacy)
+        # Imported skills are written to disk under
+        # ~/.tudou_claw/skills/<skill_id>/SKILL.md so they survive restart
+        # via the regular registry scan path. Registry is persisted
+        # immediately after the batch so the in-memory record is durable.
         import json as _json
+        import os as _os
         from pathlib import Path as _Path
         from ...core.prompt_enhancer import PromptPack
         skill_ids = body.get("skill_ids", [])
-        catalog_path = _Path(__file__).resolve().parent.parent.parent / "data" / "community_skills.json"
+        if not skill_ids:
+            raise HTTPException(400, "skill_ids is required (non-empty list)")
+
+        # Discover all catalog files
+        data_dir = _Path(__file__).resolve().parent.parent.parent / "data"
+        catalog_files: list[_Path] = []
+        legacy = data_dir / "community_skills.json"
+        if legacy.exists():
+            catalog_files.append(legacy)
+        for f in sorted(data_dir.glob("*_catalog.json")):
+            catalog_files.append(f)
+
+        # Build a single id → entry index across all catalogs
+        index: dict = {}
+        for cf in catalog_files:
+            try:
+                with open(cf, "r", encoding="utf-8") as fh:
+                    cat = _json.load(fh)
+            except Exception as e:
+                logger.warning("import: catalog %s failed to load: %s", cf.name, e)
+                continue
+            for s in cat.get("skills", []):
+                if isinstance(s, dict) and s.get("id"):
+                    # First catalog wins on id collision
+                    index.setdefault(s["id"], s)
+
+        imported_count = 0
+        already_bound = 0
+        not_found: list[str] = []
+        target_root = _os.path.expanduser("~/.tudou_claw/skills")
         try:
-            with open(catalog_path, 'r', encoding='utf-8') as f:
-                catalog = _json.load(f)
-            imported_count = 0
             for skill_id in skill_ids:
-                skill_entry = None
-                for skill in catalog.get("skills", []):
-                    if skill.get("id") == skill_id:
-                        skill_entry = skill
-                        break
-                if skill_entry:
-                    # Bug fix (Nov 2026): the catalog entry's real prompt
-                    # text lives in its `entries` sub-list, not at the
-                    # top level. Old code shipped the pack with an empty
-                    # ``content`` — "imported + bound" looked OK but the
-                    # agent never got any prompt injected.
-                    assembled = _assemble_catalog_skill_content(skill_entry)
-                    merged_tags = _merge_catalog_skill_tags(skill_entry)
-                    record = PromptPack(
-                        skill_id=skill_entry.get("id", ""),
-                        name=skill_entry.get("name", ""),
-                        description=skill_entry.get("description", ""),
-                        category=skill_entry.get("category", "general"),
-                        tags=merged_tags,
-                        content=assembled,
-                        origin="catalog"
-                    )
-                    registry.store.add_skill(record)
-                    imported_count += 1
-                    if skill_id not in agent.bound_prompt_packs:
-                        agent.bound_prompt_packs.append(skill_id)
+                skill_entry = index.get(skill_id)
+                if not skill_entry:
+                    not_found.append(skill_id)
+                    continue
+
+                # ── Resolve content body ──
+                # Prefer pre-bundled `skill_md_content` (Anthropic catalog
+                # format). Fall back to legacy `entries[]` assembler.
+                content = skill_entry.get("skill_md_content", "") or ""
+                if not content:
+                    content = _assemble_catalog_skill_content(skill_entry)
+                merged_tags = _merge_catalog_skill_tags(skill_entry)
+
+                # ── Write SKILL.md to disk so registry rescan picks it up ──
+                target_dir = _os.path.join(target_root, skill_id)
+                target_path = _os.path.join(target_dir, "SKILL.md")
+                try:
+                    _os.makedirs(target_dir, exist_ok=True)
+                    with open(target_path, "w", encoding="utf-8") as f:
+                        f.write(content)
+                except Exception as e:
+                    logger.warning(
+                        "import: write SKILL.md failed for %s: %s", skill_id, e)
+                    target_path = ""
+
+                # ── Register in PromptPackStore ──
+                record = PromptPack(
+                    skill_id=skill_entry.get("id", ""),
+                    name=skill_entry.get("name", ""),
+                    description=skill_entry.get("description", ""),
+                    category=skill_entry.get("category", "general"),
+                    tags=merged_tags,
+                    content=content,
+                    path=target_path,
+                    origin="catalog",
+                )
+                registry.store.add_skill(record)
+                imported_count += 1
+
+                # ── Bind to the agent ──
+                if skill_id in agent.bound_prompt_packs:
+                    already_bound += 1
+                else:
+                    agent.bound_prompt_packs.append(skill_id)
+
             hub._save_agents()
-            return {"ok": True, "imported": imported_count, "bound_prompt_packs": agent.bound_prompt_packs}
+
+            # ── Persist the registry so the imports survive a restart ──
+            try:
+                persist_path = getattr(
+                    registry.store, "_persist_path", "") or ""
+                if persist_path:
+                    _os.makedirs(_os.path.dirname(persist_path), exist_ok=True)
+                    with open(persist_path, "w", encoding="utf-8") as pf:
+                        _json.dump(
+                            registry.store.to_dict(), pf,
+                            ensure_ascii=False, indent=2,
+                        )
+            except Exception as pe:
+                logger.warning("import: registry persist failed: %s", pe)
+
+            logger.info(
+                "import_from_catalog agent=%s requested=%d imported=%d "
+                "already_bound=%d not_found=%s",
+                agent_id, len(skill_ids), imported_count, already_bound,
+                not_found,
+            )
+            return {
+                "ok": True,
+                "imported": imported_count,
+                "already_bound": already_bound,
+                "not_found": not_found,
+                "bound_prompt_packs": agent.bound_prompt_packs,
+            }
         except HTTPException:
             raise
         except Exception as e:
+            logger.exception("import_from_catalog failed")
             raise HTTPException(status_code=500, detail=str(e))
     elif action == "import_local":
         local_path = body.get("path", "")

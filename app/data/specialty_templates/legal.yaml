@@ -1,0 +1,128 @@
+# Specialty Template — Chinese Legal Expert
+#
+# Loaded by app.domain_expert.template_loader.load("legal").
+# Contracts:
+#   - schema validation: app.domain_expert.template.schema()
+#   - eval runner ids must match runners registered by Track C
+#   - prompt-pack ids referenced are not enforced as installed at load
+#     time (V2 vertical handles missing-resources install flow)
+#
+# References (specialist catalog ids — install via Prompt Pack 市场):
+#   community/agency-agents-zh:
+#     agency_legal_lawyer
+#     agency_legal_legal_counsel
+#     agency_legal_contract_lawyer
+#     agency_legal_litigation_specialist
+#   anthropic akwp_*:
+#     akwp_legal_brief
+#     akwp_legal_review-contract
+#     akwp_legal_compliance-check
+#     akwp_legal_triage-nda
+#     akwp_legal_legal-risk-assessment
+#     akwp_legal_legal-response
+#     akwp_legal_meeting-briefing
+#     akwp_legal_vendor-check
+
+id: legal-expert
+version: "1.0"
+name: 法律专家
+specialty: legal
+icon: balance
+description: |
+  Chinese-jurisdiction legal expert agent. Drafts contracts, reviews NDAs,
+  checks compliance, and surfaces statute/case citations. Cite-required
+  by default; refuses to give criminal-defense or final litigation advice.
+
+# ── Knowledge layer (Track A consumes) ──
+
+required_packs:
+  - agency_legal_lawyer
+  - agency_legal_legal_counsel
+  - agency_legal_contract_lawyer
+  - agency_legal_litigation_specialist
+
+required_anthropic_packs:
+  - akwp_legal_brief
+  - akwp_legal_review-contract
+  - akwp_legal_compliance-check
+  - akwp_legal_triage-nda
+  - akwp_legal_legal-risk-assessment
+  - akwp_legal_legal-response
+  - akwp_legal_meeting-briefing
+  - akwp_legal_vendor-check
+
+required_skills:
+  - cite_check
+  - legal_quote_extract
+
+required_mcps: []
+
+corpus_sources:
+  - type: url
+    location: https://www.gov.cn/zhengce/
+    description: PRC central government policy & statutes (zhengce.gov.cn)
+  - type: url
+    location: https://flk.npc.gov.cn/
+    description: National People's Congress laws DB
+  - type: url
+    location: https://wenshu.court.gov.cn/
+    description: Supreme People's Court judgment archive (sample)
+
+chunker:
+  strategy: structural    # respect 法 / 章 / 条 boundaries
+  max_tokens: 768
+  overlap_tokens: 96
+  respect_boundaries: true
+
+# ── Training layer (Track C consumes) ──
+
+training:
+  base_model: Qwen/Qwen2.5-7B-Instruct
+  raft_recipe: legal-zh-v1
+  lora_rank: 32
+  lora_alpha: 64
+  learning_rate: 0.0002
+  max_steps: 1500
+  distractor_count: 4
+  eval_split: 0.1
+
+eval_suite:
+  - runner_id: legalbench_zh        # registered by Track C
+    weight: 0.7
+    threshold: 0.5
+    description: Translated LegalBench subset (PRC adapted)
+  - runner_id: citation_accuracy    # registered by Track C
+    weight: 0.3
+    threshold: 0.7
+    description: Citation correctness (statute name, article number)
+
+# ── Level rules (gate promotion novice → master) ──
+
+level_rules:
+  - from_level: novice
+    to_level: journeyman
+    min_eval_score: 0.5
+    min_corpus_chunks: 200
+    min_traces: 0
+  - from_level: journeyman
+    to_level: expert
+    min_eval_score: 0.7
+    min_corpus_chunks: 1000
+    min_traces: 200
+  - from_level: expert
+    to_level: master
+    min_eval_score: 0.85
+    min_corpus_chunks: 5000
+    min_traces: 1000
+
+# ── Safety rails ──
+
+safety:
+  cite_required: true
+  confidence_threshold: 0.55
+  refuse_topics:
+    - criminal_defense_strategy
+    - active_litigation_advice
+  disclaimer: |
+    本回答仅供参考，不构成正式法律意见。具体案件请咨询执业律师。
+    (For reference only; not legal advice. Consult a licensed attorney.)

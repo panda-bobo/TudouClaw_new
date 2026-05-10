@@ -722,10 +722,18 @@ def _summarize_old_history(messages: list[dict],
         return messages
     total_chars = _estimate_messages_chars(messages)
     tool_count = _count_tool_messages(messages)
-    # AND 逻辑: 总字符超阈值 AND tool 数也超(两者都说明历史真的膨胀了才动手)。
-    # 旧的 OR 逻辑太激进,只要 tool_count>8 就触发,而 tool_count 在正常跑
-    # 任务时很容易 8 (随便几次 glob+read 就到) → 频繁误触发。
-    if total_chars < threshold_chars or tool_count <= max_tool_msgs:
+    # Trigger logic (2 paths):
+    #   PATH A — "fat & long" gate (original): both chars over threshold
+    #     AND tool_count > max_tool_msgs. Catches normal task bloat.
+    #   PATH B — "hard cap" gate (added 2026-05-09): if chars exceed 2×
+    #     threshold (~50k by default) we force compress regardless of
+    #     tool_count. Catches the "few but huge" pattern where 1-2 tool
+    #     calls return 8k+ tokens each and the AND gate misses it.
+    hard_cap = threshold_chars * 2
+    if total_chars >= hard_cap:
+        # Force-compress path — fall through to summarize logic below.
+        pass
+    elif total_chars < threshold_chars or tool_count <= max_tool_msgs:
         return messages
 
     # Split point: keep last `keep_last` messages + the leading system prefix.
@@ -873,6 +881,35 @@ def _summarize_old_history(messages: list[dict],
             }
         except Exception:
             pass
+
+    # ── Safety net: never produce a payload with no user/assistant. ──
+    # The cache-reuse branch above sets recent_start = sys_prefix_end
+    # + cached_n. If a downstream sanitizer (e.g. _drop_orphan_tool_
+    # messages) dropped messages between the cache write and now,
+    # recent_start can exceed len(messages) → messages[recent_start:]
+    # is empty → final payload is [system, summary_system] only →
+    # provider returns 400 "no user/assistant message". Back up
+    # recent_start to whatever's needed to keep at least the LAST
+    # user/assistant in the recent slice.
+    def _last_user_or_assistant_idx(msgs: list[dict]) -> int:
+        for i in range(len(msgs) - 1, -1, -1):
+            r = msgs[i].get("role")
+            if r in ("user", "assistant"):
+                return i
+        return -1
+
+    _last_anchor = _last_user_or_assistant_idx(messages)
+    if _last_anchor >= 0 and recent_start > _last_anchor:
+        # We were about to slice past the last anchor — back up.
+        adjusted = _find_safe_cut_idx(messages, _last_anchor)
+        if adjusted < recent_start:
+            logger.info(
+                "HISTORY_SUMMARY: safety-net backup recent_start %d → %d "
+                "(would have left 0 user/assistant msgs) agent=%s",
+                recent_start, adjusted,
+                agent.id[:8] if agent else "?")
+            recent_start = adjusted
+            old_slice = messages[sys_prefix_end:recent_start]
 
     # ── Safety net: never produce a payload with no user/assistant. ──
     # The cache-reuse branch above sets recent_start = sys_prefix_end
@@ -2082,6 +2119,24 @@ class Agent:
     # If empty, falls back to the agent's main provider/model.
     coding_provider: str = ""
     coding_model: str = ""
+    # ── TTS provider id (per-agent voice synthesis) ──
+    # 2026-05-09: empty → frontend uses browser Web Speech API (default).
+    # When set, references an LLM Provider entry (reused for TTS — calls
+    # {base_url}/audio/speech with the provider's api_key). The voice-mode
+    # UI calls POST /api/portal/tts/synthesize with this id when speaking.
+    tts_provider_id: str = ""
+    # Optional voice id (e.g. "alloy" / "Rachel" / "zh-CN-XiaoxiaoNeural").
+    # Empty → upstream provider default.
+    # For VoxCPM: this is repurposed as the *transcript* of the
+    # voice-clone reference audio (must match what's actually spoken
+    # in `tts_prompt_wav_path`).
+    tts_voice: str = ""
+    # Optional TTS model id (e.g. "tts-1" / "tts-1-hd"). Empty → "tts-1".
+    tts_model: str = ""
+    # VoxCPM voice-cloning reference audio (absolute path on disk).
+    # When set + tts_voice (transcript) set → VoxCPM clones this voice
+    # for every subsequent synthesis. Empty → use random model voice.
+    tts_prompt_wav_path: str = ""
     # ── Extra LLM slots (N-labeled models) ──
     # 每一项: {"label": "code_review", "provider": "openai", "model": "gpt-4o",
     #          "purpose": "code_review", "note": ""}
@@ -2256,6 +2311,24 @@ class Agent:
     growth_path: RoleGrowthPath | None = field(default=None, repr=False)
     # --- Skill System (技能绑定) ---
     bound_prompt_packs: list[str] = field(default_factory=list)
+    # 2026-05-10 user-reported "unbind 是假的" — `_auto_migrate_role_defaults`
+    # in hub/_core.py re-added missing role-default packs on every agent
+    # load, so explicit user unbinds got silently undone. Track packs the
+    # user has explicitly unbound here; the auto-migrate now respects this
+    # tombstone list and won't re-add them. Re-binding via the UI (or
+    # /agent/{id}/prompt-packs action=bind) automatically removes the
+    # tombstone so the user can re-enable later.
+    unbound_role_packs: list[str] = field(default_factory=list)
+    # ── Phase 0 (2026-05-10): Expert specialty (optional, all default empty) ──
+    # When all five fields are empty/zero, agent behaves identically to current
+    # (普通 agent). When expert_specialty != "", reply pipeline routes through
+    # app.domain_expert.inference.pipeline (added in V4 vertical).
+    # See docs/superpowers/specs/2026-05-10-agent-specialty-cultivation-design.md §3.2
+    expert_specialty: str = ""             # "" / "legal" / "medical" / "finance" / ...
+    expert_template_version: str = ""      # locked-in template version when initialized
+    expert_level: str = "novice"           # novice / journeyman / expert / master
+    expert_lora_version: str = ""          # active LoRA version, e.g. "v3"
+    expert_initialized_at: float = 0.0     # epoch seconds when专家化 started
     _active_skill_ids: list[str] = field(default_factory=list, repr=False)
     _chat_start_time: float = field(default=0.0, repr=False)
     # --- Execution Plans (real-time task decomposition) ---
@@ -2380,6 +2453,11 @@ class Agent:
             "multimodal_supports_tools": self.multimodal_supports_tools,
             "coding_provider": self.coding_provider,
             "coding_model": self.coding_model,
+            # --- TTS persistence (per-agent voice synthesis) ---
+            "tts_provider_id": self.tts_provider_id or "",
+            "tts_voice": self.tts_voice or "",
+            "tts_model": self.tts_model or "",
+            "tts_prompt_wav_path": self.tts_prompt_wav_path or "",
             "extra_llms": list(self.extra_llms),
             "auto_route": dict(self.auto_route or {}),
             "working_dir": self.working_dir,
@@ -2449,6 +2527,13 @@ class Agent:
             "self_improvement": self.self_improvement.to_dict() if self.self_improvement else None,
             # --- Skill system persistence ---
             "bound_prompt_packs": self.bound_prompt_packs,
+            "unbound_role_packs": self.unbound_role_packs,
+            # --- Phase 0: Expert specialty persistence (5 optional fields) ---
+            "expert_specialty": self.expert_specialty,
+            "expert_template_version": self.expert_template_version,
+            "expert_level": self.expert_level,
+            "expert_lora_version": self.expert_lora_version,
+            "expert_initialized_at": self.expert_initialized_at,
             # --- Role Growth Path persistence ---
             "growth_path": self.growth_path.to_dict() if self.growth_path else None,
             # --- Execution analyzer persistence ---
@@ -2483,6 +2568,11 @@ class Agent:
             multimodal_supports_tools=bool(d.get("multimodal_supports_tools", False)),
             coding_provider=d.get("coding_provider", "") or "",
             coding_model=d.get("coding_model", "") or "",
+            # TTS — restore per-agent voice synthesis settings
+            tts_provider_id=d.get("tts_provider_id", "") or "",
+            tts_voice=d.get("tts_voice", "") or "",
+            tts_model=d.get("tts_model", "") or "",
+            tts_prompt_wav_path=d.get("tts_prompt_wav_path", "") or "",
             extra_llms=list(d.get("extra_llms", []) or []),
             auto_route=dict(d.get("auto_route", {}) or {}),
             working_dir=d.get("working_dir", ""),
@@ -2574,6 +2664,13 @@ class Agent:
                 logger.debug("Failed to restore self_improvement: %s", e)
         # Restore skill bindings
         agent.bound_prompt_packs = d.get("bound_prompt_packs", d.get("bound_skill_ids", []))
+        agent.unbound_role_packs = list(d.get("unbound_role_packs", []) or [])
+        # Phase 0: restore expert specialty fields (default empty for old agents)
+        agent.expert_specialty = d.get("expert_specialty", "") or ""
+        agent.expert_template_version = d.get("expert_template_version", "") or ""
+        agent.expert_level = d.get("expert_level", "novice") or "novice"
+        agent.expert_lora_version = d.get("expert_lora_version", "") or ""
+        agent.expert_initialized_at = float(d.get("expert_initialized_at", 0.0) or 0.0)
         # Restore role growth path
         if d.get("growth_path"):
             agent.growth_path = RoleGrowthPath.from_dict(d["growth_path"])
@@ -2606,6 +2703,11 @@ class Agent:
             "multimodal_supports_tools": self.multimodal_supports_tools,
             "coding_provider": self.coding_provider,
             "coding_model": self.coding_model,
+            # --- TTS (per-agent voice synthesis) ---
+            "tts_provider_id": self.tts_provider_id or "",
+            "tts_voice": self.tts_voice or "",
+            "tts_model": self.tts_model or "",
+            "tts_prompt_wav_path": self.tts_prompt_wav_path or "",
             "extra_llms": list(self.extra_llms),
             "auto_route": dict(self.auto_route or {}),
             "working_dir": self.working_dir or str(self._effective_working_dir()),
@@ -2665,7 +2767,14 @@ class Agent:
             #   class of capability, surfaced in the detail dialog.
             "granted_skills": list(self.granted_skills),
             "bound_prompt_packs": self.bound_prompt_packs,
+            "unbound_role_packs": list(self.unbound_role_packs),
             "active_skill_count": len(self._active_skill_ids),
+            # --- Phase 0: Expert specialty (5 optional fields) ---
+            "expert_specialty": self.expert_specialty,
+            "expert_template_version": self.expert_template_version,
+            "expert_level": self.expert_level,
+            "expert_lora_version": self.expert_lora_version,
+            "expert_initialized_at": self.expert_initialized_at,
             # --- Preprocessor (small local LLM) ---
             "preprocessor_model": self.preprocessor_model,
             "preprocessor_modes": list(self.preprocessor_modes or []),
@@ -3288,6 +3397,108 @@ class Agent:
         trace.clear()
         return out
 
+    # ── Self-evolution Phase 1 (2026-05-08): lookup outcome trace ──
+    # When ``knowledge_lookup`` returns wiki hits, the tool records the
+    # hit refs here. When the agent later closes a step via
+    # ``finalize_step``, the closing tool flushes this trace and calls
+    # ``WikiStore.update_outcome(success=True)`` for each hit so the
+    # success_count / fail_count fields actually accumulate. Zero token
+    # cost — pure data layer.
+    #
+    # Storage shape: list of dicts
+    #   {
+    #     "scope": "global",
+    #     "kind":  "experience",
+    #     "slug":  "pci-dss-40-...",
+    #     "ts":    1778...,
+    #     "query": "the search query that produced the hit",
+    #   }
+    # In-memory only; capped at LOOKUP_TRACE_MAX (50). Not persisted
+    # across server restarts on purpose — a hit that wasn't followed
+    # by a finalize within the same process lifetime shouldn't credit
+    # the page.
+    _LOOKUP_TRACE_MAX = 50
+
+    def record_lookup_hit(
+        self, *, scope: str, kind: str, slug: str, query: str = "",
+        domains: list[str] | None = None,
+    ) -> None:
+        """Append one wiki hit to this agent's lookup-outcome trace.
+
+        Called by ``_tool_knowledge_lookup`` once per hit returned to
+        the LLM. Dedupes within the trace so the same (scope, kind,
+        slug) doesn't accumulate phantom credits if the agent calls
+        knowledge_lookup multiple times in one step.
+
+        2026-05-08: ``domains`` field captures the wiki page's
+        domain tags so finalize_step can attribute success_count
+        AND expertise_scores increments to the right domain bucket.
+        """
+        if not (scope and kind and slug):
+            return
+        trace = getattr(self, "_lookup_trace", None)
+        if trace is None:
+            trace = []
+            try:
+                self._lookup_trace = trace
+            except Exception:
+                return
+        ref = (str(scope), str(kind), str(slug))
+        # Dedupe: drop if same triple already in trace.
+        for entry in trace:
+            if (entry.get("scope"), entry.get("kind"),
+                entry.get("slug")) == ref:
+                return
+        trace.append({
+            "scope": ref[0], "kind": ref[1], "slug": ref[2],
+            "ts": time.time(), "query": query[:120],
+            "domains": list(domains or []),
+        })
+        # Cap. Drop oldest first.
+        if len(trace) > self._LOOKUP_TRACE_MAX:
+            del trace[: len(trace) - self._LOOKUP_TRACE_MAX]
+
+    # ── Self-evolution Phase 3 (2026-05-08) ──
+    def credit_expertise(
+        self, domains: list[str], *, success: bool = True,
+    ) -> None:
+        """Increment ``expertise_scores`` for each domain.
+
+        Success: +1.0 per domain.
+        Fail:    -0.5 per domain (signal of misapplication).
+        Score floors at 0.0 to keep semantics monotonic-positive.
+
+        Called by finalize_step (success) / plan_update fail_step (fail)
+        after consuming the lookup_trace. Cheap dict update.
+        """
+        if not domains:
+            return
+        scores = self.expertise_scores
+        if not isinstance(scores, dict):
+            scores = {}
+            self.expertise_scores = scores
+        delta = 1.0 if success else -0.5
+        for d in domains:
+            d_norm = str(d or "").strip().lower()
+            if not d_norm:
+                continue
+            new_val = scores.get(d_norm, 0.0) + delta
+            scores[d_norm] = max(0.0, new_val)
+
+    def consume_lookup_trace(self) -> list[dict]:
+        """Return-and-clear the agent's wiki lookup hits.
+
+        Called by ``_tool_finalize_step`` (success path) and
+        ``plan_update`` action='fail_step' so each closing event can
+        write outcomes back to the wiki layer in one shot. Idempotent
+        — second call within the same step returns []."""
+        trace = getattr(self, "_lookup_trace", None)
+        if not trace:
+            return []
+        out = list(trace)
+        trace.clear()
+        return out
+
     # ── Single source of truth for "what mode is this agent in?" ──
     #
     # 2026-05-08: User-reported bug — closing a project didn't free
@@ -3344,6 +3555,44 @@ class Agent:
         if (getattr(self, "source_meeting_id", "") or "").strip():
             return "meeting"
         return "solo"
+
+    # ── Ephemeral system_reminder queue ────────────────────────────
+    # Queued reminders are appended to the LAST user message of the
+    # next LLM call (via _apply_ephemeral_reminders), wrapped in
+    # <system-reminder>...</system-reminder>, then cleared. They never
+    # enter self.messages so the cached history prefix stays stable
+    # across turns. Use this for one-shot nudges like read-valve warns,
+    # tool-budget reminders, sandbox notices — anything the LLM should
+    # see ONCE without permanently shifting the prompt fingerprint.
+    def queue_reminder(self, text: str, *, dedupe: bool = True) -> None:
+        """Queue a one-shot system_reminder. Empty / whitespace-only
+        text is ignored. ``dedupe=True`` (default) drops a reminder
+        whose body matches a queued one — prevents the same warning
+        firing 4 times in one turn from inflating the user message.
+        """
+        if not text or not text.strip():
+            return
+        text = text.strip()
+        q = getattr(self, "_pending_reminders", None)
+        if q is None:
+            q = []
+            try:
+                self._pending_reminders = q
+            except Exception:
+                return
+        if dedupe and text in q:
+            return
+        q.append(text)
+
+    def consume_reminders(self) -> list[str]:
+        """Return all queued reminders and clear the queue. Called
+        once per LLM call by ``_apply_ephemeral_reminders``."""
+        q = getattr(self, "_pending_reminders", None)
+        if not q:
+            return []
+        out = list(q)
+        q.clear()
+        return out
 
     def _log(self, kind: str, data: dict):
         # Skip event logging during scheduled task execution — scheduled
@@ -5217,6 +5466,64 @@ class Agent:
                     _try_add("\n\n".join(parts_idx), "wiki_index")
             except Exception as _we:
                 logger.debug("wiki index injection skipped: %s", _we)
+
+        # 7.6. Domain-expertise lazy injection (Phase 4 of self-evolution).
+        # When the user's current_query contains keywords that match a
+        # domain AND this agent has accumulated expertise_scores in that
+        # domain, fetch the top wiki entry for that domain and inject as
+        # a compact "[Your domain expertise: X]" block. ~150-300 tokens
+        # per fire; zero tokens when current_query has no domain match
+        # (most non-task chitchat). Builds on top of:
+        #   - Phase 1 success_count writeback (so top-N is success-rate
+        #     ordered)
+        #   - Phase 3 expertise_scores accumulation (so we know WHICH
+        #     domain to surface for THIS agent)
+        #   - Domain Step 4 wiki search match_domains boost
+        if total_chars < max_dynamic_chars and current_query:
+            try:
+                from .tools_split.knowledge import _infer_domains_from_query
+                from .knowledge import get_wiki_store
+                _q_domains = _infer_domains_from_query(current_query)
+                if _q_domains:
+                    # Sort domains by this agent's expertise score
+                    # (DESC) so the most-confident domain surfaces.
+                    _scores = self.expertise_scores or {}
+                    _q_domains_sorted = sorted(
+                        _q_domains,
+                        key=lambda d: -_scores.get(d.lower(), 0.0),
+                    )
+                    _store_de = get_wiki_store()
+                    _injected = []
+                    # Cap at 2 expert blocks per turn to bound tokens.
+                    for _d in _q_domains_sorted[:2]:
+                        _hits = _store_de.search(
+                            current_query, limit=1,
+                            match_domains=[_d],
+                        )
+                        if not _hits:
+                            continue
+                        _p = _hits[0]
+                        _score = _scores.get(_d.lower(), 0.0)
+                        _excerpt = (_p.body or "")[:280].replace("\n", " ")
+                        if len(_p.body or "") > 280:
+                            _excerpt += "…"
+                        _injected.append(
+                            f"[Your domain expertise: {_d} "
+                            f"(score={_score:.0f}, ✓{_p.success_count}/"
+                            f"✗{_p.fail_count})]\n"
+                            f"{_p.title}\n{_excerpt}"
+                        )
+                    if _injected:
+                        _try_add(
+                            "<domain_expertise>\n"
+                            + "\n\n".join(_injected)
+                            + "\n</domain_expertise>",
+                            "domain_expertise",
+                        )
+            except Exception as _de:
+                logger.debug(
+                    "domain-expertise injection skipped: %s", _de,
+                )
 
         # 7.6. Domain-expertise lazy injection (Phase 4 of self-evolution).
         # When the user's current_query contains keywords that match a
@@ -8863,6 +9170,49 @@ Write only the summary body. Do not include any preamble or prefix."""
             # Sandbox without admin readonly is still functional —
             # this is purely additive. Never raise.
             pass
+
+        # ── Admin-maintained readonly + read-write paths (system_settings) ──
+        # 2026-05-08: User asked for a Settings-driven way to grant
+        # agents read access to specific paths outside their jail
+        # (e.g. obsidian skill needs ~/Library/Application Support/
+        # obsidian/obsidian.json). Plus read+write to vault directories
+        # so the agent can actually save notes there.
+        # Maintained by admin via Portal → 系统配置 → Sandbox cards.
+        # Each entry expands ~ and $VAR. Failures (missing settings
+        # store, bad path) silently skip — never break agent boot.
+        try:
+            from .system_settings import get_store as _get_ss_store
+            _ss = _get_ss_store()
+            if _ss is not None:
+                _admin_ro = _ss.get("sandbox.readonly_dirs", []) or []
+                if isinstance(_admin_ro, list):
+                    for _p in _admin_ro:
+                        try:
+                            _expanded = _os.path.expandvars(
+                                _os.path.expanduser(str(_p).strip())
+                            )
+                            if _expanded and _os.path.exists(_expanded):
+                                if _expanded not in readonly_dirs:
+                                    readonly_dirs.append(_expanded)
+                        except (TypeError, ValueError):
+                            continue
+                # Read+write paths
+                _admin_rw = _ss.get("sandbox.allowed_dirs", []) or []
+                if isinstance(_admin_rw, list):
+                    for _p in _admin_rw:
+                        try:
+                            _expanded = _os.path.expandvars(
+                                _os.path.expanduser(str(_p).strip())
+                            )
+                            if _expanded and _os.path.exists(_expanded):
+                                if _expanded not in allowed_dirs:
+                                    allowed_dirs.append(_expanded)
+                        except (TypeError, ValueError):
+                            continue
+        except Exception:
+            # Sandbox without admin readonly is still functional —
+            # this is purely additive. Never raise.
+            pass
         # Member-project shared workspaces — full read+write access for
         # every project this agent is a member of. The shared workspace
         # is the project's collaboration area; membership IS the access
@@ -8919,6 +9269,26 @@ Write only the summary body. Do not include any preamble or prefix."""
                     own message history; turns from one context never
                     leak into another's LLM payload.
         """
+        # ── Phase 0 (2026-05-10): Expert pipeline routing ────────────────
+        # When agent.expert_specialty is set AND module enabled AND a
+        # pipeline.answer() exists, route through the expert pipeline.
+        # All three conditions must hold; any miss falls through to the
+        # current普通-agent path. V4 vertical fills in the pipeline.
+        # See docs/superpowers/specs/2026-05-10-agent-specialty-cultivation-design.md §5.2
+        if self.expert_specialty:
+            try:
+                from app.domain_expert._config import is_disabled as _exp_is_disabled
+                if not _exp_is_disabled():
+                    from app.domain_expert.inference import pipeline as _expert_pipeline
+                    if hasattr(_expert_pipeline, "answer"):
+                        return _expert_pipeline.answer(
+                            self, user_message,
+                            on_event=on_event, abort_check=abort_check,
+                            source=source, context_id=context_id,
+                        )
+            except ImportError:
+                # Module not built yet — Phase 0 / inference package empty.
+                pass
         # ── Token logging context: 让本次 chat 内所有 LLM 调用 ──
         # ── 都能归属到这个 agent/project/meeting，token 统计才能落到 ──
         # ── agent.stats / project.stats / meeting.stats 。project_id ──
@@ -10295,6 +10665,24 @@ Write only the summary body. Do not include any preamble or prefix."""
                             })
                         except Exception:
                             pass
+                        # Mirror to ephemeral reminder queue. The
+                        # next-iteration system message (line ~9478)
+                        # already explains the situation, but the
+                        # reminder queue surfaces a one-line nudge at
+                        # the user-message edge — useful when the LLM
+                        # is rushing through tools and may skip past
+                        # the system message in the same turn.
+                        if hasattr(self, "queue_reminder"):
+                            try:
+                                self.queue_reminder(
+                                    f"Tool budget reached "
+                                    f"({_response_tool_count}/{_per_resp_cap} "
+                                    f"this turn). Stop calling tools — "
+                                    f"summarize what you have, then either "
+                                    f"finalize the step or hand back to the user."
+                                )
+                            except Exception:
+                                pass
                         # Mirror to ephemeral reminder queue. The
                         # next-iteration system message (line ~9478)
                         # already explains the situation, but the

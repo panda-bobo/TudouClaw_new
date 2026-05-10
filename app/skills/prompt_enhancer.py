@@ -202,9 +202,22 @@ def parse_skill_md(path: str) -> PromptPack | None:
         except Exception:
             pass
 
+    # 2026-05-10: previously fell back to a random UUID if the sidecar
+    # couldn't be written (read-only mount, perms, etc.) — that produced
+    # a NEW skill_id every scan, which the store couldn't dedup against,
+    # so the same SKILL.md got registered hundreds of times. Fix: derive
+    # a deterministic skill_id from the absolute path (md5 of path),
+    # so the same file always yields the same skill_id even without a
+    # writable sidecar. Sidecar is still preferred (carries any prior
+    # statistics' lineage), but fallback is now path-stable.
     if not record.skill_id:
-        safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", record.name.lower())[:30]
-        record.skill_id = f"{safe_name}__imp_{uuid.uuid4().hex[:8]}"
+        import hashlib as _hashlib
+        safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", record.name.lower())[:24]
+        path_hash = _hashlib.md5(
+            os.path.abspath(path).encode("utf-8")).hexdigest()[:8]
+        record.skill_id = f"{safe_name}__p_{path_hash}"
+        # Try writing sidecar so future-tooling sees the same ID
+        # (best-effort; fallback ID is already deterministic).
         try:
             os.makedirs(os.path.dirname(skill_id_path), exist_ok=True)
             with open(skill_id_path, "w") as f:
@@ -353,35 +366,170 @@ class PromptPackStore:
         """
         Scan all registered directories for SKILL.md files.
         Returns number of new skills discovered.
+
+        2026-05-10: rewrote to use **path** as the primary dedup key
+        instead of skill_id. Previously, when parse_skill_md fell back
+        to a random UUID (sidecar write failed), the same file got a
+        new skill_id every scan → the store kept inserting infinite
+        duplicates. Now we maintain a path → skill_id index and only
+        insert when the path is truly new.
         """
+        # Build a path → skill_id index from existing records so we can
+        # detect "this file is already registered" regardless of which
+        # skill_id was assigned in the past.
+        path_index: dict[str, str] = {}
+        for sid, rec in self._skills.items():
+            if rec.path:
+                # Normalize for comparison (handles symlinks / ./)
+                key = os.path.abspath(rec.path)
+                # First wins; later orphans are best left for cleanup_stale.
+                path_index.setdefault(key, sid)
+
         new_count = 0
         for scan_dir in self._scan_dirs:
             if not os.path.isdir(scan_dir):
                 continue
-            # Walk directory tree looking for SKILL.md files
             for root, dirs, files in os.walk(scan_dir):
                 for fname in files:
-                    if fname.upper() == "SKILL.MD":
-                        fpath = os.path.join(root, fname)
-                        record = parse_skill_md(fpath)
-                        if record and record.skill_id:
-                            if record.skill_id not in self._skills:
-                                self._skills[record.skill_id] = record
-                                new_count += 1
-                            else:
-                                # Update content if file changed
-                                existing = self._skills[record.skill_id]
-                                if record.content != existing.content:
-                                    existing.content = record.content
-                                    existing.name = record.name
-                                    existing.description = record.description
-                                    existing.tags = record.tags
-                                    existing.last_updated = time.time()
+                    if fname.upper() != "SKILL.MD":
+                        continue
+                    fpath = os.path.abspath(os.path.join(root, fname))
+                    record = parse_skill_md(fpath)
+                    if not record or not record.skill_id:
+                        continue
+                    # ── Path-based dedup (primary) ──
+                    existing_sid = path_index.get(fpath)
+                    if existing_sid:
+                        existing = self._skills.get(existing_sid)
+                        if existing and record.content != existing.content:
+                            existing.content = record.content
+                            existing.name = record.name
+                            existing.description = record.description
+                            existing.tags = record.tags
+                            existing.last_updated = time.time()
+                        continue
+                    # ── Skill-id collision (secondary) ──
+                    # If a record with this skill_id already exists but
+                    # for a different path, keep the existing one and
+                    # synthesize a unique id for the new file.
+                    if record.skill_id in self._skills:
+                        import hashlib as _h
+                        suffix = _h.md5(fpath.encode("utf-8")).hexdigest()[:6]
+                        record.skill_id = f"{record.skill_id}__{suffix}"
+                    self._skills[record.skill_id] = record
+                    path_index[fpath] = record.skill_id
+                    new_count += 1
 
         if new_count > 0:
             logger.info("PromptPackStore: scanned %d dirs, discovered %d new skills (total: %d)",
                         len(self._scan_dirs), new_count, len(self._skills))
         return new_count
+
+    def cleanup_stale_and_dedupe(self) -> dict:
+        """One-shot maintenance pass:
+          1. Remove records whose `path` no longer exists on disk.
+          2. Collapse multiple records pointing to the same absolute
+             path down to one (keep the one with the most stats).
+          3. Collapse multiple records that point to BYTE-IDENTICAL
+             SKILL.md files at different paths down to one. Common
+             cause: same skill scanned from `data/skills_installed/`,
+             `data/skill_catalog/imported/`, AND a git-worktree mirror.
+
+        Returns {"removed_dead": N, "merged_path_dups": M,
+                 "merged_content_dups": K, "total_after": T}.
+
+        Safe to call any time. Called automatically at registry init,
+        and exposed via /api/portal/prompt-packs action=cleanup.
+        """
+        import hashlib as _h
+        removed_dead = 0
+        merged_path_dups = 0
+        merged_content_dups = 0
+
+        # Pass 1: drop records with missing files
+        for sid in list(self._skills.keys()):
+            rec = self._skills[sid]
+            if rec.path and not os.path.exists(rec.path):
+                del self._skills[sid]
+                removed_dead += 1
+
+        # Pass 2: dedup by absolute path
+        by_path: dict[str, list[str]] = {}
+        for sid, rec in self._skills.items():
+            if rec.path:
+                by_path.setdefault(os.path.abspath(rec.path), []).append(sid)
+        for path, sids in by_path.items():
+            if len(sids) <= 1:
+                continue
+            keep = max(sids, key=lambda s: (
+                self._skills[s].total_selections,
+                self._skills[s].total_applied,
+                -self._skills[s].first_seen,
+            ))
+            for s in sids:
+                if s != keep:
+                    del self._skills[s]
+                    merged_path_dups += 1
+
+        # Pass 3: dedup by content hash. Tudou's data dir, the project's
+        # skills_installed/, and any git worktrees often hold byte-
+        # identical mirrors of the same SKILL.md. We treat (name +
+        # content-md5) as the identity — same name AND same file body =
+        # same skill regardless of which directory it was scanned from.
+        # We explicitly DO NOT collapse skills that share a name but
+        # differ in body (e.g. two real "code-review" packs from
+        # different sources).
+        #
+        # IMPORTANT: PromptPack.to_dict() doesn't persist `content`
+        # (would bloat the JSON), so freshly loaded records have empty
+        # content. Read the file on demand here. Cheap — usually <100
+        # files at this point.
+        def _content_md5(rec):
+            if rec.content:
+                try:
+                    return _h.md5(rec.content.encode("utf-8")).hexdigest()
+                except Exception:
+                    return None
+            if rec.path and os.path.exists(rec.path):
+                try:
+                    with open(rec.path, "rb") as f:
+                        return _h.md5(f.read()).hexdigest()
+                except Exception:
+                    return None
+            return None
+
+        by_content: dict[tuple[str, str], list[str]] = {}
+        for sid, rec in self._skills.items():
+            if not rec.path:
+                continue
+            cm = _content_md5(rec)
+            if not cm:
+                continue
+            key = (rec.name, cm)
+            by_content.setdefault(key, []).append(sid)
+        for (name, chash), sids in by_content.items():
+            if len(sids) <= 1:
+                continue
+            keep = max(sids, key=lambda s: (
+                self._skills[s].total_selections,
+                self._skills[s].total_applied,
+                # Prefer paths under the active data_dir over worktree
+                # mirrors so the persisted record points at a stable
+                # location.
+                0 if "/.claude/worktrees/" in self._skills[s].path else 1,
+                -self._skills[s].first_seen,
+            ))
+            for s in sids:
+                if s != keep:
+                    del self._skills[s]
+                    merged_content_dups += 1
+
+        return {
+            "removed_dead": removed_dead,
+            "merged_path_dups": merged_path_dups,
+            "merged_content_dups": merged_content_dups,
+            "total_after": len(self._skills),
+        }
 
     def get(self, skill_id: str) -> PromptPack | None:
         return self._skills.get(skill_id)
@@ -744,20 +892,58 @@ def init_prompt_pack_registry(data_dir: str = "", extra_scan_dirs: list[str] | N
 
     registry = PromptPackRegistry(store=store)
 
+    # ── One-shot cleanup BEFORE rescan ──
+    # Drops records whose underlying SKILL.md was deleted, and collapses
+    # any duplicate registrations (same path → same record). Cheap; runs
+    # in tens of ms even on large stores. Only persists if it actually
+    # changed something.
+    cleanup_report = store.cleanup_stale_and_dedupe()
+    if (cleanup_report["removed_dead"]
+        or cleanup_report.get("merged_path_dups", 0)
+        or cleanup_report.get("merged_content_dups", 0)):
+        logger.info(
+            "Skill registry cleanup: dropped %d dead, merged %d path-dups, "
+            "%d content-dups, %d remain",
+            cleanup_report["removed_dead"],
+            cleanup_report.get("merged_path_dups", 0),
+            cleanup_report.get("merged_content_dups", 0),
+            cleanup_report["total_after"],
+        )
+
+    persist_needed_pre = (
+        cleanup_report["removed_dead"] > 0
+        or cleanup_report.get("merged_path_dups", 0) > 0
+        or cleanup_report.get("merged_content_dups", 0) > 0
+    )
+
     # Auto-discover
     new_count = registry.discover()
+    # Run cleanup AGAIN — discover() walks scan dirs and registers any
+    # SKILL.md it finds (with path-based dedup). But the same content
+    # in different directories (e.g. ./data/skills_installed/foo and
+    # ./data/skill_catalog/imported/foo) yields different paths, so
+    # they slip through. Post-scan cleanup catches the content dups.
+    if new_count > 0:
+        post_cleanup = store.cleanup_stale_and_dedupe()
+        post_dups = (post_cleanup.get("merged_path_dups", 0)
+                     + post_cleanup.get("merged_content_dups", 0))
+        if post_dups:
+            logger.info(
+                "Post-scan cleanup: merged %d additional dups, %d remain",
+                post_dups, post_cleanup["total_after"],
+            )
+    persist_needed = new_count > 0 or persist_needed_pre
     if new_count > 0:
         logger.info("Discovered %d new skills from %d directories",
                      new_count, len(store._scan_dirs))
-        # Persist
-        if persist_path:
-            try:
-                import json
-                os.makedirs(os.path.dirname(persist_path), exist_ok=True)
-                with open(persist_path, "w") as f:
-                    json.dump(store.to_dict(), f, ensure_ascii=False, indent=2)
-            except Exception:
-                pass
+    if persist_needed and persist_path:
+        try:
+            import json
+            os.makedirs(os.path.dirname(persist_path), exist_ok=True)
+            with open(persist_path, "w") as f:
+                json.dump(store.to_dict(), f, ensure_ascii=False, indent=2)
+        except Exception as _pe:
+            logger.warning("skill_registry persist failed: %s", _pe)
 
     set_prompt_pack_registry(registry)
     logger.info("Skill registry initialized: %d skills, %d scan dirs",

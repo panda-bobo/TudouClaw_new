@@ -363,6 +363,45 @@ async def lifespan(app: FastAPI):
     except Exception as _v2e:
         logger.warning("V2 crash recovery failed: %s", _v2e)
 
+    # ── Pre-warm local TTS (VoxCPM) ──
+    # 2026-05-09: voice-mode users complained "agent reply slow" — first
+    # synthesize() call cost ~10-20s loading the 5GB model. We kick off
+    # a synthesize() in a background task with a 1-character throwaway
+    # so the model is loaded by the time the user speaks. No-ops if the
+    # active TTS provider isn't VoxCPM (env var TUDOU_PREWARM_VOXCPM=0
+    # to disable entirely for headless / CI runs).
+    try:
+        if os.environ.get("TUDOU_PREWARM_VOXCPM", "1") != "0":
+            import asyncio as _aio
+            async def _prewarm_voxcpm():
+                try:
+                    # Run sync model load in default executor — don't
+                    # block the event loop while torch loads weights.
+                    loop = _aio.get_event_loop()
+                    def _do_load():
+                        try:
+                            from ..tts_providers import (
+                                TTSProvider, _voxcpm_tts,
+                            )
+                            p = TTSProvider(
+                                id="__prewarm__",
+                                name="prewarm",
+                                kind="voxcpm",
+                                model="openbmb/VoxCPM2",
+                            )
+                            _voxcpm_tts(p, ".", voice="",
+                                        lang="zh-CN", speed=1.0)
+                        except Exception as e:
+                            logger.info(
+                                "voxcpm prewarm skipped: %s", e)
+                    await loop.run_in_executor(None, _do_load)
+                    logger.info("voxcpm prewarm done")
+                except Exception as e:
+                    logger.info("voxcpm prewarm error: %s", e)
+            _aio.create_task(_prewarm_voxcpm())
+    except Exception as _pe:
+        logger.warning("voxcpm prewarm scheduling failed: %s", _pe)
+
     _print_banner(hub, app.state.raw_admin_token)
     yield
     logger.info("TudouClaw FastAPI shutting down ...")
@@ -463,6 +502,8 @@ def create_app() -> FastAPI:
         prompt_amplifier as prompt_amplifier_router,
         rules as rules_router,
         wiki as wiki_router,
+        tts as tts_router,
+        stt as stt_router,
     )
 
     # ── API routers ──────────────────────────────────────────────────
@@ -502,6 +543,19 @@ def create_app() -> FastAPI:
     app.include_router(prompt_amplifier_router.router)
     app.include_router(rules_router.router)
     app.include_router(wiki_router.router)
+    app.include_router(tts_router.router)
+    app.include_router(stt_router.router)
+
+    # ── Phase 0 (2026-05-10): Agent Specialty Cultivation router ───────
+    # Optional module — gated by TUDOU_EXPERT_DISABLED env flag.
+    # All endpoints currently return 501 (verticals V1-V5 fill them).
+    # Import is wrapped to keep main app boot resilient if module missing.
+    try:
+        from ..domain_expert.api.routers import router as expert_router
+        app.include_router(expert_router)
+        logger.info("expert module router registered (12 endpoints)")
+    except Exception as _ee:
+        logger.info("expert module router skipped: %s", _ee)
 
     # ── Static files (JS/CSS used by portal templates) ───────────────
     server_static = os.path.join(os.path.dirname(__file__), "..", "server", "static")
