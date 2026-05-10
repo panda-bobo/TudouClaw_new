@@ -24,8 +24,9 @@ def test_router_prefix_and_count():
     #   + PUT  /specialty-templates/{id}     (full CRUD: edit existing template)
     #   + GET  /agent/{id}/expert/routing    (V5: read routing config + stats)
     #   + PUT  /agent/{id}/expert/routing    (V5: update routing config)
+    #   + DELETE /agent/{id}/expert/corpus/{source_id} (remove a source)
     # If you add an endpoint, bump this number AND add to expected_paths below.
-    assert len(router.routes) == 19
+    assert len(router.routes) == 20
 
 
 def test_router_paths_match_spec():
@@ -55,6 +56,8 @@ def test_router_paths_match_spec():
         # V5: routing config (per-agent confidence threshold / mode)
         ("GET", "/api/portal/agent/{agent_id}/expert/routing"),
         ("PUT", "/api/portal/agent/{agent_id}/expert/routing"),
+        # Corpus source removal (full CRUD on manifest)
+        ("DELETE", "/api/portal/agent/{agent_id}/expert/corpus/{source_id}"),
     }
     actual = set()
     for r in router.routes:

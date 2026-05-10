@@ -884,6 +884,57 @@ async def corpus_ingest(
     }
 
 
+@router.delete("/agent/{agent_id}/expert/corpus/{source_id}",
+               summary="Remove a corpus source")
+async def corpus_delete(
+    agent_id: str,
+    source_id: str,
+    purge_chunks: bool = True,
+    user: CurrentUser = Depends(get_current_user),
+    hub=Depends(get_hub),
+):
+    """Remove a source from the agent's corpus manifest. By default also
+    deletes its chunks dir on disk (purge_chunks=true).
+
+    Returns 200 with the updated manifest. Returns 404 if source not in
+    manifest. (404 if agent doesn't exist either.)
+    """
+    _check_enabled()
+    agent = hub.agents.get(agent_id) if hasattr(hub, "agents") else None
+    if agent is None:
+        raise HTTPException(404, f"agent {agent_id!r} not found")
+
+    from ..corpus.manifest import CorpusManifest
+    manifest = CorpusManifest.load(agent_id)
+    entry = manifest.get_source(source_id)
+    if entry is None:
+        raise HTTPException(404, f"source {source_id!r} not in manifest")
+    removed = manifest.remove_source(source_id)
+    manifest.save()
+
+    purged = False
+    if purge_chunks:
+        try:
+            from .._config import expert_dir_for as _edir
+            import shutil as _shutil
+            chunks_dir = os.path.join(_edir(agent_id), "corpus", source_id)
+            if os.path.isdir(chunks_dir):
+                _shutil.rmtree(chunks_dir)
+                purged = True
+        except Exception as e:
+            logger.warning("purge chunks for %s failed: %s", source_id, e)
+
+    logger.info("corpus source removed: agent=%s source=%s purged=%s",
+                agent_id, source_id, purged)
+    return {
+        "ok": True,
+        "agent_id": agent_id,
+        "removed_source": source_id,
+        "purged_chunks": purged,
+        "manifest": manifest.to_dict(),
+    }
+
+
 @router.post("/agent/{agent_id}/expert/corpus/reindex", summary="Rebuild vector index")
 async def corpus_reindex(
     agent_id: str,

@@ -6235,6 +6235,16 @@ function _knowledgeRefresh(agentId, templateId) {
             +   esc(s.source_id) + '</code>'
             + '<span style="color:var(--text3)">' + esc(s.version || '—') + '</span>'
             + status
+            // Delete button — confirms then DELETE /corpus/{source_id}
+            + '<button onclick="_knowledgeDeleteSource(\'' + esc(agentId) + '\',\''
+            +     esc(templateId) + '\',\'' + esc(s.source_id) + '\')" '
+            +    'title="移除此 source(同时删除 chunks)" '
+            +    'style="background:none;border:none;color:var(--error);cursor:pointer;'
+            +    'padding:2px 6px;border-radius:4px;display:flex;align-items:center" '
+            +    'onmouseover="this.style.background=\'rgba(239,68,68,0.10)\'" '
+            +    'onmouseout="this.style.background=\'none\'">'
+            + '<span class="material-symbols-outlined" style="font-size:14px">delete</span>'
+            + '</button>'
             + '</div>';
         });
       }
@@ -6385,6 +6395,23 @@ function _knowledgeUpload(agentId, templateId) {
   .catch(function(e){ alert('上传失败: ' + (e.message || e)); });
 }
 window._knowledgeUpload = _knowledgeUpload;
+
+// V3 step 2: remove a corpus source (confirms, calls DELETE, refreshes
+// drill panel + 段位条 chip — chunk_count drops so level might regress).
+function _knowledgeDeleteSource(agentId, templateId, sourceId) {
+  if (!confirm('删除 source "' + sourceId + '"?\n\n会同时清掉它在磁盘上的 chunks 文件夹,不可恢复。')) {
+    return;
+  }
+  api('DELETE', '/api/portal/agent/' + agentId + '/expert/corpus/' + encodeURIComponent(sourceId))
+    .then(function(r){
+      var msg = '已删除: ' + sourceId + (r.purged_chunks ? ' (含 chunks)' : '');
+      if (typeof _toast === 'function') _toast(msg, 'success');
+      _knowledgeRefresh(agentId, templateId);
+      try { _cultLevelChipRefresh(agentId); } catch(_) {}
+    })
+    .catch(function(e){ alert('删除失败: ' + (e.message || e)); });
+}
+window._knowledgeDeleteSource = _knowledgeDeleteSource;
 
 function _knowledgeAddManual(agentId, templateId) {
   var sid = (document.getElementById('km-add-sid') || {}).value || '';
