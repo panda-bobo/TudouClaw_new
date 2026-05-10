@@ -6371,6 +6371,8 @@ function _cultivationConfirmInit(agentId, templateId) {
   .then(function(r){
     closeModal();
     if (typeof _toast === 'function') _toast('养成已启动: ' + (r.expert_specialty || templateId), 'success');
+    // Refresh the inline 段位条 chip in the agent header
+    try { _cultLevelChipRefresh(agentId); } catch(_) {}
     // Reopen the cultivation overview so user sees the new state
     setTimeout(function(){ openCultivationModal(agentId); }, 400);
   })
@@ -6792,6 +6794,71 @@ function openCultivationModal(agentId) {
 }
 window.openCultivationModal = openCultivationModal;
 
+// Header 段位条 chip — paints "🌱 见习 25%" inline next to the agent name
+// in the tech-style header. Hidden when agent is uncultivated. Reads from
+// /expert/stats so it picks up live trace_count + lora state. The pill is
+// a button: click opens openCultivationModal directly.
+function _cultLevelChipRefresh(agentId) {
+  api('GET', '/api/portal/agent/' + agentId + '/expert/stats')
+    .then(function(s){
+      var el = document.getElementById('cult-level-chip-' + agentId);
+      if (!el) return;
+      if (!s || !s.cultivated) {
+        el.style.display = 'none';
+        el.innerHTML = '';
+        return;
+      }
+      // Compute 段位 + percentage from stats fields. Same logic as
+      // _renderCultivationWorkflowPage so the header chip and the modal
+      // never disagree.
+      var hasManifest = s.manifest && (s.manifest.sources || []).length > 0;
+      var corpusIndexed = hasManifest && (s.manifest.sources || [])
+        .some(function(src){ return (src.chunk_count || 0) > 0; });
+      var hasLora = !!s.active_lora;
+      var traceTarget = 1000;  // matches default in panel; V4 step 2
+                                // surfaces template's raft_data_target
+      var traceReady = (s.trace_count || 0) >= traceTarget;
+      var levelKey = !s.specialty       ? 'pre'
+                   : !corpusIndexed     ? 'novice'
+                   : !hasLora           ? 'journeyman'
+                   : !traceReady        ? 'expert'
+                   : 'master';
+      var levelMap = {
+        pre:        { label: '🌱',  name: '未启动', pct: 0,   color: 'var(--text3)' },
+        novice:     { label: '🌱',  name: '见习',   pct: 25,  color: 'var(--cyber-blue,#4afcff)' },
+        journeyman: { label: '🌿',  name: '熟手',   pct: 50,  color: 'var(--cyber-blue,#4afcff)' },
+        expert:     { label: '🎯',  name: '专家',   pct: 75,  color: 'var(--cyber-magenta,#ff7adb)' },
+        master:     { label: '🏆',  name: '大师',   pct: 100, color: 'var(--cyber-lime,#5cf08a)' },
+      };
+      var lvl = levelMap[levelKey] || levelMap.pre;
+      // Inline pill with mini progress bar
+      el.style.display = 'inline-flex';
+      el.style.alignItems = 'center';
+      el.style.gap = '6px';
+      el.style.padding = '2px 8px';
+      el.style.background = 'rgba(255,255,255,0.04)';
+      el.style.border = '1px solid ' + lvl.color;
+      el.style.borderRadius = '10px';
+      el.style.cursor = 'pointer';
+      el.style.fontSize = '10px';
+      el.style.fontFamily = 'var(--font-mono,monospace)';
+      el.style.transition = 'all 0.15s';
+      el.title = '点击打开养成 pipeline';
+      el.onclick = function(){ openCultivationModal(agentId); };
+      el.onmouseenter = function(){ el.style.background = 'rgba(255,255,255,0.08)'; };
+      el.onmouseleave = function(){ el.style.background = 'rgba(255,255,255,0.04)'; };
+      el.innerHTML = ''
+        + '<span style="font-size:11px">' + lvl.label + '</span>'
+        + '<span style="color:' + lvl.color + ';font-weight:600">' + esc(lvl.name) + '</span>'
+        + '<span style="display:inline-block;width:32px;height:3px;background:rgba(255,255,255,0.08);border-radius:2px;overflow:hidden">'
+        +   '<span style="display:block;height:100%;width:' + lvl.pct + '%;background:' + lvl.color + '"></span>'
+        + '</span>'
+        + '<span style="color:' + lvl.color + ';font-size:9px">' + lvl.pct + '%</span>';
+    })
+    .catch(function(){ /* silent — chip stays hidden if stats fail */ });
+}
+window._cultLevelChipRefresh = _cultLevelChipRefresh;
+
 // ═══════════════════════════════════════════════════════
 // SP-0 · UNIFIED AGENT WORKSPACE                          (end)
 // ═══════════════════════════════════════════════════════
@@ -7076,6 +7143,11 @@ function renderAgentChatTech(agentId) {
             '<span class="ach-online">Online</span>' +
             '<span style="width:3px;height:3px;background:var(--outline);border-radius:50%"></span>' +
             '<span style="font-family:var(--font-mono);font-size:10px;letter-spacing:0.05em;color:var(--outline);text-transform:uppercase;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:240px" title="' + esc(ag.model || 'default') + '">' + esc(modelShort) + '</span>' +
+            // 段位条 chip — populated async by _cultLevelChipRefresh after
+            // /expert/stats fetch. Hidden until the agent is cultivated.
+            // Click → opens cultivation modal directly (= clicking the
+            // 🎓 养成 button in the action bar).
+            '<span id="cult-level-chip-' + esc(agentId) + '" style="display:none"></span>' +
           '</div>' +
         '</div>' +
       '</div>' +
@@ -7249,6 +7321,13 @@ function renderAgentChatTech(agentId) {
     loadAgentRuntimeStats(agentId);
   }, 8000);
   _reconnectActiveStream(agentId);
+  // 段位条 chip — fires once on render. _cultLevelChipRefresh hides the
+  // chip if the agent isn't cultivated, otherwise paints a clickable
+  // pill showing the current 段位 + completion %. The cultivation modal
+  // refresh path (_cultivationConfirmInit / _cultBackToOverview) also
+  // calls this so the chip updates after initialization without a page
+  // reload.
+  try { _cultLevelChipRefresh(agentId); } catch(_) {}
 }
 window.renderAgentChatTech = renderAgentChatTech;
 
