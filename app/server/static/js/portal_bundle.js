@@ -6082,47 +6082,19 @@ function _renderCultDrillPanel(agentId, t, status, modIdx) {
       pendingHtml, '');
   }
   if (modIdx === 4) {
-    var traceTarget = (t.training && t.training.raft_data_target) || 1000;
-    var traceCount = (status.profile && status.profile.trace_count) || 0;
-    return panelShell('📊 Trace — 训练数据', 'V2 capture, V3+ accumulate',
-      '<div style="display:flex;align-items:center;gap:14px">'
-      +   '<div style="font-size:32px;font-weight:700;color:var(--cyber-magenta,#ff7adb)">' + traceCount + '</div>'
-      +   '<div style="flex:1">'
-      +     '<div style="font-size:12px;color:var(--text2)">已累积 trace · 目标 ' + traceTarget + '</div>'
-      +     '<div style="height:6px;background:rgba(255,255,255,0.08);border-radius:3px;margin-top:6px;overflow:hidden">'
-      +       '<div style="height:100%;width:' + Math.min(100, (traceCount/traceTarget)*100) + '%;background:var(--cyber-magenta,#ff7adb)"></div>'
-      +     '</div>'
-      +   '</div>'
-      + '</div>'
-      + '<div style="margin-top:16px;display:grid;grid-template-columns:1fr 1fr;gap:14px;font-size:11px">'
-      +   '<div style="padding:10px;background:rgba(74,252,255,0.06);border:1px solid rgba(74,252,255,0.25);border-radius:6px">'
-      +     '<div style="color:var(--cyber-blue,#4afcff);font-weight:600">🔄 ORGANIC (日常)</div>'
-      +     '<div style="color:var(--text3);margin-top:4px">每次 agent 处理用户提问,带 feedback 的 Q/A 自动入池</div>'
-      +   '</div>'
-      +   '<div style="padding:10px;background:rgba(255,122,219,0.06);border:1px solid rgba(255,122,219,0.25);border-radius:6px">'
-      +     '<div style="color:var(--cyber-magenta,#ff7adb);font-weight:600">📥 IMPORTED (一次导入)</div>'
-      +     '<div style="color:var(--text3);margin-top:4px">用户上传外部 Q/A 数据集 (5k+ 推荐) 做底子</div>'
-      +   '</div>'
-      + '</div>'
-      + '<div style="margin-top:14px;font-size:11px;color:var(--text3)">V3 钻取后能浏览/筛选/导出,V4 训练时优先 imported,DPO 阶段用 organic 精调</div>',
+    setTimeout(function(){ _traceRefresh(agentId, t.id); }, 0);
+    return panelShell('📊 Trace — 训练数据', 'V4 step 1: list + feedback',
+      '<div id="trace-body" style="font-size:12px;color:var(--text3)">'
+      + '<span class="material-symbols-outlined" style="font-size:16px">refresh</span> Loading…'
+      + '</div>',
       ''
     );
   }
   if (modIdx === 5) {
-    var lv = status.expert_lora_version || '';
-    var traceTarget = (t.training && t.training.raft_data_target) || 1000;
-    var traceCount = (status.profile && status.profile.trace_count) || 0;
-    var canTrain = traceCount >= traceTarget;
-    return panelShell('🧠 LoRA Training ⭐ — 微调训练', 'V4 trigger + version mgmt',
-      '<div>active LoRA: <code>' + (lv ? esc(lv) : '<span style="color:var(--text3)">(none)</span>') + '</code></div>'
-      + '<div style="margin-top:6px">trace ready: ' + traceCount + ' / ' + traceTarget + (canTrain ? ' ✓' : ' ⏳') + '</div>'
-      + '<div style="margin-top:6px">trainer: <code>' + esc((t.training && t.training.kind) || 'mlx-lm') + '</code></div>'
-      + '<div style="margin-top:14px;padding:12px;background:rgba(255,255,255,0.03);border-radius:6px;font-size:11px;color:var(--text3);line-height:1.6">'
-      +   '👉 V4 vertical 上线后,这里会出现:<br>'
-      +   '  • [开始训练] 按钮 (前置: trace ≥ ' + traceTarget + ')<br>'
-      +   '  • 训练历史 + loss 曲线<br>'
-      +   '  • 切换激活 LoRA 版本 / 一键回滚<br>'
-      +   '  • <b style="color:var(--cyber-magenta,#ff7adb)">⭐ 用户主动推进段位的关键操作 (训练完 + eval 通过 → 升专家)</b>'
+    setTimeout(function(){ _loraRefresh(agentId, t.id); }, 0);
+    return panelShell('🧠 LoRA Training ⭐ — 微调训练', 'V4 step 1: stats; V4 step 2: train trigger',
+      '<div id="lora-body" style="font-size:12px;color:var(--text3)">'
+      + '<span class="material-symbols-outlined" style="font-size:16px">refresh</span> Loading…'
       + '</div>',
       ''
     );
@@ -6271,6 +6243,111 @@ function _knowledgeReindex(agentId, templateId) {
     });
 }
 window._knowledgeReindex = _knowledgeReindex;
+
+// ── V4 step 1: Trace module live actions ──────────────────────
+function _traceRefresh(agentId, templateId) {
+  Promise.all([
+    api('GET', '/api/portal/agent/' + agentId + '/expert/traces?limit=20'),
+    api('GET', '/api/portal/agent/' + agentId + '/expert/stats'),
+  ]).then(function(rs){
+    var body = document.getElementById('trace-body');
+    if (!body) return;
+    var t = rs[0]; var stats = rs[1];
+    var fb = stats.feedback_counts || {up: 0, down: 0};
+    var rows = (t.traces || []).map(function(tr){
+      var ts = tr.ts ? new Date(tr.ts * 1000).toLocaleString() : '—';
+      var q = (tr.q || '').slice(0, 80);
+      var origin = tr.origin || 'organic';
+      var fbIcon = tr.feedback === 'up' ? '👍' : (tr.feedback === 'down' ? '👎' : '·');
+      return '<div style="padding:6px 0;border-bottom:1px solid var(--overlay-5);font-size:11px;'
+        +     'display:flex;gap:8px;align-items:center">'
+        + '  <span style="color:var(--text3);font-family:var(--font-mono,monospace);min-width:120px">' + esc(ts) + '</span>'
+        + '  <span style="font-size:14px">' + fbIcon + '</span>'
+        + '  <span style="color:' + (origin === 'imported' ? 'var(--cyber-magenta,#ff7adb)' : 'var(--cyber-blue,#4afcff)') + ';font-size:10px">' + esc(origin) + '</span>'
+        + '  <span style="flex:1;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(tr.q || '') + '">' + esc(q) + '</span>'
+        + '</div>';
+    }).join('');
+    if (!rows) {
+      rows = '<div style="padding:14px;color:var(--text3);text-align:center;border:1px dashed var(--border);border-radius:6px;font-size:11px">'
+        + '尚无 trace 记录 (V4 step 2: /expert/query 上线后开始累积)</div>';
+    }
+    body.innerHTML = ''
+      + '<div style="display:flex;align-items:center;gap:14px;margin-bottom:12px">'
+      +   '<div style="font-size:24px;font-weight:700;color:var(--cyber-magenta,#ff7adb)">' + (stats.trace_count || 0) + '</div>'
+      +   '<div style="flex:1">'
+      +     '<div style="font-size:12px;color:var(--text2)">total traces · 👍 ' + fb.up + ' · 👎 ' + fb.down + '</div>'
+      +   '</div>'
+      + '</div>'
+      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;font-size:10px">'
+      +   '<div style="padding:8px;background:rgba(74,252,255,0.06);border:1px solid rgba(74,252,255,0.25);border-radius:6px">'
+      +     '<div style="color:var(--cyber-blue,#4afcff);font-weight:600">🔄 ORGANIC</div>'
+      +     '<div style="color:var(--text3);margin-top:2px">日常对话累积 (V4 step 2)</div></div>'
+      +   '<div style="padding:8px;background:rgba(255,122,219,0.06);border:1px solid rgba(255,122,219,0.25);border-radius:6px">'
+      +     '<div style="color:var(--cyber-magenta,#ff7adb);font-weight:600">📥 IMPORTED</div>'
+      +     '<div style="color:var(--text3);margin-top:2px">用户上传 Q/A 数据集</div></div>'
+      + '</div>'
+      + '<div style="font-size:10px;color:var(--text3);margin-bottom:6px">RECENT (' + (t.traces || []).length + ' / ' + (t.total || 0) + ')</div>'
+      + rows;
+  }).catch(function(e){
+    var body = document.getElementById('trace-body');
+    if (body) body.innerHTML = '<div style="color:var(--error)">trace load failed: ' + esc(e.message || e) + '</div>';
+  });
+}
+window._traceRefresh = _traceRefresh;
+
+// ── V4 step 1: LoRA module live actions ──────────────────────
+function _loraRefresh(agentId, templateId) {
+  api('GET', '/api/portal/agent/' + agentId + '/expert/stats')
+    .then(function(stats){
+      var body = document.getElementById('lora-body');
+      if (!body) return;
+      var versions = stats.lora_versions || [];
+      var active = stats.active_lora || '';
+      var traceCount = stats.trace_count || 0;
+      // Read the template's RAFT data target — comes from template, not status
+      // Fall back to 1000 if not visible
+      var traceTarget = 1000;
+      var canTrain = traceCount >= traceTarget;
+
+      var versionRows = versions.length === 0
+        ? '<div style="color:var(--text3);font-size:11px">无 LoRA 版本(尚未训练)</div>'
+        : versions.map(function(v){
+            var isActive = v === active;
+            return '<div style="display:flex;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid var(--overlay-5)">'
+              + '  <code style="font-size:11px;color:' + (isActive ? 'var(--cyber-lime,#5cf08a)' : 'var(--text2)') + '">' + esc(v) + '</code>'
+              + (isActive ? '  <span style="font-size:10px;color:var(--cyber-lime,#5cf08a)">⭐ active</span>' : '')
+              + '</div>';
+          }).join('');
+
+      body.innerHTML = ''
+        + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">'
+        +   '<div style="padding:10px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:6px">'
+        +     '<div style="font-size:10px;color:var(--text3);text-transform:uppercase">ACTIVE LORA</div>'
+        +     '<div style="font-size:14px;color:' + (active ? 'var(--cyber-lime,#5cf08a)' : 'var(--text3)') + ';font-family:var(--font-mono,monospace);margin-top:2px">'
+        +       (active ? esc(active) : '(none)') + '</div>'
+        +   '</div>'
+        +   '<div style="padding:10px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:6px">'
+        +     '<div style="font-size:10px;color:var(--text3);text-transform:uppercase">TRACE READY</div>'
+        +     '<div style="font-size:14px;color:' + (canTrain ? 'var(--cyber-lime,#5cf08a)' : 'var(--warning,#f59e0b)') + ';margin-top:2px">'
+        +       traceCount + ' / ' + traceTarget + (canTrain ? ' ✓' : ' ⏳') + '</div>'
+        +   '</div>'
+        + '</div>'
+        + '<div style="font-size:10px;color:var(--text3);text-transform:uppercase;margin-bottom:8px">VERSIONS (' + versions.length + ')</div>'
+        + versionRows
+        + '<div style="margin-top:14px;display:flex;gap:8px">'
+        +   '<button class="btn btn-sm btn-primary" disabled '
+        +         'title="V4 step 2: trigger QLoRA training" '
+        +         'style="font-size:11px;opacity:0.55;cursor:not-allowed">'
+        +     '🚀 开始训练 ' + (canTrain ? '' : '(需 ' + traceTarget + ' traces)') + ' [V4 step 2]'
+        +   '</button>'
+        + '</div>';
+    })
+    .catch(function(e){
+      var body = document.getElementById('lora-body');
+      if (body) body.innerHTML = '<div style="color:var(--error)">stats load failed: ' + esc(e.message || e) + '</div>';
+    });
+}
+window._loraRefresh = _loraRefresh;
 
 function _cultBackToOverview(agentId, templateId) {
   Promise.all([
