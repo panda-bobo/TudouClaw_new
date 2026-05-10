@@ -5703,12 +5703,15 @@ function _awsCultivationCultivatedCard(agentId, status) {
 
     + '  <div style="background:rgba(255,255,255,0.03);border:1px solid var(--border);'
     +     'border-radius:8px;padding:18px;margin-bottom:14px">'
-    + '    <div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:10px">PIPELINE STATUS</div>'
-    + '    <div style="font-size:13px;color:var(--text2);line-height:1.7">'
-    + '      🟢 Bundle 已应用 (V2 落地后会列出每个 pack/skill 的 grant 状态)<br>'
-    + '      ⏳ Corpus 索引 (V3 落地)<br>'
-    + '      ⏳ LoRA 训练 (V4/SP-2 落地)<br>'
-    + '      ⏳ 路由策略 (SP-3 落地)'
+    + '    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">'
+    + '      <div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em">PIPELINE STATUS · 点击进入对应模块</div>'
+    + '      <span style="font-size:10px;color:var(--cyber-lime,#5cf08a)">V1-V5 已上线</span>'
+    + '    </div>'
+    + '    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;font-size:12px">'
+    +        _pipelineStatusRow(agentId, status, 2, '🛠', 'Bundle',     '已应用 packs/skills/MCPs · 模块 2 看清单')
+    +        _pipelineStatusRow(agentId, status, 3, '📚', 'Knowledge',  '上传语料 → 切分到 manifest · 模块 3')
+    +        _pipelineStatusRow(agentId, status, 5, '🧠', 'LoRA',       '触发训练队列(SP-2 worker 上线后真训练) · 模块 5')
+    +        _pipelineStatusRow(agentId, status, 6, '🎯', 'Routing',    '调 confidence threshold + mode · 模块 6')
     + '    </div>'
     + '  </div>'
 
@@ -5718,6 +5721,46 @@ function _awsCultivationCultivatedCard(agentId, status) {
     + '    <button class="btn btn-sm btn-ghost" onclick="_awsCultivationDisable(\''
     +        esc(agentId) + '\', false)" style="color:var(--error);margin-left:auto">🗑️ 完全卸载(删数据)</button>'
     + '  </div>'
+    + '</div>';
+}
+
+// Compact pipeline-status row used in the cultivated card. Clickable —
+// jumps to the matching pipeline module's drill panel.
+function _pipelineStatusRow(agentId, status, modIdx, icon, name, hint) {
+  // Determine status color based on what we know
+  var stamp = '⚪';
+  var color = 'var(--text3)';
+  if (modIdx === 2) {           // Bundle — applied if cultivated
+    if (status.cultivated) { stamp = '✓'; color = 'var(--cyber-lime,#5cf08a)'; }
+  } else if (modIdx === 3) {    // Knowledge — chunked sources?
+    var hasChunks = false;
+    var prof = status.profile || {};
+    if (prof.corpus_chunks && prof.corpus_chunks > 0) hasChunks = true;
+    stamp = hasChunks ? '✓' : '⏳';
+    color = hasChunks ? 'var(--cyber-lime,#5cf08a)' : 'var(--warning,#f59e0b)';
+  } else if (modIdx === 5) {    // LoRA — has active version?
+    if (status.expert_lora_version) { stamp = '✓'; color = 'var(--cyber-lime,#5cf08a)'; }
+    else { stamp = '⏳'; color = 'var(--warning,#f59e0b)'; }
+  } else if (modIdx === 6) {    // Routing — local rate ≥ 60% or config exists
+    var rate = (status.profile && status.profile.local_handle_rate) || 0;
+    if (rate >= 0.6) { stamp = '✓'; color = 'var(--cyber-lime,#5cf08a)'; }
+    else { stamp = '⏳'; color = 'var(--warning,#f59e0b)'; }
+  }
+  return '<div onclick="_cultDrillModule(\'' + esc(agentId) + '\',\''
+    + esc(status.expert_specialty || status.expert_template_version || '') + '\',' + modIdx + ')" '
+    + 'style="display:flex;align-items:center;gap:10px;padding:10px 12px;'
+    +        'background:rgba(255,255,255,0.02);border:1px solid var(--border);'
+    +        'border-radius:6px;cursor:pointer;transition:all 0.15s" '
+    + 'onmouseover="this.style.borderColor=\'var(--cyber-magenta,#ff7adb)\'" '
+    + 'onmouseout="this.style.borderColor=\'var(--border)\'">'
+    + '  <span style="font-size:18px">' + icon + '</span>'
+    + '  <div style="flex:1;min-width:0">'
+    + '    <div style="font-size:11px;color:' + color + ';font-weight:600">'
+    +       stamp + ' ' + esc(name) + '</div>'
+    + '    <div style="font-size:10px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
+    +       esc(hint) + '</div>'
+    + '  </div>'
+    + '  <span class="material-symbols-outlined" style="font-size:14px;color:var(--text3)">chevron_right</span>'
     + '</div>';
 }
 
@@ -39440,37 +39483,105 @@ async function _cultHubRenderCultivated(body) {
 }
 
 async function _cultHubRenderUncultivated(body) {
-  body.innerHTML = '<div style="color:var(--text3);padding:14px">加载…</div>';
+  body.innerHTML = ''
+    + '<div class="tc-mono-label" style="color:var(--outline);padding:14px;letter-spacing:0.05em">'
+    + 'LOADING…</div>';
   var allAgents = (typeof agents !== 'undefined' && agents) || [];
   var uncultivated = allAgents.filter(function(a){ return !a.expert_specialty; });
+
+  // Header — tech-style mono-label + status dot, matches cultivated tab
+  var headerHtml = ''
+    + '<div style="display:flex;justify-content:space-between;align-items:center;'
+    +     'margin-bottom:18px;flex-wrap:wrap;gap:12px">'
+    + '  <div>'
+    + '    <div class="tc-mono-label" style="color:var(--primary);display:flex;'
+    +         'align-items:center;gap:8px;font-size:11px;letter-spacing:0.05em">'
+    + '      <span>UNCULTIVATED AGENTS</span>'
+    + '      <span style="width:6px;height:6px;border-radius:50%;background:var(--outline);'
+    +             'animation:pulse-dot 2s infinite ease-in-out"></span>'
+    + '    </div>'
+    + '    <div style="font-size:12px;color:var(--text3);margin-top:6px;line-height:1.55">'
+    +     'Generic agents — pick a specialty template to start cultivation. '
+    +     'Cultivation makes them experts in a domain through prompt packs / '
+    +     'corpus / RAG / LoRA pipeline.'
+    + '    </div>'
+    + '  </div>'
+    + '  <div class="tc-mono-label" style="color:var(--outline);font-size:10px">'
+    +     uncultivated.length + ' AVAILABLE'
+    + '  </div>'
+    + '</div>';
+
   if (uncultivated.length === 0) {
-    body.innerHTML = '<div style="padding:30px;text-align:center;color:var(--text3)">'
-      + '所有 agent 都已养成</div>';
+    body.innerHTML = headerHtml
+      + '<div class="tc-card tc-text-dim" style="text-align:center;padding:60px 20px;border-style:dashed">'
+      +   '<span class="material-symbols-outlined" style="font-size:48px;color:var(--outline)">verified</span>'
+      +   '<div style="font-size:14px;color:var(--on-surface-variant);margin-top:14px;margin-bottom:8px">所有 agent 都已养成</div>'
+      +   '<div class="tc-text-dim" style="font-size:12px;line-height:1.55">'
+      +     'Switch to "我的专家" tab to inspect their pipelines, or use Templates to create a new specialty.'
+      +   '</div>'
+      + '</div>';
     return;
   }
-  var rows = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px">';
-  uncultivated.forEach(function(a){
-    rows += ''
-      + '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;'
-      +     'padding:14px;display:flex;flex-direction:column;gap:10px">'
-      + '  <div style="display:flex;align-items:center;gap:10px">'
-      + '    <span class="material-symbols-outlined" style="font-size:22px;color:var(--text3)">smart_toy</span>'
+
+  // Tech-style cards — glass surface + mono-label sections + uppercase
+  // accent. Avatar uses agent.robot_avatar if available, else 'smart_toy'.
+  var cards = uncultivated.map(function(a) {
+    var avatar = (typeof _robotIconUrl === 'function' && a.robot_avatar)
+      ? '<img src="' + _robotIconUrl(a.robot_avatar) + '" '
+        + 'style="width:36px;height:36px;border-radius:8px;object-fit:cover" '
+        + 'onerror="this.outerHTML=\'<span class=&quot;material-symbols-outlined&quot; style=&quot;font-size:24px;color:var(--primary)&quot;>memory</span>\'">'
+      : '<span class="material-symbols-outlined" style="font-size:24px;color:var(--primary)">memory</span>';
+    return ''
+      + '<div class="tc-card" style="display:flex;flex-direction:column;gap:12px;padding:18px;'
+      +     'background:var(--surface);border:1px solid var(--outline-variant);border-radius:var(--r-lg,12px);'
+      +     'transition:border-color 0.15s,transform 0.1s" '
+      +     'onmouseover="this.style.borderColor=\'var(--secondary)\';this.style.transform=\'translateY(-1px)\'" '
+      +     'onmouseout="this.style.borderColor=\'var(--outline-variant)\';this.style.transform=\'\'">'
+      // Avatar + name row
+      + '  <div style="display:flex;align-items:center;gap:12px">'
+      + '    <div style="width:42px;height:42px;border-radius:8px;background:rgba(192,193,255,0.08);'
+      +         'border:1px solid var(--outline-variant);display:flex;align-items:center;justify-content:center">'
+      +         avatar
+      + '    </div>'
       + '    <div style="flex:1;min-width:0">'
-      + '      <div style="font-size:13px;font-weight:600">' + esc(a.name) + '</div>'
-      + '      <div style="font-size:10px;color:var(--text3);font-family:var(--font-mono,monospace)">'
-      +         esc(a.role || 'general') + ' · 通用 agent</div>'
+      + '      <div style="font-size:14px;font-weight:600;color:var(--on-surface)">'
+      +         esc(a.name) + '</div>'
+      + '      <div class="tc-mono-label" style="font-size:9px;color:var(--outline);'
+      +         'letter-spacing:0.05em;margin-top:2px">'
+      +         esc((a.role || 'GENERAL').toUpperCase()) + ' · GENERIC AGENT'
+      + '      </div>'
+      + '    </div>'
+      + '    <span class="tc-mono-label" style="padding:2px 7px;border-radius:4px;'
+      +       'background:rgba(192,193,255,0.10);color:var(--outline);font-size:9px;'
+      +       'border:1px solid rgba(192,193,255,0.20);letter-spacing:0.05em">UNTRAINED</span>'
+      + '  </div>'
+      // Spec section — what cultivation will give this agent
+      + '  <div style="padding:10px 12px;background:rgba(255,122,219,0.04);'
+      +       'border:1px solid rgba(255,122,219,0.20);border-radius:6px">'
+      + '    <div class="tc-mono-label" style="font-size:9px;color:var(--cyber-magenta,#ff7adb);'
+      +         'letter-spacing:0.05em;margin-bottom:6px">CULTIVATION TARGET</div>'
+      + '    <div style="font-size:11px;color:var(--text2);line-height:1.55">'
+      +       'pick a specialty → bind packs/skills → ingest corpus → '
+      +       'agent answers grounded in domain knowledge'
       + '    </div>'
       + '  </div>'
-      + '  <div style="font-size:11px;color:var(--text3);line-height:1.5">'
-      +     '尚未配置专家 specialty。点击下方按钮选择模板进入养成流程。</div>'
-      + '  <button class="btn btn-sm btn-primary" onclick="openCultivationModal(\'' + esc(a.id) + '\')" '
-      +         'style="background:var(--cyber-magenta,#ff7adb);border-color:var(--cyber-magenta,#ff7adb);'
-      +         'color:#000;font-size:11px">'
-      +         '<span class="material-symbols-outlined" style="font-size:14px">school</span> 开始养成</button>'
+      // Action — uses tc-btn-primary look
+      + '  <button class="tc-btn tc-btn-primary tc-btn-sm" '
+      +         'onclick="openCultivationModal(\'' + esc(a.id) + '\')" '
+      +         'style="background:var(--cyber-magenta,#ff7adb);'
+      +         'border:1px solid var(--cyber-magenta,#ff7adb);color:#000;'
+      +         'font-family:var(--font-mono,monospace);font-size:11px;'
+      +         'letter-spacing:0.05em;text-transform:uppercase;font-weight:600">'
+      + '    <span class="material-symbols-outlined" style="font-size:14px">school</span>'
+      + '    START CULTIVATION'
+      + '  </button>'
       + '</div>';
-  });
-  rows += '</div>';
-  body.innerHTML = rows;
+  }).join('');
+
+  body.innerHTML = headerHtml
+    + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:14px">'
+    + cards
+    + '</div>';
 }
 
 // ============ Specialty Templates (养成模板) ============
