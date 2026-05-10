@@ -31920,6 +31920,9 @@ async function _renderKmPrivateTech() {
         '</div>';
     }).join('');
 
+    // Header — strips out the "+ NEW KB" topbar button. Add affordance
+    // is now a card at the end of the grid (matches Worker Nodes pattern,
+    // user direction "所有的添加按钮,做成卡片示添加").
     var headerHtml =
       '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--s-lg);gap:var(--s-md);flex-wrap:wrap">' +
         '<div style="flex:1;min-width:240px">' +
@@ -31931,23 +31934,39 @@ async function _renderKmPrivateTech() {
             'Domain knowledge bases — independent of agents. Bind to multiple advisors; deleting an agent does not affect the KB.' +
           '</div>' +
         '</div>' +
-        '<button class="tc-btn tc-btn-primary tc-btn-sm" onclick="_kmShowCreateDomainKb()">' +
-          '<span class="material-symbols-outlined" style="font-size:14px">add</span> NEW KB' +
-        '</button>' +
+      '</div>';
+
+    // Card-style "+" add affordance — appended to grid; styled like Worker
+    // Nodes' "+ CONNECT NODE" but with cyber-magenta tint to match the
+    // cultivation hub's overall accent color.
+    var addKbCard =
+      '<div onclick="_kmShowCreateDomainKb()" ' +
+           'onmouseover="this.style.borderColor=\'rgba(137,206,255,0.50)\';this.style.background=\'rgba(137,206,255,0.05)\'" ' +
+           'onmouseout="this.style.borderColor=\'\';this.style.background=\'transparent\'" ' +
+           'style="display:flex;flex-direction:column;align-items:center;justify-content:center;' +
+                  'gap:10px;min-height:200px;border:2px dashed rgba(137,206,255,0.30);' +
+                  'border-radius:var(--r-lg,12px);background:transparent;cursor:pointer;' +
+                  'transition:all 0.18s;padding:18px;text-align:center">' +
+        '<div style="width:42px;height:42px;border-radius:9999px;background:rgba(137,206,255,0.10);' +
+              'border:1px solid rgba(137,206,255,0.40);' +
+              'display:flex;align-items:center;justify-content:center">' +
+          '<span class="material-symbols-outlined" style="color:var(--secondary);font-size:22px">add</span>' +
+        '</div>' +
+        '<div class="tc-mono-label" style="color:var(--secondary);font-size:12px;font-weight:600;letter-spacing:0.05em">NEW KB</div>' +
+        '<div class="tc-text-dim" style="font-size:11px;line-height:1.5;max-width:220px">' +
+            'Create a knowledge base, import documents, then bind to advisor agents' +
+        '</div>' +
       '</div>';
 
     var bodyHtml = (kbs.length === 0)
-      ? '<div class="tc-card" style="text-align:center;padding:60px 20px;border-style:dashed">' +
-          '<span class="material-symbols-outlined" style="font-size:48px;color:var(--outline)">menu_book</span>' +
-          '<div style="font-size:14px;color:var(--on-surface-variant);margin-top:14px;margin-bottom:8px">No domain knowledge bases yet</div>' +
-          '<div class="tc-text-dim" style="font-size:12px;margin-bottom:20px;line-height:1.55">' +
-            'Create a KB, import PDFs / docs, then bind it when configuring an advisor agent.' +
+      ? '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:var(--s-md)">' +
+          addKbCard +
+          '<div class="tc-card tc-text-dim" style="padding:30px 20px;text-align:center;font-size:12px;line-height:1.6">' +
+            '<span class="material-symbols-outlined" style="font-size:32px;color:var(--outline);display:block;margin-bottom:10px">menu_book</span>' +
+            'No domain knowledge bases yet — click the card on the left to create your first one.' +
           '</div>' +
-          '<button class="tc-btn tc-btn-primary tc-btn-sm" onclick="_kmShowCreateDomainKb()">' +
-            '<span class="material-symbols-outlined" style="font-size:14px">add</span> CREATE FIRST KB' +
-          '</button>' +
         '</div>'
-      : '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:var(--s-md)">' + cardsHtml + '</div>';
+      : '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:var(--s-md)">' + cardsHtml + addKbCard + '</div>';
 
     sc.innerHTML = headerHtml + bodyHtml;
 
