@@ -653,8 +653,46 @@ async def expert_query(
     user: CurrentUser = Depends(get_current_user),
     hub=Depends(get_hub),
 ):
+    """V4 step 2. Thin REST wrapper around app.domain_expert.inference.
+    pipeline.answer — the same function agent.chat() routes through
+    when expert_specialty is set.
+
+    Body: `{"q": "<user question>", "context_id": "solo"}`
+
+    Returns: `{"answer": "...", "trace_id": "...", "retrieved_count": N}`
+    """
     _check_enabled()
-    raise HTTPException(501, "not implemented (V4 delivers)")
+    agent = hub.agents.get(agent_id) if hasattr(hub, "agents") else None
+    if agent is None:
+        raise HTTPException(404, f"agent {agent_id!r} not found")
+    cur_specialty = getattr(agent, "expert_specialty", "") or ""
+    if not cur_specialty:
+        raise HTTPException(409, {
+            "error": "not_cultivated",
+            "agent_id": agent_id,
+            "hint": "POST /agent/{id}/expert/initialize first.",
+        })
+    q = (body.get("q") or body.get("query") or "").strip()
+    if not q:
+        raise HTTPException(400, "body must include 'q' (string)")
+    context_id = (body.get("context_id") or "solo").strip()
+
+    try:
+        from ..inference import pipeline as _pipeline
+        answer_text = _pipeline.answer(
+            agent, q, source="api", context_id=context_id,
+        )
+    except Exception as e:
+        logger.exception("expert_query failed for %s", agent_id)
+        raise HTTPException(500, f"expert pipeline failed: {e}")
+
+    return {
+        "agent_id": agent_id,
+        "specialty": cur_specialty,
+        "q": q,
+        "answer": answer_text,
+        "ok": True,
+    }
 
 
 @router.post("/agent/{agent_id}/expert/feedback", summary="User 👍/👎 feedback on a reply")
