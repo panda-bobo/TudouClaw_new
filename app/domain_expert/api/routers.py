@@ -11,6 +11,7 @@ When TUDOU_EXPERT_DISABLED=1, every endpoint here returns 503.
 """
 from __future__ import annotations
 import logging
+import os
 
 from fastapi import APIRouter, Depends, HTTPException, Body
 
@@ -554,8 +555,41 @@ async def expert_feedback(
     user: CurrentUser = Depends(get_current_user),
     hub=Depends(get_hub),
 ):
+    """V4 step 1. Append a 👍/👎 feedback record to the agent's trace
+    pool. The trace is appended to the same JSONL the V4 step 2 query
+    handler will write organic Q/A traces to, so RAFT data prep + LoRA
+    training pull from a single source.
+
+    Body: `{"trace_id": "...", "rating": "thumbs_up"|"thumbs_down",
+            "comment": "..."}`
+    """
     _check_enabled()
-    raise HTTPException(501, "not implemented (V5 delivers)")
+    agent = hub.agents.get(agent_id) if hasattr(hub, "agents") else None
+    if agent is None:
+        raise HTTPException(404, f"agent {agent_id!r} not found")
+
+    rating = (body.get("rating") or "").strip().lower()
+    if rating not in ("thumbs_up", "thumbs_down", "up", "down", "👍", "👎"):
+        raise HTTPException(400, "rating must be thumbs_up or thumbs_down")
+    rating_norm = "up" if rating in ("thumbs_up", "up", "👍") else "down"
+    trace_id = (body.get("trace_id") or "").strip()
+    comment = (body.get("comment") or "").strip()
+
+    import json, time
+    from .._config import expert_dir_for
+    feedback_dir = os.path.join(expert_dir_for(agent_id), "feedback")
+    os.makedirs(feedback_dir, exist_ok=True)
+    record = {
+        "trace_id": trace_id,
+        "rating": rating_norm,
+        "comment": comment,
+        "ts": time.time(),
+        "by_user": getattr(user, "user_id", "unknown"),
+    }
+    fp = os.path.join(feedback_dir, "feedback.jsonl")
+    with open(fp, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return {"ok": True, "agent_id": agent_id, "feedback": record}
 
 
 # ── Traces / stats ──
@@ -563,11 +597,55 @@ async def expert_feedback(
 @router.get("/agent/{agent_id}/expert/traces", summary="List Q/A trace history")
 async def expert_traces(
     agent_id: str,
+    limit: int = 100,
     user: CurrentUser = Depends(get_current_user),
     hub=Depends(get_hub),
 ):
+    """V4 step 1. Read the agent's trace JSONL files and return up to
+    `limit` most-recent entries. V4 step 2 will add filters (by feedback
+    / by source / by score), but a flat read is enough for the UI to
+    show the trace count toward the RAFT threshold.
+
+    Returns:
+      {
+        "agent_id": ...,
+        "total": int,             # total trace entries on disk
+        "traces": [ {q, a, retrieved_docs, feedback, origin, ts}, ... ],
+      }
+    """
     _check_enabled()
-    raise HTTPException(501, "not implemented (V5 delivers)")
+    agent = hub.agents.get(agent_id) if hasattr(hub, "agents") else None
+    if agent is None:
+        raise HTTPException(404, f"agent {agent_id!r} not found")
+    import json
+    from .._config import expert_dir_for
+    traces_dir = os.path.join(expert_dir_for(agent_id), "traces")
+    traces: list[dict] = []
+    total = 0
+    if os.path.isdir(traces_dir):
+        # Each .jsonl file holds N traces; read all then take `limit` most
+        # recent. For V4 step 1 this is fine — files are agent-scoped and
+        # bounded. V4 step 2 adds proper sharding.
+        for fname in sorted(os.listdir(traces_dir)):
+            if not fname.endswith(".jsonl"):
+                continue
+            with open(os.path.join(traces_dir, fname), "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    total += 1
+                    try:
+                        traces.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+    # Most recent first; then truncate to limit
+    traces.sort(key=lambda t: t.get("ts", 0), reverse=True)
+    return {
+        "agent_id": agent_id,
+        "total": total,
+        "traces": traces[: max(1, min(int(limit), 500))],
+    }
 
 
 @router.get("/agent/{agent_id}/expert/stats", summary="Cultivation pipeline stats dashboard")
@@ -576,5 +654,83 @@ async def expert_stats(
     user: CurrentUser = Depends(get_current_user),
     hub=Depends(get_hub),
 ):
+    """V4 step 1. Aggregate stats across the agent's expert dir for the
+    pipeline visualization. V4 step 2 wires per-module deeper metrics
+    (per-source chunk counts, eval scores, training history); V5 adds
+    routing rate. For now this returns enough to feed the 6 module cards.
+
+    Returns:
+      {
+        "agent_id": ...,
+        "cultivated": bool,
+        "specialty": ...,
+        "level": novice|journeyman|expert|master,
+        "manifest": {sources, total_chunks, total_bytes, last_updated},
+        "trace_count": int,
+        "feedback_counts": {up: N, down: N},
+        "lora_versions": [v1, v2, ...],
+        "active_lora": ...,
+      }
+    """
     _check_enabled()
-    raise HTTPException(501, "not implemented (V5 delivers)")
+    agent = hub.agents.get(agent_id) if hasattr(hub, "agents") else None
+    if agent is None:
+        raise HTTPException(404, f"agent {agent_id!r} not found")
+    import json
+    from .._config import expert_dir_for
+    from ..corpus.manifest import CorpusManifest
+
+    edir = expert_dir_for(agent_id)
+    manifest = CorpusManifest.load(agent_id)
+
+    # Trace count — sum of lines in all JSONL files
+    trace_count = 0
+    traces_dir = os.path.join(edir, "traces")
+    if os.path.isdir(traces_dir):
+        for fname in os.listdir(traces_dir):
+            if not fname.endswith(".jsonl"):
+                continue
+            with open(os.path.join(traces_dir, fname), "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        trace_count += 1
+
+    # Feedback counts — read feedback.jsonl
+    fb_up = fb_down = 0
+    fb_path = os.path.join(edir, "feedback", "feedback.jsonl")
+    if os.path.isfile(fb_path):
+        with open(fb_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                    if rec.get("rating") == "up":
+                        fb_up += 1
+                    elif rec.get("rating") == "down":
+                        fb_down += 1
+                except json.JSONDecodeError:
+                    continue
+
+    # LoRA versions — list dirs under lora/
+    lora_dir = os.path.join(edir, "lora")
+    lora_versions: list[str] = []
+    if os.path.isdir(lora_dir):
+        lora_versions = sorted(
+            d for d in os.listdir(lora_dir)
+            if os.path.isdir(os.path.join(lora_dir, d)) and d != "current"
+        )
+
+    return {
+        "agent_id": agent_id,
+        "cultivated": bool(getattr(agent, "expert_specialty", "") or ""),
+        "specialty": getattr(agent, "expert_specialty", "") or "",
+        "level": getattr(agent, "expert_level", "novice") or "novice",
+        "template_version": getattr(agent, "expert_template_version", "") or "",
+        "active_lora": getattr(agent, "expert_lora_version", "") or "",
+        "lora_versions": lora_versions,
+        "manifest": manifest.to_dict(),
+        "trace_count": trace_count,
+        "feedback_counts": {"up": fb_up, "down": fb_down},
+    }
