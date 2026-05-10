@@ -59,6 +59,12 @@ def test_hook_falls_through_when_pipeline_module_missing(monkeypatch):
     ), "Phase 0 should NOT have pipeline.answer yet"
 
 
+@pytest.mark.skip(
+    reason="V4 step 2 early-return hook was disabled 2026-05-10 — it bypassed "
+           "agent.chat()'s transcript/streaming/event side effects, breaking "
+           "the chat UI. Re-enable this test once pipeline integration moves "
+           "to in-flow message augmentation (TODO in agent.chat comment block)."
+)
 def test_hook_routes_when_pipeline_present(monkeypatch):
     """If we inject a fake pipeline.answer, the hook should call it and
     return its result. Simulates what V4 vertical will deliver."""
