@@ -9399,6 +9399,54 @@ Write only the summary body. Do not include any preamble or prefix."""
                     "content": memory_context,
                 })
 
+            # --- Expert RAG augmentation (V4 step 2 in-flow version) ---
+            # When agent is cultivated (expert_specialty set), retrieve top-K
+            # corpus chunks and inject them as a system message BEFORE the
+            # LLM call. Unlike the early-return hook (disabled 2026-05-10),
+            # this preserves all of agent.chat()'s normal flow — transcript,
+            # streaming, on_event, tool calls — while giving the LLM
+            # domain-specific grounding to cite from.
+            #
+            # Visible signals the user can check:
+            #   1. Reply contains "[来源: <source_id>]" when LLM cites a chunk
+            #   2. Log line "[expert] retrieved N chunks for ..." every call
+            #   3. Trace count in cultivation hub Module 4 increments
+            self._expert_rag_chunks = []  # stash for post-chat trace write
+            if self.expert_specialty:
+                try:
+                    from app.domain_expert._config import is_disabled as _exp_dis
+                    if not _exp_dis():
+                        from app.domain_expert.inference import pipeline as _pl
+                        chunks = _pl._retrieve(self.id, _user_text or "", k=5)
+                        self._expert_rag_chunks = chunks
+                        logger.info(
+                            "[expert] retrieved %d chunks for agent=%s "
+                            "specialty=%s query=%r",
+                            len(chunks), self.id, self.expert_specialty,
+                            (_user_text or "")[:60],
+                        )
+                        if chunks:
+                            ctx_block = "\n\n".join(
+                                f"[来源: {c['source_id']}]\n{c['text']}"
+                                for c in chunks
+                            )
+                            sys_msg = (
+                                f"=== {self.expert_specialty} 专家知识库检索 "
+                                f"(共 {len(chunks)} 段) ===\n\n"
+                                f"{ctx_block}\n\n"
+                                "回答时优先参考以上检索资料,并用 "
+                                "[来源: source_id] 格式标注引用; "
+                                "资料未覆盖的部分基于通用知识作答即可。"
+                            )
+                            self.messages.append({
+                                "role": "system",
+                                "content": sys_msg,
+                            })
+                except ImportError:
+                    pass
+                except Exception as _e:
+                    logger.warning("[expert] RAG augmentation skipped: %s", _e)
+
             # --- Enhancement module: pre-thinking injection ---
             if self.enhancer and self.enhancer.enabled:
                 pre_think = self.enhancer.pre_think(_user_text)
@@ -11230,6 +11278,33 @@ Write only the summary body. Do not include any preamble or prefix."""
             # buffer set would make pollers incorrectly believe the
             # agent is still typing.
             self._streaming_buffer = ""
+
+            # --- Expert pipeline trace write (V4 step 2) ---
+            # Companion to the in-flow RAG augmentation block above. After
+            # the LLM returns, capture the Q/A + retrieved sources to
+            # ~/.tudou_claw/expert/<id>/traces/YYYY-MM-DD.jsonl. This is
+            # what drives Module 4 (Trace) counter + the 段位 chip's
+            # accuracy progression (after user 👍/👎 feedback hits the
+            # same trace).
+            try:
+                rag_chunks = getattr(self, "_expert_rag_chunks", None)
+                if self.expert_specialty and rag_chunks is not None:
+                    from app.domain_expert.inference import pipeline as _pl
+                    _pl._write_trace(self.id, {
+                        "ts": time.time(),
+                        "q": (_user_text or "")[:500],
+                        "a": (final_content or "")[:2000],
+                        "retrieved_count": len(rag_chunks),
+                        "retrieved_sources": sorted({
+                            c["source_id"] for c in rag_chunks
+                        }),
+                        "origin": "organic",
+                        "source": source,
+                        "context_id": context_id,
+                        "specialty": self.expert_specialty,
+                    })
+            except Exception as _trace_err:
+                logger.debug("[expert] trace write failed: %s", _trace_err)
             return final_content
 
     def _chat_async_via_langgraph(
