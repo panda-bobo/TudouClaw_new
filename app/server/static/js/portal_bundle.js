@@ -5721,6 +5721,21 @@ function _awsStatTile(label, value, accent) {
 }
 
 // Card shown for uncultivated agent — specialty template picker.
+// Render a template icon: if icon string is multi-char ASCII (e.g. "balance",
+// "school"), treat as a Material Symbols name; otherwise render verbatim
+// (single emoji like "🎓"). Falls back to 🎓 when missing.
+function _cultIconHTML(iconStr, sizePx) {
+  var icon = (iconStr || '🎓');
+  var size = sizePx || 30;
+  // Multi-char with only ASCII letters/digits/_/- → Material Symbol
+  if (icon.length > 1 && /^[a-z0-9_-]+$/i.test(icon)) {
+    return '<span class="material-symbols-outlined" style="font-size:'
+      + size + 'px;line-height:1">' + esc(icon) + '</span>';
+  }
+  // Single grapheme / emoji → render as text
+  return esc(icon);
+}
+
 function _awsCultivationPickerCard(agentId, status, catalog) {
   var templates = (catalog && catalog.templates) || [];
   var loadErr = (catalog && catalog._error)
@@ -5743,7 +5758,7 @@ function _awsCultivationPickerCard(agentId, status, catalog) {
         + 'onmouseenter="this.style.borderColor=\'var(--primary)\';this.style.transform=\'translateY(-1px)\'" '
         + 'onmouseleave="this.style.borderColor=\'\';this.style.transform=\'\'">'
         + '  <div style="display:flex;align-items:flex-start;gap:10px">'
-        + '    <div style="font-size:32px;line-height:1;flex-shrink:0">' + esc(t.icon || '🎓') + '</div>'
+        + '    <div style="font-size:32px;line-height:1;flex-shrink:0;color:var(--cyber-magenta,#ff7adb)">' + _cultIconHTML(t.icon, 32) + '</div>'
         + '    <div style="flex:1;min-width:0">'
         + '      <div style="font-size:14px;font-weight:600">' + esc(t.name) + '</div>'
         + '      <div style="font-size:10px;color:var(--text3);font-family:var(--font-mono,monospace);margin-top:2px">'
@@ -5988,8 +6003,9 @@ function _renderCultivationWorkflowPage(agentId, t, status, drillModule) {
     + '    <div style="display:flex;align-items:center;gap:12px">'
     + '      <div style="width:42px;height:42px;background:rgba(255,122,219,0.15);'
     +           'border:1px solid rgba(255,122,219,0.5);border-radius:10px;'
-    +           'display:flex;align-items:center;justify-content:center;font-size:22px">'
-    +           esc(t.icon || '🎓') + '</div>'
+    +           'display:flex;align-items:center;justify-content:center;font-size:22px;'
+    +           'color:var(--cyber-magenta,#ff7adb)">'
+    +           _cultIconHTML(t.icon, 22) + '</div>'
     + '      <div>'
     + '        <div style="font-size:10px;color:var(--cyber-magenta,#ff7adb);'
     +             'text-transform:uppercase;letter-spacing:0.06em;font-weight:600">CULTIVATION PIPELINE</div>'
