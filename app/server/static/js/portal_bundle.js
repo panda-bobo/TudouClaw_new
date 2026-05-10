@@ -39030,6 +39030,7 @@ function renderSettingsPage() {
     { id: 'nodes',      label: window.t('tab.settings.nodes',        'Nodes'),         icon: 'device_hub' },
     { id: 'channels',   label: window.t('tab.settings.channels',     'Channels'),      icon: 'cable' },
     { id: 'templates',  label: window.t('tab.settings.domains',      '专业领域'),      icon: 'library_books' },
+    { id: 'specialty_templates', label: '养成模板', icon: 'school' },
     { id: 'policy',     label: window.t('tab.settings.policy',       '审批策略'),      icon: 'shield' },
     { id: 'tokens',     label: window.t('tab.settings.apiTokens',    'API Tokens'),    icon: 'key' },
   ];
@@ -39050,6 +39051,7 @@ function renderSettingsPage() {
     'channels':   '<button class="btn btn-primary btn-sm" onclick="showModal(\'add-channel\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> Add Channel</button>',
     'tokens':     '<button class="btn btn-primary btn-sm" onclick="showModal(\'create-token\')"><span class="material-symbols-outlined" style="font-size:16px">add</span> Create Token</button>',
     'templates':  '<button class="btn btn-primary btn-sm" onclick="showCreateTemplate()"><span class="material-symbols-outlined" style="font-size:16px">add</span> New Template</button>',
+    'specialty_templates': '<button class="btn btn-primary btn-sm" onclick="showCreateSpecialtyTemplate()"><span class="material-symbols-outlined" style="font-size:16px">add</span> 新建养成模板</button>',
   };
   if (actionsEl) actionsEl.innerHTML = _tabActions[_settingsSubTab] || '';
   switch(_settingsSubTab) {
@@ -39065,11 +39067,251 @@ function renderSettingsPage() {
     case 'nodes': renderNodes(sc); break;
     case 'channels': renderChannels(sc); break;
     case 'templates': renderTemplateLibrary(sc); break;
+    case 'specialty_templates': renderSpecialtyTemplates(sc); break;
     case 'policy': renderPolicyConfig(sc); break;
     case 'tokens': renderTokens(sc); break;
     default: sc.innerHTML = '<div style="color:var(--text3);padding:20px">Select a settings tab</div>';
   }
 }
+
+// ============ Specialty Templates (养成模板) ============
+// Lists / creates / deletes the YAML templates that drive specialty
+// cultivation. Lives in System Settings → 养成模板. Per-template UI is
+// the cultivation modal (separate); this is the catalog admin view.
+async function renderSpecialtyTemplates(container) {
+  var c = container || document.getElementById('content');
+  c.innerHTML = '<div style="color:var(--text3);padding:20px">加载养成模板…</div>';
+  try {
+    var data = await api('GET', '/api/portal/specialty-templates');
+    var templates = (data && data.templates) || [];
+    var rows = '';
+    if (templates.length === 0) {
+      rows = '<div style="padding:30px;text-align:center;color:var(--text3);'
+        + 'border:1px dashed var(--border);border-radius:8px">'
+        + '尚未注册任何养成模板。<br>'
+        + '点击右上角 [➕ 新建养成模板] 创建第一个。'
+        + '</div>';
+    } else {
+      rows = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px">';
+      templates.forEach(function(t){
+        var iconHtml = (typeof _cultIconHTML === 'function')
+          ? _cultIconHTML(t.icon, 28)
+          : esc(t.icon || '🎓');
+        rows += '<div style="background:var(--surface);border:1px solid var(--border);'
+          +     'border-radius:10px;padding:18px;display:flex;flex-direction:column;gap:10px">'
+          + '  <div style="display:flex;align-items:center;gap:12px">'
+          + '    <div style="width:42px;height:42px;background:rgba(255,122,219,0.1);'
+          +       'border:1px solid rgba(255,122,219,0.4);border-radius:10px;'
+          +       'display:flex;align-items:center;justify-content:center;color:var(--cyber-magenta,#ff7adb);font-size:20px">'
+          +       iconHtml + '</div>'
+          + '    <div style="flex:1;min-width:0">'
+          + '      <div style="font-size:14px;font-weight:600">' + esc(t.name) + '</div>'
+          + '      <div style="font-size:10px;color:var(--text3);font-family:var(--font-mono,monospace);margin-top:2px">'
+          +         esc(t.id) + ' · ' + esc(t.specialty) + ' · v' + esc(t.version) + '</div>'
+          + '    </div>'
+          + '  </div>'
+          + '  <div style="font-size:12px;color:var(--text2);line-height:1.55;flex:1;min-height:36px">'
+          +       esc(t.description || '(no description)') + '</div>'
+          + '  <div style="display:flex;gap:6px;flex-wrap:wrap;font-size:10px;color:var(--text3);font-family:var(--font-mono,monospace)">'
+          + '    <span title="prompt packs">📝 ' + (t.required_packs_count || 0) + ' packs</span>'
+          + '    <span title="skills">🛠 ' + (t.required_skills_count || 0) + ' skills</span>'
+          + '    <span title="levels">🎯 ' + (t.level_count || 0) + ' levels</span>'
+          + '  </div>'
+          + '  <div style="display:flex;gap:6px;border-top:1px solid var(--overlay-5);padding-top:12px">'
+          + '    <button class="btn btn-sm btn-ghost" onclick="_specTemplateView(\'' + esc(t.id) + '\')" '
+          +         'style="font-size:11px"><span class="material-symbols-outlined" style="font-size:14px">visibility</span> 查看</button>'
+          + '    <button class="btn btn-sm btn-ghost" '
+          +         'onclick="_specTemplateDelete(\'' + esc(t.id) + '\',\'' + esc(t.name) + '\')" '
+          +         'style="font-size:11px;margin-left:auto;color:var(--error)">'
+          +         '<span class="material-symbols-outlined" style="font-size:14px">delete</span> 删除</button>'
+          + '  </div>'
+          + '</div>';
+      });
+      rows += '</div>';
+    }
+    c.innerHTML = ''
+      + '<div style="margin-bottom:16px;padding:14px 18px;background:rgba(255,122,219,0.04);'
+      +     'border:1px solid rgba(255,122,219,0.20);border-radius:8px">'
+      + '  <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">'
+      + '    <span class="material-symbols-outlined" style="color:var(--cyber-magenta,#ff7adb)">school</span>'
+      + '    <span style="font-size:13px;font-weight:600">专家养成模板</span>'
+      + '    <span style="margin-left:auto;color:var(--text3);font-size:11px">总计 ' + templates.length + ' 个</span>'
+      + '  </div>'
+      + '  <div style="font-size:11px;color:var(--text3);line-height:1.6">'
+      +     '模板 = 把一个 agent 培育成某领域专家的"配方":定义需要哪些 prompt packs / skills / 知识库 / 评测 / 训练参数。'
+      +     '<br>YAML 存放在 <code>app/data/specialty_templates/&lt;id&gt;.yaml</code>,可手工编辑或用此处的 [新建] 按钮生成。'
+      + '  </div>'
+      + '</div>'
+      + rows;
+  } catch (e) {
+    c.innerHTML = '<div style="color:var(--error);padding:20px">加载失败: ' + esc(e.message || String(e)) + '</div>';
+  }
+}
+window.renderSpecialtyTemplates = renderSpecialtyTemplates;
+
+function _specTemplateView(id) {
+  api('GET', '/api/portal/specialty-templates/' + encodeURIComponent(id))
+    .then(function(t){
+      var yamlPreview = JSON.stringify(t, null, 2);
+      showModalHTMLLarge(
+        '<div style="width:780px;max-width:92vw;max-height:85vh;overflow-y:auto;'
+        +     'background:var(--surface);border-radius:12px;padding:0">'
+        + '  <div style="padding:14px 20px;border-bottom:1px solid var(--border-light);'
+        +       'display:flex;justify-content:space-between;align-items:center">'
+        + '    <div style="font-size:14px;font-weight:600">'
+        +       '<span class="material-symbols-outlined" style="vertical-align:middle;color:var(--cyber-magenta,#ff7adb)">visibility</span> '
+        +       esc(t.name) + ' <span style="font-size:11px;color:var(--text3);font-family:var(--font-mono,monospace)">' + esc(t.id) + '</span></div>'
+        + '    <button class="btn btn-sm btn-ghost" onclick="closeModal()" style="padding:4px 10px">'
+        +       '<span class="material-symbols-outlined" style="font-size:16px">close</span></button>'
+        + '  </div>'
+        + '  <pre style="margin:0;padding:18px 20px;font-family:var(--font-mono,monospace);font-size:11px;'
+        +       'color:var(--text2);background:var(--bg);overflow-x:auto;line-height:1.5">'
+        +       esc(yamlPreview) + '</pre>'
+        + '</div>'
+      );
+    })
+    .catch(function(e){ alert('加载失败: ' + (e.message || e)); });
+}
+window._specTemplateView = _specTemplateView;
+
+function _specTemplateDelete(id, name) {
+  if (!confirm('确定删除模板 "' + name + '" (' + id + ') ?\n\n此操作不可撤销。')) return;
+  api('DELETE', '/api/portal/specialty-templates/' + encodeURIComponent(id))
+    .then(function(r){
+      if (typeof _toast === 'function') _toast('已删除: ' + id, 'success');
+      renderSpecialtyTemplates();
+    })
+    .catch(function(e){ alert('删除失败: ' + (e.message || e)); });
+}
+window._specTemplateDelete = _specTemplateDelete;
+
+// Show the create-template modal with form fields. Submit calls
+// POST /specialty-templates and refreshes the list.
+function showCreateSpecialtyTemplate() {
+  showModalHTMLLarge(
+    '<div style="width:680px;max-width:92vw;max-height:88vh;overflow-y:auto;'
+    +     'background:var(--surface);border-radius:12px">'
+    + '  <div style="padding:16px 22px;border-bottom:1px solid var(--border-light);'
+    +       'display:flex;justify-content:space-between;align-items:center">'
+    + '    <div style="font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px">'
+    + '      <span class="material-symbols-outlined" style="color:var(--cyber-magenta,#ff7adb)">school</span>'
+    + '      新建专家养成模板</div>'
+    + '    <button class="btn btn-sm btn-ghost" onclick="closeModal()" style="padding:4px 10px">'
+    +       '<span class="material-symbols-outlined" style="font-size:16px">close</span></button>'
+    + '  </div>'
+    + '  <div style="padding:18px 22px">'
+    + '    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">'
+    + _formField('id', '模板 ID *', 'medical-expert',
+                 'lowercase, alphanumeric (- and _ ok). 也是文件名。')
+    + _formField('specialty', '专业领域 *', 'medical',
+                 '短键名,例如: medical, finance, security')
+    + '    </div>'
+    + _formField('name', '显示名称 *', '医疗专家')
+    + '    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px">'
+    + _formField('icon', '图标', 'medical_information',
+                 'Material Symbol 名 (https://fonts.google.com/icons) 或 emoji')
+    + _formField('version', '版本', '1.0')
+    + '    </div>'
+    + '    <div style="margin-top:14px">'
+    + '      <label style="font-size:11px;color:var(--text3);text-transform:uppercase;'
+    +           'letter-spacing:0.05em;font-weight:600;display:block;margin-bottom:4px">描述</label>'
+    + '      <textarea id="ct-spec-description" rows="3" '
+    +           'placeholder="这个 agent 是哪个领域的专家? 能做什么? 不做什么?" '
+    +           'style="width:100%;padding:8px 10px;background:var(--bg2);border:1px solid var(--border);'
+    +           'border-radius:6px;color:var(--text);font-size:12px;font-family:inherit;resize:vertical"></textarea>'
+    + '    </div>'
+    + '    <div style="margin-top:14px">'
+    + '      <label style="font-size:11px;color:var(--text3);text-transform:uppercase;'
+    +           'letter-spacing:0.05em;font-weight:600;display:block;margin-bottom:4px">'
+    + '        Prompt Packs (社区, 逗号分隔)</label>'
+    + '      <input id="ct-spec-required-packs" '
+    +           'placeholder="agency_legal_lawyer, agency_legal_legal_counsel" '
+    +           'style="width:100%;padding:8px 10px;background:var(--bg2);border:1px solid var(--border);'
+    +           'border-radius:6px;color:var(--text);font-size:11px;font-family:var(--font-mono,monospace)">'
+    + '    </div>'
+    + '    <div style="margin-top:10px">'
+    + '      <label style="font-size:11px;color:var(--text3);text-transform:uppercase;'
+    +           'letter-spacing:0.05em;font-weight:600;display:block;margin-bottom:4px">'
+    + '        Anthropic Packs (akwp_*, 逗号分隔)</label>'
+    + '      <input id="ct-spec-required-anthropic-packs" '
+    +           'placeholder="akwp_legal_brief, akwp_legal_review-contract" '
+    +           'style="width:100%;padding:8px 10px;background:var(--bg2);border:1px solid var(--border);'
+    +           'border-radius:6px;color:var(--text);font-size:11px;font-family:var(--font-mono,monospace)">'
+    + '    </div>'
+    + '    <div style="margin-top:10px">'
+    + '      <label style="font-size:11px;color:var(--text3);text-transform:uppercase;'
+    +           'letter-spacing:0.05em;font-weight:600;display:block;margin-bottom:4px">'
+    + '        Skills (install ids, 逗号分隔)</label>'
+    + '      <input id="ct-spec-required-skills" '
+    +           'placeholder="md_acme_legal-checker, md_acme_pdf-reader" '
+    +           'style="width:100%;padding:8px 10px;background:var(--bg2);border:1px solid var(--border);'
+    +           'border-radius:6px;color:var(--text);font-size:11px;font-family:var(--font-mono,monospace)">'
+    + '    </div>'
+    + '    <div style="margin-top:14px;padding:10px;background:rgba(255,255,255,0.02);'
+    +         'border-radius:6px;font-size:10px;color:var(--text3);line-height:1.6">'
+    + '      💡 默认会附带:级别规则 (novice→journeyman→expert→master)、'
+    +         'chunker (semantic, 768 tokens)、训练 (mlx-lm, 1000 traces target)。'
+    + '      <br>YAML 生成后可在 <code>app/data/specialty_templates/&lt;id&gt;.yaml</code> 手工微调。'
+    + '    </div>'
+    + '  </div>'
+    + '  <div style="padding:14px 22px;border-top:1px solid var(--border-light);'
+    +       'display:flex;justify-content:flex-end;gap:10px">'
+    + '    <button class="btn btn-sm btn-ghost" onclick="closeModal()">取消</button>'
+    + '    <button class="btn btn-sm btn-primary" onclick="_specTemplateSubmit()" '
+    +         'style="background:var(--cyber-magenta,#ff7adb);border-color:var(--cyber-magenta,#ff7adb);color:#000">'
+    + '      🚀 创建模板</button>'
+    + '  </div>'
+    + '</div>'
+  );
+}
+window.showCreateSpecialtyTemplate = showCreateSpecialtyTemplate;
+
+// Helper: render a labeled input row used in the create-template form.
+function _formField(key, label, placeholder, hint) {
+  return ''
+    + '<div>'
+    + '  <label style="font-size:11px;color:var(--text3);text-transform:uppercase;'
+    +       'letter-spacing:0.05em;font-weight:600;display:block;margin-bottom:4px">' + esc(label) + '</label>'
+    + '  <input id="ct-spec-' + esc(key) + '" placeholder="' + esc(placeholder || '') + '" '
+    +       'style="width:100%;padding:8px 10px;background:var(--bg2);border:1px solid var(--border);'
+    +       'border-radius:6px;color:var(--text);font-size:12px">'
+    + (hint ? '<div style="font-size:10px;color:var(--text3);margin-top:3px">' + esc(hint) + '</div>' : '')
+    + '</div>';
+}
+
+function _specTemplateSubmit() {
+  function v(id) { return ((document.getElementById('ct-spec-' + id) || {}).value || '').trim(); }
+  function csv(id) {
+    return v(id).split(',').map(function(s){ return s.trim(); }).filter(Boolean);
+  }
+  var body = {
+    id:       v('id'),
+    specialty: v('specialty'),
+    name:     v('name'),
+    icon:     v('icon'),
+    version:  v('version') || '1.0',
+    description: v('description'),
+    required_packs:           csv('required-packs'),
+    required_anthropic_packs: csv('required-anthropic-packs'),
+    required_skills:          csv('required-skills'),
+  };
+  if (!body.id || !body.specialty || !body.name) {
+    alert('id / specialty / name 都是必填'); return;
+  }
+  api('POST', '/api/portal/specialty-templates', body)
+    .then(function(r){
+      if (typeof _toast === 'function') _toast('已创建模板: ' + r.id, 'success');
+      closeModal();
+      // Refresh the list if we're still on the templates tab
+      if (typeof renderSpecialtyTemplates === 'function') {
+        renderSpecialtyTemplates();
+      }
+    })
+    .catch(function(e){
+      alert('创建失败: ' + (e.message || e));
+    });
+}
+window._specTemplateSubmit = _specTemplateSubmit;
 
 // ============ Branding Settings (品牌) ============
 async function renderBrandingSettings(container) {

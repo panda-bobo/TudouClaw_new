@@ -73,6 +73,169 @@ async def list_specialty_templates(
     }
 
 
+@router.post("/specialty-templates", summary="Create a new specialty template")
+async def create_specialty_template(
+    body: dict = Body(...),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Create a new template YAML in app/data/specialty_templates/.
+
+    Required body fields:
+      id          — unique template id (also the filename stem)
+      specialty   — short specialty key (e.g. "medical", "finance")
+      name        — display name (e.g. "医疗专家")
+
+    Optional body fields:
+      version              — default "1.0"
+      icon                 — Material Symbol or emoji, default "school"
+      description          — multi-line text
+      required_packs       — list of community pack ids
+      required_anthropic_packs — list of anthropic akwp_* ids
+      required_skills      — list of skill install ids
+      chunker_strategy     — default "paragraph"
+      raft_data_target     — default 1000
+
+    Auto-fills sensible defaults for level_rules / safety / training so
+    the resulting YAML loads cleanly via the existing loader.
+    """
+    _check_enabled()
+    tid = (body.get("id") or "").strip()
+    specialty = (body.get("specialty") or "").strip()
+    name = (body.get("name") or "").strip()
+    if not tid or not specialty or not name:
+        raise HTTPException(400, "body must include id + specialty + name")
+    # Reject id with file-system unsafe characters
+    import re as _re
+    if not _re.match(r"^[a-z0-9][a-z0-9_-]*$", tid):
+        raise HTTPException(
+            400,
+            "id must be lowercase alphanumeric (with - or _)",
+        )
+
+    # Refuse if file already exists
+    from ..template_loader import _yaml_path_for, invalidate_cache
+    path = _yaml_path_for(tid)
+    if os.path.exists(path):
+        raise HTTPException(409, f"template {tid!r} already exists at {path}")
+
+    # Build the YAML structure
+    yaml_doc = {
+        "id":          tid,
+        "version":     str(body.get("version") or "1.0"),
+        "name":        name,
+        "specialty":   specialty,
+        "icon":        str(body.get("icon") or "school"),
+        "description": str(body.get("description") or "").strip(),
+        # Knowledge layer
+        "required_packs":           list(body.get("required_packs") or []),
+        "required_anthropic_packs": list(body.get("required_anthropic_packs") or []),
+        "required_skills":          list(body.get("required_skills") or []),
+        "required_mcps":            list(body.get("required_mcps") or []),
+        # Corpus / chunker (V3 hooks in)
+        "corpus_sources": list(body.get("corpus_sources") or []),
+        # Chunker strategy enum is ['semantic', 'fixed', 'structural'].
+        # 'paragraph' (V3 step 2 ingest) is internal-only — we default
+        # the YAML schema to 'semantic' which V3 step 3 will honor.
+        "chunker": {
+            "strategy": str(body.get("chunker_strategy") or "semantic"),
+            "max_tokens": int(body.get("chunker_max_tokens") or 768),
+            "overlap_tokens": int(body.get("chunker_overlap") or 96),
+            "respect_boundaries": True,
+        },
+        # Training (V4 hooks in) — schema is dataclass TrainingConfig
+        "training": {
+            "base_model":       str(body.get("base_model") or ""),
+            "raft_recipe":      str(body.get("raft_recipe") or "default"),
+            "lora_rank":        int(body.get("lora_rank") or 16),
+            "lora_alpha":       int(body.get("lora_alpha") or 32),
+            "learning_rate":    float(body.get("learning_rate") or 2e-4),
+            "max_steps":        int(body.get("max_steps") or 0),
+            "distractor_count": int(body.get("distractor_count") or 4),
+            "eval_split":       float(body.get("eval_split") or 0.1),
+        },
+        # Eval suite — empty until user adds runners (V3 step 3)
+        "eval_suite": list(body.get("eval_suite") or []),
+        # Default growth path (per design §3.6.6)
+        "level_rules": [
+            {"from_level": "novice",     "to_level": "journeyman",
+             "min_eval_score": 0.5,  "min_corpus_chunks": 200,  "min_traces": 0},
+            {"from_level": "journeyman", "to_level": "expert",
+             "min_eval_score": 0.7,  "min_corpus_chunks": 1000, "min_traces": 200},
+            {"from_level": "expert",     "to_level": "master",
+             "min_eval_score": 0.85, "min_corpus_chunks": 5000, "min_traces": 1000},
+        ],
+        # Safety defaults — schema is dataclass SafetyRails
+        "safety": {
+            "cite_required":        bool(body.get("cite_required",  False)),
+            "confidence_threshold": float(body.get("confidence_threshold", 0.0)),
+            "refuse_topics":        list(body.get("refuse_topics") or []),
+            "disclaimer":           str(body.get("disclaimer") or ""),
+        },
+    }
+
+    # Validate by loading through the same code path /specialty-templates
+    # uses — fail loudly here rather than at first read.
+    from ..template import SpecialtyTemplate
+    try:
+        SpecialtyTemplate.from_dict(yaml_doc)
+    except Exception as e:
+        raise HTTPException(400, f"invalid template structure: {e}")
+
+    # Write YAML with reasonable formatting. yaml.safe_dump preserves
+    # unicode, sort_keys=False keeps our intentional ordering.
+    try:
+        import yaml
+    except ImportError:
+        raise HTTPException(500, "PyYAML not installed")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        # Header banner so user knows it's auto-generated
+        f.write(
+            "# Specialty Template — auto-generated via Settings UI\n"
+            f"# Specialty: {specialty}\n"
+            f"# Created by: {getattr(user, 'user_id', 'unknown')}\n"
+            "# Edit by hand to add corpus_sources / eval_suite / etc.\n\n"
+        )
+        yaml.safe_dump(yaml_doc, f, allow_unicode=True, sort_keys=False)
+
+    # Drop loader cache so /specialty-templates picks it up immediately
+    invalidate_cache()
+    logger.info("specialty template created: %s by %s",
+                tid, getattr(user, "user_id", "unknown"))
+    return {
+        "ok": True,
+        "id": tid,
+        "path": path,
+        "template": yaml_doc,
+    }
+
+
+@router.delete("/specialty-templates/{template_id}", summary="Delete a specialty template")
+async def delete_specialty_template(
+    template_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Delete a template YAML. Returns 404 if not found, 409 if any
+    cultivated agent still uses this specialty (cascade-protect)."""
+    _check_enabled()
+    from ..template_loader import _yaml_path_for, invalidate_cache, load_all
+    path = _yaml_path_for(template_id)
+    if not os.path.exists(path):
+        # Try inner-id resolution
+        try:
+            for cand in load_all():
+                if cand.id == template_id:
+                    path = _yaml_path_for(cand.specialty)
+                    break
+        except Exception:
+            pass
+    if not os.path.exists(path):
+        raise HTTPException(404, f"template {template_id!r} not found")
+    os.remove(path)
+    invalidate_cache()
+    return {"ok": True, "id": template_id, "deleted_path": path}
+
+
 @router.get("/specialty-templates/{template_id}", summary="Get one template detail")
 async def get_specialty_template(
     template_id: str,

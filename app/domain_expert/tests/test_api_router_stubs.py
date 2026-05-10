@@ -16,12 +16,17 @@ from app.domain_expert import _config
 
 def test_router_prefix_and_count():
     assert router.prefix == "/api/portal"
-    assert len(router.routes) == 12
+    # Phase 0 spec declared 12 endpoints. V2 onward added more:
+    #   + POST /specialty-templates       (create template, V4 step 2 follow-up)
+    #   + DELETE /specialty-templates/{id} (delete template, same)
+    # If you add an endpoint, bump this number AND add to expected_paths below.
+    assert len(router.routes) == 14
 
 
 def test_router_paths_match_spec():
-    """Spec §5.1 declares these 12 endpoints."""
+    """All registered endpoints (Phase 0 spec §5.1 + later additions)."""
     expected_paths = {
+        # Phase 0 baseline
         ("GET", "/api/portal/specialty-templates"),
         ("GET", "/api/portal/specialty-templates/{template_id}"),
         ("GET", "/api/portal/agent/{agent_id}/expert"),
@@ -34,6 +39,9 @@ def test_router_paths_match_spec():
         ("POST", "/api/portal/agent/{agent_id}/expert/feedback"),
         ("GET", "/api/portal/agent/{agent_id}/expert/traces"),
         ("GET", "/api/portal/agent/{agent_id}/expert/stats"),
+        # Template CRUD (Settings UI: 养成模板)
+        ("POST", "/api/portal/specialty-templates"),
+        ("DELETE", "/api/portal/specialty-templates/{template_id}"),
     }
     actual = set()
     for r in router.routes:
