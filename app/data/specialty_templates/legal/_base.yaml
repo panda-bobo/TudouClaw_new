@@ -1,0 +1,84 @@
+# Legal domain base — abstract template, only for `extends:` use.
+#
+# Common to ALL legal sub-specialties (民法 / 刑法 / 公司法 / 中东法 / ...).
+# Sub-domain templates (e.g. legal/civil_law.yaml) inherit from here and
+# override / add the parts that distinguish them.
+#
+# Per the cultivation system's 4-piece formula:
+#   ① 专家 Prompt   ─ defined here at "common" level + sub-domain at "specific" level
+#   ② 专家知识库     ─ per-agent (created when agent is cultivated, seeded from kb_seeds)
+#   ③ 通用 Skill   ─ marketplace tag=common (装在 common_skills here)
+#   ④ 专家 Skill   ─ marketplace tag=specialty:legal (in common_specialty_skills here,
+#                    sub-domains add their own e.g. specialty:civil_law)
+
+abstract: true
+
+specialty: legal_base
+version: "1.0"
+name: 法律领域底子(抽象,不可直接养成)
+icon: balance
+description: |
+  All legal sub-specialties inherit this. Provides:
+    - common red-lines (don't guarantee lawsuit outcome, don't replace lawyer)
+    - common skills (law searcher, citation formatter)
+    - shared corpus seeds (民法典 / 司法解释索引 — useful across most sub-specialties)
+
+# ── Track A: corpus / RAG (per-agent KB will inherit these as seeds) ──
+
+required_packs:        []   # legal sub-specialties typically don't need community packs
+required_anthropic_packs: []
+required_skills:       []   # filled per sub-specialty
+required_mcps:         []
+
+corpus_sources: []           # sub-specialty adds its own; engine ingests on cultivate
+
+chunker:
+  strategy: structural
+  max_tokens: 768
+  overlap_tokens: 96
+  respect_boundaries: true
+
+# ── Track C: training + eval ──
+
+training:
+  base_model: ""             # picked at cultivate time
+  raft_recipe: legal-default
+  lora_rank: 32
+  lora_alpha: 64
+  learning_rate: 0.0002
+  max_steps: 1500
+  distractor_count: 4
+  eval_split: 0.1
+
+eval_suite:
+  - runner_id: legalbench_zh
+    weight: 0.7
+    threshold: 0.5
+    description: 通用法律 benchmark (sub-specialty 可叠加专属 runner)
+
+level_rules:
+  - from_level: novice
+    to_level: journeyman
+    min_eval_score: 0.5
+    min_corpus_chunks: 200
+    min_traces: 0
+  - from_level: journeyman
+    to_level: expert
+    min_eval_score: 0.7
+    min_corpus_chunks: 1000
+    min_traces: 200
+  - from_level: expert
+    to_level: master
+    min_eval_score: 0.85
+    min_corpus_chunks: 5000
+    min_traces: 1000
+
+safety:
+  cite_required: true
+  confidence_threshold: 0.7
+  refuse_topics:
+    - 保证胜诉
+    - 替代律师执业
+  disclaimer: |
+    我提供法律分析,不替代具备执业资格律师的法律意见。
+    重要决策请咨询专业律师。

@@ -1,0 +1,46 @@
+# 民法专家 — extends legal/_base
+#
+# Demonstrates the new template inheritance system. Just specifies what's
+# DIFFERENT from the legal base; common fields (eval_suite, level_rules,
+# safety boilerplate, etc.) are inherited automatically by the merger.
+
+extends: legal/_base
+
+id: civil-law-expert
+specialty: civil_law
+version: "1.0"
+name: 民法专家
+icon: balance
+description: |
+  专精中国民法领域的法律 agent。
+  核心范畴: 合同、人身/财产权、婚姻家庭、继承、侵权责任。
+  范畴外问题(刑事/中东法/海事...)会引导用户找对应专家。
+
+# ── corpus_sources: 民法专属种子,会和 _base 的 corpus_sources 合并 ──
+corpus_sources:
+  - type: url
+    location: https://www.gov.cn/banshi/2005-05/25/content_958.htm
+    description: 中华人民共和国民法典 (官方版)
+  - type: url
+    location: https://www.court.gov.cn/zixun/xiangqing/40742.html
+    description: 最高人民法院民事审判指导意见汇编
+
+# ── eval_suite: 在 _base 通用 runner 之上加民法专属 ──
+# (注意 list 是 APPEND 语义, _base 的 legalbench_zh 仍在)
+eval_suite:
+  - runner_id: civil_code_recall
+    weight: 0.3
+    threshold: 0.6
+    description: 民法典条文召回准确率(自定 runner,需 Track C 注册)
+
+# ── safety: 深度合并,只覆盖 refuse_topics; 其他字段(cite_required等)继承 ──
+safety:
+  refuse_topics:
+    - 刑事辩护与罪名认定
+    - 中东法律体系
+    - 海事 / 国际航运法
+    - 保证胜诉
+    - 替代律师执业
+  disclaimer: |
+    我专精中国民法,提供分析与思路参考,不替代律师执业。
+    民事纠纷重大决策请咨询有执业资格的民商事律师。
