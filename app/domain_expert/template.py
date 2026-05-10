@@ -97,6 +97,58 @@ class SafetyRails:
         return asdict(self)
 
 
+@dataclass
+class CoreRedLine:
+    """One top-level hard guardrail composed into the system prompt.
+
+    Detail rules (30-100+) live in the per-agent KB with
+    ``metadata.type=red_line``; CoreRedLines are the 5-10 ones that
+    must always be in front of the model. ``pattern`` (when set)
+    enables regex-based pre/post checks in agent.chat() — see R4.
+    """
+    id: str                                # short stable id, e.g. "no_lawsuit_guarantee"
+    pattern: str = ""                      # optional regex (case-insensitive)
+    message: str = ""                      # refuse text shown to user when triggered
+    severity: str = "HARD_REFUSE"          # "HARD_REFUSE" | "SOFT_WARN"
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class PromptBlock:
+    """The ① piece of the 4-piece formula: 专家 Prompt.
+
+    Composed by :func:`prompt_renderer.render_specialty_system_prompt`
+    into the system message that fronts every reply. Keep it terse —
+    long reference material belongs in ② KB, not here.
+    """
+    role: str = ""                         # e.g. "民法专家,公司法务助手"
+    scope: str = ""                        # what I do / don't do (positive form)
+    core_red_lines: list[CoreRedLine] = field(default_factory=list)
+    output_format: str = ""                # e.g. "回答末尾标注 [来源]"
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class KBSeed:
+    """Seed material copied into a fresh agent's per-agent KB.
+
+    KBSeeds are NOT a shared corpus — they're initial copies. Once an
+    agent is cultivated, its KB is independent (the user can add /
+    remove sources). The ``type`` is mirrored into the chunk's
+    ``metadata.type`` so retrieval can group/filter (R5 typed RAG).
+    """
+    file: str                              # path under <template_dir>/seeds/ (or absolute)
+    type: str = "reference"                # red_line / sop / law / template / case / internal_doc / reference
+    title: str = ""                        # display name in KB list (defaults to file basename)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Top-level SpecialtyTemplate
 # ─────────────────────────────────────────────────────────────────────────────
@@ -130,6 +182,13 @@ class SpecialtyTemplate:
 
     # Safety
     safety: SafetyRails = field(default_factory=SafetyRails)
+
+    # Cultivation 4-piece formula:
+    #   ① 专家 Prompt → composed from `prompt` (PromptBlock)
+    #   ② 专家知识库  → seeded from `kb_seeds` (initial corpus copies)
+    #   ③ 通用 Skill / ④ 专家 Skill → in `required_skills` (marketplace tagged)
+    prompt: PromptBlock = field(default_factory=PromptBlock)
+    kb_seeds: list[KBSeed] = field(default_factory=list)
 
     # ── Serialization ──
 
@@ -171,6 +230,22 @@ class SpecialtyTemplate:
         safety_d = d.get("safety") or {}
         safety = SafetyRails(**_sub(safety_d, SafetyRails))
 
+        prompt_d = d.get("prompt") or {}
+        prompt_red_lines = [
+            CoreRedLine(**_sub(rl, CoreRedLine))
+            for rl in (prompt_d.get("core_red_lines") or [])
+        ]
+        prompt = PromptBlock(
+            role=str(prompt_d.get("role", "")),
+            scope=str(prompt_d.get("scope", "")),
+            core_red_lines=prompt_red_lines,
+            output_format=str(prompt_d.get("output_format", "")),
+        )
+        kb_seeds = [
+            KBSeed(**_sub(s, KBSeed))
+            for s in (d.get("kb_seeds") or [])
+        ]
+
         return SpecialtyTemplate(
             id=str(d["id"]),
             version=str(d["version"]),
@@ -188,6 +263,8 @@ class SpecialtyTemplate:
             eval_suite=eval_suite,
             level_rules=level_rules,
             safety=safety,
+            prompt=prompt,
+            kb_seeds=kb_seeds,
         )
 
 
@@ -330,6 +407,49 @@ _SCHEMA: dict[str, Any] = {
                     "items": {"type": "string"},
                 },
                 "disclaimer": {"type": "string"},
+            },
+        },
+
+        # ① 专家 Prompt — composed into system message at chat time
+        "prompt": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "role": {"type": "string"},
+                "scope": {"type": "string"},
+                "core_red_lines": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["id"],
+                        "properties": {
+                            "id": {"type": "string", "minLength": 1},
+                            "pattern": {"type": "string"},
+                            "message": {"type": "string"},
+                            "severity": {
+                                "type": "string",
+                                "enum": ["HARD_REFUSE", "SOFT_WARN"],
+                            },
+                        },
+                    },
+                },
+                "output_format": {"type": "string"},
+            },
+        },
+
+        # ② 专家知识库 seeds — copied into per-agent KB on cultivate
+        "kb_seeds": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["file"],
+                "properties": {
+                    "file": {"type": "string", "minLength": 1},
+                    "type": {"type": "string"},
+                    "title": {"type": "string"},
+                },
             },
         },
     },

@@ -1,4 +1,9 @@
-"""Track D Task D1 — full SpecialtyTemplate dataclass + JSONSchema."""
+"""Track D Task D1 — full SpecialtyTemplate dataclass + JSONSchema.
+
+R2 (cultivation real system) extends the schema with PromptBlock,
+CoreRedLine, and KBSeed for the 4-piece formula. Tests below the
+``# ── R2 ──`` divider cover that surface.
+"""
 from __future__ import annotations
 
 import jsonschema
@@ -6,9 +11,12 @@ import pytest
 
 from app.domain_expert.template import (
     ChunkerConfig,
+    CoreRedLine,
     CorpusSource,
     EvalRunner,
+    KBSeed,
     LevelRule,
+    PromptBlock,
     SafetyRails,
     SpecialtyTemplate,
     TrainingConfig,
@@ -211,6 +219,182 @@ def test_schema_returns_independent_copies():
     s1["properties"]["id"] = {"type": "boolean"}  # mutate
     s2 = schema()
     assert s2["properties"]["id"]["type"] == "string"
+
+
+# ── R2 ── PromptBlock + CoreRedLine + KBSeed (cultivation real system)
+
+def test_from_dict_default_prompt_and_kb_seeds():
+    """Templates without `prompt`/`kb_seeds` get empty defaults — backward-
+    compat with the existing legal.yaml shape."""
+    t = SpecialtyTemplate.from_dict({
+        "id": "x", "version": "1.0", "name": "x", "specialty": "x",
+    })
+    assert isinstance(t.prompt, PromptBlock)
+    assert t.prompt.role == ""
+    assert t.prompt.scope == ""
+    assert t.prompt.core_red_lines == []
+    assert t.prompt.output_format == ""
+    assert t.kb_seeds == []
+
+
+def test_from_dict_builds_prompt_block_with_red_lines():
+    t = SpecialtyTemplate.from_dict({
+        "id": "civil", "version": "1.0",
+        "name": "民法专家", "specialty": "civil_law",
+        "prompt": {
+            "role": "民法专家,公司法务助手",
+            "scope": "我专门处理民事问题。",
+            "core_red_lines": [
+                {"id": "no_lawsuit_guarantee",
+                 "pattern": r"保证.*胜诉",
+                 "message": "我无法保证任何案件的胜诉结果。",
+                 "severity": "HARD_REFUSE"},
+                {"id": "criminal_question",
+                 "message": "刑事问题请咨询刑法专家。",
+                 "severity": "SOFT_WARN"},
+            ],
+            "output_format": "回答末尾标注 [来源: 法条/案例]。",
+        },
+    })
+    assert t.prompt.role == "民法专家,公司法务助手"
+    assert t.prompt.scope.startswith("我专门")
+    assert t.prompt.output_format.startswith("回答末尾")
+    assert len(t.prompt.core_red_lines) == 2
+    rl = t.prompt.core_red_lines[0]
+    assert isinstance(rl, CoreRedLine)
+    assert rl.id == "no_lawsuit_guarantee"
+    assert rl.pattern == r"保证.*胜诉"
+    assert rl.message.startswith("我无法保证")
+    assert rl.severity == "HARD_REFUSE"
+    assert t.prompt.core_red_lines[1].severity == "SOFT_WARN"
+
+
+def test_from_dict_builds_kb_seeds():
+    t = SpecialtyTemplate.from_dict({
+        "id": "civil", "version": "1.0",
+        "name": "民法专家", "specialty": "civil_law",
+        "kb_seeds": [
+            {"file": "legal/civil_code.md", "type": "law",
+             "title": "中华人民共和国民法典"},
+            {"file": "legal/contract_review_sop.md", "type": "sop",
+             "title": "合同审查 SOP"},
+            {"file": "legal/red_lines.md", "type": "red_line"},
+        ],
+    })
+    assert len(t.kb_seeds) == 3
+    seed0 = t.kb_seeds[0]
+    assert isinstance(seed0, KBSeed)
+    assert seed0.file == "legal/civil_code.md"
+    assert seed0.type == "law"
+    assert seed0.title == "中华人民共和国民法典"
+    # title default empty when absent
+    assert t.kb_seeds[2].title == ""
+    # type default "reference" when absent — covered by separate test
+    assert t.kb_seeds[2].type == "red_line"
+
+
+def test_kb_seed_default_type_is_reference():
+    seed = KBSeed(file="example.md")
+    assert seed.type == "reference"
+    assert seed.title == ""
+
+
+def test_core_red_line_default_severity_is_hard_refuse():
+    rl = CoreRedLine(id="x")
+    assert rl.severity == "HARD_REFUSE"
+    assert rl.pattern == ""
+    assert rl.message == ""
+
+
+def test_to_dict_round_trip_with_prompt_and_seeds():
+    src = {
+        "id": "civil", "version": "1.0",
+        "name": "民法专家", "specialty": "civil_law",
+        "prompt": {
+            "role": "民法专家",
+            "scope": "民事问题",
+            "core_red_lines": [
+                {"id": "no_guarantee", "pattern": r"保证胜诉",
+                 "message": "无法保证胜诉。", "severity": "HARD_REFUSE"},
+            ],
+            "output_format": "标注来源",
+        },
+        "kb_seeds": [
+            {"file": "civil_code.md", "type": "law", "title": "民法典"},
+        ],
+    }
+    t1 = SpecialtyTemplate.from_dict(src)
+    t2 = SpecialtyTemplate.from_dict(t1.to_dict())
+    assert t1 == t2
+
+
+def test_schema_accepts_prompt_block():
+    valid = {
+        "id": "x", "version": "1.0", "name": "x", "specialty": "x",
+        "prompt": {
+            "role": "民法专家",
+            "scope": "处理民事问题",
+            "core_red_lines": [
+                {"id": "no_guarantee", "pattern": r"保证胜诉",
+                 "message": "无法保证。", "severity": "HARD_REFUSE"},
+            ],
+            "output_format": "标注来源",
+        },
+    }
+    jsonschema.validate(valid, schema())
+
+
+def test_schema_accepts_kb_seeds():
+    valid = {
+        "id": "x", "version": "1.0", "name": "x", "specialty": "x",
+        "kb_seeds": [
+            {"file": "civil_code.md", "type": "law", "title": "民法典"},
+            {"file": "sop.md"},
+        ],
+    }
+    jsonschema.validate(valid, schema())
+
+
+def test_schema_rejects_red_line_missing_id():
+    bad = {
+        "id": "x", "version": "1.0", "name": "x", "specialty": "x",
+        "prompt": {
+            "core_red_lines": [{"message": "no id field"}],
+        },
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(bad, schema())
+
+
+def test_schema_rejects_red_line_bad_severity():
+    bad = {
+        "id": "x", "version": "1.0", "name": "x", "specialty": "x",
+        "prompt": {
+            "core_red_lines": [
+                {"id": "rl1", "severity": "ULTRA_REFUSE"},
+            ],
+        },
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(bad, schema())
+
+
+def test_schema_rejects_kb_seed_missing_file():
+    bad = {
+        "id": "x", "version": "1.0", "name": "x", "specialty": "x",
+        "kb_seeds": [{"type": "law", "title": "missing file"}],
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(bad, schema())
+
+
+def test_schema_rejects_unknown_field_in_prompt():
+    bad = {
+        "id": "x", "version": "1.0", "name": "x", "specialty": "x",
+        "prompt": {"role": "x", "ohno_typo": True},
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(bad, schema())
 
 
 def test_schema_accepts_full_legal_yaml_shape():
