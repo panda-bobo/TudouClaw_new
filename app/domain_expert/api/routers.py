@@ -1059,6 +1059,128 @@ async def expert_traces(
     }
 
 
+@router.get("/agent/{agent_id}/expert/routing", summary="Get routing config + live stats")
+async def routing_get(
+    agent_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    hub=Depends(get_hub),
+):
+    """V5. Returns the agent's routing config (confidence_threshold, mode)
+    + live local-handle stats. Mode is one of:
+      auto    — confidence-gated (≥ threshold → local LoRA, else → cloud)
+      local   — force local (testing / privacy mode)
+      cloud   — force cloud (bypass LoRA, useful while LoRA is broken)
+    Stored in ~/.tudou_claw/expert/<id>/routing.json. Defaults if missing.
+    """
+    _check_enabled()
+    agent = hub.agents.get(agent_id) if hasattr(hub, "agents") else None
+    if agent is None:
+        raise HTTPException(404, f"agent {agent_id!r} not found")
+    import json as _json
+    from .._config import expert_dir_for as _edir
+    edir = _edir(agent_id)
+    cfg = {
+        "mode": "auto",
+        "confidence_threshold": 0.7,
+        "fallback_to_cloud": True,
+    }
+    cfg_path = os.path.join(edir, "routing.json")
+    if os.path.isfile(cfg_path):
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                stored = _json.load(f)
+            if isinstance(stored, dict):
+                cfg.update(stored)
+        except (OSError, _json.JSONDecodeError):
+            pass
+
+    # Live stats: read routing log if present (V4 step 2 doesn't write
+    # this yet — placeholder zeros until inference path tags routes).
+    stats = {"local_handled": 0, "cloud_handled": 0, "total": 0,
+             "local_handle_rate": 0.0}
+    log_path = os.path.join(edir, "routing.log.jsonl")
+    if os.path.isfile(log_path):
+        try:
+            with open(log_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = _json.loads(line)
+                    except _json.JSONDecodeError:
+                        continue
+                    stats["total"] += 1
+                    where = rec.get("handled_by")
+                    if where == "local":
+                        stats["local_handled"] += 1
+                    elif where == "cloud":
+                        stats["cloud_handled"] += 1
+        except OSError:
+            pass
+    if stats["total"] > 0:
+        stats["local_handle_rate"] = stats["local_handled"] / stats["total"]
+    return {
+        "agent_id": agent_id,
+        "config": cfg,
+        "stats": stats,
+    }
+
+
+@router.put("/agent/{agent_id}/expert/routing", summary="Update routing config")
+async def routing_put(
+    agent_id: str,
+    body: dict = Body(...),
+    user: CurrentUser = Depends(get_current_user),
+    hub=Depends(get_hub),
+):
+    """V5. Update routing config (any subset of: mode / confidence_threshold
+    / fallback_to_cloud). Validates mode enum + threshold 0..1."""
+    _check_enabled()
+    agent = hub.agents.get(agent_id) if hasattr(hub, "agents") else None
+    if agent is None:
+        raise HTTPException(404, f"agent {agent_id!r} not found")
+
+    mode = body.get("mode")
+    if mode is not None and mode not in ("auto", "local", "cloud"):
+        raise HTTPException(400, "mode must be auto / local / cloud")
+    thresh = body.get("confidence_threshold")
+    if thresh is not None:
+        try:
+            thresh = float(thresh)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "confidence_threshold must be a number")
+        if not (0.0 <= thresh <= 1.0):
+            raise HTTPException(400, "confidence_threshold must be 0..1")
+    fallback = body.get("fallback_to_cloud")
+
+    import json as _json
+    from .._config import expert_dir_for as _edir
+    edir = _edir(agent_id)
+    os.makedirs(edir, exist_ok=True)
+    cfg_path = os.path.join(edir, "routing.json")
+    cfg = {"mode": "auto", "confidence_threshold": 0.7,
+           "fallback_to_cloud": True}
+    if os.path.isfile(cfg_path):
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                stored = _json.load(f)
+            if isinstance(stored, dict):
+                cfg.update(stored)
+        except (OSError, _json.JSONDecodeError):
+            pass
+    if mode is not None:
+        cfg["mode"] = mode
+    if thresh is not None:
+        cfg["confidence_threshold"] = thresh
+    if fallback is not None:
+        cfg["fallback_to_cloud"] = bool(fallback)
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        _json.dump(cfg, f, ensure_ascii=False, indent=2)
+    logger.info("routing config updated for %s: %s", agent_id, cfg)
+    return {"ok": True, "agent_id": agent_id, "config": cfg}
+
+
 @router.post("/agent/{agent_id}/expert/lora/train", summary="Trigger LoRA training")
 async def lora_train(
     agent_id: str,

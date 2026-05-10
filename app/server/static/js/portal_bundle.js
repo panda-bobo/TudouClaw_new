@@ -6149,14 +6149,10 @@ function _renderCultDrillPanel(agentId, t, status, modIdx) {
     );
   }
   if (modIdx === 6) {
-    var localRate = (status.profile && status.profile.local_handle_rate) || 0;
-    return panelShell('🎯 Routing — 部署路由', 'V5 confidence threshold tuning',
-      '<div>local handle rate: <span style="font-weight:600;color:var(--cyber-lime,#5cf08a)">' + Math.round(localRate * 100) + '%</span> (target ≥ 60%)</div>'
-      + '<div style="margin-top:14px;padding:12px;background:rgba(255,255,255,0.03);border-radius:6px;font-size:11px;color:var(--text3);line-height:1.6">'
-      +   '👉 V5 vertical 上线后,这里会出现:<br>'
-      +   '  • 调 confidence_threshold 滑块<br>'
-      +   '  • 本地 vs 云端处理分布饼图<br>'
-      +   '  • 强制全云端 (临时禁本地) / 强制全本地 (测试) 模式切换'
+    setTimeout(function(){ _routingRefresh(agentId, t.id); }, 0);
+    return panelShell('🎯 Routing — 部署路由', 'V5: confidence threshold + mode switch',
+      '<div id="routing-body" style="font-size:12px;color:var(--text3)">'
+      + '<span class="material-symbols-outlined" style="font-size:16px">refresh</span> Loading…'
       + '</div>',
       ''
     );
@@ -6459,12 +6455,17 @@ function _loraRefresh(agentId, templateId) {
         + '</div>'
         + '<div style="font-size:10px;color:var(--text3);text-transform:uppercase;margin-bottom:8px">VERSIONS (' + versions.length + ')</div>'
         + versionRows
-        + '<div style="margin-top:14px;display:flex;gap:8px">'
-        +   '<button class="btn btn-sm btn-primary" disabled '
-        +         'title="V4 step 2: trigger QLoRA training" '
-        +         'style="font-size:11px;opacity:0.55;cursor:not-allowed">'
-        +     '🚀 开始训练 ' + (canTrain ? '' : '(需 ' + traceTarget + ' traces)') + ' [V4 step 2]'
+        + '<div style="margin-top:14px;display:flex;gap:8px;align-items:center">'
+        +   '<button class="btn btn-sm btn-primary" '
+        +         'onclick="_loraTrigger(\'' + esc(agentId) + '\',\'' + esc(templateId) + '\',' + (canTrain ? 'false' : 'true') + ')" '
+        +         'title="' + (canTrain ? 'Queue a training run' : 'Queue anyway with override_target=true') + '" '
+        +         'style="font-size:11px;background:var(--cyber-magenta,#ff7adb);'
+        +         'border-color:var(--cyber-magenta,#ff7adb);color:#000">'
+        +     '🚀 开始训练 ' + (canTrain ? '(' + traceCount + ' traces 就绪)' : '(强制·trace 不足)')
         +   '</button>'
+        +   '<span style="font-size:10px;color:var(--text3);flex:1">'
+        +     '排入 lora/_queue.jsonl · SP-2 worker 上线后真训练'
+        +   '</span>'
         + '</div>';
     })
     .catch(function(e){
@@ -6526,6 +6527,122 @@ function _chatFeedback(btn, agentId, rating) {
   });
 }
 window._chatFeedback = _chatFeedback;
+
+// ── V4 step 3: trigger LoRA training queue ────────────────────
+function _loraTrigger(agentId, templateId, override) {
+  if (override && !confirm('trace 数量未达模板要求,确定强制排队?\n(SP-2 worker 上线后才会实际开始训练)')) {
+    return;
+  }
+  api('POST', '/api/portal/agent/' + agentId + '/expert/lora/train',
+      { override_target: override })
+    .then(function(r){
+      var msg = (r.queued && r.queued.status) || 'queued';
+      if (typeof _toast === 'function') _toast('LoRA 训练已排队: ' + msg, 'success');
+      _loraRefresh(agentId, templateId);
+    })
+    .catch(function(e){
+      var detail = (e.detail && e.detail.hint) ? e.detail.hint : (e.message || e);
+      alert('排队失败: ' + detail);
+    });
+}
+window._loraTrigger = _loraTrigger;
+
+// ── V5: Routing module live actions ──────────────────────────
+function _routingRefresh(agentId, templateId) {
+  api('GET', '/api/portal/agent/' + agentId + '/expert/routing')
+    .then(function(r){
+      var body = document.getElementById('routing-body');
+      if (!body) return;
+      var cfg = r.config || {};
+      var stats = r.stats || {};
+      var mode = cfg.mode || 'auto';
+      var thresh = (typeof cfg.confidence_threshold === 'number')
+        ? cfg.confidence_threshold : 0.7;
+      var rate = stats.local_handle_rate || 0;
+
+      function modeBtn(id, label, hint) {
+        var active = mode === id;
+        return '<button class="btn btn-sm" '
+          + 'onclick="_routingSetMode(\'' + esc(agentId) + '\',\'' + esc(templateId) + '\',\'' + id + '\')" '
+          + 'title="' + esc(hint) + '" '
+          + 'style="font-size:11px;padding:6px 12px;background:'
+          +   (active ? 'rgba(255,122,219,0.20)' : 'transparent') + ';'
+          +   'border:1px solid ' + (active ? 'var(--cyber-magenta,#ff7adb)' : 'var(--border)') + ';'
+          +   'color:' + (active ? 'var(--cyber-magenta,#ff7adb)' : 'var(--text2)') + ';'
+          +   'border-radius:6px;font-weight:' + (active ? '600' : '500') + '">'
+          +   esc(label) + '</button>';
+      }
+
+      body.innerHTML = ''
+        + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">'
+        +   '<div style="padding:12px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:6px">'
+        +     '<div style="font-size:10px;color:var(--text3);text-transform:uppercase">LOCAL HANDLE RATE</div>'
+        +     '<div style="font-size:24px;font-weight:700;color:var(--cyber-lime,#5cf08a);margin-top:4px">'
+        +       Math.round(rate * 100) + '%</div>'
+        +     '<div style="font-size:10px;color:var(--text3);margin-top:2px">target ≥ 60% · '
+        +       (stats.total || 0) + ' total queries</div>'
+        +   '</div>'
+        +   '<div style="padding:12px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:6px">'
+        +     '<div style="font-size:10px;color:var(--text3);text-transform:uppercase">SPLIT</div>'
+        +     '<div style="font-size:14px;color:var(--text2);margin-top:6px">'
+        +       '<span style="color:var(--cyber-lime,#5cf08a)">本地 ' + (stats.local_handled || 0) + '</span>'
+        +       ' / <span style="color:var(--cyber-blue,#4afcff)">云端 ' + (stats.cloud_handled || 0) + '</span></div>'
+        +   '</div>'
+        + '</div>'
+        + '<div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px">MODE</div>'
+        + '<div style="display:flex;gap:8px;margin-bottom:14px">'
+        +   modeBtn('auto', '🔀 auto', 'confidence-gated: ≥ threshold → 本地 LoRA, else → 云端')
+        +   modeBtn('local', '🏠 force-local', '所有问题强制走本地(测试用)')
+        +   modeBtn('cloud', '☁️ force-cloud', '所有问题强制走云端(LoRA 故障兜底)')
+        + '</div>'
+        + '<div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px">'
+        +   'CONFIDENCE THRESHOLD <span style="color:var(--cyber-magenta,#ff7adb);font-weight:700">' + thresh.toFixed(2) + '</span></div>'
+        + '<div style="display:flex;align-items:center;gap:10px">'
+        +   '<input type="range" id="routing-thresh-slider" min="0" max="1" step="0.05" value="' + thresh + '" '
+        +         'oninput="document.getElementById(\'routing-thresh-val\').textContent=parseFloat(this.value).toFixed(2)" '
+        +         'style="flex:1">'
+        +   '<span id="routing-thresh-val" style="font-family:var(--font-mono,monospace);font-size:12px;color:var(--cyber-magenta,#ff7adb);min-width:32px">' + thresh.toFixed(2) + '</span>'
+        +   '<button class="btn btn-sm btn-primary" '
+        +         'onclick="_routingSaveThresh(\'' + esc(agentId) + '\',\'' + esc(templateId) + '\')" '
+        +         'style="font-size:11px;background:var(--cyber-magenta,#ff7adb);'
+        +         'border-color:var(--cyber-magenta,#ff7adb);color:#000">保存</button>'
+        + '</div>'
+        + '<div style="margin-top:12px;font-size:10px;color:var(--text3);line-height:1.6">'
+        +   '阈值越高,越倾向走云端(本地 LoRA 必须置信度足够才接管)。 '
+        +   '低于 0.5 几乎全本地; 高于 0.8 几乎全云端。 '
+        +   'V5 step 2 上线 inference 路径埋点后, "LOCAL HANDLE RATE" 会有真实数据。'
+        + '</div>';
+    })
+    .catch(function(e){
+      var body = document.getElementById('routing-body');
+      if (body) body.innerHTML = '<div style="color:var(--error)">routing load failed: ' + esc(e.message || e) + '</div>';
+    });
+}
+window._routingRefresh = _routingRefresh;
+
+function _routingSetMode(agentId, templateId, mode) {
+  api('PUT', '/api/portal/agent/' + agentId + '/expert/routing', { mode: mode })
+    .then(function(){
+      if (typeof _toast === 'function') _toast('mode → ' + mode, 'success');
+      _routingRefresh(agentId, templateId);
+    })
+    .catch(function(e){ alert('保存失败: ' + (e.message || e)); });
+}
+window._routingSetMode = _routingSetMode;
+
+function _routingSaveThresh(agentId, templateId) {
+  var slider = document.getElementById('routing-thresh-slider');
+  if (!slider) return;
+  var v = parseFloat(slider.value);
+  api('PUT', '/api/portal/agent/' + agentId + '/expert/routing',
+      { confidence_threshold: v })
+    .then(function(){
+      if (typeof _toast === 'function') _toast('threshold → ' + v.toFixed(2), 'success');
+      _routingRefresh(agentId, templateId);
+    })
+    .catch(function(e){ alert('保存失败: ' + (e.message || e)); });
+}
+window._routingSaveThresh = _routingSaveThresh;
 
 function _cultBackToOverview(agentId, templateId) {
   Promise.all([

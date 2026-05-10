@@ -22,8 +22,10 @@ def test_router_prefix_and_count():
     #   + POST /agent/{id}/expert/lora/train (V4 step 3: queue request)
     #   + GET  /agent/{id}/expert/lora       (V4 step 3: list versions+queue)
     #   + PUT  /specialty-templates/{id}     (full CRUD: edit existing template)
+    #   + GET  /agent/{id}/expert/routing    (V5: read routing config + stats)
+    #   + PUT  /agent/{id}/expert/routing    (V5: update routing config)
     # If you add an endpoint, bump this number AND add to expected_paths below.
-    assert len(router.routes) == 17
+    assert len(router.routes) == 19
 
 
 def test_router_paths_match_spec():
@@ -50,6 +52,9 @@ def test_router_paths_match_spec():
         ("GET",  "/api/portal/agent/{agent_id}/expert/lora"),
         # Template edit (full CRUD)
         ("PUT", "/api/portal/specialty-templates/{template_id}"),
+        # V5: routing config (per-agent confidence threshold / mode)
+        ("GET", "/api/portal/agent/{agent_id}/expert/routing"),
+        ("PUT", "/api/portal/agent/{agent_id}/expert/routing"),
     }
     actual = set()
     for r in router.routes:
