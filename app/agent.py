@@ -4449,6 +4449,12 @@ class Agent:
             self.soul_md or "",
             self._get_global_system_prompt(),
             self._get_scene_prompts_text(),
+            # R4: cultivation specialty fingerprint — re-cultivation
+            # (specialty change OR template_version bump) invalidates
+            # the cached static prompt so the new PromptBlock takes
+            # effect on the next turn.
+            f"specialty:{getattr(self, 'expert_specialty', '') or ''}",
+            f"specialty_version:{getattr(self, 'expert_template_version', '') or ''}",
         ]
         # ── Project-context freshness ───────────────────────────────
         # mtime-nanoseconds of PROJECT_CONTEXT.md (and legacy siblings)
@@ -4533,6 +4539,94 @@ class Agent:
             pass
         return hashlib.md5("|".join(parts).encode()).hexdigest()
 
+    # ── R4: Specialty cultivation — template loader + red-line check ──
+
+    def _load_specialty_template(self):
+        """Return the agent's SpecialtyTemplate, or None if not cultivated.
+
+        Cached on the agent instance keyed by (specialty, template_version)
+        so a re-cultivation (specialty change OR template_version bump)
+        invalidates automatically. The cache is process-local and lazy:
+        nothing is loaded for non-cultivated agents and the import only
+        happens on the first call.
+
+        Returns None when:
+          - agent has no expert_specialty (普通 agent, not cultivated)
+          - the domain_expert module is disabled via env var
+          - the template file is missing or fails to parse (logged debug)
+        """
+        specialty = getattr(self, "expert_specialty", "") or ""
+        if not specialty:
+            return None
+        try:
+            from .domain_expert._config import is_disabled as _exp_dis
+            if _exp_dis():
+                return None
+        except ImportError:
+            return None
+
+        template_version = getattr(self, "expert_template_version", "") or ""
+        cache_key = (specialty, template_version)
+        cache = getattr(self, "_specialty_template_cache", None)
+        if cache is not None and cache.get("key") == cache_key:
+            return cache.get("tpl")
+
+        try:
+            from .domain_expert.template_loader import load as _tload
+            tpl = _tload(specialty)
+        except Exception as _e:
+            logger.debug(
+                "specialty template load failed for %s/%s: %s",
+                self.id, specialty, _e,
+            )
+            tpl = None
+        # Cache even None so we don't retry on every chat turn for
+        # an agent whose specialty file is missing.
+        self._specialty_template_cache = {"key": cache_key, "tpl": tpl}
+        return tpl
+
+    def _check_red_lines(self, text, template):
+        """Return the first HARD_REFUSE rule whose regex matches text,
+        or None. Thin wrapper over safety.find_red_line_hit so all
+        red-line filtering goes through one place (easy to swap for
+        post-LLM classifier later).
+        """
+        if template is None:
+            return None
+        try:
+            from .domain_expert.safety import find_red_line_hit
+            return find_red_line_hit(text, template, severity="HARD_REFUSE")
+        except Exception as _e:
+            logger.debug("red-line check skipped: %s", _e)
+            return None
+
+    def _record_red_line_block(self, hit, stage: str, source: str = "admin",
+                                context_id: str = "solo") -> str:
+        """Common bookkeeping when a red-line fires (pre OR post).
+
+        Logs the safety_blocked event and returns the user-facing
+        refuse text. The caller is responsible for placing the refuse
+        text into self.messages and persisting (different cleanup
+        depending on pre vs post).
+        """
+        refuse = hit.message or "[safety] 该请求被红线规则拦截"
+        try:
+            self._log("safety_blocked", {
+                "rule_id": hit.id,
+                "stage": stage,
+                "specialty": getattr(self, "expert_specialty", "") or "",
+                "context_id": context_id,
+                "source": source,
+            })
+        except Exception:
+            pass
+        logger.info(
+            "[safety] red-line %s stage=%s agent=%s specialty=%s",
+            hit.id, stage, self.id,
+            getattr(self, "expert_specialty", "") or "",
+        )
+        return refuse
+
     def _build_static_system_prompt(self) -> str:
         """Build the STATIC portion of the system prompt.
 
@@ -4582,6 +4676,27 @@ class Agent:
         _rp = _build_retrieval_protocol(p)
         if _rp:
             parts.append(_rp)
+
+        # ── R4: ① 专家 Prompt (cultivation system) ─────────────────
+        # When the agent is cultivated against a SpecialtyTemplate,
+        # render its PromptBlock (role / scope / hard + soft red lines /
+        # output format) as a system-prompt section. This is what makes
+        # the LLM aware of "I am a 民法专家 and these are my red lines"
+        # before any user turn — the regex-based check in safety.py is
+        # the deterministic safety net, this is the natural-language
+        # behaviour layer.
+        try:
+            _spec_tpl = self._load_specialty_template()
+            if _spec_tpl is not None:
+                from .domain_expert.prompt_renderer import (
+                    render_specialty_system_prompt as _render_specialty,
+                )
+                _spec_block = _render_specialty(_spec_tpl)
+                if _spec_block:
+                    parts.append("")
+                    parts.append(_spec_block)
+        except Exception as _spec_err:
+            logger.debug("specialty prompt render skipped: %s", _spec_err)
 
         # File display contract — keeps the agent from writing broken
         # markdown image syntax for binary files, or "drag the file into
@@ -9381,6 +9496,42 @@ Write only the summary body. Do not include any preamble or prefix."""
             self.messages.append(msg)
             self._log("message", {"role": "user", "content": _user_text[:500], "source": source})
 
+            # ── R4: red-line pre-check (cultivation safety) ──
+            # Cultivated agents have a SpecialtyTemplate.PromptBlock with
+            # CoreRedLines. If the user's text matches a HARD_REFUSE
+            # rule's regex, return the rule's message immediately —
+            # never call the LLM. The user message is already in
+            # self.messages so the UI shows what was asked; the refusal
+            # is appended next so the conversation reads naturally.
+            try:
+                _spec_tpl = self._load_specialty_template()
+                _pre_hit = self._check_red_lines(_user_text, _spec_tpl)
+                if _pre_hit is not None:
+                    _pre_refuse = self._record_red_line_block(
+                        _pre_hit, stage="pre",
+                        source=source, context_id=context_id,
+                    )
+                    self.messages.append({
+                        "role": "assistant",
+                        "content": _pre_refuse,
+                        "_source": "safety",
+                    })
+                    # Persist the refusal turn so it survives reload
+                    try:
+                        from .hub import get_hub as _get_hub_pre
+                        _h_pre = _get_hub_pre()
+                        if _h_pre is not None:
+                            self.save_memory()
+                            _h_pre._save_agent_workspace(self)
+                            _h_pre._save_agents()
+                    except Exception as _save_err_pre:
+                        logger.debug("red-line pre-save failed: %s", _save_err_pre)
+                    self.status = AgentStatus.IDLE
+                    self._streaming_buffer = ""
+                    return _pre_refuse
+            except Exception as _rl_err:
+                logger.debug("red-line pre-check skipped: %s", _rl_err)
+
             # --- agent_state shadow (phase-1 grey rollout) ---
             # Mirror this user turn into the new typed state model.
             # Failures here MUST NOT affect the live agent path.
@@ -11255,6 +11406,29 @@ Write only the summary body. Do not include any preamble or prefix."""
                 self._turn_memory_refs = []
             except Exception:
                 pass
+
+            # ── R4: red-line post-check (cultivation safety) ──
+            # If the LLM produced output that matches a HARD_REFUSE rule
+            # despite the system prompt warning it not to, replace the
+            # output. We rewrite the LAST assistant content message so
+            # the persisted history shows the refusal, not the violation.
+            try:
+                _spec_tpl_post = self._load_specialty_template()
+                _post_hit = self._check_red_lines(final_content, _spec_tpl_post)
+                if _post_hit is not None:
+                    _post_refuse = self._record_red_line_block(
+                        _post_hit, stage="post",
+                        source=source, context_id=context_id,
+                    )
+                    final_content = _post_refuse
+                    for _i in range(len(self.messages) - 1, -1, -1):
+                        _m = self.messages[_i]
+                        if _m.get("role") == "assistant" and not _m.get("tool_calls"):
+                            _m["content"] = _post_refuse
+                            _m["_source"] = "safety"
+                            break
+            except Exception as _rl_post_err:
+                logger.debug("red-line post-check skipped: %s", _rl_post_err)
 
             # ── Persist chat turn immediately ──────────────────────
             # Was: _auto_save_check() with 60s throttle — if user closes
