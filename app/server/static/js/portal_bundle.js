@@ -30,6 +30,14 @@ function _robotIconUrl(ref) {
 let agents = [], nodes = [], messages = [], approvals = [], auditLog = [], tokens = [], providers = [], projects = [];
 let currentView = 'dashboard';
 let currentAgent = null;
+// Mirror to window so console diagnostics + cross-script handlers can
+// read the currently-open agent id without relying on module scope.
+Object.defineProperty(window, 'currentAgent', {
+  configurable: true,
+  enumerable: true,
+  get: function() { return currentAgent; },
+  set: function(v) { currentAgent = v; },
+});
 let currentProject = null;
 let _renderEpoch = 0; // Guard: incremented on every view change to prevent async overwrites
 // Admin context
@@ -6752,6 +6760,17 @@ window._capToggleEmbed = _capToggleEmbed;
 // "对话/能力/配置/历史 是一样的功能, 为啥要在套一层" — so cultivation
 // gets the same modal treatment as Voice / Soul rather than its own tab.
 function openCultivationModal(agentId) {
+  // Defensive: console invocations often pass window.currentAgent which
+  // is undefined (module-scoped let, not on window). Fall back to the
+  // module's currentAgent before bailing.
+  if (!agentId || agentId === 'undefined') {
+    if (typeof currentAgent !== 'undefined' && currentAgent) {
+      agentId = currentAgent;
+    } else {
+      alert('未指定 agent — 请先打开一个 agent');
+      return;
+    }
+  }
   // Initial loading state
   showModalHTMLLarge(
     '<div style="width:880px;max-width:90vw;max-height:85vh;overflow-y:auto;'
