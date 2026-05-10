@@ -6464,6 +6464,59 @@ function _loraRefresh(agentId, templateId) {
 }
 window._loraRefresh = _loraRefresh;
 
+// Chat-message feedback handler. Wired into 👍/👎 buttons that
+// renderChatBubble adds for cultivated agents. POSTs to /feedback,
+// then refreshes the 段位条 chip so the user sees movement.
+function _chatFeedback(btn, agentId, rating) {
+  // Find the bubble's timestamp by walking up from the action bar
+  var ts = 0;
+  var node = btn;
+  for (var hops = 0; hops < 6 && node; hops++) {
+    if (typeof node._timestamp === 'number' && node._timestamp > 0) {
+      ts = node._timestamp; break;
+    }
+    if (node.querySelector) {
+      var cd = node.querySelector('.chat-msg-content');
+      if (cd && typeof cd._timestamp === 'number') {
+        ts = cd._timestamp; break;
+      }
+    }
+    node = node.parentElement;
+  }
+  var traceId = ts ? ('bubble-' + Math.floor(ts)) : ('bubble-' + Date.now());
+  var bar = btn.parentElement;
+  // Visually highlight clicked, dim the other
+  if (bar) {
+    bar.querySelectorAll('.chat-action-feedback').forEach(function(b){
+      b.style.opacity = '0.35';
+    });
+    btn.style.opacity = '1';
+    btn.style.background = (rating === 'up')
+      ? 'rgba(92,240,138,0.20)'
+      : 'rgba(239,68,68,0.20)';
+  }
+  api('POST', '/api/portal/agent/' + agentId + '/expert/feedback', {
+    trace_id: traceId,
+    rating: rating,
+  })
+  .then(function(){
+    if (typeof _toast === 'function') {
+      _toast(rating === 'up' ? '👍 已记录(推进段位)' : '👎 已记录(进入低质 trace)', 'success');
+    }
+    // Refresh 段位条 chip immediately so the user sees feedback impact
+    try { _cultLevelChipRefresh(agentId); } catch(_) {}
+  })
+  .catch(function(e){
+    if (bar) {
+      bar.querySelectorAll('.chat-action-feedback').forEach(function(b){
+        b.style.opacity = ''; b.style.background = '';
+      });
+    }
+    alert('反馈提交失败: ' + (e.message || e));
+  });
+}
+window._chatFeedback = _chatFeedback;
+
 function _cultBackToOverview(agentId, templateId) {
   Promise.all([
     api('GET', '/api/portal/specialty-templates/' + encodeURIComponent(templateId))
@@ -8842,10 +8895,34 @@ function addChatBubble(agentId, role, text, timestamp, extraClass) {
     div.appendChild(timeSpan);
     var actionBar = document.createElement('div');
     actionBar.className = 'chat-msg-actions';
-    actionBar.innerHTML = '<button class="chat-action-btn" onclick="_speakBubble(this)" title="' + window.t('bubble.speak', '朗读此消息') + '"><span class="material-symbols-outlined" style="font-size:14px">volume_up</span></button>' +
-      '<button class="chat-action-btn" onclick="_saveToFile(this,\''+agentId+'\')" title="' + window.t('bubble.saveFile', '保存为文件') + '"><span class="material-symbols-outlined" style="font-size:14px">save</span> ' + window.t('action.save', 'Save') + '</button>' +
-      '<button class="chat-action-btn" onclick="_copyToClipboard(this)" title="' + window.t('bubble.copy', '复制') + '"><span class="material-symbols-outlined" style="font-size:14px">content_copy</span> ' + window.t('bubble.copy', '复制') + '</button>' +
-      '<button class="chat-action-btn chat-action-delete" onclick="_deleteBubble(this,\''+agentId+'\',\'assistant\')" title="' + window.t('bubble.delete', '删除此消息') + '"><span class="material-symbols-outlined" style="font-size:14px">close</span></button>';
+    // 👍 / 👎 feedback buttons — only for cultivated agents (so the
+    // 段位 system has a signal). The trace_id we pass is the bubble's
+    // timestamp; the backend doesn't enforce strict cross-ref against
+    // a specific trace yet (V4 step 2 follow-up), so even an
+    // approximately-matching id is fine for accuracy aggregation.
+    var _ag = agents.find(function(a){ return a.id === agentId; });
+    var _isCultivated = !!(_ag && _ag.expert_specialty);
+    var feedbackBtns = '';
+    if (_isCultivated) {
+      feedbackBtns = ''
+        + '<button class="chat-action-btn chat-action-feedback" '
+        +   'onclick="_chatFeedback(this,\'' + esc(agentId) + '\',\'up\')" '
+        +   'title="答案准确,推进段位" '
+        +   'style="color:var(--cyber-lime,#5cf08a)">'
+        +   '<span class="material-symbols-outlined" style="font-size:14px">thumb_up</span>'
+        + '</button>'
+        + '<button class="chat-action-btn chat-action-feedback" '
+        +   'onclick="_chatFeedback(this,\'' + esc(agentId) + '\',\'down\')" '
+        +   'title="答案不准,记入低质 trace" '
+        +   'style="color:var(--error,#ef4444)">'
+        +   '<span class="material-symbols-outlined" style="font-size:14px">thumb_down</span>'
+        + '</button>';
+    }
+    actionBar.innerHTML = feedbackBtns
+      + '<button class="chat-action-btn" onclick="_speakBubble(this)" title="' + window.t('bubble.speak', '朗读此消息') + '"><span class="material-symbols-outlined" style="font-size:14px">volume_up</span></button>'
+      + '<button class="chat-action-btn" onclick="_saveToFile(this,\''+agentId+'\')" title="' + window.t('bubble.saveFile', '保存为文件') + '"><span class="material-symbols-outlined" style="font-size:14px">save</span> ' + window.t('action.save', 'Save') + '</button>'
+      + '<button class="chat-action-btn" onclick="_copyToClipboard(this)" title="' + window.t('bubble.copy', '复制') + '"><span class="material-symbols-outlined" style="font-size:14px">content_copy</span> ' + window.t('bubble.copy', '复制') + '</button>'
+      + '<button class="chat-action-btn chat-action-delete" onclick="_deleteBubble(this,\''+agentId+'\',\'assistant\')" title="' + window.t('bubble.delete', '删除此消息') + '"><span class="material-symbols-outlined" style="font-size:14px">close</span></button>';
     div.appendChild(actionBar);
     row.appendChild(div);
     div._contentDiv = contentDiv;
