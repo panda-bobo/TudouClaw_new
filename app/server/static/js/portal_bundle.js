@@ -39215,17 +39215,21 @@ async function renderCultivationHub(container) {
     + '<div id="cult-hub-body"></div>';
 
   var body = document.getElementById('cult-hub-body');
-  // Merged-in renderers from K&M hub use document.getElementById('content')
-  // / 'km-content' as their target. Bridge by giving the body an 'id'
-  // they recognize while their render runs, then swap back.
+  // Merged-in renderers from K&M hub look for different container ids
+  // depending on theme:
+  //   legacy → document.getElementById('km-content')
+  //   tech   → document.getElementById('tech-hub-km-body') THEN
+  //            falls back to document.getElementById('content') ←
+  //            this fallback was nuking the whole hub (tabs gone).
+  // Bridge: rename the hub's body to whichever id the renderer wants.
+  // Since renderCultivationHub() rebuilds #content from scratch on
+  // every tab switch, we don't need to restore the id — it'll come
+  // back as 'cult-hub-body' next time the user switches tabs.
   function _withKmContainer(fn) {
-    var origId = body.id;
-    body.id = 'km-content';
-    try { fn(); } finally {
-      // Some renderers populate inside km-content asynchronously; rename
-      // back after a microtask to avoid clobbering before paint.
-      setTimeout(function(){ body.id = origId; }, 50);
-    }
+    var isTech = false;
+    try { isTech = localStorage.getItem('tudou_theme') === 'tech'; } catch (e) {}
+    body.id = isTech ? 'tech-hub-km-body' : 'km-content';
+    fn();
   }
   if (_cultHubTab === 'cultivated')        await _cultHubRenderCultivated(body);
   else if (_cultHubTab === 'templates')    renderSpecialtyTemplates(body);
