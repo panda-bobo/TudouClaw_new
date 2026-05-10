@@ -9275,20 +9275,30 @@ Write only the summary body. Do not include any preamble or prefix."""
         # All three conditions must hold; any miss falls through to the
         # current普通-agent path. V4 vertical fills in the pipeline.
         # See docs/superpowers/specs/2026-05-10-agent-specialty-cultivation-design.md §5.2
-        if self.expert_specialty:
-            try:
-                from app.domain_expert._config import is_disabled as _exp_is_disabled
-                if not _exp_is_disabled():
-                    from app.domain_expert.inference import pipeline as _expert_pipeline
-                    if hasattr(_expert_pipeline, "answer"):
-                        return _expert_pipeline.answer(
-                            self, user_message,
-                            on_event=on_event, abort_check=abort_check,
-                            source=source, context_id=context_id,
-                        )
-            except ImportError:
-                # Module not built yet — Phase 0 / inference package empty.
-                pass
+        # ── V4 step 2 RAG hook (DISABLED 2026-05-10) ──────────────────
+        # The original early-return version routed cultivated agents
+        # through pipeline.answer() and returned the LLM response
+        # directly. Problem: it skipped ALL of agent.chat()'s normal
+        # plumbing — transcript/messages/history append, on_event
+        # streaming, tool-call resolution, token accounting, etc. —
+        # so user sent a message and saw NOTHING in the UI ("发消息
+        # 没反应" bug, 2026-05-10).
+        #
+        # Better integration approach (TODO V4 step 2 follow-up):
+        #   1. Don't early-return; let agent.chat() run normally.
+        #   2. BEFORE the LLM call, ask pipeline._retrieve(...) for
+        #      top-K corpus chunks for this query.
+        #   3. PREPEND a system message with [来源:...] context to the
+        #      messages list.
+        #   4. AFTER agent.chat() returns, call a side-effect hook that
+        #      writes the trace (q, a, retrieved_count, sources) to
+        #      ~/.tudou_claw/expert/<id>/traces/YYYY-MM-DD.jsonl.
+        #
+        # That keeps the UI streaming + history intact AND still tags
+        # the conversation with retrieved context for grounded answers.
+        # POST /expert/query is unaffected — it always was a separate
+        # entrypoint that calls pipeline.answer directly.
+        # ─────────────────────────────────────────────────────────────
         # ── Token logging context: 让本次 chat 内所有 LLM 调用 ──
         # ── 都能归属到这个 agent/project/meeting，token 统计才能落到 ──
         # ── agent.stats / project.stats / meeting.stats 。project_id ──
