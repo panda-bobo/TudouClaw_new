@@ -166,8 +166,164 @@ async def initialize_expert(
     user: CurrentUser = Depends(get_current_user),
     hub=Depends(get_hub),
 ):
+    """V2 implementation. Apply a specialty template to an agent — the
+    "Start Cultivation" button.
+
+    Body: `{"template_id": "<template_id>", "force": false}`
+
+    What it does (delegating to Track D's apply_bundle):
+      1. Look up the agent (404 if missing).
+      2. Refuse if agent is already cultivated AND force=false (returns 409
+         with current specialty so client can prompt user to delete first).
+      3. Load the SpecialtyTemplate (404 if id unknown). Tries filename
+         match first ("legal" → legal.yaml), falls back to inner id match
+         ("legal-expert" → load_all + scan).
+      4. Wire callbacks against the live PromptPackRegistry + skill
+         registry so apply_bundle can detect "pack X not in registry".
+      5. Call apply_bundle → stamps agent.expert_* fields + appends
+         packs/skills/mcps, persists via hub._save_agents.
+      6. Write ExpertProfile snapshot to ~/.tudou_claw/expert/<id>/config.json.
+      7. Return the BundleApplyResult so UI can show what was applied vs
+         skipped vs missing.
+    """
     _check_enabled()
-    raise HTTPException(501, "not implemented (V2 delivers)")
+
+    # ── Step 1: agent ──
+    agent = hub.agents.get(agent_id) if hasattr(hub, "agents") else None
+    if agent is None:
+        raise HTTPException(404, f"agent {agent_id!r} not found")
+
+    template_id = (body.get("template_id") or "").strip()
+    if not template_id:
+        raise HTTPException(400, "body must include 'template_id' (string)")
+    force = bool(body.get("force") or False)
+
+    # ── Step 2: refuse re-cultivation unless force ──
+    cur_specialty = getattr(agent, "expert_specialty", "") or ""
+    if cur_specialty and not force:
+        raise HTTPException(
+            409,
+            {
+                "error": "already_cultivated",
+                "agent_id": agent_id,
+                "current_specialty": cur_specialty,
+                "current_template_version":
+                    getattr(agent, "expert_template_version", ""),
+                "hint": "DELETE /agent/{id}/expert first, or pass force=true.",
+            },
+        )
+
+    # ── Step 3: template (filename or inner-id) ──
+    try:
+        from ..template_loader import (
+            load, load_all, TemplateNotFoundError, TemplateInvalidError,
+        )
+    except ImportError as e:
+        raise HTTPException(500, f"template_loader unavailable: {e}")
+    template = None
+    try:
+        template = load(template_id)
+    except TemplateNotFoundError:
+        try:
+            for cand in load_all():
+                if cand.id == template_id:
+                    template = cand
+                    break
+        except Exception as e:
+            raise HTTPException(500, f"template lookup by id failed: {e}")
+        if template is None:
+            raise HTTPException(404, f"template {template_id!r} not found")
+    except TemplateInvalidError as e:
+        raise HTTPException(500, f"template {template_id!r} invalid: {e}")
+
+    # ── Step 4: wire callbacks ──
+    pack_exists_cb = None
+    anthropic_pack_exists_cb = None
+    skill_exists_cb = None
+    skill_grant_cb = None
+
+    # Prompt packs — registry is shared with the existing PromptPack store
+    try:
+        from app.skills.prompt_enhancer import get_prompt_pack_registry
+        pp_reg = get_prompt_pack_registry()
+        store = getattr(pp_reg, "store", None)
+        if store is not None:
+            pack_exists_cb = lambda pid: store.get(pid) is not None
+            # Anthropic packs (akwp_*) live in the same store after import,
+            # so the same callback works.
+            anthropic_pack_exists_cb = pack_exists_cb
+    except Exception as e:
+        logger.info("PromptPackRegistry unavailable, packs treated as present: %s", e)
+
+    # Skills — hub.skill_registry (if present)
+    skill_registry = getattr(hub, "skill_registry", None)
+    if skill_registry is not None:
+        if hasattr(skill_registry, "has"):
+            skill_exists_cb = lambda sid: skill_registry.has(sid)
+        elif hasattr(skill_registry, "get"):
+            skill_exists_cb = lambda sid: skill_registry.get(sid) is not None
+        if hasattr(skill_registry, "grant"):
+            def _grant(aid, sid):
+                try:
+                    skill_registry.grant(sid, aid)
+                except TypeError:
+                    skill_registry.grant(aid, sid)
+            skill_grant_cb = _grant
+    if skill_grant_cb is None:
+        # Fallback: append directly to agent.granted_skills.
+        def _grant_fallback(aid, sid):
+            cur = list(getattr(agent, "granted_skills", []) or [])
+            if sid not in cur:
+                cur.append(sid)
+                agent.granted_skills = cur
+        skill_grant_cb = _grant_fallback
+
+    # ── Step 5: apply ──
+    from ..bundle_apply import apply_bundle
+    save_called = {"n": 0}
+    def _save():
+        save_called["n"] += 1
+        try:
+            hub._save_agents()
+        except Exception as e:
+            logger.warning("hub._save_agents failed: %s", e)
+
+    result = apply_bundle(
+        template, agent,
+        save_callback=_save,
+        skill_grant_callback=skill_grant_cb,
+        pack_exists_callback=pack_exists_cb,
+        anthropic_pack_exists_callback=anthropic_pack_exists_cb,
+        skill_exists_callback=skill_exists_cb,
+    )
+
+    # ── Step 6: write ExpertProfile snapshot ──
+    try:
+        from ..profile import ExpertProfile
+        profile = ExpertProfile(
+            agent_id=agent_id,
+            specialty=template.specialty,
+            template_id=template.id,
+            template_version=template.version,
+            level=getattr(agent, "expert_level", "novice") or "novice",
+            active_lora_version=getattr(agent, "expert_lora_version", "") or "",
+            initialized_at=float(
+                getattr(agent, "expert_initialized_at", 0.0) or 0.0
+            ),
+        )
+        profile.save()
+    except Exception as e:
+        logger.warning("ExpertProfile.save failed for %s: %s", agent_id, e)
+
+    # ── Step 7: return ──
+    from dataclasses import asdict
+    out = asdict(result)
+    out["expert_level_after"] = getattr(agent, "expert_level", "novice")
+    out["save_called"] = save_called["n"] > 0
+    out["is_complete"] = result.is_complete()
+    out["summary"] = result.summary()
+    out["ok"] = True
+    return out
 
 
 @router.delete("/agent/{agent_id}/expert", summary="Disable / delete expert state")
