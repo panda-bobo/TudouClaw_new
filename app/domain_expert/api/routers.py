@@ -210,6 +210,107 @@ async def create_specialty_template(
     }
 
 
+@router.put("/specialty-templates/{template_id}", summary="Update an existing specialty template")
+async def update_specialty_template(
+    template_id: str,
+    body: dict = Body(...),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Edit an existing template's YAML. Only the fields present in
+    `body` are overlaid; everything else is preserved.
+
+    Path arg: template filename stem OR inner id (same fallback as GET).
+    Body: any subset of the create fields (id, name, description, packs,
+          skills, icon, version, etc.). Changing `id` renames the file.
+
+    Returns the updated template dict on success.
+    """
+    _check_enabled()
+    from ..template_loader import (
+        _yaml_path_for, load, load_all, invalidate_cache,
+        TemplateNotFoundError, TemplateInvalidError,
+    )
+
+    # Resolve the existing yaml path — by filename or inner id
+    path = _yaml_path_for(template_id)
+    existing = None
+    if os.path.exists(path):
+        try:
+            existing = load(template_id)
+        except (TemplateNotFoundError, TemplateInvalidError) as e:
+            raise HTTPException(500, f"existing template invalid: {e}")
+    if existing is None:
+        # try inner-id resolution
+        for cand in load_all():
+            if cand.id == template_id:
+                existing = cand
+                path = _yaml_path_for(cand.specialty)
+                break
+    if existing is None:
+        raise HTTPException(404, f"template {template_id!r} not found")
+
+    # Read current YAML to a dict so we can overlay
+    try:
+        import yaml
+    except ImportError:
+        raise HTTPException(500, "PyYAML not installed")
+    with open(path, "r", encoding="utf-8") as f:
+        cur_doc = yaml.safe_load(f) or {}
+
+    # Overlay body — only top-level keys we recognize, plus pass-through
+    # for nested chunker / training / safety dicts.
+    SHALLOW_FIELDS = {
+        "id", "version", "name", "specialty", "icon", "description",
+        "required_packs", "required_anthropic_packs", "required_skills",
+        "required_mcps", "corpus_sources", "eval_suite", "level_rules",
+    }
+    for k in SHALLOW_FIELDS:
+        if k in body:
+            cur_doc[k] = body[k]
+    # Nested merges (allow PATCH-style partial updates of sub-dicts)
+    for nested in ("chunker", "training", "safety"):
+        if nested in body and isinstance(body[nested], dict):
+            cur = dict(cur_doc.get(nested) or {})
+            cur.update(body[nested])
+            cur_doc[nested] = cur
+
+    # Validate
+    from ..template import SpecialtyTemplate
+    try:
+        SpecialtyTemplate.from_dict(cur_doc)
+    except Exception as e:
+        raise HTTPException(400, f"invalid template after edit: {e}")
+
+    # Determine target path: if `id` (filename) changed, rename the file
+    new_specialty = cur_doc.get("specialty") or existing.specialty
+    target_path = _yaml_path_for(cur_doc.get("id") or existing.id) \
+        if False else _yaml_path_for(new_specialty)
+    # Actually filename should remain stable unless user explicitly asked
+    # to change it. We key on filename = specialty key. If `specialty`
+    # changed, the file moves.
+    if target_path != path and os.path.exists(target_path):
+        raise HTTPException(409,
+            f"target path {target_path} already exists "
+            f"(specialty conflict)")
+
+    # Write
+    if target_path != path:
+        os.remove(path)
+    with open(target_path, "w", encoding="utf-8") as f:
+        f.write(
+            "# Specialty Template — edited via cultivation hub UI\n"
+            f"# Specialty: {new_specialty}\n"
+            f"# Last edit by: {getattr(user, 'user_id', 'unknown')}\n\n"
+        )
+        yaml.safe_dump(cur_doc, f, allow_unicode=True, sort_keys=False)
+
+    invalidate_cache()
+    logger.info("specialty template updated: %s by %s",
+                template_id, getattr(user, "user_id", "unknown"))
+    return {"ok": True, "id": cur_doc.get("id"), "path": target_path,
+            "template": cur_doc}
+
+
 @router.delete("/specialty-templates/{template_id}", summary="Delete a specialty template")
 async def delete_specialty_template(
     template_id: str,
@@ -955,6 +1056,157 @@ async def expert_traces(
         "agent_id": agent_id,
         "total": total,
         "traces": traces[: max(1, min(int(limit), 500))],
+    }
+
+
+@router.post("/agent/{agent_id}/expert/lora/train", summary="Trigger LoRA training")
+async def lora_train(
+    agent_id: str,
+    body: dict = Body(default={}),
+    user: CurrentUser = Depends(get_current_user),
+    hub=Depends(get_hub),
+):
+    """V4 step 3 stub. Records a training request to a queue file.
+
+    The actual mlx-lm + RAFT pipeline lands in SP-2 (estimated ~3 days
+    of work). For now this:
+      1. Validates the agent is cultivated
+      2. Validates trace_count >= raft_data_target (no point training
+         without enough data)
+      3. Writes a request record to lora/_queue.jsonl with status='queued'
+
+    Returns 200 + the queue record. The UI button surfaces this as
+    "训练已排队 — 后台执行(SP-2 上线)". No actual training fires yet.
+
+    Body (all optional):
+      override_target  — accept fewer traces than template's raft_data_target
+      base_model       — override template's base_model
+      lora_rank / alpha — override hyperparams
+    """
+    _check_enabled()
+    agent = hub.agents.get(agent_id) if hasattr(hub, "agents") else None
+    if agent is None:
+        raise HTTPException(404, f"agent {agent_id!r} not found")
+    cur_specialty = getattr(agent, "expert_specialty", "") or ""
+    if not cur_specialty:
+        raise HTTPException(409, {"error": "not_cultivated"})
+
+    # Count traces — same logic as /stats
+    import json as _json, time as _time
+    from .._config import expert_dir_for as _edir
+    edir = _edir(agent_id)
+    trace_count = 0
+    traces_dir = os.path.join(edir, "traces")
+    if os.path.isdir(traces_dir):
+        try:
+            for fname in os.listdir(traces_dir):
+                if fname.endswith(".jsonl"):
+                    with open(os.path.join(traces_dir, fname), "r", encoding="utf-8") as f:
+                        for line in f:
+                            if line.strip():
+                                trace_count += 1
+        except OSError:
+            pass
+
+    # Resolve template to know raft_data_target
+    raft_target = 1000
+    try:
+        from ..template_loader import load, load_all, TemplateNotFoundError
+        try:
+            tpl = load(cur_specialty)
+        except TemplateNotFoundError:
+            tpl = None
+            for cand in load_all():
+                if cand.id == cur_specialty or cand.specialty == cur_specialty:
+                    tpl = cand; break
+        if tpl is not None and tpl.training:
+            # Schema's TrainingConfig has no raft_data_target, but we use
+            # max_steps as a rough analog or fall back to 1000.
+            raft_target = max(int(getattr(tpl.training, "max_steps", 0) or 0), 1000)
+    except Exception as e:
+        logger.info("template lookup for lora_train failed: %s", e)
+
+    override_target = bool(body.get("override_target") or False)
+    if trace_count < raft_target and not override_target:
+        raise HTTPException(409, {
+            "error": "insufficient_traces",
+            "trace_count": trace_count,
+            "raft_target": raft_target,
+            "hint": (
+                f"need ≥ {raft_target} traces, have {trace_count}. "
+                "pass override_target=true to force-queue anyway."
+            ),
+        })
+
+    # Queue the request
+    lora_dir = os.path.join(edir, "lora")
+    os.makedirs(lora_dir, exist_ok=True)
+    queue_path = os.path.join(lora_dir, "_queue.jsonl")
+    record = {
+        "ts": _time.time(),
+        "agent_id": agent_id,
+        "specialty": cur_specialty,
+        "trace_count": trace_count,
+        "raft_target": raft_target,
+        "override_target": override_target,
+        "base_model_override": str(body.get("base_model") or ""),
+        "lora_rank_override":  int(body.get("lora_rank") or 0),
+        "lora_alpha_override": int(body.get("lora_alpha") or 0),
+        "status": "queued",
+        "queued_by": getattr(user, "user_id", "unknown"),
+        "note": "SP-2 worker not yet wired; record kept for inspection",
+    }
+    with open(queue_path, "a", encoding="utf-8") as f:
+        f.write(_json.dumps(record, ensure_ascii=False) + "\n")
+    logger.info("lora_train queued for %s (traces=%d/target=%d, override=%s)",
+                agent_id, trace_count, raft_target, override_target)
+    return {"ok": True, "queued": record}
+
+
+@router.get("/agent/{agent_id}/expert/lora", summary="List LoRA versions + queue")
+async def lora_list(
+    agent_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    hub=Depends(get_hub),
+):
+    """V4 step 3 read-side. Lists training queue records + on-disk LoRA
+    versions (subdirs under lora/). Used by module 5 drill panel."""
+    _check_enabled()
+    agent = hub.agents.get(agent_id) if hasattr(hub, "agents") else None
+    if agent is None:
+        raise HTTPException(404, f"agent {agent_id!r} not found")
+    import json as _json
+    from .._config import expert_dir_for as _edir
+    lora_dir = os.path.join(_edir(agent_id), "lora")
+    versions: list[str] = []
+    queue: list[dict] = []
+    if os.path.isdir(lora_dir):
+        try:
+            versions = sorted(
+                d for d in os.listdir(lora_dir)
+                if os.path.isdir(os.path.join(lora_dir, d)) and d not in ("current",)
+            )
+        except OSError:
+            pass
+        qpath = os.path.join(lora_dir, "_queue.jsonl")
+        if os.path.isfile(qpath):
+            try:
+                with open(qpath, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line: continue
+                        try:
+                            queue.append(_json.loads(line))
+                        except _json.JSONDecodeError:
+                            continue
+            except OSError:
+                pass
+    queue.sort(key=lambda r: r.get("ts", 0), reverse=True)
+    return {
+        "agent_id": agent_id,
+        "active_lora": getattr(agent, "expert_lora_version", "") or "",
+        "versions": versions,
+        "queue": queue[:20],
     }
 
 
