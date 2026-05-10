@@ -4550,10 +4550,19 @@ class Agent:
         nothing is loaded for non-cultivated agents and the import only
         happens on the first call.
 
+        Resolution order (handles bundle_apply's design quirk where
+        agent.expert_specialty stores ``template.specialty`` but the
+        loader keys are template-paths like ``legal/civil_law``):
+          1. Direct ``template_loader.load(specialty)`` — works for
+             top-level templates whose filename matches their specialty.
+          2. Fallback ``load_all()`` + filter by ``.specialty`` — handles
+             nested sub-specialties (``legal/test_red_lines.yaml``
+             whose ``specialty: test_red_lines``).
+
         Returns None when:
           - agent has no expert_specialty (普通 agent, not cultivated)
           - the domain_expert module is disabled via env var
-          - the template file is missing or fails to parse (logged debug)
+          - no template on disk has a matching ``.specialty`` field
         """
         specialty = getattr(self, "expert_specialty", "") or ""
         if not specialty:
@@ -4571,15 +4580,33 @@ class Agent:
         if cache is not None and cache.get("key") == cache_key:
             return cache.get("tpl")
 
+        tpl = None
         try:
-            from .domain_expert.template_loader import load as _tload
-            tpl = _tload(specialty)
-        except Exception as _e:
-            logger.debug(
-                "specialty template load failed for %s/%s: %s",
-                self.id, specialty, _e,
+            from .domain_expert.template_loader import (
+                load as _tload, load_all as _tload_all,
             )
-            tpl = None
+            try:
+                tpl = _tload(specialty)
+            except Exception:
+                # Fallback: scan templates and match on .specialty
+                # (sub-specialty templates like legal/civil_law have
+                # specialty="civil_law" but live at path
+                # "legal/civil_law", so a direct load() misses them).
+                try:
+                    for cand in _tload_all():
+                        if getattr(cand, "specialty", "") == specialty:
+                            tpl = cand
+                            break
+                except Exception as _scan_err:
+                    logger.debug(
+                        "specialty template scan failed for %s/%s: %s",
+                        self.id, specialty, _scan_err,
+                    )
+        except ImportError as _imp_err:
+            logger.debug(
+                "specialty template loader unavailable for %s: %s",
+                self.id, _imp_err,
+            )
         # Cache even None so we don't retry on every chat turn for
         # an agent whose specialty file is missing.
         self._specialty_template_cache = {"key": cache_key, "tpl": tpl}
