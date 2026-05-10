@@ -6248,25 +6248,37 @@ function _knowledgeRefresh(agentId, templateId) {
             + '</div>';
         });
       }
-      // Template expected sources (info)
+      // Template expected sources (info-only). Template specs in legal.yaml
+      // describe sources by {type, location, description} — they do NOT
+      // ship with a source_id (the user picks one when ingesting). We
+      // show them as a read-only suggestion list; ingest happens via the
+      // upload form below where the user types a real source_id +
+      // pastes/uploads content.
       if (tplSources.length > 0) {
         rows += '<div style="margin-top:14px;font-size:10px;color:var(--text3);text-transform:uppercase;'
-          + 'letter-spacing:0.05em;margin-bottom:8px">模板预期 (template, ' + tplSources.length + ')</div>';
+          + 'letter-spacing:0.05em;margin-bottom:8px">模板建议来源 (template, ' + tplSources.length + ')</div>';
         tplSources.forEach(function(s){
-          var sid = s.source_id || s.id || '?';
-          var registered = sources.some(function(m){ return m.source_id === sid; });
-          rows += '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;'
-            +     'border-bottom:1px solid var(--overlay-5);font-size:11px;opacity:'
-            +     (registered ? '0.5' : '1') + '">'
-            + '<code style="flex:1;color:var(--text2)">' + esc(sid) + '</code>'
-            + '<span style="color:var(--text3);font-size:10px">' + esc(s.kind || s.type || '') + '</span>'
-            + (registered
-                ? '<span style="color:var(--cyber-lime,#5cf08a);font-size:10px">已注册</span>'
-                : ('<button class="btn btn-sm" style="font-size:10px;padding:2px 8px" '
-                   +   'onclick="_knowledgeAddSource(\'' + esc(agentId) + '\',\'' + esc(templateId) + '\','
-                   +     '\'' + esc(sid) + '\',\'' + esc(s.version || '') + '\')">注册</button>'))
+          var loc   = s.location || s.url || '';
+          var kind  = s.kind || s.type || 'url';
+          var desc  = s.description || '';
+          rows += '<div style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;'
+            +     'border-bottom:1px solid var(--overlay-5);font-size:11px">'
+            + '<span style="color:var(--text3);font-size:10px;min-width:36px">' + esc(kind) + '</span>'
+            + '<div style="flex:1;min-width:0">'
+            + '  <div style="color:var(--text2);font-family:var(--font-mono,monospace);font-size:10px;'
+            +     'overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(loc) + '">'
+            +     esc(loc || '(no location)') + '</div>'
+            + (desc
+                ? '<div style="color:var(--text3);font-size:10px;margin-top:2px">' + esc(desc) + '</div>'
+                : '')
+            + '</div>'
+            + '<span style="color:var(--text3);font-size:9px;text-transform:uppercase">参考</span>'
             + '</div>';
         });
+        rows += '<div style="font-size:10px;color:var(--text3);margin-top:6px;line-height:1.6">'
+          + '💡 模板建议是只读参考。真正的注册在下面"上传语料"区域 —— '
+          + '填 source_id + 粘贴/上传内容。'
+          + '</div>';
       }
       // Upload form — V3 step 2: paste/upload text content, real chunking
       var uploadForm = ''

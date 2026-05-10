@@ -800,6 +800,20 @@ async def corpus_ingest(
     source_id = (body.get("source_id") or "").strip()
     if not source_id:
         raise HTTPException(400, "body must include 'source_id' (string)")
+    # Reject placeholder values that should not have made it through the UI.
+    # The "?" specifically slipped in when the template_sources [注册] button
+    # was wired to s.source_id || s.id || '?' and the template specs only
+    # carry {type, location, description} — no source_id. Frontend now
+    # surfaces template_sources as read-only references; this is a backstop.
+    if source_id in ("?", "??", "...", "-"):
+        raise HTTPException(400, f"source_id {source_id!r} is a placeholder; "
+                                  "give the source a real, descriptive id "
+                                  "(e.g. 'civil-code', 'my-cases-2024')")
+    # Filesystem-safe check (we'll create a directory with this name)
+    import re as _re_sid
+    if not _re_sid.match(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$", source_id):
+        raise HTTPException(400, f"source_id {source_id!r} must be alphanumeric "
+                                  "(plus _ . : -); no slashes or spaces")
 
     content = body.get("content") or ""
     strategy = (body.get("chunker_strategy") or "paragraph").strip()
