@@ -81,13 +81,30 @@ async def get_specialty_template(
     bundle preview before user confirms cultivation."""
     _check_enabled()
     try:
-        from ..template_loader import load, TemplateNotFoundError, TemplateInvalidError
+        from ..template_loader import (
+            load, load_all, TemplateNotFoundError, TemplateInvalidError,
+        )
     except ImportError as e:
         raise HTTPException(500, f"template_loader unavailable: {e}")
+    # Resolve template_id by trying:
+    #   1. Direct filename match (e.g. "legal" → legal.yaml)
+    #   2. Inner id match (e.g. "legal-expert" → scan load_all() for t.id)
+    # The picker UI sends t.id (e.g. "legal-expert") but the loader keys
+    # by filename — without this fallback every preview returned 404.
     try:
         tpl = load(template_id)
     except TemplateNotFoundError:
-        raise HTTPException(404, f"template {template_id!r} not found")
+        try:
+            for cand in load_all():
+                if cand.id == template_id:
+                    tpl = cand
+                    break
+            else:
+                raise HTTPException(404, f"template {template_id!r} not found")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(500, f"template lookup by id failed: {e}")
     except TemplateInvalidError as e:
         raise HTTPException(500, f"template {template_id!r} invalid: {e}")
     except Exception as e:

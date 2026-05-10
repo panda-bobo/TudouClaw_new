@@ -5775,23 +5775,414 @@ function _awsCultivationPickerCard(agentId, status, catalog) {
     + '</div>';
 }
 
-// V1 stub: clicking "选这个模板" — preview / placeholder for V2.
+// Click "选这个模板" → open the cultivation workflow page (a deeper
+// modal showing the actual prompt-packs / skills / knowledge-base / RAG /
+// LoRA pipeline for this specialty). V1 shows the structure read-only +
+// a single "确认初始化" button that calls POST /expert/initialize. V2-V5
+// progressively fill in the per-section actions (install pack, ingest
+// corpus, kick off training, etc.).
 function _awsCultivationPreview(agentId, templateId) {
-  api('GET', '/api/portal/specialty-templates/' + encodeURIComponent(templateId))
-    .then(function(t){
-      var summary = '模板预览(V2 上线后,确认按钮会真应用 bundle):\n\n'
-        + '  ID: ' + (t.id || '?') + '\n'
-        + '  Version: ' + (t.version || '?') + '\n'
-        + '  Required prompt packs: ' + ((t.required_packs || []).length + (t.required_anthropic_packs || []).length) + '\n'
-        + '  Required skills: ' + (t.required_skills || []).length + '\n'
-        + '  Eval suite: ' + ((t.eval_suite || []).map(function(e){return e.runner_id;}).join(', ') || '(none)') + '\n'
-        + '  Levels: ' + ((t.level_rules || []).length);
-      alert(summary);
-    })
-    .catch(function(e){
-      alert('Template preview failed: ' + (e.message || e));
-    });
+  // Loading screen
+  showModalHTMLLarge(
+    '<div style="width:980px;max-width:92vw;max-height:88vh;overflow-y:auto;'
+    +     'background:var(--surface);border-radius:14px;padding:0">'
+    + '  <div style="padding:50px;text-align:center;color:var(--text3)">'
+    + '    <span class="material-symbols-outlined" style="font-size:24px">refresh</span><br>Loading template…'
+    + '  </div></div>'
+  );
+  Promise.all([
+    api('GET', '/api/portal/specialty-templates/' + encodeURIComponent(templateId))
+      .catch(function(e){ return { _error: e }; }),
+    api('GET', '/api/portal/agent/' + agentId + '/expert')
+      .catch(function(e){ return {}; }),
+  ]).then(function(rs){
+    var t = rs[0]; var st = rs[1] || {};
+    if (t && t._error) {
+      showModalHTMLLarge(
+        '<div style="width:520px;background:var(--surface);border-radius:14px;'
+        +     'padding:24px;color:var(--error)">'
+        + 'Template load failed: ' + esc(t._error.message || String(t._error))
+        + '<div style="margin-top:14px"><button class="btn btn-sm" onclick="closeModal()">Close</button></div>'
+        + '</div>'
+      );
+      return;
+    }
+    _renderCultivationWorkflowPage(agentId, t, st, null);
+  });
 }
+
+// Render the cultivation workflow page — implements design spec §3.6:
+// 6-module horizontal pipeline + clickable drill-down + 段位条.
+//
+// Modules (left → right):
+//   1 📋 Template     — chosen specialty + version
+//   2 🛠 Bundle       — packs/skills/mcps grant status
+//   3 📚 Knowledge ⭐ — corpus ingest + index (user-driven primary engine)
+//   4 📊 Trace        — usage trace accumulation toward RAFT threshold
+//   5 🧠 LoRA ⭐      — local fine-tune trigger (user-driven primary engine)
+//   6 🎯 Routing      — local-handle rate, confidence threshold
+//
+// Each module: status (✓/⏳/⏸/✗) + progress bar + click-to-drill panel.
+// Below pipeline: 段位条 (novice/journeyman/expert/master) computed from
+// module completion.
+//
+// V1 vertical: pipeline laid out, module 1 + 2 actionable (apply bundle).
+// V2-V5 verticals progressively fill drill-down actions.
+function _renderCultivationWorkflowPage(agentId, t, status, drillModule) {
+  status = status || {};
+  drillModule = drillModule || null;
+
+  // ─── Module state computation ───────────────────────────────────
+  // Template (1): done if agent has expert_specialty matching t.id (or
+  // just preview mode if status.cultivated is false)
+  var mod1Done = !!(status.cultivated && status.expert_specialty);
+  // Bundle (2): V2 will set granted/total; V1 just shows required total
+  var packTotal = (t.required_packs || []).length + (t.required_anthropic_packs || []).length;
+  var skillTotal = (t.required_skills || []).length;
+  var mcpTotal = (t.required_mcps || []).length;
+  var bundleApplied = !!(status.profile && status.profile.bundle_applied);
+  var mod2Done = bundleApplied;
+  // Knowledge (3): V3 — corpus indexed
+  var mod3Done = !!(status.profile && status.profile.corpus_indexed);
+  var corpusCount = (status.profile && status.profile.corpus_chunks) || 0;
+  // Trace (4): V2 captures, V3+ accumulates toward raft target
+  var traceCount = (status.profile && status.profile.trace_count) || 0;
+  var traceTarget = (t.training && t.training.raft_data_target) || 1000;
+  var mod4Done = traceCount >= traceTarget;
+  // LoRA (5): V4 — active version + eval score
+  var loraVersion = status.expert_lora_version || '';
+  var mod5Done = !!loraVersion;
+  // Routing (6): V5 — local-handle rate ≥ 60%
+  var localRate = (status.profile && status.profile.local_handle_rate) || 0;
+  var mod6Done = localRate >= 0.6;
+
+  // Module status — ✓ done, ⏳ in progress, ⏸ waiting, ✗ failed
+  function modState(done, prereq, hasData) {
+    if (done) return { icon: '✓', label: 'done', color: 'var(--cyber-lime,#5cf08a)' };
+    if (!prereq) return { icon: '⏸', label: 'wait', color: 'var(--text3)' };
+    if (hasData) return { icon: '⏳', label: 'progress', color: 'var(--warning,#f59e0b)' };
+    return { icon: '·', label: 'idle', color: 'var(--text3)' };
+  }
+
+  var s1 = modState(mod1Done, true, !!status.expert_specialty);
+  var s2 = modState(mod2Done, mod1Done, mod1Done);
+  var s3 = modState(mod3Done, mod2Done, corpusCount > 0);
+  var s4 = modState(mod4Done, mod3Done, traceCount > 0);
+  var s5 = modState(mod5Done, mod4Done, traceCount > 0);
+  var s6 = modState(mod6Done, mod5Done, localRate > 0);
+
+  var modules = [
+    { i: 1, icon: '📋', name: 'Template',  sub: t.name + ' v' + t.version, st: s1, prog: mod1Done ? 100 : 0 },
+    { i: 2, icon: '🛠', name: 'Bundle',    sub: packTotal + ' packs · ' + skillTotal + ' skills', st: s2, prog: mod2Done ? 100 : 0 },
+    { i: 3, icon: '📚', name: 'Knowledge', sub: corpusCount + ' chunks',    st: s3, prog: mod3Done ? 100 : Math.min(99, corpusCount / 100), star: true },
+    { i: 4, icon: '📊', name: 'Trace',     sub: traceCount + ' / ' + traceTarget, st: s4, prog: Math.min(100, (traceCount / traceTarget) * 100) },
+    { i: 5, icon: '🧠', name: 'LoRA',      sub: loraVersion || '(none)',    st: s5, prog: mod5Done ? 100 : 0, star: true },
+    { i: 6, icon: '🎯', name: 'Routing',   sub: Math.round(localRate * 100) + '% local', st: s6, prog: Math.min(100, localRate * 100 / 0.6 * 100) },
+  ];
+
+  // Compute current 段位 (level) — see design §3.6.6
+  var doneCount = [mod1Done, mod2Done, mod3Done, mod4Done, mod5Done, mod6Done].filter(Boolean).length;
+  var levelKey = !mod1Done ? 'pre'
+              : (mod1Done && mod2Done && !mod3Done) ? 'novice'
+              : (mod3Done && !mod5Done) ? 'journeyman'
+              : (mod5Done && !mod6Done) ? 'expert'
+              : (mod6Done) ? 'master' : 'novice';
+  var levelMap = {
+    pre:        { label: '⏳ 未启动',     pct: 0,   nextHint: '先点击「确认初始化」激活配方' },
+    novice:     { label: '🌱 见习',       pct: 25,  nextHint: '完成 📚 Knowledge 索引 → 升熟手' },
+    journeyman: { label: '🌿 熟手',       pct: 50,  nextHint: '日常使用累积 trace + 训练 LoRA → 升专家' },
+    expert:     { label: '🎯 专家',       pct: 75,  nextHint: '调通 routing 让本地处理率 ≥ 60% → 升大师' },
+    master:     { label: '🏆 大师',       pct: 100, nextHint: '已达终点 — 持续 refresh LoRA 即可' },
+  };
+  var lvl = levelMap[levelKey] || levelMap.pre;
+
+  // ─── Module card renderer ─────────────────────────────────────
+  function modCard(m, isActive) {
+    var isStar = m.star;
+    var bg = isActive ? 'rgba(255,122,219,0.10)' : 'rgba(255,255,255,0.03)';
+    var bd = isActive ? 'var(--cyber-magenta,#ff7adb)' : 'var(--border)';
+    var progBar = '<div style="height:3px;background:rgba(255,255,255,0.08);border-radius:2px;margin-top:8px;overflow:hidden">'
+      + '  <div style="height:100%;width:' + Math.max(0, Math.min(100, m.prog)) + '%;'
+      +     'background:' + m.st.color + ';transition:width 0.3s"></div></div>';
+    return ''
+      + '<div onclick="_cultDrillModule(\'' + esc(agentId) + '\',\'' + esc(t.id) + '\',' + m.i + ')" '
+      +      'style="background:' + bg + ';border:1px solid ' + bd + ';border-radius:10px;'
+      +      'padding:12px;cursor:pointer;transition:all 0.15s;flex:1;min-width:0;'
+      +      'display:flex;flex-direction:column;gap:4px"'
+      +      ' onmouseenter="this.style.borderColor=\'var(--cyber-magenta,#ff7adb)\';this.style.transform=\'translateY(-1px)\'"'
+      +      ' onmouseleave="this.style.borderColor=\'' + bd + '\';this.style.transform=\'\'">'
+      + '  <div style="display:flex;align-items:center;justify-content:space-between">'
+      + '    <span style="font-size:18px">' + m.icon + '</span>'
+      + '    <span style="font-size:14px;color:' + m.st.color + ';font-weight:700">' + m.st.icon + '</span>'
+      + '  </div>'
+      + '  <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;font-weight:600">'
+      +       esc(m.name) + (isStar ? ' ⭐' : '') + '</div>'
+      + '  <div style="font-size:11px;color:var(--text2);font-family:var(--font-mono,monospace);'
+      +       'overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(m.sub) + '">'
+      +       esc(m.sub) + '</div>'
+      +    progBar
+      + '</div>';
+  }
+
+  // Pipeline strip (6 cards left to right, with arrow connectors)
+  var pipelineHtml = '<div style="display:flex;align-items:stretch;gap:6px">';
+  modules.forEach(function(m, idx){
+    pipelineHtml += modCard(m, drillModule === m.i);
+    if (idx < modules.length - 1) {
+      pipelineHtml += '<div style="display:flex;align-items:center;color:' + m.st.color + ';font-size:14px;flex-shrink:0">›</div>';
+    }
+  });
+  pipelineHtml += '</div>';
+
+  // ─── 段位条 ──────────────────────────────────────────────
+  var levelBarHtml = ''
+    + '<div style="background:rgba(255,255,255,0.03);border:1px solid var(--border);'
+    +     'border-radius:10px;padding:14px 18px;margin-top:14px">'
+    + '  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'
+    + '    <span style="font-size:13px;font-weight:600">当前段位 · ' + lvl.label + '</span>'
+    + '    <span style="font-size:11px;color:var(--text3)">' + esc(lvl.nextHint) + '</span>'
+    + '  </div>'
+    + '  <div style="height:8px;background:rgba(255,255,255,0.08);border-radius:4px;overflow:hidden">'
+    + '    <div style="height:100%;width:' + lvl.pct + '%;'
+    +         'background:linear-gradient(90deg,var(--cyber-blue,#4afcff),var(--cyber-magenta,#ff7adb));'
+    +         'transition:width 0.4s"></div>'
+    + '  </div>'
+    + '  <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text3);margin-top:6px">'
+    + '    <span>🌱 见习</span><span>🌿 熟手</span><span>🎯 专家</span><span>🏆 大师</span>'
+    + '  </div>'
+    + '</div>';
+
+  // ─── Drill panel — V1 read-only, V2-V5 add actions ────────
+  var drillHtml = '';
+  if (drillModule != null) {
+    drillHtml = _renderCultDrillPanel(agentId, t, status, drillModule);
+  } else {
+    drillHtml = ''
+      + '<div style="background:rgba(255,255,255,0.02);border:1px dashed var(--border);'
+      +     'border-radius:10px;padding:24px;margin-top:14px;text-align:center;color:var(--text3);font-size:12px">'
+      + '  💡 点击上方任一模块查看详情 / 执行操作'
+      + '</div>';
+  }
+
+  showModalHTMLLarge(
+    '<div style="width:1080px;max-width:94vw;max-height:90vh;overflow-y:auto;'
+    +     'background:var(--surface);border-radius:14px">'
+    // Header
+    + '  <div style="padding:16px 22px;border-bottom:1px solid var(--border-light);'
+    +       'display:flex;justify-content:space-between;align-items:center;'
+    +       'position:sticky;top:0;background:var(--surface);z-index:2">'
+    + '    <div style="display:flex;align-items:center;gap:12px">'
+    + '      <div style="width:42px;height:42px;background:rgba(255,122,219,0.15);'
+    +           'border:1px solid rgba(255,122,219,0.5);border-radius:10px;'
+    +           'display:flex;align-items:center;justify-content:center;font-size:22px">'
+    +           esc(t.icon || '🎓') + '</div>'
+    + '      <div>'
+    + '        <div style="font-size:10px;color:var(--cyber-magenta,#ff7adb);'
+    +             'text-transform:uppercase;letter-spacing:0.06em;font-weight:600">CULTIVATION PIPELINE</div>'
+    + '        <div style="font-size:15px;font-weight:600">' + esc(t.name)
+    +             ' <span style="font-size:10px;color:var(--text3);font-family:var(--font-mono,monospace)">'
+    +             esc(t.id) + ' v' + esc(t.version) + '</span></div>'
+    + '      </div>'
+    + '    </div>'
+    + '    <button class="btn btn-sm btn-ghost" onclick="closeModal()" '
+    +           'style="padding:4px 10px"><span class="material-symbols-outlined" style="font-size:16px">close</span></button>'
+    + '  </div>'
+    // Body
+    + '  <div style="padding:20px 22px">'
+    +      pipelineHtml
+    +      levelBarHtml
+    +      drillHtml
+    + '  </div>'
+    + '</div>'
+  );
+}
+
+// Click pipeline module → re-render with that module's drill panel.
+function _cultDrillModule(agentId, templateId, modIdx) {
+  // Re-fetch template + status to keep state fresh, then render with drill
+  Promise.all([
+    api('GET', '/api/portal/specialty-templates/' + encodeURIComponent(templateId))
+      .catch(function(e){ return null; }),
+    api('GET', '/api/portal/agent/' + agentId + '/expert')
+      .catch(function(e){ return {}; }),
+  ]).then(function(rs){
+    var tpl = rs[0]; var st = rs[1];
+    if (!tpl) return;
+    _renderCultivationWorkflowPage(agentId, tpl, st, modIdx);
+  });
+}
+window._cultDrillModule = _cultDrillModule;
+
+// Drill detail panel for one module — V1 read-only, V2+ progressively
+// adds actions. Each panel returns HTML appended below the pipeline strip.
+function _renderCultDrillPanel(agentId, t, status, modIdx) {
+  function panelShell(title, vertical, body, footerActions) {
+    return ''
+      + '<div style="background:rgba(255,122,219,0.04);border:1px solid var(--cyber-magenta,#ff7adb);'
+      +     'border-radius:10px;padding:18px 20px;margin-top:14px">'
+      + '  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">'
+      + '    <div>'
+      + '      <div style="font-size:10px;color:var(--text3);text-transform:uppercase;'
+      +           'letter-spacing:0.05em">VERTICAL ' + esc(vertical) + '</div>'
+      + '      <div style="font-size:15px;font-weight:600">' + title + '</div>'
+      + '    </div>'
+      + '    <button class="btn btn-sm btn-ghost" onclick="_cultBackToOverview(\'' + esc(agentId) + '\',\'' + esc(t.id) + '\')">← 返回总览</button>'
+      + '  </div>'
+      + '  <div style="font-size:13px;color:var(--text2);line-height:1.6">' + body + '</div>'
+      + (footerActions ? ('<div style="margin-top:14px;display:flex;gap:8px">' + footerActions + '</div>') : '')
+      + '</div>';
+  }
+
+  if (modIdx === 1) {
+    var initBtn = !status.cultivated
+      ? '<button class="btn btn-sm btn-primary" '
+        +    'onclick="_cultivationConfirmInit(\'' + esc(agentId) + '\',\'' + esc(t.id) + '\')" '
+        +    'style="background:var(--cyber-magenta,#ff7adb);border-color:var(--cyber-magenta,#ff7adb);color:#000">'
+        + '  🚀 确认初始化 (apply bundle)</button>'
+      : '<button class="btn btn-sm btn-ghost" disabled>已初始化 ✓</button>';
+    return panelShell('📋 Template — 配方', 'V1 active',
+      '<div>specialty: <code>' + esc(t.specialty || t.id) + '</code></div>'
+      + '<div style="margin-top:6px">version: <code>' + esc(t.version) + '</code></div>'
+      + '<div style="margin-top:6px;color:var(--text3)">' + esc(t.description || '') + '</div>'
+      + '<div style="margin-top:14px;font-size:11px;color:var(--text3)">'
+      +   '后续操作: V1 仅支持初始化; V2+ 加切换/版本检查' + '</div>',
+      initBtn
+    );
+  }
+  if (modIdx === 2) {
+    var packs = (t.required_packs || []).map(function(p){
+      return '<div style="padding:4px 0;border-bottom:1px solid var(--overlay-5);font-family:var(--font-mono,monospace);font-size:11px">📝 ' + esc(p) + '</div>';
+    }).join('');
+    var apacks = (t.required_anthropic_packs || []).map(function(p){
+      return '<div style="padding:4px 0;border-bottom:1px solid var(--overlay-5);font-family:var(--font-mono,monospace);font-size:11px;color:var(--cyber-blue,#4afcff)">📝 ' + esc(p) + '</div>';
+    }).join('');
+    var skills = (t.required_skills || []).map(function(s){
+      return '<div style="padding:4px 0;border-bottom:1px solid var(--overlay-5);font-family:var(--font-mono,monospace);font-size:11px;color:var(--cyber-lime,#5cf08a)">🛠 ' + esc(s) + '</div>';
+    }).join('');
+    return panelShell('🛠 Bundle — 能力包', 'V2 install action',
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">'
+      + '<div><div style="font-size:11px;color:var(--text3);margin-bottom:6px">PROMPT PACKS</div>' + (packs || '<div style="color:var(--text3)">无</div>') + apacks + '</div>'
+      + '<div><div style="font-size:11px;color:var(--text3);margin-bottom:6px">SKILLS</div>' + (skills || '<div style="color:var(--text3)">无</div>') + '</div>'
+      + '</div>'
+      + '<div style="margin-top:12px;font-size:11px;color:var(--text3)">'
+      +   'V2 vertical 落地后,「确认初始化」会自动批量绑定这些 packs/skills 到本 agent。' + '</div>',
+      ''
+    );
+  }
+  if (modIdx === 3) {
+    var sources = (t.corpus_sources || []).map(function(c){
+      return '<div style="padding:6px 0;border-bottom:1px solid var(--overlay-5)">'
+        + '<code style="font-size:11px">' + esc(c.source_id || c.id || JSON.stringify(c).slice(0,50)) + '</code>'
+        + '<span style="font-size:10px;color:var(--text3);margin-left:10px">' + esc(c.kind || c.type || '') + '</span>'
+        + '</div>';
+    }).join('');
+    return panelShell('📚 Knowledge ⭐ — 知识库', 'V3 ingest + index',
+      '<div style="font-size:11px;color:var(--text3);margin-bottom:8px">CORPUS SOURCES (' + (t.corpus_sources || []).length + ')</div>'
+      + (sources || '<div style="color:var(--text3)">未配置语料源</div>')
+      + '<div style="margin-top:14px;padding:12px;background:rgba(255,255,255,0.03);border-radius:6px;font-size:11px;color:var(--text3);line-height:1.6">'
+      +   '👉 V3 vertical 上线后,这里会出现:<br>'
+      +   '  • 上传新语料文件按钮 (PDF / MD / 自定义 JSON)<br>'
+      +   '  • 添加 HuggingFace 数据集 / FLK / GitHub repo 来源<br>'
+      +   '  • 触发增量索引 / 查看 chunks 详情<br>'
+      +   '  • <b style="color:var(--cyber-magenta,#ff7adb)">⭐ 这是用户主动推进专家成熟度的关键操作</b>'
+      + '</div>',
+      ''
+    );
+  }
+  if (modIdx === 4) {
+    var traceTarget = (t.training && t.training.raft_data_target) || 1000;
+    var traceCount = (status.profile && status.profile.trace_count) || 0;
+    return panelShell('📊 Trace — 训练数据', 'V2 capture, V3+ accumulate',
+      '<div style="display:flex;align-items:center;gap:14px">'
+      +   '<div style="font-size:32px;font-weight:700;color:var(--cyber-magenta,#ff7adb)">' + traceCount + '</div>'
+      +   '<div style="flex:1">'
+      +     '<div style="font-size:12px;color:var(--text2)">已累积 trace · 目标 ' + traceTarget + '</div>'
+      +     '<div style="height:6px;background:rgba(255,255,255,0.08);border-radius:3px;margin-top:6px;overflow:hidden">'
+      +       '<div style="height:100%;width:' + Math.min(100, (traceCount/traceTarget)*100) + '%;background:var(--cyber-magenta,#ff7adb)"></div>'
+      +     '</div>'
+      +   '</div>'
+      + '</div>'
+      + '<div style="margin-top:16px;display:grid;grid-template-columns:1fr 1fr;gap:14px;font-size:11px">'
+      +   '<div style="padding:10px;background:rgba(74,252,255,0.06);border:1px solid rgba(74,252,255,0.25);border-radius:6px">'
+      +     '<div style="color:var(--cyber-blue,#4afcff);font-weight:600">🔄 ORGANIC (日常)</div>'
+      +     '<div style="color:var(--text3);margin-top:4px">每次 agent 处理用户提问,带 feedback 的 Q/A 自动入池</div>'
+      +   '</div>'
+      +   '<div style="padding:10px;background:rgba(255,122,219,0.06);border:1px solid rgba(255,122,219,0.25);border-radius:6px">'
+      +     '<div style="color:var(--cyber-magenta,#ff7adb);font-weight:600">📥 IMPORTED (一次导入)</div>'
+      +     '<div style="color:var(--text3);margin-top:4px">用户上传外部 Q/A 数据集 (5k+ 推荐) 做底子</div>'
+      +   '</div>'
+      + '</div>'
+      + '<div style="margin-top:14px;font-size:11px;color:var(--text3)">V3 钻取后能浏览/筛选/导出,V4 训练时优先 imported,DPO 阶段用 organic 精调</div>',
+      ''
+    );
+  }
+  if (modIdx === 5) {
+    var lv = status.expert_lora_version || '';
+    var traceTarget = (t.training && t.training.raft_data_target) || 1000;
+    var traceCount = (status.profile && status.profile.trace_count) || 0;
+    var canTrain = traceCount >= traceTarget;
+    return panelShell('🧠 LoRA Training ⭐ — 微调训练', 'V4 trigger + version mgmt',
+      '<div>active LoRA: <code>' + (lv ? esc(lv) : '<span style="color:var(--text3)">(none)</span>') + '</code></div>'
+      + '<div style="margin-top:6px">trace ready: ' + traceCount + ' / ' + traceTarget + (canTrain ? ' ✓' : ' ⏳') + '</div>'
+      + '<div style="margin-top:6px">trainer: <code>' + esc((t.training && t.training.kind) || 'mlx-lm') + '</code></div>'
+      + '<div style="margin-top:14px;padding:12px;background:rgba(255,255,255,0.03);border-radius:6px;font-size:11px;color:var(--text3);line-height:1.6">'
+      +   '👉 V4 vertical 上线后,这里会出现:<br>'
+      +   '  • [开始训练] 按钮 (前置: trace ≥ ' + traceTarget + ')<br>'
+      +   '  • 训练历史 + loss 曲线<br>'
+      +   '  • 切换激活 LoRA 版本 / 一键回滚<br>'
+      +   '  • <b style="color:var(--cyber-magenta,#ff7adb)">⭐ 用户主动推进段位的关键操作 (训练完 + eval 通过 → 升专家)</b>'
+      + '</div>',
+      ''
+    );
+  }
+  if (modIdx === 6) {
+    var localRate = (status.profile && status.profile.local_handle_rate) || 0;
+    return panelShell('🎯 Routing — 部署路由', 'V5 confidence threshold tuning',
+      '<div>local handle rate: <span style="font-weight:600;color:var(--cyber-lime,#5cf08a)">' + Math.round(localRate * 100) + '%</span> (target ≥ 60%)</div>'
+      + '<div style="margin-top:14px;padding:12px;background:rgba(255,255,255,0.03);border-radius:6px;font-size:11px;color:var(--text3);line-height:1.6">'
+      +   '👉 V5 vertical 上线后,这里会出现:<br>'
+      +   '  • 调 confidence_threshold 滑块<br>'
+      +   '  • 本地 vs 云端处理分布饼图<br>'
+      +   '  • 强制全云端 (临时禁本地) / 强制全本地 (测试) 模式切换'
+      + '</div>',
+      ''
+    );
+  }
+  return panelShell('Unknown module', '',
+    '<div style="color:var(--error)">未知模块 ID: ' + modIdx + '</div>', '');
+}
+
+function _cultBackToOverview(agentId, templateId) {
+  Promise.all([
+    api('GET', '/api/portal/specialty-templates/' + encodeURIComponent(templateId))
+      .catch(function(e){ return null; }),
+    api('GET', '/api/portal/agent/' + agentId + '/expert')
+      .catch(function(e){ return {}; }),
+  ]).then(function(rs){
+    if (rs[0]) _renderCultivationWorkflowPage(agentId, rs[0], rs[1], null);
+  });
+}
+window._cultBackToOverview = _cultBackToOverview;
+
+// Calls POST /expert/initialize with the chosen template. V2 vertical
+// already wrote the endpoint logic; reload the modal afterwards so the
+// user sees the cultivated state.
+function _cultivationConfirmInit(agentId, templateId) {
+  api('POST', '/api/portal/agent/' + agentId + '/expert/initialize', {
+    template_id: templateId,
+  })
+  .then(function(r){
+    closeModal();
+    if (typeof _toast === 'function') _toast('养成已启动: ' + (r.expert_specialty || templateId), 'success');
+    // Reopen the cultivation overview so user sees the new state
+    setTimeout(function(){ openCultivationModal(agentId); }, 400);
+  })
+  .catch(function(e){
+    var msg = (e && e.message) ? e.message : String(e);
+    alert('初始化失败: ' + msg);
+  });
+}
+window._cultivationConfirmInit = _cultivationConfirmInit;
 
 // V1: disable / fully delete cultivation — wired to DELETE endpoint.
 async function _awsCultivationDisable(agentId, keepData) {
@@ -6148,6 +6539,62 @@ window._awsGetState = _awsGetState;
 window._awsLaunchVoiceMode = _awsLaunchVoiceMode;
 window._capToggleEmbed = _capToggleEmbed;
 
+// ── Cultivation modal — direct-from-toolbar entry (no workspace v2) ──
+// Triggered by the 养成 button in renderAgentChatTech's action sub-bar.
+// Reuses the V1 cultivation card renderers (_awsCultivationCultivatedCard
+// / _awsCultivationPickerCard) but presents them in a modal overlay
+// instead of taking over the whole page. User wanted the simpler path:
+// "对话/能力/配置/历史 是一样的功能, 为啥要在套一层" — so cultivation
+// gets the same modal treatment as Voice / Soul rather than its own tab.
+function openCultivationModal(agentId) {
+  // Initial loading state
+  showModalHTMLLarge(
+    '<div style="width:880px;max-width:90vw;max-height:85vh;overflow-y:auto;'
+    +     'background:var(--surface);border-radius:14px;padding:0">'
+    + '  <div style="display:flex;justify-content:space-between;align-items:center;'
+    +       'padding:16px 22px;border-bottom:1px solid var(--border-light)">'
+    + '    <div style="font-size:14px;font-weight:600;color:var(--text);'
+    +         'display:flex;align-items:center;gap:8px">'
+    + '      <span class="material-symbols-outlined" style="color:var(--cyber-magenta,#ff7adb)">school</span>'
+    + '      <span>专业养成 · Cultivation</span>'
+    + '    </div>'
+    + '    <button class="btn btn-sm btn-ghost" onclick="closeModal()" '
+    +           'style="padding:4px 10px"><span class="material-symbols-outlined" '
+    +           'style="font-size:16px">close</span></button>'
+    + '  </div>'
+    + '  <div id="cultivation-modal-body" style="padding:0">'
+    + '    <div style="padding:40px;text-align:center;color:var(--text3)">'
+    + '      <span class="material-symbols-outlined" style="font-size:24px">refresh</span><br>Loading…'
+    + '    </div>'
+    + '  </div>'
+    + '</div>'
+  );
+  // Parallel fetch: expert status for this agent + template catalog
+  Promise.all([
+    api('GET', '/api/portal/agent/' + agentId + '/expert')
+      .catch(function(e){ return { _error: e }; }),
+    api('GET', '/api/portal/specialty-templates')
+      .catch(function(e){ return { _error: e }; }),
+  ]).then(function(results){
+    var status = results[0] || {};
+    var catalog = results[1] || {};
+    var body = document.getElementById('cultivation-modal-body');
+    if (!body) return;
+    if (status._error) {
+      body.innerHTML = '<div style="padding:30px;color:var(--error)">'
+        + 'Cultivation status load failed: '
+        + esc(String(status._error.message || status._error)) + '</div>';
+      return;
+    }
+    if (status.cultivated) {
+      body.innerHTML = _awsCultivationCultivatedCard(agentId, status);
+    } else {
+      body.innerHTML = _awsCultivationPickerCard(agentId, status, catalog);
+    }
+  });
+}
+window.openCultivationModal = openCultivationModal;
+
 // ═══════════════════════════════════════════════════════
 // SP-0 · UNIFIED AGENT WORKSPACE                          (end)
 // ═══════════════════════════════════════════════════════
@@ -6470,6 +6917,10 @@ function renderAgentChatTech(agentId) {
         '<span class="material-symbols-outlined" id="rag-icon-' + agentId + '">search</span>Rag</button>' +
       '<button class="ach-act" onclick="openVoiceMode(\'' + agentId + '\')" title="实时语音模式 — 点击进入沉浸式语音交互">' +
         '<span class="material-symbols-outlined">graphic_eq</span>Voice</button>' +
+      // ── 养成 (Cultivate): opens specialty cultivation modal directly from
+      // the tech-style action bar. Avoids wrapping the chat in workspace v2.
+      '<button class="ach-act" onclick="openCultivationModal(\'' + agentId + '\')" title="专业养成 — 选择 specialty 模板，启用 RAG / LoRA 训练流水线">' +
+        '<span class="material-symbols-outlined">school</span>养成</button>' +
     '</div>' +
 
     // ── Main section: chat (left) | right column [artifact (top) + tabs (bottom)] ──
@@ -25673,11 +26124,22 @@ async function _voiceModeUploadAudio() {
       _voiceModeResumeMic();
       return;
     }
-    if (!/[。！？!?.]\s*$/.test(text)) {
-      _voiceModeLog('STT_NO_TERMINAL_PUNCT → ignored: '
+    // Whisper YouTube-spam hallucination denylist — when audio is silent
+    // or noisy Whisper sometimes outputs YouTube subscription jingles or
+    // typical caption-spam. These are highly recognizable so we filter
+    // them by content rather than by punctuation absence.
+    if (/订阅|点赞|关注.*频道|打赏|by\s+amara\.org|字幕志愿者|明镜.*点点|转发.*支持/.test(text)) {
+      _voiceModeLog('STT_KNOWN_SPAM → ignored: '
         + JSON.stringify(text.slice(0, 40)));
       _voiceModeResumeMic();
       return;
+    }
+    // Note: previously required terminal punct (。！？.!?) but Whisper
+    // drops it on short Chinese questions like "小土昨天聊到哪了". The
+    // length+spam filters above are sufficient. Auto-append "。" so
+    // downstream sentence-segmentation still works.
+    if (!/[。！？!?.]\s*$/.test(text)) {
+      text = text + '。';
     }
     // (c) Single-char dominance — Whisper failure mode where confidence
     // collapses into one repeated character: "嗯嗯嗯嗯嗯嗯嗯嗯嗯。" or
