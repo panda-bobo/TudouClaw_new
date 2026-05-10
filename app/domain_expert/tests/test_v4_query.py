@@ -92,7 +92,11 @@ def test_pipeline_answer_with_corpus_retrieves_and_writes_trace(monkeypatch, tmp
     # System prompt should include the retrieved chunks
     sys_msg = captured_messages[0][0]["content"]
     assert "民事主体" in sys_msg
-    assert "[来源: civil-code]" in sys_msg
+    # R5: typed RAG renders chunks with [type · source_id] header.
+    # Seeded chunks have no metadata.type, so they default to "reference".
+    assert "[reference · civil-code]" in sys_msg
+    # The block carries a typed section header
+    assert "📚 参考资料" in sys_msg
 
     # Trace was written
     today = time.strftime("%Y-%m-%d")

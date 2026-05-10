@@ -45,14 +45,16 @@ def test_hook_skipped_when_specialty_empty(monkeypatch):
     assert not a.expert_specialty
 
 
+@pytest.mark.skip(
+    reason="Phase 0 invariant — V4 step 2 (commit 337158f) shipped "
+           "inference/pipeline.py with answer() + _retrieve(), and R5 "
+           "added build_typed_rag_block. The 'pipeline module is missing' "
+           "fallback is still tested by test_hook_bypassed_when_module_disabled "
+           "via the env-var path; this assertion is just stale."
+)
 def test_hook_falls_through_when_pipeline_module_missing(monkeypatch):
-    """When expert_specialty is set but app.domain_expert.inference.pipeline
-    doesn't exist (Phase 0 reality), the hook catches ImportError and
-    returns nothing. The chat() default path takes over.
-
-    We verify by ensuring that `inference.pipeline` truly doesn't exist
-    at this stage of the codebase."""
-    # Phase 0: inference package is empty
+    """Stale Phase-0 invariant — pipeline.answer now exists. Kept as
+    documentation of the original fallback contract."""
     import app.domain_expert.inference
     assert not hasattr(app.domain_expert.inference, "pipeline") or not hasattr(
         getattr(app.domain_expert.inference, "pipeline", None), "answer"
@@ -122,13 +124,15 @@ def test_hook_bypassed_when_module_disabled(monkeypatch):
         pass
 
 
+@pytest.mark.skip(
+    reason="Phase-0 invariant — V4 step 2 + R5 populate the inference "
+           "package (pipeline.answer / _retrieve / build_typed_rag_block). "
+           "Kept for historical context; the empty-package contract no "
+           "longer holds."
+)
 def test_phase_0_inference_package_is_intentionally_empty():
-    """Confirm Phase 0 leaves inference/ empty. Verticals fill it.
-
-    This test guards against accidentally importing pipeline before it
-    exists — the chat() hook relies on ImportError as graceful fallback."""
+    """Stale Phase-0 invariant — inference/ now ships pipeline + helpers."""
     import app.domain_expert.inference as inf
-    # __init__.py exists but should not export anything
     public_names = [n for n in dir(inf) if not n.startswith("_")]
     assert public_names == [] or public_names == ["__name__"], (
         f"Phase 0 inference package should be empty; found: {public_names}"

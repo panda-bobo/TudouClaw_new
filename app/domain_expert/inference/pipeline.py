@@ -31,6 +31,93 @@ logger = logging.getLogger("tudouclaw.expert.pipeline")
 
 
 # ─────────────────────────────────────────────────────────────────────
+# R5: typed RAG block — group chunks by metadata.type so the LLM sees
+# "here are the red-line rules vs here are the SOPs vs here is the
+# reference material" instead of a flat dump. Title order is canonical
+# (most-binding-first); unknown types fall through to the end with their
+# raw label uppercased.
+# ─────────────────────────────────────────────────────────────────────
+
+# Headers shown to the LLM. Keep the prefix emoji — it makes the
+# section breaks visually scannable in chat-style log dumps.
+TYPE_TITLES: dict[str, str] = {
+    "red_line":     "⚠️ 适用红线规则",
+    "sop":          "📋 参考工作流程",
+    "law":          "📖 法条参考",
+    "template":     "📑 模板参考",
+    "case":         "⚖️ 案例参考",
+    "internal_doc": "📁 内部文档",
+    "reference":    "📚 参考资料",
+}
+
+# Display order. red_line first because it's the most binding context;
+# reference last because it's the most generic.
+TYPE_ORDER: tuple[str, ...] = (
+    "red_line", "sop", "law", "template", "case", "internal_doc", "reference",
+)
+
+# Footer reminding the LLM to cite. Kept identical between agent.chat
+# in-flow injection and pipeline.answer so REST /expert/query and live
+# chat give consistent answers.
+_FOOTER = (
+    "\n\n回答时优先参考以上检索资料,并用 "
+    "[来源: source_id] 格式标注引用; "
+    "资料未覆盖的部分基于通用知识作答即可。"
+)
+
+
+def build_typed_rag_block(chunks: list[dict], specialty: str = "") -> str:
+    """Render retrieved chunks as a single system-message string,
+    grouped by ``metadata.type``.
+
+    Args:
+      chunks: each dict has at least ``source_id`` + ``text``;
+              ``metadata.type`` selects the section. Missing type
+              falls back to "reference".
+      specialty: when non-empty, included in the block header for
+                 grounding ("=== legal 专家知识库检索 ...").
+
+    Returns "" when chunks is empty so callers can short-circuit
+    without checking length again.
+    """
+    if not chunks:
+        return ""
+
+    groups: dict[str, list[dict]] = {}
+    for c in chunks:
+        meta = c.get("metadata") or {}
+        t = meta.get("type") or "reference"
+        groups.setdefault(t, []).append(c)
+
+    def _section(t: str, items: list[dict]) -> str:
+        title = TYPE_TITLES.get(t, t.upper())
+        body = "\n\n".join(
+            f"[{t} · {c.get('source_id', '?')}]\n{c.get('text', '')}"
+            for c in items
+        )
+        return f"=== {title} ({len(items)}) ===\n{body}"
+
+    sections: list[str] = []
+    seen: set[str] = set()
+    for t in TYPE_ORDER:
+        items = groups.get(t)
+        if items:
+            sections.append(_section(t, items))
+            seen.add(t)
+    # Custom / unknown types (e.g. user adds metadata.type="risk")
+    for t, items in groups.items():
+        if t not in seen:
+            sections.append(_section(t, items))
+
+    header = (
+        f"=== {specialty} 专家知识库检索 (共 {len(chunks)} 段) ==="
+        if specialty
+        else f"=== 检索到 {len(chunks)} 段资料 ==="
+    )
+    return header + "\n\n" + "\n\n".join(sections) + _FOOTER
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Public entry point — called by agent.chat() reply hook
 # ─────────────────────────────────────────────────────────────────────
 
@@ -67,10 +154,9 @@ def answer(agent, user_message, *, on_event: Any = None,
     # ── Step 3: build system prompt with retrieved context ──
     specialty = getattr(agent, "expert_specialty", "") or "?"
     if chunks:
-        context_block = "\n\n".join(
-            f"[来源: {c['source_id']}]\n{c['text']}"
-            for c in chunks
-        )
+        # R5: typed RAG — chunks grouped by metadata.type so the LLM
+        # sees red-lines / SOPs / case law / etc. as distinct sections.
+        typed_block = build_typed_rag_block(chunks, specialty=specialty)
         sys_prompt = (
             f"你是 {agent.name},一个 {specialty} 领域专家 agent。\n"
             "请基于下面检索到的内部资料回答用户的问题。\n"
@@ -78,7 +164,7 @@ def answer(agent, user_message, *, on_event: Any = None,
             "  1. 优先采用检索到的资料,引用来源用 [来源: source_id] 格式\n"
             "  2. 检索资料未覆盖的部分,可以基于通用知识回答,但要明确标注 (通用知识)\n"
             "  3. 回答要准确、有据,不要编造\n\n"
-            f"=== 检索到 {len(chunks)} 段资料 ===\n{context_block}"
+            f"{typed_block}"
         )
     else:
         sys_prompt = (

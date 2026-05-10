@@ -9577,22 +9577,19 @@ Write only the summary body. Do not include any preamble or prefix."""
                             (_user_text or "")[:60],
                         )
                         if chunks:
-                            ctx_block = "\n\n".join(
-                                f"[来源: {c['source_id']}]\n{c['text']}"
-                                for c in chunks
+                            # R5: typed RAG — group by metadata.type
+                            # so red-lines / SOPs / case law / etc.
+                            # show up as named sections rather than a
+                            # flat dump. Same helper drives REST
+                            # /expert/query for consistency.
+                            sys_msg = _pl.build_typed_rag_block(
+                                chunks, specialty=self.expert_specialty,
                             )
-                            sys_msg = (
-                                f"=== {self.expert_specialty} 专家知识库检索 "
-                                f"(共 {len(chunks)} 段) ===\n\n"
-                                f"{ctx_block}\n\n"
-                                "回答时优先参考以上检索资料,并用 "
-                                "[来源: source_id] 格式标注引用; "
-                                "资料未覆盖的部分基于通用知识作答即可。"
-                            )
-                            self.messages.append({
-                                "role": "system",
-                                "content": sys_msg,
-                            })
+                            if sys_msg:
+                                self.messages.append({
+                                    "role": "system",
+                                    "content": sys_msg,
+                                })
                 except ImportError:
                     pass
                 except Exception as _e:
