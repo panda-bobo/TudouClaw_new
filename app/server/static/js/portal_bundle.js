@@ -30609,23 +30609,9 @@ async function _renderKmShared() {
   // the Wiki tab. We keep this view live so admins can verify the
   // migration / spot anything they want to clean up before fully
   // dropping the legacy_kb store.
-  var _legacyBanner = ''
-    + '<div style="padding:12px 14px;margin-bottom:14px;background:rgba(255,180,0,0.08);'
-    +              'border:1px solid rgba(255,180,0,0.25);border-radius:8px;'
-    +              'display:flex;align-items:flex-start;gap:10px;font-size:12px;color:var(--text2)">'
-    +   '<span class="material-symbols-outlined" style="font-size:18px;color:#e6a700;flex-shrink:0">history</span>'
-    +   '<div style="flex:1">'
-    +     '<div style="font-weight:700;color:var(--text);margin-bottom:2px">这个 tab 已迁出 (legacy)</div>'
-    +     '内容已经迁到 <b>Wiki / 经验库</b> tab,新条目请去那边添加。本视图保留供你核对迁移结果,后续会移除。'
-    +   '</div>'
-    +   '<button class="btn btn-sm" onclick="_kmTab=\'wiki\';renderKnowledgeMemoryHub()" '
-    +     'style="flex-shrink:0">去 Wiki tab →</button>'
-    + '</div>';
-  // Step E (2026-05-08): legacy banner. The migration from Shared
-  // Knowledge → Wiki happened in 361f04b; new content should land on
-  // the Wiki tab. We keep this view live so admins can verify the
-  // migration / spot anything they want to clean up before fully
-  // dropping the legacy_kb store.
+  // (2026-05-10: deduplicated — recovery transcript replay had inserted
+  // this block twice. The second `var _legacyBanner` silently shadowed
+  // the first; behavior unchanged but the duplicate is now removed.)
   var _legacyBanner = ''
     + '<div style="padding:12px 14px;margin-bottom:14px;background:rgba(255,180,0,0.08);'
     +              'border:1px solid rgba(255,180,0,0.25);border-radius:8px;'
