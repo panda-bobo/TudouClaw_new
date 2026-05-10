@@ -286,3 +286,87 @@ def test_result_default_dataclass_state():
     assert r.is_complete()
     assert r.packs_bound == []
     assert r.saved is False
+    assert r.seeds_ingested == []
+
+
+# ── R3: kb_seed loader hook ──
+
+def _tpl_with_seeds(**overrides):
+    """Template that carries kb_seeds for the seed-hook tests."""
+    return _tpl(kb_seeds=[
+        {"file": "civil_code.md", "type": "law", "title": "民法典"},
+        {"file": "sop.md", "type": "sop"},
+    ], **overrides)
+
+
+def test_seed_loader_callback_not_invoked_when_template_has_no_seeds():
+    a = FakeAgent()
+    calls = []
+    apply_bundle(
+        _tpl(),  # no kb_seeds
+        a,
+        seed_loader_callback=lambda aid, t: calls.append((aid, t)) or [],
+    )
+    assert calls == []
+
+
+def test_seed_loader_callback_not_invoked_when_callback_omitted():
+    """Backward compat: when callback is None, no seeding attempt is made."""
+    a = FakeAgent()
+    r = apply_bundle(_tpl_with_seeds(), a)
+    assert r.seeds_ingested == []
+
+
+def test_seed_loader_callback_runs_and_results_recorded():
+    """When the callback returns CorpusSourceEntry-shaped objects, their
+    source_ids are surfaced on result.seeds_ingested."""
+    from dataclasses import dataclass
+
+    @dataclass
+    class FakeEntry:
+        source_id: str
+
+    a = FakeAgent()
+    captured: list = []
+
+    def loader(agent_id, template):
+        captured.append((agent_id, template.id))
+        return [FakeEntry("seed_civil_code"), FakeEntry("seed_sop")]
+
+    r = apply_bundle(
+        _tpl_with_seeds(), a,
+        seed_loader_callback=loader,
+    )
+    assert captured == [("ag1", "legal-expert")]
+    assert r.seeds_ingested == ["seed_civil_code", "seed_sop"]
+
+
+def test_seed_loader_callback_exception_does_not_raise():
+    """Seed-loader errors are best-effort — bundle_apply must still
+    return a usable result (Track D contract: don't raise out)."""
+    a = FakeAgent()
+
+    def boom(aid, t):
+        raise RuntimeError("disk full or similar")
+
+    r = apply_bundle(_tpl_with_seeds(), a, seed_loader_callback=boom)
+    assert r.seeds_ingested == []
+    # Other state still populated
+    assert a.expert_specialty == "legal"
+
+
+def test_seed_loader_callback_runs_on_idempotent_reapply():
+    """Re-applying a template with seeds should re-run the loader so
+    updated seed files reach the agent's KB even when nothing else
+    changed (the loader itself is idempotent)."""
+    a = FakeAgent()
+    apply_bundle(_tpl_with_seeds(), a)  # first apply
+
+    calls: list = []
+
+    def loader(aid, t):
+        calls.append(aid)
+        return []
+
+    apply_bundle(_tpl_with_seeds(), a, seed_loader_callback=loader)
+    assert calls == ["ag1"]

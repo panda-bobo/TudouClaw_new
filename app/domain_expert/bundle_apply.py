@@ -82,6 +82,10 @@ class BundleApplyResult:
     missing_skills: list[str] = field(default_factory=list)
     missing_mcps: list[str] = field(default_factory=list)
 
+    # R3: per-agent KB seeded from template.kb_seeds. Source IDs (not
+    # full paths) so callers / tests can verify what landed.
+    seeds_ingested: list[str] = field(default_factory=list)
+
     saved: bool = False
     initialized_at: float = 0.0
 
@@ -128,6 +132,9 @@ def apply_bundle(
     anthropic_pack_exists_callback: Optional[Callable[[str], bool]] = None,
     skill_exists_callback: Optional[Callable[[str], bool]] = None,
     mcp_exists_callback: Optional[Callable[[str], bool]] = None,
+    seed_loader_callback: Optional[
+        Callable[[str, SpecialtyTemplate], list[Any]]
+    ] = None,
     now: Callable[[], float] = _time.time,
 ) -> BundleApplyResult:
     """Apply ``template`` to ``agent``. Returns a BundleApplyResult.
@@ -153,6 +160,13 @@ def apply_bundle(
             registry?" — used to populate the missing_* fields. When
             absent, no existence check happens (everything is treated
             as present by default — V2 vertical wires the real check).
+        seed_loader_callback(agent_id, template) -> list[CorpusSourceEntry]:
+            R3 hook for ingesting template.kb_seeds into the per-agent
+            KB. Production wires
+            ``app.domain_expert.kb_seed_loader.ingest_seeds_into_agent_kb``;
+            tests can pass a no-op or a fake. When absent, no seeding
+            happens — backward-compatible default. The returned source
+            IDs are surfaced on result.seeds_ingested.
 
     Idempotency: calling apply_bundle twice with the same template
     produces the same result. The agent's expert_initialized_at is
@@ -269,7 +283,24 @@ def apply_bundle(
             continue
         result.mcps_required.append(mcp_id)
 
-    # ── 5. Save once at the end iff anything changed ──
+    # ── 5. Seed per-agent KB from template.kb_seeds ──
+    # Runs even on idempotent re-apply: re-cultivating an existing agent
+    # should refresh seeded sources to whatever the (possibly updated)
+    # template now says. The loader itself is idempotent — overwrites
+    # by source_id, doesn't touch user uploads.
+    if seed_loader_callback is not None and template.kb_seeds:
+        try:
+            seeded = seed_loader_callback(agent_id, template) or []
+        except Exception:
+            # Track D contract: don't raise out of bundle_apply on
+            # callback errors. Seeds are best-effort — V2 vertical can
+            # surface the failure separately if it cares.
+            seeded = []
+        for entry in seeded:
+            sid = getattr(entry, "source_id", None) or str(entry)
+            result.seeds_ingested.append(sid)
+
+    # ── 6. Save once at the end iff anything changed ──
     if something_changed and save_callback is not None:
         save_callback()
         result.saved = True
