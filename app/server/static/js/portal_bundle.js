@@ -39347,51 +39347,66 @@ async function renderSpecialtyTemplates(container) {
   try {
     var data = await api('GET', '/api/portal/specialty-templates');
     var templates = (data && data.templates) || [];
-    var rows = '';
-    if (templates.length === 0) {
-      rows = '<div style="padding:30px;text-align:center;color:var(--text3);'
-        + 'border:1px dashed var(--border);border-radius:8px">'
-        + '尚未注册任何养成模板。<br>'
-        + '点击右上角 [➕ 新建养成模板] 创建第一个。'
+    // Existing templates grid + a card-style "+" add affordance at the
+    // end. User direction (2026-05-10): "所有的添加按钮,做成卡片示添加".
+    // Pattern matches the Worker Nodes "+ CONNECT NODE" dashed card.
+    var addCard = ''
+      + '<div onclick="showCreateSpecialtyTemplate()" '
+      +      'onmouseover="this.style.borderColor=\'rgba(255,122,219,0.50)\';this.style.background=\'rgba(255,122,219,0.05)\'" '
+      +      'onmouseout="this.style.borderColor=\'\';this.style.background=\'transparent\'" '
+      +      'style="display:flex;flex-direction:column;align-items:center;justify-content:center;'
+      +             'gap:10px;min-height:200px;border:2px dashed rgba(255,122,219,0.30);'
+      +             'border-radius:10px;background:transparent;cursor:pointer;'
+      +             'transition:all 0.18s;padding:18px;text-align:center">'
+      + '  <div style="width:42px;height:42px;border-radius:9999px;background:rgba(255,122,219,0.10);'
+      +       'border:1px solid rgba(255,122,219,0.40);'
+      +       'display:flex;align-items:center;justify-content:center">'
+      + '    <span class="material-symbols-outlined" style="color:var(--cyber-magenta,#ff7adb);font-size:22px">add</span>'
+      + '  </div>'
+      + '  <div style="color:var(--cyber-magenta,#ff7adb);font-size:12px;font-weight:600;'
+      +       'text-transform:uppercase;letter-spacing:0.05em">新建养成模板</div>'
+      + '  <div style="color:var(--text3);font-size:11px;line-height:1.5;max-width:220px">'
+      +       '定义一个新专家"配方":需要哪些 prompt packs / skills / 知识库 / 训练参数</div>'
+      + '</div>';
+
+    var rows = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px">';
+    templates.forEach(function(t){
+      var iconHtml = (typeof _cultIconHTML === 'function')
+        ? _cultIconHTML(t.icon, 28)
+        : esc(t.icon || '🎓');
+      rows += '<div style="background:var(--surface);border:1px solid var(--border);'
+        +     'border-radius:10px;padding:18px;display:flex;flex-direction:column;gap:10px">'
+        + '  <div style="display:flex;align-items:center;gap:12px">'
+        + '    <div style="width:42px;height:42px;background:rgba(255,122,219,0.1);'
+        +       'border:1px solid rgba(255,122,219,0.4);border-radius:10px;'
+        +       'display:flex;align-items:center;justify-content:center;color:var(--cyber-magenta,#ff7adb);font-size:20px">'
+        +       iconHtml + '</div>'
+        + '    <div style="flex:1;min-width:0">'
+        + '      <div style="font-size:14px;font-weight:600">' + esc(t.name) + '</div>'
+        + '      <div style="font-size:10px;color:var(--text3);font-family:var(--font-mono,monospace);margin-top:2px">'
+        +         esc(t.id) + ' · ' + esc(t.specialty) + ' · v' + esc(t.version) + '</div>'
+        + '    </div>'
+        + '  </div>'
+        + '  <div style="font-size:12px;color:var(--text2);line-height:1.55;flex:1;min-height:36px">'
+        +       esc(t.description || '(no description)') + '</div>'
+        + '  <div style="display:flex;gap:6px;flex-wrap:wrap;font-size:10px;color:var(--text3);font-family:var(--font-mono,monospace)">'
+        + '    <span title="prompt packs">📝 ' + (t.required_packs_count || 0) + ' packs</span>'
+        + '    <span title="skills">🛠 ' + (t.required_skills_count || 0) + ' skills</span>'
+        + '    <span title="levels">🎯 ' + (t.level_count || 0) + ' levels</span>'
+        + '  </div>'
+        + '  <div style="display:flex;gap:6px;border-top:1px solid var(--overlay-5);padding-top:12px">'
+        + '    <button class="btn btn-sm btn-ghost" onclick="_specTemplateView(\'' + esc(t.id) + '\')" '
+        +         'style="font-size:11px"><span class="material-symbols-outlined" style="font-size:14px">visibility</span> 查看</button>'
+        + '    <button class="btn btn-sm btn-ghost" onclick="_specTemplateEdit(\'' + esc(t.id) + '\')" '
+        +         'style="font-size:11px"><span class="material-symbols-outlined" style="font-size:14px">edit</span> 编辑</button>'
+        + '    <button class="btn btn-sm btn-ghost" '
+        +         'onclick="_specTemplateDelete(\'' + esc(t.id) + '\',\'' + esc(t.name) + '\')" '
+        +         'style="font-size:11px;margin-left:auto;color:var(--error)">'
+        +         '<span class="material-symbols-outlined" style="font-size:14px">delete</span> 删除</button>'
+        + '  </div>'
         + '</div>';
-    } else {
-      rows = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px">';
-      templates.forEach(function(t){
-        var iconHtml = (typeof _cultIconHTML === 'function')
-          ? _cultIconHTML(t.icon, 28)
-          : esc(t.icon || '🎓');
-        rows += '<div style="background:var(--surface);border:1px solid var(--border);'
-          +     'border-radius:10px;padding:18px;display:flex;flex-direction:column;gap:10px">'
-          + '  <div style="display:flex;align-items:center;gap:12px">'
-          + '    <div style="width:42px;height:42px;background:rgba(255,122,219,0.1);'
-          +       'border:1px solid rgba(255,122,219,0.4);border-radius:10px;'
-          +       'display:flex;align-items:center;justify-content:center;color:var(--cyber-magenta,#ff7adb);font-size:20px">'
-          +       iconHtml + '</div>'
-          + '    <div style="flex:1;min-width:0">'
-          + '      <div style="font-size:14px;font-weight:600">' + esc(t.name) + '</div>'
-          + '      <div style="font-size:10px;color:var(--text3);font-family:var(--font-mono,monospace);margin-top:2px">'
-          +         esc(t.id) + ' · ' + esc(t.specialty) + ' · v' + esc(t.version) + '</div>'
-          + '    </div>'
-          + '  </div>'
-          + '  <div style="font-size:12px;color:var(--text2);line-height:1.55;flex:1;min-height:36px">'
-          +       esc(t.description || '(no description)') + '</div>'
-          + '  <div style="display:flex;gap:6px;flex-wrap:wrap;font-size:10px;color:var(--text3);font-family:var(--font-mono,monospace)">'
-          + '    <span title="prompt packs">📝 ' + (t.required_packs_count || 0) + ' packs</span>'
-          + '    <span title="skills">🛠 ' + (t.required_skills_count || 0) + ' skills</span>'
-          + '    <span title="levels">🎯 ' + (t.level_count || 0) + ' levels</span>'
-          + '  </div>'
-          + '  <div style="display:flex;gap:6px;border-top:1px solid var(--overlay-5);padding-top:12px">'
-          + '    <button class="btn btn-sm btn-ghost" onclick="_specTemplateView(\'' + esc(t.id) + '\')" '
-          +         'style="font-size:11px"><span class="material-symbols-outlined" style="font-size:14px">visibility</span> 查看</button>'
-          + '    <button class="btn btn-sm btn-ghost" '
-          +         'onclick="_specTemplateDelete(\'' + esc(t.id) + '\',\'' + esc(t.name) + '\')" '
-          +         'style="font-size:11px;margin-left:auto;color:var(--error)">'
-          +         '<span class="material-symbols-outlined" style="font-size:14px">delete</span> 删除</button>'
-          + '  </div>'
-          + '</div>';
-      });
-      rows += '</div>';
-    }
+    });
+    rows += addCard + '</div>';
     c.innerHTML = ''
       + '<div style="margin-bottom:16px;padding:14px 18px;background:rgba(255,122,219,0.04);'
       +     'border:1px solid rgba(255,122,219,0.20);border-radius:8px">'
@@ -39448,9 +39463,61 @@ function _specTemplateDelete(id, name) {
 }
 window._specTemplateDelete = _specTemplateDelete;
 
+// Edit existing template: fetch + open the same modal, pre-filled.
+// Submit goes through PUT instead of POST. We track the mode via
+// window._specEditingId — _specTemplateSubmit reads it.
+function _specTemplateEdit(id) {
+  api('GET', '/api/portal/specialty-templates/' + encodeURIComponent(id))
+    .then(function(t){
+      window._specEditingId = id;
+      showCreateSpecialtyTemplate();   // builds the form
+      // Wait one tick so the form DOM exists, then prefill
+      setTimeout(function(){
+        function set(key, val) {
+          var el = document.getElementById('ct-spec-' + key);
+          if (el) el.value = val == null ? '' : String(val);
+        }
+        set('id',          t.id);
+        set('specialty',   t.specialty);
+        set('name',        t.name);
+        set('icon',        t.icon || '');
+        set('version',     t.version || '1.0');
+        set('description', t.description || '');
+        set('required-packs',           (t.required_packs || []).join(', '));
+        set('required-anthropic-packs', (t.required_anthropic_packs || []).join(', '));
+        set('required-skills',          (t.required_skills || []).join(', '));
+        // Update header to indicate edit mode
+        var header = document.querySelector('#modal-overlay .material-symbols-outlined + span, '
+                                          + '#modal-overlay span:first-child + span');
+        // Find the modal title element by content text "新建专家养成模板" → "编辑"
+        var titles = document.querySelectorAll('#modal-overlay div');
+        titles.forEach(function(el){
+          if (el.textContent && el.textContent.indexOf('新建专家养成模板') >= 0) {
+            el.innerHTML = el.innerHTML.replace('新建专家养成模板', '编辑专家养成模板 · ' + esc(id));
+          }
+        });
+        // Submit button label
+        var btn = document.querySelector('#modal-overlay button[onclick="_specTemplateSubmit()"]');
+        if (btn) btn.innerHTML = '✏️ 保存修改';
+        // Lock id field (filename change is messy across mid-edit)
+        var idEl = document.getElementById('ct-spec-id');
+        if (idEl) {
+          idEl.readOnly = true;
+          idEl.style.opacity = '0.6';
+          idEl.title = '编辑模式下不能改 id (文件名)';
+        }
+      }, 30);
+    })
+    .catch(function(e){ alert('加载失败: ' + (e.message || e)); });
+}
+window._specTemplateEdit = _specTemplateEdit;
+
 // Show the create-template modal with form fields. Submit calls
 // POST /specialty-templates and refreshes the list.
 function showCreateSpecialtyTemplate() {
+  // Clear edit flag — caller may have set it. _specTemplateEdit re-sets
+  // it after this returns when it's actually editing.
+  window._specEditingId = null;
   showModalHTMLLarge(
     '<div style="width:680px;max-width:92vw;max-height:88vh;overflow-y:auto;'
     +     'background:var(--surface);border-radius:12px">'
@@ -39561,13 +39628,38 @@ function _specTemplateSubmit() {
   if (!body.id || !body.specialty || !body.name) {
     alert('id / specialty / name 都是必填'); return;
   }
+  // Edit mode? PUT against the existing template_id. Otherwise POST.
+  var editingId = window._specEditingId;
+  if (editingId) {
+    api('PUT', '/api/portal/specialty-templates/' + encodeURIComponent(editingId), body)
+      .then(function(r){
+        if (typeof _toast === 'function') _toast('已更新模板: ' + (r.id || editingId), 'success');
+        window._specEditingId = null;
+        closeModal();
+        if (typeof renderSpecialtyTemplates === 'function') {
+          renderSpecialtyTemplates();
+        }
+        // Cultivation hub refresh too — chip might change after edit
+        if (typeof renderCultivationHub === 'function' &&
+            (currentView === 'cultivation' || _cultHubTab === 'templates')) {
+          renderCultivationHub();
+        }
+      })
+      .catch(function(e){
+        alert('更新失败: ' + (e.message || e));
+      });
+    return;
+  }
   api('POST', '/api/portal/specialty-templates', body)
     .then(function(r){
       if (typeof _toast === 'function') _toast('已创建模板: ' + r.id, 'success');
       closeModal();
-      // Refresh the list if we're still on the templates tab
       if (typeof renderSpecialtyTemplates === 'function') {
         renderSpecialtyTemplates();
+      }
+      if (typeof renderCultivationHub === 'function' &&
+          (currentView === 'cultivation' || _cultHubTab === 'templates')) {
+        renderCultivationHub();
       }
     })
     .catch(function(e){
