@@ -701,6 +701,155 @@ def _find_safe_cut_idx(messages: list[dict], want_idx: int) -> int:
     return max(0, cut)
 
 
+# ── Step 3 (2026-05-11): structured fact extraction for compaction ──
+#
+# The LLM-generated history summary is good at "narrative tissue"
+# (reasoning, abandoned approaches, why X was decided). It is bad at
+# faithful enumeration of "which files were edited" / "what bash ran"
+# / "which tools failed" — those facts get omitted, miscounted, or
+# paraphrased.
+#
+# So we extract those facts deterministically with code (no LLM call,
+# no hallucination risk) and render them as a separate block in the
+# compacted system message, alongside the narrative + user verbatim.
+def _extract_structured_facts(old_slice: list[dict]) -> dict:
+    """Deterministic scan of compressed-out messages.
+
+    Returns a dict the renderer consumes; never mutates input. Pass-1
+    walks assistant.tool_calls to identify what was attempted; pass-2
+    walks tool results to identify which attempts failed.
+    """
+    import json as _json
+    out: dict = {
+        "files_touched": [],        # [{"tool": ..., "path": ...}, ...]
+        "tools_called_count": {},   # {tool_name: count}
+        "tools_with_errors": [],    # [{"tool": ..., "error": brief}]
+        "bash_commands": [],        # [str, ...]   in order
+        "todos_changed": 0,
+    }
+
+    # Pass 1: assistant.tool_calls — what was attempted, with args.
+    tc_by_id: dict[str, tuple[str, dict]] = {}
+    for m in old_slice:
+        if m.get("role") != "assistant":
+            continue
+        for tc in (m.get("tool_calls") or []):
+            fn = tc.get("function") or {}
+            name = str(fn.get("name") or "")
+            tc_id = str(tc.get("id") or "")
+            args_raw = fn.get("arguments") or "{}"
+            try:
+                args = (_json.loads(args_raw)
+                        if isinstance(args_raw, str) else args_raw)
+                if not isinstance(args, dict):
+                    args = {}
+            except Exception:
+                args = {}
+            tc_by_id[tc_id] = (name, args)
+
+            out["tools_called_count"][name] = (
+                out["tools_called_count"].get(name, 0) + 1)
+
+            if name in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+                p = args.get("file_path") or args.get("notebook_path")
+                if p:
+                    out["files_touched"].append(
+                        {"tool": name, "path": str(p)})
+            elif name == "Bash":
+                cmd = str(args.get("command") or "")
+                if cmd:
+                    short = (cmd if len(cmd) <= 200
+                             else cmd[:200] + f"…(+{len(cmd)-200}c)")
+                    out["bash_commands"].append(short)
+            elif name == "TodoWrite":
+                out["todos_changed"] += 1
+
+    # Pass 2: tool results — which attempts errored?
+    for m in old_slice:
+        if m.get("role") != "tool":
+            continue
+        tc_id = str(m.get("tool_call_id") or "")
+        content = m.get("content") or ""
+        if isinstance(content, list):
+            try:
+                content = " ".join(
+                    p.get("text", "") for p in content
+                    if isinstance(p, dict) and p.get("type") == "text")
+            except Exception:
+                content = str(content)
+        content = str(content)
+
+        # Error heuristic — keep low false-positive rate by requiring
+        # the marker near the start, not buried.
+        head = content[:500].lower()
+        is_err = bool(
+            m.get("is_error") is True
+            or "<error>" in head
+            or head.startswith(("error:", "error ", "exception:",
+                                "traceback", "fatal:"))
+            or "permission denied" in head
+            or "command not found" in head
+        )
+        if is_err:
+            tool_name = (tc_by_id.get(tc_id) or ("?", {}))[0]
+            brief = content.strip()[:200].replace("\n", " ")
+            out["tools_with_errors"].append(
+                {"tool": tool_name, "error": brief})
+
+    return out
+
+
+def _render_structured_facts(facts: dict) -> str:
+    """Render extractor output as compact markdown. Empty str if nothing."""
+    sections: list[str] = []
+
+    # Files modified — dedup by path, keep last op per path.
+    if facts.get("files_touched"):
+        seen: dict[str, str] = {}
+        for f in facts["files_touched"]:
+            seen[f["path"]] = f["tool"]
+        lines = [f"- `{path}` ({tool})" for path, tool in seen.items()]
+        sections.append("### Files modified\n" + "\n".join(lines))
+
+    # Tool errors — agent must see these so it doesn't blindly retry.
+    if facts.get("tools_with_errors"):
+        lines = []
+        for e in facts["tools_with_errors"][:20]:
+            lines.append(f"- {e['tool']}: {e['error']}")
+        sections.append(
+            "### Tool errors (do NOT blindly retry — diagnose first)\n"
+            + "\n".join(lines))
+
+    # Tool call frequency — top 8.
+    if facts.get("tools_called_count"):
+        top = sorted(facts["tools_called_count"].items(),
+                     key=lambda kv: -kv[1])[:8]
+        line = ", ".join(f"{n}×{c}" for n, c in top)
+        sections.append(f"### Tools called (top 8): {line}")
+
+    # Recent bash — last 5 unique, in chrono order.
+    if facts.get("bash_commands"):
+        seen_cmd: list[str] = []
+        for c in reversed(facts["bash_commands"]):
+            if c not in seen_cmd:
+                seen_cmd.append(c)
+            if len(seen_cmd) >= 5:
+                break
+        seen_cmd.reverse()
+        lines = [f"- `{c}`" for c in seen_cmd]
+        sections.append("### Recent bash (last 5 unique)\n"
+                        + "\n".join(lines))
+
+    if facts.get("todos_changed"):
+        sections.append(
+            f"### TodoWrite invoked {facts['todos_changed']}× "
+            f"(current todos in dynamic context, not here)")
+
+    if not sections:
+        return ""
+    return "\n\n".join(sections)
+
+
 def _summarize_old_history(messages: list[dict],
                             agent,
                             threshold_chars: int = _HISTORY_SUMMARY_CHARS,
@@ -1028,15 +1177,44 @@ def _summarize_old_history(messages: list[dict],
         user_lines.append(_c)
         used += len(_c)
 
-    summary_content = (
-        f"[HISTORY_SUMMARY — 覆盖 {len(old_slice)} 条旧消息]\n"
-        f"{summary_text}"
-    )
+    # Step 3 (2026-05-11): structured fact extraction.
+    # Deterministic code scan (no LLM) — pulls out facts the narrative
+    # can't be trusted to enumerate accurately: files modified, tool
+    # errors, tool-call frequency, recent bash, todo cadence.
+    structured_block = ""
+    try:
+        structured_block = _render_structured_facts(
+            _extract_structured_facts(old_slice))
+    except Exception as e:
+        logger.warning("structured fact extraction failed: %s", e)
+        structured_block = ""
+
+    # Final layout (top-to-bottom in the assembled system message):
+    #   1. Header   — covers-N counter
+    #   2. FACTS    — deterministic, append-only — agent ground truth
+    #   3. VERBATIM — user msgs original text — source of truth
+    #   4. NARRATIVE — LLM-generated reasoning glue
+    # Narrative goes LAST so it sits adjacent to the recent-K window;
+    # the agent reads "here's why we are where we are" then immediately
+    # sees the next live messages. FACTS + VERBATIM are the stable
+    # prefix (helps prompt cache in Step 4).
+    parts: list[str] = [
+        f"[HISTORY_SUMMARY — 覆盖 {len(old_slice)} 条旧消息]"
+    ]
+    if structured_block:
+        parts.append(
+            "[STRUCTURED_FACTS — 代码确定性抽取, 比 narrative 可靠]\n"
+            + structured_block)
     if user_lines:
-        summary_content += (
-            f"\n\n[USER_VERBATIM — 在被压缩历史里用户说过的话, 按时序保留原文 ({len(user_lines)} 条)]\n"
-            + "\n\n---\n\n".join(user_lines)
-        )
+        parts.append(
+            f"[USER_VERBATIM — 在被压缩历史里用户说过的话, "
+            f"按时序保留原文 ({len(user_lines)} 条)]\n"
+            + "\n\n---\n\n".join(user_lines))
+    parts.append(
+        "[NARRATIVE — agent 推理脉络, 由 LLM 总结, 仅供理解上下文,"
+        "事实以上面 STRUCTURED_FACTS / USER_VERBATIM 为准]\n"
+        + summary_text)
+    summary_content = "\n\n".join(parts)
 
     # Assemble: [system prefix ..., summary system msg, recent messages ...]
     summary_msg = {
