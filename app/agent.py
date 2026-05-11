@@ -940,13 +940,68 @@ def _summarize_old_history(messages: list[dict],
             recent_start = adjusted
             old_slice = messages[sys_prefix_end:recent_start]
 
+    # 2026-05-11: preserve user messages verbatim.
+    # The LLM-generated summary is fact-only and aggressively compressed
+    # (300-500 chars target), which means user instructions get
+    # paraphrased into "用户希望开发华为云 skill" rather than the actual
+    # "继续 skill4 开发". Real symptom: user's audit report (4KB) was
+    # pasted to 刘老师, got compressed across 2 summary cycles, and the
+    # specific request to fix 4 empty modules was diluted into an
+    # unactionable summary — the agent kept reading SKILL.md files
+    # instead of writing terraform code.
+    #
+    # Extract every user message in old_slice and append the verbatim
+    # text after the summary, so the LLM always sees what the operator
+    # actually said, no matter how many summary cycles have run.
+    # Total appended bytes capped to keep the summary message itself
+    # bounded (single user msg can also exceed cap on long pastes).
+    _USER_VERBATIM_TOTAL_CAP = 30000
+    _USER_VERBATIM_PER_MSG_CAP = 8000
+    user_lines: list[str] = []
+    used = 0
+    for _m in old_slice:
+        if _m.get("role") != "user":
+            continue
+        _c = _m.get("content")
+        if isinstance(_c, list):
+            try:
+                _c = " ".join(_p.get("text", "") for _p in _c
+                              if isinstance(_p, dict)
+                              and _p.get("type") == "text")
+            except Exception:
+                _c = str(_c)
+        _c = str(_c or "").strip()
+        if not _c:
+            continue
+        # Skip the marker we ourselves emit on context-compress prefix
+        if _c.startswith("[Context Compressed:"):
+            continue
+        if len(_c) > _USER_VERBATIM_PER_MSG_CAP:
+            _c = (_c[:_USER_VERBATIM_PER_MSG_CAP // 2]
+                  + f"\n…[truncated {len(_c) - _USER_VERBATIM_PER_MSG_CAP}c]…\n"
+                  + _c[-_USER_VERBATIM_PER_MSG_CAP // 2:])
+        if used + len(_c) > _USER_VERBATIM_TOTAL_CAP:
+            user_lines.append(
+                f"[…剩余 {len([m for m in old_slice if m.get('role')=='user']) - len(user_lines)} 条用户消息因总量超限被省略…]"
+            )
+            break
+        user_lines.append(_c)
+        used += len(_c)
+
+    summary_content = (
+        f"[HISTORY_SUMMARY — 覆盖 {len(old_slice)} 条旧消息]\n"
+        f"{summary_text}"
+    )
+    if user_lines:
+        summary_content += (
+            f"\n\n[USER_VERBATIM — 在被压缩历史里用户说过的话, 按时序保留原文 ({len(user_lines)} 条)]\n"
+            + "\n\n---\n\n".join(user_lines)
+        )
+
     # Assemble: [system prefix ..., summary system msg, recent messages ...]
     summary_msg = {
         "role": "system",
-        "content": (
-            f"[HISTORY_SUMMARY — 覆盖 {len(old_slice)} 条旧消息]\n"
-            f"{summary_text}"
-        ),
+        "content": summary_content,
     }
     result = list(messages[:sys_prefix_end])
     result.append(summary_msg)
