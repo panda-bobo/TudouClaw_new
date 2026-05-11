@@ -843,18 +843,32 @@ def _summarize_old_history(messages: list[dict],
             lines.append(f"[{role}] {content}")
         transcript = "\n".join(lines)
 
+        # 2026-05-11: prompt rewritten — Step 2/4.
+        # Old prompt had hard "300-500 字" cap → forced over-compression
+        # (real ratio ~27:1) and lost specificity. New prompt:
+        #   - no hard char cap; length matches information density
+        #   - tells LLM that user verbatim + structured facts will be
+        #     appended downstream, so it should focus on the
+        #     *connecting tissue*: reasoning, what was tried & ruled
+        #     out, why decisions were made — the bits that no
+        #     deterministic extractor can recover
+        #   - explicit anti-hallucination + anti-paraphrase rules
         prompt = (
-            "以下是一段 agent 对话历史。请压缩成一份事实性摘要,下一轮用于给"
-            "该 agent 做上下文提示。\n\n"
-            "要求:\n"
-            "1. 用中文,300-500 字。\n"
-            "2. 只记事实,不要评论或润色。\n"
-            "3. 分 3 节:\n"
-            "   ## 用户意图: (1-2 句概括整条对话用户想达成什么)\n"
-            "   ## 已完成: (bullet 列表: 调用了什么工具,得到什么关键结果,"
-            "写入了哪些文件/路径)\n"
-            "   ## 关键数据: (保留必须记住的字段/路径/数字/ID,不要省略)\n"
-            "4. 禁止编造。历史里没写的不要加。\n\n"
+            "你正在为一个长程 agent 压缩对话历史。下游会单独保留 "
+            "(a) 所有 user 消息原文 (b) 通过代码确定性抽取的事实 "
+            "(改过的文件/失败的工具/做出的决定/产出的 artifact)。\n\n"
+            "因此你只需要写 **过程性叙事** — 把那些代码抽不出来的"
+            "推理脉络写下来。\n\n"
+            "硬性规则:\n"
+            "1. 中文。长度按信息密度决定,不设字数上下限 — 简单段落"
+            "几十字就够,复杂段落写多少都可以。\n"
+            "2. 只记历史里真实出现过的事,禁止编造、禁止脑补、禁止"
+            "替用户'升华'意图。\n"
+            "3. 优先记: agent 尝试过但放弃的方案 / 关键 trade-off "
+            "/ 推理依据 / 工具调用之间的因果链 / 错误后是怎么诊断的。\n"
+            "4. 不要列已完成的工具调用清单 (代码会单独抽), 不要复述 "
+            "user 原文 (会单独贴), 不要写 '总结一下' 这种 meta 句。\n"
+            "5. 用 markdown, 段落之间空行。\n\n"
             "--- 历史开始 ---\n"
             f"{transcript}\n"
             "--- 历史结束 ---"
@@ -870,8 +884,11 @@ def _summarize_old_history(messages: list[dict],
             resp = _llm.chat_no_stream(
                 messages=[
                     {"role": "system",
-                     "content": ("你是一个事实性对话摘要器。忠实压缩,"
-                                 "不编造,不润色。")},
+                     "content": ("你是 agent 长程记忆的过程叙事器。"
+                                 "user 原文和确定性事实都由代码单独保留,"
+                                 "你只负责写'代码抽不出来的推理脉络'。"
+                                 "禁止编造,禁止替用户脑补意图,"
+                                 "长度按信息密度自决。")},
                     {"role": "user", "content": prompt},
                 ],
                 model=_mdl, provider=_prov,
