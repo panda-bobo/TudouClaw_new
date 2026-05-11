@@ -12267,29 +12267,58 @@ async function _reconnectActiveStream(agentId) {
     }
     return;
   }
-  // No tracked stream — check if agent is busy (status from state data)
+  // No tracked stream — check if agent is actually busy.
+  //
+  // 2026-05-11: previously this read status from the cached `agents`
+  // array, which after polling was throttled (commit a01f3d2) often
+  // held a STALE 'busy' from an earlier visit. Result: opening any
+  // agent that had been busy hours ago showed a permanent "Working
+  // (reconnecting)..." spinner with no actual task to attach to.
+  //
+  // Now: short-circuit on the cached value, but if it says busy go
+  // ask the backend directly before painting the spinner. Skips the
+  // cache→spinner→404 loop entirely for agents that finished their
+  // task while the user was away.
   var ag = agents.find(function(a){ return a.id === agentId; });
-  if (ag && ag.status === 'busy') {
-    // Agent is busy but we don't have a tracked stream (page was loaded fresh)
-    // Show a working indicator
-    var progressBar = _createProgressBar(agentId);
-    _updateProgress(agentId, 50, 'Working (reconnecting)...');
-    // Try to find the latest active ChatTask (NOT AgentTask)
-    try {
-      var taskResp = await api('GET', '/api/portal/agent/'+agentId+'/chat-tasks');
-      if (taskResp && taskResp.tasks) {
-        var runningTask = taskResp.tasks.find(function(t){ return ['queued','thinking','streaming','tool_exec','waiting_approval'].indexOf(t.status) !== -1; });
-        if (runningTask) {
-          var thinkDiv = addChatBubble(agentId, 'assistant thinking', '');
-          thinkDiv.innerHTML = '<span class="thinking-dots"><span>.</span><span>.</span><span>.</span></span>';
-          _streamTaskEvents(agentId, runningTask.id, thinkDiv, progressBar);
-          return;
-        }
-      }
-    } catch(e) {}
-    // No running task found — remove progress bar
-    _removeProgressBar(agentId);
+  if (!ag || ag.status !== 'busy') return;
+
+  var fresh = null;
+  try {
+    fresh = await api('GET', '/api/portal/agent/' + agentId);
+  } catch(_) { fresh = null; }
+  if (fresh) {
+    // Reconcile the cached entry so the rest of the UI (sidebar
+    // dot, header chip, etc.) sees the truth too.
+    ag.status = fresh.status;
+    if (Array.isArray(window._cachedAgents)) {
+      var i = window._cachedAgents.findIndex(function(a){ return a.id === agentId; });
+      if (i >= 0) window._cachedAgents[i].status = fresh.status;
+    }
   }
+  if (!fresh || fresh.status !== 'busy') {
+    // Cache was lying — agent is idle. Don't show the reconnect spinner.
+    return;
+  }
+
+  // Backend confirms busy. Show working indicator + try to attach.
+  var progressBar = _createProgressBar(agentId);
+  _updateProgress(agentId, 50, 'Working (reconnecting)...');
+  try {
+    var taskResp = await api('GET', '/api/portal/agent/'+agentId+'/chat-tasks');
+    if (taskResp && taskResp.tasks) {
+      var runningTask = taskResp.tasks.find(function(t){ return ['queued','thinking','streaming','tool_exec','waiting_approval'].indexOf(t.status) !== -1; });
+      if (runningTask) {
+        var thinkDiv = addChatBubble(agentId, 'assistant thinking', '');
+        thinkDiv.innerHTML = '<span class="thinking-dots"><span>.</span><span>.</span><span>.</span></span>';
+        _streamTaskEvents(agentId, runningTask.id, thinkDiv, progressBar);
+        return;
+      }
+    }
+  } catch(e) {}
+  // Backend said busy but no chat-task is actually running — that's a
+  // backend stale-status bug, not a client one. Drop the spinner so
+  // the user isn't stuck staring at it; the next reload will refresh.
+  _removeProgressBar(agentId);
 }
 
 // ============ Agent events log ============
