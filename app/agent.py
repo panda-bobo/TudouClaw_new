@@ -989,43 +989,78 @@ def _summarize_old_history(messages: list[dict],
                     cached_hash, cached_n,
                     agent.id[:8] if agent else "?")
 
-        # Tier 2: delta reuse — only if Tier 1 didn't hit
-        if not cached_full_content and cached_n > 0:
+        # Tier 2: delta reuse — only if Tier 1 didn't hit AND we have
+        # a cached_hash to verify against. The 2026-05-11 bug found by
+        # test_step4_inner_mutation_invalidates_cache: an in-place
+        # mutation of an inner tool body (e.g. _compress_old_tool_results
+        # truncating in place) keeps n + chars roughly equal but changes
+        # content. The old delta gate would accept this and reuse a now-
+        # stale narrative. Fix: after shrinking old_slice to the cached
+        # prefix, REQUIRE the shrunk-slice hash to match cached_hash;
+        # otherwise fall through to fresh LLM call.
+        if not cached_full_content and cached_n > 0 and cached_hash:
             delta_msgs = len(old_slice) - cached_n
             delta_chars = old_chars - cached_chars
             if (0 <= delta_msgs < _HISTORY_SUMMARY_RESUM_DELTA_MSGS
                     and delta_chars < _HISTORY_SUMMARY_RESUM_DELTA_CHARS):
-                summary_text = str(
-                    cache.get("narrative")
-                    or cache.get("text")    # legacy key
-                    or "")
-                if summary_text:
+                new_recent_start = _find_safe_cut_idx(
+                    messages, sys_prefix_end + cached_n)
+                if new_recent_start > sys_prefix_end:
+                    shrunk_slice = messages[sys_prefix_end:new_recent_start]
+                    # Verify the shrunk prefix matches the cached one
+                    # byte-exactly. This rules out mid-stream mutation.
+                    if _hash_old_slice(shrunk_slice) == cached_hash:
+                        cf = str(cache.get("full_content") or "")
+                        if cf:
+                            cached_full_content = cf
+                            old_slice = shrunk_slice
+                            recent_start = new_recent_start
+                            summary_text = str(
+                                cache.get("narrative")
+                                or cache.get("text")
+                                or "")
+                            cache_hit_kind = "delta-then-exact"
+                            logger.info(
+                                "HISTORY_SUMMARY cache DELTA→EXACT hit "
+                                "(covers=%d, delta_msgs=%d, "
+                                "delta_chars=%d) agent=%s",
+                                cached_n, delta_msgs, delta_chars,
+                                agent.id[:8] if agent else "?")
+                    else:
+                        # Prefix mutated under us — cache stale, run fresh.
+                        logger.debug(
+                            "HISTORY_SUMMARY cache rejected "
+                            "(n+chars within delta but content "
+                            "mutated) agent=%s",
+                            agent.id[:8] if agent else "?")
+
+        # Legacy compat: if cache has no old_hash (pre-Step-4 entry),
+        # fall back to the original n+chars-only delta reuse path. This
+        # is the same risk profile as before Step 4 — only triggered
+        # for caches written by old code in long-lived agents.
+        if (not cached_full_content
+                and cached_n > 0
+                and not cached_hash):
+            delta_msgs = len(old_slice) - cached_n
+            delta_chars = old_chars - cached_chars
+            if (0 <= delta_msgs < _HISTORY_SUMMARY_RESUM_DELTA_MSGS
+                    and delta_chars < _HISTORY_SUMMARY_RESUM_DELTA_CHARS):
+                legacy_text = str(
+                    cache.get("narrative") or cache.get("text") or "")
+                if legacy_text:
                     new_recent_start = _find_safe_cut_idx(
                         messages, sys_prefix_end + cached_n)
                     if new_recent_start > sys_prefix_end:
                         old_slice = messages[sys_prefix_end:new_recent_start]
                         recent_start = new_recent_start
-                        # After shrink, re-check Tier 1 — if hash
-                        # matches we can byte-reuse full_content.
-                        if cached_hash == _hash_old_slice(old_slice):
-                            cf = str(cache.get("full_content") or "")
-                            if cf:
-                                cached_full_content = cf
-                                cache_hit_kind = "delta-then-exact"
-                                logger.info(
-                                    "HISTORY_SUMMARY cache DELTA→EXACT "
-                                    "hit (covers=%d, delta_msgs=%d) "
-                                    "agent=%s",
-                                    cached_n, delta_msgs,
-                                    agent.id[:8] if agent else "?")
-                        else:
-                            cache_hit_kind = "delta"
-                            logger.debug(
-                                "HISTORY_SUMMARY cache DELTA reuse "
-                                "(covers=%d, delta_msgs=%d, "
-                                "delta_chars=%d) agent=%s",
-                                cached_n, delta_msgs, delta_chars,
-                                agent.id[:8] if agent else "?")
+                        summary_text = legacy_text
+                        cache_hit_kind = "delta-legacy"
+                        logger.debug(
+                            "HISTORY_SUMMARY cache DELTA reuse "
+                            "(legacy, no hash) covers=%d delta_msgs=%d "
+                            "agent=%s",
+                            cached_n, delta_msgs,
+                            agent.id[:8] if agent else "?")
 
     # Tier 1 hit: skip LLM call entirely — summary_text is set from cache
     # but we'll also skip extraction + assembly below by checking
