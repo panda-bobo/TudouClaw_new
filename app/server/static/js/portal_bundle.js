@@ -19853,10 +19853,41 @@ async function _soulLoadTemplate(role) {
 async function _saveSoul(agentId) {
   var soulMd = document.getElementById('soul-editor-textarea').value;
   var robotAvatar = window._soulSelectedRobot || '';
-  await api('POST', '/api/portal/agent/'+agentId+'/soul', {
-    soul_md: soulMd,
-    robot_avatar: robotAvatar
-  });
+  // 2026-05-11: previously this awaited the POST and immediately
+  // removed the modal regardless of outcome. If the fetch failed
+  // (auth expired, network blip, 500), the user saw the modal close
+  // and thought their edit was saved — but the backend never changed.
+  // Real symptom: 刘老师 was edited several times to clear the SSC
+  // persona, but SQLite still held the original 3.7 KB SOUL because
+  // every save silently failed. Now we surface errors and KEEP the
+  // modal open so the user can retry / copy their edits before
+  // navigating away.
+  var saveBtn = document.querySelector('#soul-editor-overlay .btn-primary');
+  var origLabel = saveBtn ? saveBtn.textContent : '';
+  if (saveBtn) {
+    saveBtn.disabled = true;
+    saveBtn.textContent = '保存中…';
+  }
+  var result;
+  try {
+    result = await api('POST', '/api/portal/agent/'+agentId+'/soul', {
+      soul_md: soulMd,
+      robot_avatar: robotAvatar
+    });
+  } catch (e) {
+    alert('SOUL 保存失败 (network): ' + (e && e.message ? e.message : e) +
+          '\n\nmodal 保留打开,请重试或先复制内容。');
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = origLabel; }
+    return;
+  }
+  if (!result || result.error) {
+    var msg = (result && result.error) ? result.error : 'no response';
+    alert('SOUL 保存失败: ' + msg +
+          '\n\nmodal 保留打开,请重试或先复制内容。' +
+          '\n如反复失败请刷新页面 (⌘⇧R) 再试。');
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = origLabel; }
+    return;
+  }
   document.getElementById('soul-editor-overlay').remove();
   // Refresh state to update sidebar avatars
   refreshState();
