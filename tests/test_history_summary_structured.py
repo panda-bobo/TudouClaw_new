@@ -232,3 +232,76 @@ def test_extractor_handles_list_content_in_tool_result():
     ]
     facts = _extract_structured_facts(msgs)
     assert len(facts["tools_with_errors"]) == 1
+
+
+# ── Step 4: content-hash cache key ────────────────────────────────────
+from app.agent import _hash_old_slice
+
+
+def test_hash_stable_across_calls():
+    msgs = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "world"},
+    ]
+    assert _hash_old_slice(msgs) == _hash_old_slice(msgs)
+
+
+def test_hash_changes_on_content_edit():
+    msgs1 = [{"role": "user", "content": "hello"}]
+    msgs2 = [{"role": "user", "content": "hello!"}]
+    assert _hash_old_slice(msgs1) != _hash_old_slice(msgs2)
+
+
+def test_hash_changes_on_role_swap():
+    msgs1 = [{"role": "user", "content": "x"}]
+    msgs2 = [{"role": "assistant", "content": "x"}]
+    assert _hash_old_slice(msgs1) != _hash_old_slice(msgs2)
+
+
+def test_hash_detects_message_addition():
+    base = [{"role": "user", "content": "x"}]
+    longer = base + [{"role": "assistant", "content": "y"}]
+    assert _hash_old_slice(base) != _hash_old_slice(longer)
+
+
+def test_hash_detects_inner_tool_result_mutation():
+    # Real-world cache-poisoning scenario: a downstream sanitizer
+    # truncates a tool body in place. covers_n + covers_chars stay
+    # nearly the same, but content differs → hash MUST differ.
+    msgs1 = [
+        _assistant_tc("Read", {"file_path": "/x"}, tc_id="t1"),
+        _tool_result("t1", "X" * 5000),
+    ]
+    msgs2 = [
+        _assistant_tc("Read", {"file_path": "/x"}, tc_id="t1"),
+        _tool_result("t1", "X" * 4900 + "[truncated]"),
+    ]
+    assert _hash_old_slice(msgs1) != _hash_old_slice(msgs2)
+
+
+def test_hash_handles_list_content():
+    # Anthropic-style multi-part content shouldn't crash.
+    msgs = [{
+        "role": "user",
+        "content": [{"type": "text", "text": "hi"}],
+    }]
+    h = _hash_old_slice(msgs)
+    assert isinstance(h, str) and len(h) == 16
+
+
+def test_hash_handles_empty_slice():
+    assert _hash_old_slice([]) == _hash_old_slice([])
+    # And it's a valid 16-hex string
+    h = _hash_old_slice([])
+    assert len(h) == 16
+    int(h, 16)  # parses as hex
+
+
+def test_hash_handles_unserializable_content_gracefully():
+    # A custom object that JSON can't serialize — should fallback
+    # to repr() and not raise.
+    class Weird:
+        def __repr__(self): return "Weird()"
+    msgs = [{"role": "user", "content": Weird()}]
+    h = _hash_old_slice(msgs)
+    assert len(h) == 16

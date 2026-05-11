@@ -799,6 +799,43 @@ def _extract_structured_facts(old_slice: list[dict]) -> dict:
     return out
 
 
+def _hash_old_slice(old_slice: list[dict]) -> str:
+    """Stable content hash for compaction cache.
+
+    Uses sha256 over a canonical JSON serialization of (role, content,
+    tool_calls, tool_call_id) per message. Returns the first 16 hex
+    chars — collision-safe enough for an in-memory cache while keeping
+    log lines short.
+
+    Why a hash instead of (covers_n, covers_chars):
+      - mid-stream message mutations (e.g. `_compress_old_tool_results`
+        truncating a tool body) can keep n+chars approximately the
+        same but change the actual content — old key would falsely
+        cache-hit and reuse a now-stale narrative
+      - hash is byte-exact, so a true hit guarantees the previously
+        cached `full_content` string is still byte-identical to what
+        we'd produce now → safe to reuse → upstream prompt-cache
+        prefix stays stable too
+    """
+    import hashlib as _hashlib
+    import json as _json
+    h = _hashlib.sha256()
+    for m in old_slice:
+        rec = {
+            "role": m.get("role"),
+            "content": m.get("content"),
+            "tool_calls": m.get("tool_calls"),
+            "tool_call_id": m.get("tool_call_id"),
+        }
+        try:
+            h.update(_json.dumps(rec, ensure_ascii=False,
+                                 sort_keys=True, default=str).encode())
+        except Exception:
+            h.update(repr(rec).encode("utf-8", "replace"))
+        h.update(b"\x00")  # message separator
+    return h.hexdigest()[:16]
+
+
 def _render_structured_facts(facts: dict) -> str:
     """Render extractor output as compact markdown. Empty str if nothing."""
     sections: list[str] = []
@@ -909,40 +946,91 @@ def _summarize_old_history(messages: list[dict],
     if old_chars < _HISTORY_SUMMARY_MIN_OLD_CHARS:
         return messages
 
-    # Cache check with INCREMENTAL REUSE.
-    # 上次摘要覆盖了 cached_n 条 old 消息,本次 old_slice 可能只多了
-    # 几条 (最常见:每轮 iter 多 1-2 条新 tool_result 挤进 old)。
-    # 不达 RESUM_DELTA 就直接复用缓存的摘要文本,把新增的 delta 挤进 recent
-    # 保持原样 (调整 recent_start 往前移),避免反复摘要。
+    # Cache check — two-tier (Step 4 of compaction overhaul, 2026-05-11):
+    #
+    #   Tier 1 — EXACT hash match: old_slice content is byte-identical
+    #            to last time. Reuse the entire `full_content` string
+    #            so the assembled system message is byte-identical
+    #            → upstream Anthropic/OpenAI prompt-cache prefix stays
+    #            valid, no recomputation. Fastest path.
+    #
+    #   Tier 2 — DELTA reuse: a few new messages joined `old_slice`
+    #            but content of the original prefix unchanged. Shrink
+    #            old_slice back to the cached prefix so the new
+    #            messages stay verbatim in the recent window. Then
+    #            re-check Tier 1 (which should now hit since we
+    #            shrunk to the cached size).
+    #
+    #   Tier 3 — MISS: run LLM summarize + structured + verbatim,
+    #            assemble fresh, store cache for next iter.
     cache = getattr(agent, "_history_summary_cache", None)
     summary_text = ""
+    cached_full_content = ""        # set on Tier-1 hit, skips assembly
+    cache_hit_kind = "miss"
+
     if isinstance(cache, dict):
+        cached_hash = str(cache.get("old_hash") or "")
         cached_n = int(cache.get("covers_n") or 0)
         cached_chars = int(cache.get("covers_chars") or 0)
-        delta_msgs = len(old_slice) - cached_n
-        delta_chars = old_chars - cached_chars
-        if (cached_n > 0
-                and 0 <= delta_msgs < _HISTORY_SUMMARY_RESUM_DELTA_MSGS
-                and delta_chars < _HISTORY_SUMMARY_RESUM_DELTA_CHARS):
-            # Reuse cached summary; shrink old_slice to the originally-
-            # covered prefix so the delta stays as verbatim messages
-            # between the summary and 'recent'.
-            summary_text = str(cache.get("text") or "")
-            if summary_text:
-                # Shift recent_start left so the delta messages are
-                # preserved as-is. Protect tool pairs at the new boundary.
-                new_recent_start = _find_safe_cut_idx(
-                    messages, sys_prefix_end + cached_n)
-                if new_recent_start > sys_prefix_end:
-                    old_slice = messages[sys_prefix_end:new_recent_start]
-                    recent_start = new_recent_start
-                    logger.debug(
-                        "HISTORY_SUMMARY reused cache (covers=%d, "
-                        "delta_msgs=%d, delta_chars=%d) agent=%s",
-                        cached_n, delta_msgs, delta_chars,
-                        agent.id[:8] if agent else "?")
 
-    if not summary_text:
+        # Tier 1: exact hash match against current old_slice
+        if cached_hash and cached_hash == _hash_old_slice(old_slice):
+            cf = str(cache.get("full_content") or "")
+            if cf:
+                cached_full_content = cf
+                summary_text = str(
+                    cache.get("narrative")
+                    or cache.get("text")    # legacy key
+                    or "")
+                cache_hit_kind = "exact"
+                logger.info(
+                    "HISTORY_SUMMARY cache EXACT hit (hash=%s, n=%d) "
+                    "agent=%s",
+                    cached_hash, cached_n,
+                    agent.id[:8] if agent else "?")
+
+        # Tier 2: delta reuse — only if Tier 1 didn't hit
+        if not cached_full_content and cached_n > 0:
+            delta_msgs = len(old_slice) - cached_n
+            delta_chars = old_chars - cached_chars
+            if (0 <= delta_msgs < _HISTORY_SUMMARY_RESUM_DELTA_MSGS
+                    and delta_chars < _HISTORY_SUMMARY_RESUM_DELTA_CHARS):
+                summary_text = str(
+                    cache.get("narrative")
+                    or cache.get("text")    # legacy key
+                    or "")
+                if summary_text:
+                    new_recent_start = _find_safe_cut_idx(
+                        messages, sys_prefix_end + cached_n)
+                    if new_recent_start > sys_prefix_end:
+                        old_slice = messages[sys_prefix_end:new_recent_start]
+                        recent_start = new_recent_start
+                        # After shrink, re-check Tier 1 — if hash
+                        # matches we can byte-reuse full_content.
+                        if cached_hash == _hash_old_slice(old_slice):
+                            cf = str(cache.get("full_content") or "")
+                            if cf:
+                                cached_full_content = cf
+                                cache_hit_kind = "delta-then-exact"
+                                logger.info(
+                                    "HISTORY_SUMMARY cache DELTA→EXACT "
+                                    "hit (covers=%d, delta_msgs=%d) "
+                                    "agent=%s",
+                                    cached_n, delta_msgs,
+                                    agent.id[:8] if agent else "?")
+                        else:
+                            cache_hit_kind = "delta"
+                            logger.debug(
+                                "HISTORY_SUMMARY cache DELTA reuse "
+                                "(covers=%d, delta_msgs=%d, "
+                                "delta_chars=%d) agent=%s",
+                                cached_n, delta_msgs, delta_chars,
+                                agent.id[:8] if agent else "?")
+
+    # Tier 1 hit: skip LLM call entirely — summary_text is set from cache
+    # but we'll also skip extraction + assembly below by checking
+    # `cached_full_content`.
+    if not summary_text and not cached_full_content:
         import json as _json
         # 2026-05-11: role-aware per-message truncation.
         #
@@ -1058,18 +1146,10 @@ def _summarize_old_history(messages: list[dict],
             return messages
         if not summary_text:
             return messages
-        try:
-            # 记下本次摘要覆盖的消息数 + 字符数,下次用于"增量复用"判定:
-            # 只要新 old_slice 没比这个多 RESUM_DELTA_MSGS 条或
-            # RESUM_DELTA_CHARS 字符,就直接复用 summary_text,不再 re-summarize。
-            agent._history_summary_cache = {
-                "text": summary_text,
-                "covers_n": len(old_slice),
-                "covers_chars": sum(
-                    len(str(m.get("content") or "")) for m in old_slice),
-            }
-        except Exception:
-            pass
+        # Cache write moved below to after `summary_content` is fully
+        # assembled — Step 4 caches the byte-exact full_content so a
+        # later iteration with identical old_slice can reuse it without
+        # rebuilding (and without invalidating upstream prompt cache).
 
     # ── Safety net: never produce a payload with no user/assistant. ──
     # The cache-reuse branch above sets recent_start = sys_prefix_end
@@ -1177,44 +1257,67 @@ def _summarize_old_history(messages: list[dict],
         user_lines.append(_c)
         used += len(_c)
 
-    # Step 3 (2026-05-11): structured fact extraction.
-    # Deterministic code scan (no LLM) — pulls out facts the narrative
-    # can't be trusted to enumerate accurately: files modified, tool
-    # errors, tool-call frequency, recent bash, todo cadence.
-    structured_block = ""
-    try:
-        structured_block = _render_structured_facts(
-            _extract_structured_facts(old_slice))
-    except Exception as e:
-        logger.warning("structured fact extraction failed: %s", e)
+    # Step 4 fast path: exact-cache hit — `cached_full_content` was set
+    # in the Tier-1 / DELTA→EXACT branch above. The bytes are exactly
+    # what we'd produce now, so reuse them and skip both fact extraction
+    # and assembly (cheaper, plus guarantees byte-stable prefix).
+    if cached_full_content:
+        summary_content = cached_full_content
+    else:
+        # Step 3 (2026-05-11): structured fact extraction.
+        # Deterministic code scan (no LLM) — pulls out facts the
+        # narrative can't be trusted to enumerate accurately: files
+        # modified, tool errors, tool-call frequency, recent bash,
+        # todo cadence.
         structured_block = ""
+        try:
+            structured_block = _render_structured_facts(
+                _extract_structured_facts(old_slice))
+        except Exception as e:
+            logger.warning("structured fact extraction failed: %s", e)
+            structured_block = ""
 
-    # Final layout (top-to-bottom in the assembled system message):
-    #   1. Header   — covers-N counter
-    #   2. FACTS    — deterministic, append-only — agent ground truth
-    #   3. VERBATIM — user msgs original text — source of truth
-    #   4. NARRATIVE — LLM-generated reasoning glue
-    # Narrative goes LAST so it sits adjacent to the recent-K window;
-    # the agent reads "here's why we are where we are" then immediately
-    # sees the next live messages. FACTS + VERBATIM are the stable
-    # prefix (helps prompt cache in Step 4).
-    parts: list[str] = [
-        f"[HISTORY_SUMMARY — 覆盖 {len(old_slice)} 条旧消息]"
-    ]
-    if structured_block:
+        # Final layout (top-to-bottom in the assembled system message):
+        #   1. Header   — covers-N counter
+        #   2. FACTS    — deterministic, append-only — agent ground truth
+        #   3. VERBATIM — user msgs original text — source of truth
+        #   4. NARRATIVE — LLM-generated reasoning glue
+        # Narrative goes LAST so it sits adjacent to the recent-K
+        # window; the agent reads "here's why we are where we are"
+        # then immediately sees the next live messages. FACTS + VERBATIM
+        # are the stable prefix (helps prompt cache).
+        parts: list[str] = [
+            f"[HISTORY_SUMMARY — 覆盖 {len(old_slice)} 条旧消息]"
+        ]
+        if structured_block:
+            parts.append(
+                "[STRUCTURED_FACTS — 代码确定性抽取, 比 narrative 可靠]\n"
+                + structured_block)
+        if user_lines:
+            parts.append(
+                f"[USER_VERBATIM — 在被压缩历史里用户说过的话, "
+                f"按时序保留原文 ({len(user_lines)} 条)]\n"
+                + "\n\n---\n\n".join(user_lines))
         parts.append(
-            "[STRUCTURED_FACTS — 代码确定性抽取, 比 narrative 可靠]\n"
-            + structured_block)
-    if user_lines:
-        parts.append(
-            f"[USER_VERBATIM — 在被压缩历史里用户说过的话, "
-            f"按时序保留原文 ({len(user_lines)} 条)]\n"
-            + "\n\n---\n\n".join(user_lines))
-    parts.append(
-        "[NARRATIVE — agent 推理脉络, 由 LLM 总结, 仅供理解上下文,"
-        "事实以上面 STRUCTURED_FACTS / USER_VERBATIM 为准]\n"
-        + summary_text)
-    summary_content = "\n\n".join(parts)
+            "[NARRATIVE — agent 推理脉络, 由 LLM 总结, 仅供理解上下文,"
+            "事实以上面 STRUCTURED_FACTS / USER_VERBATIM 为准]\n"
+            + summary_text)
+        summary_content = "\n\n".join(parts)
+
+        # Step 4 cache write — store full_content + content hash so a
+        # future iteration with identical old_slice can byte-reuse and
+        # keep the upstream prompt-cache prefix valid.
+        try:
+            agent._history_summary_cache = {
+                "old_hash": _hash_old_slice(old_slice),
+                "narrative": summary_text,
+                "full_content": summary_content,
+                "covers_n": len(old_slice),
+                "covers_chars": sum(
+                    len(str(m.get("content") or "")) for m in old_slice),
+            }
+        except Exception:
+            pass
 
     # Assemble: [system prefix ..., summary system msg, recent messages ...]
     summary_msg = {
