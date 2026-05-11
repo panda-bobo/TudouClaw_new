@@ -374,6 +374,12 @@ class MCPServerConfig:
     install_error: str = ""           # 安装失败时的错误信息
     install_command: str = ""         # 记录对应的安装命令
     installed_at: float = 0           # 安装成功的时间戳
+    # 2026-05-11: when this config was generated from MCP_CATALOG via
+    # generate_from_catalog, this stores the catalog id (e.g. "terraform",
+    # "chromadb"). MCPManager.get_agent_tool_names walks this back to
+    # the catalog entry's tools_provided list — generated configs
+    # don't carry tools_provided themselves.
+    capability_id: str = ""
 
     def to_dict(self) -> dict:
         # Encrypt sensitive env values (PASSWORD / TOKEN / API_KEY / ...)
@@ -398,6 +404,7 @@ class MCPServerConfig:
             "install_error": self.install_error,
             "install_command": self.install_command,
             "installed_at": self.installed_at,
+            "capability_id": self.capability_id,
         }
 
     @staticmethod
@@ -411,6 +418,7 @@ class MCPServerConfig:
             env=d.get("env", {}),
             enabled=d.get("enabled", True),
             scope=d.get("scope", "node"),
+            capability_id=d.get("capability_id", ""),
             install_status=d.get("install_status", "unknown"),
             install_error=d.get("install_error", ""),
             install_command=d.get("install_command", ""),

@@ -1754,6 +1754,12 @@ class MCPServerConfig:
     install_error: str = ""           # 安装失败时的错误信息
     install_command: str = ""         # 记录对应的安装命令
     installed_at: float = 0           # 安装成功的时间戳
+    # 2026-05-11: when this config was generated from MCP_CATALOG
+    # via generate_from_catalog, this field stores the catalog id
+    # (e.g. "terraform", "chromadb"). MCPManager.get_agent_tool_names
+    # uses it to find the catalog entry's tools_provided list — the
+    # generated MCPServerConfig itself doesn't carry tools_provided.
+    capability_id: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -1768,6 +1774,7 @@ class MCPServerConfig:
             "install_error": self.install_error,
             "install_command": self.install_command,
             "installed_at": self.installed_at,
+            "capability_id": self.capability_id,
         }
 
     @staticmethod
@@ -1785,6 +1792,7 @@ class MCPServerConfig:
             install_error=d.get("install_error", ""),
             install_command=d.get("install_command", ""),
             installed_at=d.get("installed_at", 0),
+            capability_id=d.get("capability_id", ""),
         )
 
 
@@ -6890,6 +6898,37 @@ class Agent:
         else:
             self.agent_phase = AgentPhase.PLANNING
 
+    def _get_bound_mcp_tool_names(self) -> frozenset[str]:
+        """Return the set of tool names provided by every MCP server
+        bound to this agent. Cached for the chat turn.
+
+        2026-05-11: lets MCP-provided tools (e.g. terraform_init,
+        terraform_apply, vector_search, ...) bypass the
+        ``profile.allowed_tools`` allow-list. Those tools never
+        appear in the Portal "Tool Permissions" grid (the
+        ``/api/portal/tools`` catalog only ships built-in tool names),
+        so a non-empty allowed_tools would otherwise lock the agent
+        out of every MCP it's been bound to.
+
+        Authority comes from the MCP binding (bind_agent on
+        MCPManager); per-tool risk is still enforced by
+        ``ToolPolicy.check_tool`` afterwards (high-risk tools like
+        terraform_apply still go through the Portal Approvals queue).
+        """
+        cached = getattr(self, "_mcp_tool_names_cache", None)
+        if cached is not None:
+            return cached
+        out: frozenset[str] = frozenset()
+        try:
+            from .mcp.manager import get_mcp_manager
+            mgr = get_mcp_manager()
+            if mgr is not None:
+                out = frozenset(mgr.get_agent_tool_names(self.id))
+        except Exception as _e:
+            logger.debug("MCP tool-name lookup failed for %s: %s", self.id, _e)
+        self._mcp_tool_names_cache = out
+        return out
+
     def _make_summary_llm_call(self):
         """
         构建用于记忆摘要/提取的 LLM 调用函数。
@@ -8360,15 +8399,26 @@ Write only the summary body. Do not include any preamble or prefix."""
         # ── 2026-05-06: allow-only execution gate ──
         # Visibility (schema shipping) handled by _get_effective_tools.
         # Here we just re-check: if the tool isn't in the agent's allow
-        # set ∪ CORE bypass, refuse. denied_tools is no longer consulted
-        # (admin: remove from allowed_tools instead).
+        # set ∪ CORE bypass ∪ bound-MCP tools, refuse. denied_tools is
+        # no longer consulted (admin: remove from allowed_tools instead).
+        #
+        # 2026-05-11: MCP-provided tools added to the bypass set. They
+        # don't appear in the portal's "Tool Permissions" grid (the
+        # /api/portal/tools catalog only lists built-in tools), so a
+        # ticked allowed_tools list would otherwise lock out every
+        # MCP tool the agent IS supposed to have via its MCP binding.
+        # Authority for MCP tools comes from the agent's MCP binding
+        # (ToolPolicy still classifies risk → high tools still need
+        # operator approval — see DEFAULT_TOOL_RISK).
         try:
             from .tool_capabilities import CORE_TOOLS as _CORE
         except Exception:
             _CORE = frozenset()
+        _mcp_tool_names = self._get_bound_mcp_tool_names()
         if (self.profile.allowed_tools
                 and tool_name not in self.profile.allowed_tools
-                and tool_name not in _CORE):
+                and tool_name not in _CORE
+                and tool_name not in _mcp_tool_names):
             return f"DENIED: Tool '{tool_name}' is not in this agent's allowed list."
 
         # Scheduled / background task: skip approval (already authorized at creation)

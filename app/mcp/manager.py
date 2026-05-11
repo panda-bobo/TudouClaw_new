@@ -709,6 +709,46 @@ class MCPManager:
                         seen[cfg.id] = cfg
         return list(seen.values())
 
+    def get_agent_tool_names(self, agent_id: str) -> set[str]:
+        """Union of tool names from every MCP server bound to this agent.
+
+        Used by ``Agent.execute_tool`` to let MCP-provided tools bypass
+        the ``profile.allowed_tools`` allow-list (those are built-in
+        tools only — the portal "Tool Permissions" grid never exposes
+        MCP tools, so a non-empty allowed_tools would otherwise lock
+        the agent out of every MCP it's been legitimately bound to).
+
+        Authority for the MCP itself comes from the bind_agent call;
+        per-tool risk is still enforced by ``ToolPolicy.check_tool``
+        (high-risk tools like terraform_apply still need approval).
+        """
+        out: set[str] = set()
+        with self._lock:
+            for ncfg in self.node_configs.values():
+                mcp_ids = ncfg.agent_bindings.get(agent_id, []) or []
+                for mid in mcp_ids:
+                    # Direct catalog lookup (rare — catalog id == cfg id
+                    # only when the operator added the MCP by-hand with
+                    # a matching id; the generate_from_catalog flow
+                    # produces a random uuid id and tracks the catalog
+                    # link via cfg.capability_id below).
+                    cap = MCP_CATALOG.get(mid)
+                    if cap and cap.tools_provided:
+                        out.update(cap.tools_provided)
+                    # Generated-from-catalog config: walk the link back
+                    # to the catalog entry to pick up tools_provided.
+                    cfg = ncfg.available_mcps.get(mid)
+                    if cfg is not None:
+                        cap2 = MCP_CATALOG.get(getattr(cfg, "capability_id", "") or "")
+                        if cap2 and cap2.tools_provided:
+                            out.update(cap2.tools_provided)
+                        # Fallback: the cfg itself may have a tools_provided
+                        # list (manually added MCPs after tool-manifest preload).
+                        tp = getattr(cfg, "tools_provided", None) or []
+                        if tp:
+                            out.update(tp)
+        return out
+
     def _find_config_by_id(self, mcp_id: str) -> "MCPServerConfig | None":
         with self._lock:
             if mcp_id in self.global_mcps:
@@ -1625,6 +1665,7 @@ class MCPManager:
             env=env_values.copy(),
             enabled=True,
             scope=capability.scope,
+            capability_id=capability_id,  # link back to catalog for tools_provided lookup
         )
         return config
 
