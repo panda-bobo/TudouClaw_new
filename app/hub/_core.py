@@ -1245,52 +1245,70 @@ class Hub:
         except Exception as e:
             logger.warning("auto-migrate task-notif sweep skipped: %s", e)
 
-    def _auto_migrate_dedupe_persona_fields(self) -> None:
-        """One-shot migration: if ``agent.system_prompt`` and
-        ``agent.soul_md`` carry the same content, clear the
-        ``system_prompt`` copy.
+    def _auto_migrate_sync_persona_fields(self) -> None:
+        """One-shot migration: force ``agent.system_prompt`` to match
+        ``agent.soul_md`` so the next chat picks up the user's most
+        recent SOUL edit.
 
-        Pre-2026-05-11 ``POST /agent/<id>/soul`` mirrored every SOUL
-        edit into ``agent.system_prompt`` ("update system_prompt from
-        SOUL.md content"). Both fields then got stitched into the
-        system message by ``_build_static_system_prompt`` →
-        ``compose_full_prompt(agent_system_prompt=..., agent_soul_md=...)``,
-        so every persona was injected TWICE. With a 3-4 KB SOUL the
-        cost was 6-8 KB of redundant framing per turn, plus the very
-        real risk that the LLM gives the duplicated section disproportionate
-        attention. Real symptom: 刘老师 had a 1k+ char ``system_prompt``
-        AND a 3.7k char identical ``soul_md``, both invisible in the
-        portal (until the to_dict fix shipped alongside this), both
-        burning tokens / over-anchoring the SSC architect persona.
+        Design (2026-05-11 v2):
+          ``soul_md`` is the user-edited single source of truth (SOUL
+          editor + edit-agent modal both write here). The
+          ``system_prompt`` field is a runtime mirror — kept identical
+          on save, deduplicated to one section by
+          :func:`app.system_prompt.build_persona_block` so the LLM only
+          sees one copy.
 
-        The mirror is removed in this commit. This migration cleans up
-        existing agents created under the old behaviour. Idempotent:
-        when the two fields already differ (legit case — operator
-        intentionally split persona vs identity) we leave both alone.
+        Why force-overwrite (not just dedupe):
+          When the SOUL editor was edited but ``system_prompt`` still
+          held a STALE persona (because an earlier code path failed to
+          mirror, or because the previous "drop the duplicate" attempt
+          left a divergence), the next chat turn picked up
+          ``system_prompt`` and the LLM kept behaving as the OLD
+          identity. Real symptom: 刘老师's SOUL was edited away from
+          the SSC architect role but ``system_prompt`` still said
+          "Task: write SSC insight report", so the agent kept
+          researching SSC after the user thought they had cleared it.
+
+        Migration policy:
+          - If ``soul_md`` is non-empty: copy it into ``system_prompt``
+            (force, even if they already match — cheap idempotent op).
+          - Else if ``system_prompt`` is non-empty (legacy agent that
+            never set SOUL): backfill SOUL from system_prompt so the
+            edit-agent modal can show + edit the persona.
+          - Else (both empty): nothing to do.
         """
         try:
-            cleared = 0
+            synced = 0
             for agent in self.agents.values():
-                sp = (getattr(agent, "system_prompt", "") or "").strip()
-                soul = (getattr(agent, "soul_md", "") or "").strip()
-                if sp and soul and sp == soul:
-                    agent.system_prompt = ""
-                    cleared += 1
-            if cleared:
+                sp = getattr(agent, "system_prompt", "") or ""
+                soul = getattr(agent, "soul_md", "") or ""
+                if soul.strip():
+                    if sp != soul:
+                        agent.system_prompt = soul
+                        synced += 1
+                elif sp.strip():
+                    agent.soul_md = sp
+                    synced += 1
+            if synced:
                 logger.info(
-                    "auto-migrate: cleared duplicate system_prompt on "
-                    "%d agent(s) where it equalled soul_md",
-                    cleared,
+                    "auto-migrate: synced persona fields on %d agent(s) "
+                    "(soul_md ⇄ system_prompt)",
+                    synced,
                 )
                 try:
                     self._save_agents()
                 except Exception as _se:
                     logger.warning(
-                        "auto-migrate: save after persona-dedupe failed: %s",
+                        "auto-migrate: save after persona-sync failed: %s",
                         _se,
                     )
         except Exception as e:
-            logger.warning("auto-migrate persona-dedupe skipped: %s", e)
+            logger.warning("auto-migrate persona-sync skipped: %s", e)
+
+    # Legacy alias — older code paths and any external scripts that
+    # called the dedupe variant continue to work and do the right
+    # thing (now: force-sync rather than clear).
+    _auto_migrate_dedupe_persona_fields = _auto_migrate_sync_persona_fields
 
     def _auto_migrate_role_defaults(self) -> None:
         """Back-fill role_defaults onto existing agents at load time.

@@ -1991,21 +1991,15 @@ h4, h5 { letter-spacing: -0.01em; }
       </select>
     </div>
     <div class="form-group">
-      <label>System Prompt (identity / 身份)</label>
+      <label>Persona (人设) — drives every reply</label>
       <div style="font-size:11px;color:var(--text3);margin-bottom:6px;line-height:1.4">
-        Defines who the agent IS. Stitched into the system message every turn.
-        Pre-2026-05-11 the SOUL editor silently mirrored its content here, causing
-        double-injection. Edit / clear directly to remove a stuck persona.
+        Who the agent IS + how it speaks. Stored on both
+        <code>soul_md</code> and <code>system_prompt</code> (kept in sync;
+        the LLM only sees one copy thanks to dedup). Edit here OR via the
+        SOUL editor on the agent page — same field. Clear it to wipe a
+        stuck persona.
       </div>
-      <textarea id="ea-system-prompt" rows="6" placeholder="e.g. You are a senior Python engineer..." style="font-family:monospace;font-size:12px"></textarea>
-    </div>
-    <div class="form-group">
-      <label>SOUL.md (personality / how it speaks)</label>
-      <div style="font-size:11px;color:var(--text3);margin-bottom:6px;line-height:1.4">
-        Long-form persona (tone, format, examples). Use the SOUL editor button on
-        the agent page for richer editing — this textarea is for quick inspection / clear.
-      </div>
-      <textarea id="ea-soul-md" rows="4" placeholder="(empty)" style="font-family:monospace;font-size:12px"></textarea>
+      <textarea id="ea-soul-md" rows="8" placeholder="e.g. You are a senior Python engineer who writes terse, working code first..." style="font-family:monospace;font-size:12px"></textarea>
     </div>
     <div class="form-group">
       <label>Custom Instructions (ad-hoc additions)</label>

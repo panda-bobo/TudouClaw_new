@@ -2368,21 +2368,18 @@ def _do_post_inner(handler, path: str):
         robot_avatar = body.get("robot_avatar", "")
         if soul_md is not None:
             agent.soul_md = soul_md
-            # 2026-05-11: STOPPED auto-mirroring soul_md → system_prompt.
-            # Both fields get stitched into the system message by
-            # _build_static_system_prompt → compose_full_prompt
-            # (agent_system_prompt + agent_soul_md), so duplicating the
-            # content silently doubled every persona. Combined with the
-            # to_dict omission (fixed in same commit), the user could
-            # neither see nor diagnose why their agent was running on
-            # 5kB of repeated "I am a 刘老师 SSC architect" framing.
-            #
-            # If the legacy mirror left an exact-duplicate system_prompt
-            # behind, clear it on the next save so the doubling stops
-            # without operator action. Distinct content (rare — set
-            # explicitly somewhere else) is preserved.
-            if (agent.system_prompt or "").strip() == (soul_md or "").strip():
-                agent.system_prompt = ""
+            # SOUL is the user-edited single source of truth for the
+            # agent's persona; mirror into system_prompt so both fields
+            # stay in sync. ``build_persona_block`` already collapses
+            # identical content to one section in the LLM prompt, so
+            # mirroring does NOT cause double injection — but it DOES
+            # ensure the next chat turn picks up the user's edit (if
+            # we left system_prompt with the previous persona, the LLM
+            # would keep behaving as the OLD identity, which is exactly
+            # the bug 刘老师 hit: SOUL was edited to clear the SSC
+            # role, but system_prompt still said "Task: write SSC
+            # insight report").
+            agent.system_prompt = soul_md
         if robot_avatar is not None:
             agent.robot_avatar = robot_avatar
         # Rebuild system prompt immediately

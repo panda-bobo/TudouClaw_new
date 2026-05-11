@@ -20262,14 +20262,17 @@ async function editAgentProfile(agentId) {
   _renderAvatarGrid('ea-avatar-grid', '_eaSelectedAvatar', 'eaPickAvatar');
   document.getElementById('ea-language').value = prof.language || 'auto';
   document.getElementById('ea-prompt').value = prof.custom_instructions || '';
-  // 2026-05-11: surface system_prompt + soul_md so the operator can
-  // see what's actually driving their agent. Pre-fix these were
-  // invisible (Agent.to_dict omitted them) and a stale "你是 SSC
-  // 架构师" persona could go on driving behaviour for weeks.
-  var _eaSp = document.getElementById('ea-system-prompt');
-  if (_eaSp) _eaSp.value = agent.system_prompt || '';
+  // 2026-05-11: surface SOUL/persona so the operator can see what's
+  // actually driving their agent. Pre-fix this was invisible (to_dict
+  // omitted soul_md / system_prompt) and a stale "你是 SSC 架构师"
+  // persona could go on driving behaviour for weeks. SOUL is the
+  // single source of truth — system_prompt mirrors it on save.
   var _eaSoul = document.getElementById('ea-soul-md');
-  if (_eaSoul) _eaSoul.value = agent.soul_md || '';
+  if (_eaSoul) {
+    // Prefer soul_md; fall back to system_prompt for legacy agents
+    // whose SOUL was never written but system_prompt was.
+    _eaSoul.value = agent.soul_md || agent.system_prompt || '';
+  }
 
   // RAG configuration (mode + domain KB bindings)
   var eaRagMode = document.getElementById('ea-rag-mode');
@@ -20419,12 +20422,16 @@ async function saveAgentProfile() {
       tts_provider_id: ((document.getElementById('ea-tts-provider') || {}).value || '').trim(),
       tts_voice: ((document.getElementById('ea-tts-voice') || {}).value || '').trim(),
       tts_model: ((document.getElementById('ea-tts-model') || {}).value || '').trim(),
-      // 2026-05-11: persona fields the modal now lets you edit.
-      // ``''`` is meaningful (= clear the persona) — the backend
-      // /profile handler treats present-but-empty as a real value.
-      system_prompt: (document.getElementById('ea-system-prompt') || {}).value || '',
-      soul_md: (document.getElementById('ea-soul-md') || {}).value || '',
     };
+    // 2026-05-11: persona — single field, mirrored to both
+    // soul_md + system_prompt so the next chat turn picks up the
+    // change immediately. ``''`` is a meaningful clear.
+    var _personaEl = document.getElementById('ea-soul-md');
+    if (_personaEl) {
+      var _persona = _personaEl.value || '';
+      payload.soul_md = _persona;
+      payload.system_prompt = _persona;
+    }
 
     // Merge tool permission state from the new UI (nov 2026)
     try {
