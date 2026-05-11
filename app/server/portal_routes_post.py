@@ -1073,6 +1073,14 @@ def _do_post_inner(handler, path: str):
                     agent.department = (body.get("department") or "").strip()
                 if "robot_avatar" in body:
                     agent.robot_avatar = body["robot_avatar"]
+                # 2026-05-11: persona fields are now editable from the
+                # edit-agent modal too. ``""`` is a meaningful clear —
+                # check ``in body`` rather than truthiness so the user
+                # can wipe a stuck persona.
+                if "system_prompt" in body:
+                    agent.system_prompt = str(body.get("system_prompt") or "")
+                if "soul_md" in body:
+                    agent.soul_md = str(body.get("soul_md") or "")
                 agent.profile = AgentProfile(
                     agent_class=body.get("agent_class", agent.profile.agent_class),
                     memory_mode=body.get("memory_mode", agent.profile.memory_mode),
@@ -2360,8 +2368,21 @@ def _do_post_inner(handler, path: str):
         robot_avatar = body.get("robot_avatar", "")
         if soul_md is not None:
             agent.soul_md = soul_md
-            # Also update the system_prompt from SOUL.md content
-            agent.system_prompt = soul_md
+            # 2026-05-11: STOPPED auto-mirroring soul_md → system_prompt.
+            # Both fields get stitched into the system message by
+            # _build_static_system_prompt → compose_full_prompt
+            # (agent_system_prompt + agent_soul_md), so duplicating the
+            # content silently doubled every persona. Combined with the
+            # to_dict omission (fixed in same commit), the user could
+            # neither see nor diagnose why their agent was running on
+            # 5kB of repeated "I am a 刘老师 SSC architect" framing.
+            #
+            # If the legacy mirror left an exact-duplicate system_prompt
+            # behind, clear it on the next save so the doubling stops
+            # without operator action. Distinct content (rare — set
+            # explicitly somewhere else) is preserved.
+            if (agent.system_prompt or "").strip() == (soul_md or "").strip():
+                agent.system_prompt = ""
         if robot_avatar is not None:
             agent.robot_avatar = robot_avatar
         # Rebuild system prompt immediately

@@ -20262,6 +20262,14 @@ async function editAgentProfile(agentId) {
   _renderAvatarGrid('ea-avatar-grid', '_eaSelectedAvatar', 'eaPickAvatar');
   document.getElementById('ea-language').value = prof.language || 'auto';
   document.getElementById('ea-prompt').value = prof.custom_instructions || '';
+  // 2026-05-11: surface system_prompt + soul_md so the operator can
+  // see what's actually driving their agent. Pre-fix these were
+  // invisible (Agent.to_dict omitted them) and a stale "你是 SSC
+  // 架构师" persona could go on driving behaviour for weeks.
+  var _eaSp = document.getElementById('ea-system-prompt');
+  if (_eaSp) _eaSp.value = agent.system_prompt || '';
+  var _eaSoul = document.getElementById('ea-soul-md');
+  if (_eaSoul) _eaSoul.value = agent.soul_md || '';
 
   // RAG configuration (mode + domain KB bindings)
   var eaRagMode = document.getElementById('ea-rag-mode');
@@ -20411,6 +20419,11 @@ async function saveAgentProfile() {
       tts_provider_id: ((document.getElementById('ea-tts-provider') || {}).value || '').trim(),
       tts_voice: ((document.getElementById('ea-tts-voice') || {}).value || '').trim(),
       tts_model: ((document.getElementById('ea-tts-model') || {}).value || '').trim(),
+      // 2026-05-11: persona fields the modal now lets you edit.
+      // ``''`` is meaningful (= clear the persona) — the backend
+      // /profile handler treats present-but-empty as a real value.
+      system_prompt: (document.getElementById('ea-system-prompt') || {}).value || '',
+      soul_md: (document.getElementById('ea-soul-md') || {}).value || '',
     };
 
     // Merge tool permission state from the new UI (nov 2026)

@@ -2721,6 +2721,20 @@ class Agent:
             "robot_avatar": self.robot_avatar,
             "desktop_enabled": bool(self.desktop_enabled),
             "desktop_lottie_url": self.desktop_lottie_url,
+            # 2026-05-11: previously omitted from to_dict (only in
+            # to_persist_dict). The portal's edit-agent modal therefore
+            # showed system_prompt / soul_md as empty even when the
+            # agent had a multi-kilobyte persona configured. Users
+            # couldn't see — let alone edit — what was actually
+            # driving their agent's behaviour. Real symptom: 刘老师
+            # had a 1k+ char "你是 SSC 架构师 / Task: write SSC report"
+            # system_prompt + a near-identical 3.7k-char soul_md, both
+            # invisible in the UI, both being stitched into every
+            # turn's system message — so the agent kept "spontaneously"
+            # researching SSC. Returning both lets ops + the edit
+            # modal see and clear them.
+            "system_prompt": self.system_prompt or "",
+            "soul_md": self.soul_md or "",
             "created_at": self.created_at,
             "message_count": len(self.messages),
             "event_count": len(self.events),

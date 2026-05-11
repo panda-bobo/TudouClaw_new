@@ -1153,6 +1153,7 @@ class Hub:
                 logger.warning("SQLite agent load failed: %s", e)
             self._auto_migrate_role_defaults()
             self._auto_migrate_drop_stale_task_notifications()
+            self._auto_migrate_dedupe_persona_fields()
             return
         # No DB — JSON is the source.
         if not os.path.exists(self._agents_file):
@@ -1168,6 +1169,7 @@ class Hub:
             traceback.print_exc()
         self._auto_migrate_role_defaults()
         self._auto_migrate_drop_stale_task_notifications()
+        self._auto_migrate_dedupe_persona_fields()
 
     def _auto_migrate_drop_stale_task_notifications(self) -> None:
         """Drop legacy ``[TASK ASSIGNED]`` user-messages on agent load.
@@ -1242,6 +1244,53 @@ class Hub:
                     )
         except Exception as e:
             logger.warning("auto-migrate task-notif sweep skipped: %s", e)
+
+    def _auto_migrate_dedupe_persona_fields(self) -> None:
+        """One-shot migration: if ``agent.system_prompt`` and
+        ``agent.soul_md`` carry the same content, clear the
+        ``system_prompt`` copy.
+
+        Pre-2026-05-11 ``POST /agent/<id>/soul`` mirrored every SOUL
+        edit into ``agent.system_prompt`` ("update system_prompt from
+        SOUL.md content"). Both fields then got stitched into the
+        system message by ``_build_static_system_prompt`` →
+        ``compose_full_prompt(agent_system_prompt=..., agent_soul_md=...)``,
+        so every persona was injected TWICE. With a 3-4 KB SOUL the
+        cost was 6-8 KB of redundant framing per turn, plus the very
+        real risk that the LLM gives the duplicated section disproportionate
+        attention. Real symptom: 刘老师 had a 1k+ char ``system_prompt``
+        AND a 3.7k char identical ``soul_md``, both invisible in the
+        portal (until the to_dict fix shipped alongside this), both
+        burning tokens / over-anchoring the SSC architect persona.
+
+        The mirror is removed in this commit. This migration cleans up
+        existing agents created under the old behaviour. Idempotent:
+        when the two fields already differ (legit case — operator
+        intentionally split persona vs identity) we leave both alone.
+        """
+        try:
+            cleared = 0
+            for agent in self.agents.values():
+                sp = (getattr(agent, "system_prompt", "") or "").strip()
+                soul = (getattr(agent, "soul_md", "") or "").strip()
+                if sp and soul and sp == soul:
+                    agent.system_prompt = ""
+                    cleared += 1
+            if cleared:
+                logger.info(
+                    "auto-migrate: cleared duplicate system_prompt on "
+                    "%d agent(s) where it equalled soul_md",
+                    cleared,
+                )
+                try:
+                    self._save_agents()
+                except Exception as _se:
+                    logger.warning(
+                        "auto-migrate: save after persona-dedupe failed: %s",
+                        _se,
+                    )
+        except Exception as e:
+            logger.warning("auto-migrate persona-dedupe skipped: %s", e)
 
     def _auto_migrate_role_defaults(self) -> None:
         """Back-fill role_defaults onto existing agents at load time.

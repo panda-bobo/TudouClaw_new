@@ -1991,7 +1991,24 @@ h4, h5 { letter-spacing: -0.01em; }
       </select>
     </div>
     <div class="form-group">
-      <label>Custom Instructions</label>
+      <label>System Prompt (identity / 身份)</label>
+      <div style="font-size:11px;color:var(--text3);margin-bottom:6px;line-height:1.4">
+        Defines who the agent IS. Stitched into the system message every turn.
+        Pre-2026-05-11 the SOUL editor silently mirrored its content here, causing
+        double-injection. Edit / clear directly to remove a stuck persona.
+      </div>
+      <textarea id="ea-system-prompt" rows="6" placeholder="e.g. You are a senior Python engineer..." style="font-family:monospace;font-size:12px"></textarea>
+    </div>
+    <div class="form-group">
+      <label>SOUL.md (personality / how it speaks)</label>
+      <div style="font-size:11px;color:var(--text3);margin-bottom:6px;line-height:1.4">
+        Long-form persona (tone, format, examples). Use the SOUL editor button on
+        the agent page for richer editing — this textarea is for quick inspection / clear.
+      </div>
+      <textarea id="ea-soul-md" rows="4" placeholder="(empty)" style="font-family:monospace;font-size:12px"></textarea>
+    </div>
+    <div class="form-group">
+      <label>Custom Instructions (ad-hoc additions)</label>
       <textarea id="ea-prompt" rows="3" placeholder="Additional instructions..."></textarea>
     </div>
     <!-- Tool Permissions (allowed_tools / denied_tools) -->
