@@ -346,6 +346,41 @@ MCP_CATALOG: dict[str, MCPCapability] = {
                "默认使用 all-MiniLM-L6-v2 模型 (约 90MB)。首次使用会下载模型。"),
         scope="node",
     ),
+    "terraform": MCPCapability(
+        id="terraform",
+        name="Terraform CLI (gated)",
+        description="结构化的 terraform 工具面: init / validate / fmt / "
+                    "plan / show / apply / destroy / output / state。"
+                    "apply 与 destroy 强制要求人类操作员签发的 approval_token,"
+                    "agent 不能自创令牌。plan 输出按 metadata.type 截断到 8KB,"
+                    "防止 provider 日志撑爆 LLM 上下文。",
+        server_type="api",
+        transport="stdio",
+        command_template="python -m app.mcp.builtins.terraform",
+        required_env=[],
+        optional_env=[
+            "TF_BIN",
+            "TF_ALLOW_DIRS",
+            "TF_PLUGIN_CACHE_DIR",
+            "TF_AGENT_APPROVAL_SECRET",
+        ],
+        tools_provided=[
+            "terraform_init", "terraform_validate", "terraform_fmt",
+            "terraform_plan", "terraform_show",
+            "terraform_apply", "terraform_destroy",
+            "terraform_output",
+            "terraform_state_list", "terraform_state_show",
+            "terraform_workspace_list",
+        ],
+        compatible_roles=["devops", "sre", "admin", "cloud_delivery"],
+        install_command="brew install terraform  # or apt-get / choco install",
+        notes=("内置 MCP server。需本机有 terraform 二进制 (≥1.0)。"
+               "强烈建议设 TF_ALLOW_DIRS 限制可操作目录,"
+               "并设 TF_AGENT_APPROVAL_SECRET 让 approval_token 跨重启稳定。"
+               "secrets (AWS_*/HCLOUD_TOKEN/...) 走宿主进程 env,"
+               "不要让 agent 通过 tool 参数传。"),
+        scope="node",
+    ),
 
     # ══════════════════════════════════════════════════════════════════
     # Global-level MCPs — 调用外部 API / 云服务，配置一次同步所有 Node
