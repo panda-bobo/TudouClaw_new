@@ -9619,8 +9619,20 @@ Write only the summary body. Do not include any preamble or prefix."""
             self._ensure_system_message(current_query=_user_text)
             self._trim_context()
             msg = {"role": "user", "content": _msg_content, "source": source}
-            self.messages.append(msg)
-            self._log("message", {"role": "user", "content": _user_text[:500], "source": source})
+            # 2026-05-11: dedupe against pre-persisted entry.
+            # The portal chat endpoint now appends + logs this message
+            # to events BEFORE dispatching to chat_async, so the user's
+            # input survives a backend kill that fires before this
+            # thread runs. If the pre-persist already happened, skip
+            # to avoid duplicate user bubbles in the chat history.
+            _pre_appended = (
+                self.messages
+                and self.messages[-1].get("role") == "user"
+                and self.messages[-1].get("content") == _msg_content
+            )
+            if not _pre_appended:
+                self.messages.append(msg)
+                self._log("message", {"role": "user", "content": _user_text[:500], "source": source})
 
             # ── R4: red-line pre-check (cultivation safety) ──
             # Cultivated agents have a SpecialtyTemplate.PromptBlock with

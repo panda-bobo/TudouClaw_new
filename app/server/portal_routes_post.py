@@ -724,6 +724,55 @@ def _do_post_inner(handler, path: str):
             len(chat_content) if isinstance(chat_content, list)
             else len(str(chat_content)),
         )
+        # 2026-05-11: pre-persist the user message BEFORE dispatching to
+        # the supervisor. chat_async hands the message to a background
+        # thread that runs Agent.chat() — if the backend is killed
+        # (operator restart, OOM, deploy) before that thread reaches
+        # the messages.append + _log("message") at the top of chat(),
+        # the user's input is lost from agent state entirely. The
+        # ConversationTask survives (it's persisted to SQLite eagerly)
+        # but the chat UI can't show it because loadAgentChat reads
+        # from the events stream and agent.messages.
+        #
+        # Real symptom (21:17 incident): user pasted a 4KB audit report
+        # to 刘老师 -> ConversationTask wrote to SQLite (visible in
+        # conv_tasks table) -> backend restarted before agent.chat()
+        # ran -> the message vanished from the chat UI even though
+        # the user clearly sent it.
+        #
+        # Agent.chat() entry now dedupes against the last message in
+        # self.messages, so this pre-append doesn't get duplicated.
+        try:
+            agent.messages.append({
+                "role": "user",
+                "content": chat_content,
+                "source": "admin",
+            })
+            # Snapshot to events stream — same shape agent.chat() uses.
+            _ut = (chat_content if isinstance(chat_content, str)
+                   else " ".join((p.get("text", "")
+                                  for p in chat_content
+                                  if isinstance(p, dict)
+                                  and p.get("type") == "text")) or "(multimodal)")
+            agent._log("message", {"role": "user",
+                                    "content": _ut[:500],
+                                    "source": "admin"})
+            # Flush to disk immediately. Cheap (single agent record)
+            # and the whole point — without this the in-memory event
+            # is just as ephemeral as before.
+            try:
+                hub._save_agent_workspace(agent)
+            except Exception:
+                # Workspace dir may not exist for fresh agents; not
+                # fatal — _save_agents() below covers the SQLite copy.
+                pass
+            try:
+                hub._save_agents()
+            except Exception as _se:
+                logger.debug("pre-chat save_agents failed: %s", _se)
+        except Exception as _pp_err:
+            logger.warning("chat pre-persist failed (continuing): %s", _pp_err)
+
         # ── Route through supervisor (handles isolated / in-process) ──
         task = hub.supervisor.chat_async(agent.id, chat_content, source="admin")
 
