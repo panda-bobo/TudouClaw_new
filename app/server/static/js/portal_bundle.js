@@ -5344,7 +5344,13 @@ function _bottomTabKey(agentId) {
 function _getActiveBottomTab(agentId) {
   try {
     var v = localStorage.getItem(_bottomTabKey(agentId));
-    if (v && ['caps','tasks','log','todos'].indexOf(v) !== -1) return v;
+    // 2026-05-11: 'todos' was promoted to a permanent panel above the
+    // tabs and 'artifacts' was demoted from its own panel into a tab.
+    // Map any persisted 'todos' selection forward to 'caps' (the new
+    // default) so old localStorage entries don't leave the user with
+    // a dead-tab selection.
+    if (v === 'todos') v = 'caps';
+    if (v && ['caps','tasks','log','artifacts'].indexOf(v) !== -1) return v;
   } catch(_) {}
   return 'caps';
 }
@@ -7662,19 +7668,34 @@ function renderAgentChatTech(agentId) {
         '</div>' +
       '</div>' +
 
-      // ── Right column: artifact (top half) + tabs+pane (bottom half) ──
+      // ── Right column: TODOs (top half) + tabs+pane (bottom half) ──
+      // 2026-05-11: Artifacts panel removed from the top half per
+      // user request — it took 50% of the right column for content
+      // most agents never produced. TODOs (execution_steps stream)
+      // promoted to the top so the operator can see what the agent
+      // is currently working on without switching tabs. Artifacts
+      // moved into the bottom-tabs row as the 4th tab so they're
+      // still accessible when needed but don't compete for space.
       '<div class="agent-chat-right-col" style="width:380px;flex-shrink:0;display:flex;flex-direction:column;border-left:1px solid var(--outline-variant);overflow:hidden">' +
-        // Artifact panel — fills top 50%
-        '<div class="ach-right-artifact" style="flex:1 1 50%;min-height:0;display:flex;flex-direction:column;overflow:hidden">' +
-          _renderArtifactPanelShell('agent', agentId) +
+        // TODOs panel — fills top 50% (永久显示当前执行步骤)
+        '<div class="ach-right-todos" style="flex:1 1 50%;min-height:0;display:flex;flex-direction:column;overflow:hidden">' +
+          '<div style="display:flex;align-items:center;gap:6px;padding:8px 12px;border-bottom:1px solid var(--outline-variant);flex-shrink:0;background:var(--surface-container-low)">' +
+            '<span class="material-symbols-outlined" style="font-size:16px;color:var(--primary)">checklist</span>' +
+            '<span class="tc-mono-label" style="color:var(--outline);font-size:10px;font-weight:700;letter-spacing:0.8px">TODOS</span>' +
+          '</div>' +
+          '<div style="flex:1;overflow-y:auto;padding:14px 18px">' +
+            '<div id="execution-steps-' + agentId + '" style="display:flex;flex-direction:column;gap:6px">' +
+              '<div class="tc-mono-label" style="color:var(--outline);padding:6px 0;font-size:10px">WAITING FOR AGENT…</div>' +
+            '</div>' +
+          '</div>' +
         '</div>' +
-        // Tabs + panes — fills bottom 50%
+        // Tabs + panes — fills bottom 50% (Artifacts now lives here)
         '<div class="ach-right-tabs" style="flex:1 1 50%;min-height:0;display:flex;flex-direction:column;overflow:hidden;border-top:1px solid var(--outline-variant);background:var(--surface-container-lowest)">' +
           '<div class="lt-bottom-tabs" id="lt-bottom-tabs-' + agentId + '">' +
-            _bottomTabBtnTech('caps',  'build_circle', 'Caps') +
-            _bottomTabBtnTech('tasks', 'queue',        'Tasks') +
-            _bottomTabBtnTech('log',   'terminal',     'Log') +
-            _bottomTabBtnTech('todos', 'checklist',    'Todos') +
+            _bottomTabBtnTech('caps',      'build_circle', 'Caps') +
+            _bottomTabBtnTech('tasks',     'queue',        'Tasks') +
+            _bottomTabBtnTech('log',       'terminal',     'Log') +
+            _bottomTabBtnTech('artifacts', 'folder_zip',   'Artifacts') +
           '</div>' +
           '<div style="flex:1;overflow:hidden;position:relative">' +
             // Capabilities (default)
@@ -7715,12 +7736,15 @@ function renderAgentChatTech(agentId) {
               ' style="display:none;position:absolute;inset:0;overflow-y:auto;padding:14px 18px;background:var(--surface-container-lowest)">' +
               '<div id="agent-event-log-' + agentId + '" style="font-family:var(--font-mono);font-size:10px;line-height:1.7;color:var(--on-surface-variant);letter-spacing:0.03em"></div>' +
             '</div>' +
-            // TODOs
-            '<div class="lt-bottom-pane" data-pane="todos" id="lt-pane-todos-' + agentId + '"' +
-              ' style="display:none;position:absolute;inset:0;overflow-y:auto;padding:14px 18px">' +
-              '<div id="execution-steps-' + agentId + '" style="display:flex;flex-direction:column;gap:6px">' +
-                '<div class="tc-mono-label" style="color:var(--outline);padding:6px 0;font-size:10px">WAITING FOR AGENT…</div>' +
-              '</div>' +
+            // Artifacts (moved from top half — fills bottom-tab pane)
+            // 2026-05-11: Was previously in its own ach-right-artifact
+            // panel taking 50% of right column. Most agents never wrote
+            // files; the panel was empty 99% of sessions. Demoted to a
+            // tab here so it's still discoverable but doesn't compete
+            // with TODOs for permanent screen real estate.
+            '<div class="lt-bottom-pane" data-pane="artifacts" id="lt-pane-artifacts-' + agentId + '"' +
+              ' style="display:none;position:absolute;inset:0;overflow:hidden">' +
+              _renderArtifactPanelShell('agent', agentId) +
             '</div>' +
           '</div>' +
         '</div>' +
@@ -7775,11 +7799,15 @@ window.renderAgentChatTech = renderAgentChatTech;
 // _selectBottomTab keeps its inline-style flow.
 window._selectBottomTabTech = function(agentId, paneId) {
   try { localStorage.setItem(_bottomTabKey(agentId), paneId); } catch(_) {}
+  // 2026-05-11: pane list updated — 'todos' was promoted to a permanent
+  // panel above the tabs and 'artifacts' was demoted from its own
+  // panel into a bottom tab. Switching the selector to match keeps tab
+  // clicks actually toggling the visible pane.
   var panes = document.querySelectorAll(
     '#lt-pane-caps-' + CSS.escape(agentId) + ', '
     + '#lt-pane-tasks-' + CSS.escape(agentId) + ', '
     + '#lt-pane-log-' + CSS.escape(agentId) + ', '
-    + '#lt-pane-todos-' + CSS.escape(agentId));
+    + '#lt-pane-artifacts-' + CSS.escape(agentId));
   panes.forEach(function(p) {
     p.style.display = (p.getAttribute('data-pane') === paneId) ? 'block' : 'none';
   });
