@@ -8144,8 +8144,13 @@ async function loadExecutionSteps(agentId) {
     if (!data) { _stepsLoading[agentId] = false; return; }
     await _pollStale(agentId);
     renderExecutionSteps(agentId, data.current_plan);
-    // Only start polling if plan is not completed
-    if (data.current_plan && data.current_plan.status === 'completed') {
+    // Only start polling if the plan is still live (not completed and
+    // not interrupted-by-restart). 2026-05-11: 'interrupted' is a new
+    // status the persistence layer assigns to plans that were 'active'
+    // when the backend shut down — no thread is progressing them, so
+    // polling would burn requests and never see a state change.
+    if (data.current_plan && (data.current_plan.status === 'completed'
+                              || data.current_plan.status === 'interrupted')) {
       _stepsLoading[agentId] = false;
       return;
     }
@@ -8201,6 +8206,22 @@ function renderExecutionSteps(agentId, plan) {
 
   var progress = plan.progress || {};
   var html = '';
+
+  // 2026-05-11: an "interrupted" plan is one that was active when the
+  // backend last shut down — it was persisted (so the user can still
+  // see what was being worked on) but no thread is actually
+  // progressing it. Show a clear banner so the user doesn't mistake
+  // the frozen state for active work.
+  if (plan.status === 'interrupted') {
+    html += '<div style="background:rgba(245,158,11,0.10);border:1px solid rgba(245,158,11,0.30);'
+      + 'border-radius:6px;padding:8px 10px;margin-bottom:10px;font-size:11px;'
+      + 'color:#f59e0b;display:flex;align-items:flex-start;gap:6px;line-height:1.45">'
+      + '<span class="material-symbols-outlined" style="font-size:14px;flex-shrink:0;margin-top:1px">warning</span>'
+      + '<span><b>已中断</b> — 上次后端重启时这条 plan 还在执行,'
+      + '未完成的 step 不会自动续跑。重新发消息让 agent 接着做,'
+      + '或在 Tasks 面板手动管理。</span>'
+      + '</div>';
+  }
 
   // Task summary header
   html += '<div style="font-size:12px;color:var(--text2);font-weight:600;margin-bottom:10px;display:flex;align-items:center;gap:6px">';

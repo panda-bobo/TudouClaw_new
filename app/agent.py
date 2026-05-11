@@ -2540,6 +2540,12 @@ class Agent:
             "execution_analyzer": self._execution_analyzer.to_dict() if self._execution_analyzer else None,
             # --- Execution plans persistence (keep last 20) ---
             "execution_plans": [p.to_dict() for p in self.execution_plans[-20:]],
+            # 2026-05-11: persist the live _current_plan too so the
+            # right-column TODOs panel still has something to show
+            # after a backend restart. Loader downgrades active
+            # status to "interrupted" so the UI flags it instead of
+            # pretending the plan is still running.
+            "current_plan": self._current_plan.to_dict() if self._current_plan else None,
             "evolution_goals": self.evolution_goals,
         }
 
@@ -2680,6 +2686,23 @@ class Agent:
         # Restore execution plans
         for pd in d.get("execution_plans", []):
             agent.execution_plans.append(ExecutionPlan.from_dict(pd))
+        # 2026-05-11: restore live _current_plan if persisted.
+        # On a clean shutdown the agent's chat loop sets status to
+        # "completed"/"failed" before flushing, but a crash / kill -9
+        # / mid-flight uvicorn restart leaves the plan at "active".
+        # Mark those as "interrupted" so the renderExecutionSteps UI
+        # can flag them ("⚠️ Interrupted by restart") rather than
+        # implying the agent is still working on them.
+        cp = d.get("current_plan")
+        if cp:
+            try:
+                restored = ExecutionPlan.from_dict(cp)
+                if restored.status == "active":
+                    restored.status = "interrupted"
+                agent._current_plan = restored
+            except Exception:
+                # Bad persisted plan shouldn't break agent load
+                agent._current_plan = None
         return agent
 
     # ---- API serialisation ----
