@@ -506,23 +506,51 @@ def _do_post_inner(handler, path: str):
             return
         if agent and body.get("profile"):
             prof = body["profile"]
-            # Preserve previously-set fields we don't get from the form
+            # Preserve previously-set fields we don't get from the form.
+            # 2026-05-11: switched from ``prof.get(k, "") or existing.X``
+            # to ``prof[k] if k in prof else existing.X``. The old ``or``
+            # short-circuit silently coerced explicit clears (rag_mode=""
+            # / rag_collection_ids=[]) back to the previous value, so a
+            # user trying to unbind a knowledge base via the form just
+            # saw the binding "stick". Now ``""`` / ``[]`` from the
+            # client REALLY clear; only an absent key falls back to the
+            # existing value.
             existing = agent.profile
+
+            def _pick(key, default):
+                """Use the request value if the key is present (even
+                empty); else fall back to the persisted default."""
+                return prof[key] if key in prof else default
+
+            def _pick_int(key, default):
+                v = prof[key] if key in prof else default
+                try:
+                    return int(v) if v is not None else default
+                except (TypeError, ValueError):
+                    return default
+
+            def _pick_float(key, default):
+                v = prof[key] if key in prof else default
+                try:
+                    return float(v) if v is not None else default
+                except (TypeError, ValueError):
+                    return default
+
             agent.profile = AgentProfile(
-                agent_class=prof.get("agent_class", "") or existing.agent_class,
-                memory_mode=prof.get("memory_mode", "") or existing.memory_mode,
-                rag_mode=prof.get("rag_mode", "") or existing.rag_mode,
-                rag_provider_id=prof.get("rag_provider_id", "") or existing.rag_provider_id,
-                rag_collection_ids=prof.get("rag_collection_ids", []) or list(existing.rag_collection_ids or []),
-                personality=prof.get("personality", "") or existing.personality,
-                communication_style=prof.get("communication_style", "") or existing.communication_style,
-                expertise=prof.get("expertise", []) or list(existing.expertise or []),
-                skills=prof.get("skills", []) or list(existing.skills or []),
-                language=prof.get("language", "auto") or existing.language,
-                custom_instructions=prof.get("custom_instructions", "") or existing.custom_instructions,
-                max_context_messages=int(prof.get("max_context_messages", existing.max_context_messages) or existing.max_context_messages),
-                temperature=float(prof.get("temperature", existing.temperature) or existing.temperature),
-                exec_policy=prof.get("exec_policy", "") or existing.exec_policy,
+                agent_class=_pick("agent_class", existing.agent_class),
+                memory_mode=_pick("memory_mode", existing.memory_mode),
+                rag_mode=_pick("rag_mode", existing.rag_mode),
+                rag_provider_id=_pick("rag_provider_id", existing.rag_provider_id),
+                rag_collection_ids=list(_pick("rag_collection_ids", existing.rag_collection_ids or [])),
+                personality=_pick("personality", existing.personality),
+                communication_style=_pick("communication_style", existing.communication_style),
+                expertise=list(_pick("expertise", existing.expertise or [])),
+                skills=list(_pick("skills", existing.skills or [])),
+                language=_pick("language", existing.language or "auto"),
+                custom_instructions=_pick("custom_instructions", existing.custom_instructions),
+                max_context_messages=_pick_int("max_context_messages", existing.max_context_messages),
+                temperature=_pick_float("temperature", existing.temperature),
+                exec_policy=_pick("exec_policy", existing.exec_policy),
                 # Older agent profiles can have these list-typed fields stored
                 # as None (legacy saved state). list(None) raises — fall back to [].
                 allowed_tools=list(existing.allowed_tools or []),

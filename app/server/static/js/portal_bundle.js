@@ -7356,7 +7356,7 @@ function renderAgentChat(agentId) {
           '<button class="btn btn-ghost btn-sm" onclick="showThinkingPanel(\'' + agentId + '\')" title="Summarize the last N turns and insert as an assistant message" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" style="font-size:14px">summarize</span> Summarize</button>' +
           '<button id="tts-btn-' + agentId + '" class="btn btn-ghost btn-sm" onclick="_toggleTTS(\'' + agentId + '\')" title="自动朗读新消息 (Auto TTS)" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" style="font-size:14px;color:var(--text3)">volume_up</span></button>' +
           '<button class="btn btn-ghost btn-sm" onclick="wakeAgent(\'' + agentId + '\')" title="' + t('chat.wake.tooltip') + '" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" style="font-size:14px">notifications_active</span> <span data-i18n="chat.wake">Wake</span></button>' +
-          '<button id="rag-btn-' + agentId + '" class="btn btn-ghost btn-sm" onclick="_toggleRagOnly(\'' + agentId + '\')" title="' + t('chat.rag.off') + '" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" id="rag-icon-' + agentId + '" style="font-size:14px;color:var(--text3)">search</span> <span data-i18n="chat.rag">RAG</span></button>' +
+          '<button id="rag-btn-' + agentId + '" class="btn btn-ghost btn-sm" onclick="_toggleRagOnly(\'' + agentId + '\')" oncontextmenu="event.preventDefault();unbindAgentKnowledgeBase(\'' + agentId + '\');return false;" title="点击: 切换 RAG-only 模式\n右键: 真正解绑知识库" style="padding:4px 8px;font-size:10px"><span class="material-symbols-outlined" id="rag-icon-' + agentId + '" style="font-size:14px;color:var(--text3)">search</span> <span data-i18n="chat.rag">RAG</span></button>' +
           // Preprocessor status badge — only visible when agent.preprocessor_model is set.
           // Click → opens Settings to the preprocessor section.
           '<span id="prep-badge-' + agentId + '" style="display:none"></span>' +
@@ -7613,7 +7613,7 @@ function renderAgentChatTech(agentId) {
         '<span class="material-symbols-outlined">volume_up</span>TTS</button>' +
       '<button class="ach-act" onclick="wakeAgent(\'' + agentId + '\')" title="Wake agent">' +
         '<span class="material-symbols-outlined">notifications_active</span>Wake</button>' +
-      '<button id="rag-btn-' + agentId + '" class="ach-act" onclick="_toggleRagOnly(\'' + agentId + '\')" title="Toggle RAG-only mode">' +
+      '<button id="rag-btn-' + agentId + '" class="ach-act" onclick="_toggleRagOnly(\'' + agentId + '\')" oncontextmenu="event.preventDefault();unbindAgentKnowledgeBase(\'' + agentId + '\');return false;" title="点击: 切换 RAG-only 模式 (限制本轮工具到 knowledge_lookup)\n右键: 真正解绑此 agent 的知识库 (清 rag_collection_ids + rag_mode)">' +
         '<span class="material-symbols-outlined" id="rag-icon-' + agentId + '">search</span>Rag</button>' +
       '<button class="ach-act" onclick="openVoiceMode(\'' + agentId + '\')" title="实时语音模式 — 点击进入沉浸式语音交互">' +
         '<span class="material-symbols-outlined">graphic_eq</span>Voice</button>' +

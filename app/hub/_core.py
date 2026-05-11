@@ -1152,6 +1152,7 @@ class Hub:
             except Exception as e:
                 logger.warning("SQLite agent load failed: %s", e)
             self._auto_migrate_role_defaults()
+            self._auto_migrate_drop_stale_task_notifications()
             return
         # No DB — JSON is the source.
         if not os.path.exists(self._agents_file):
@@ -1166,6 +1167,81 @@ class Hub:
             import traceback
             traceback.print_exc()
         self._auto_migrate_role_defaults()
+        self._auto_migrate_drop_stale_task_notifications()
+
+    def _auto_migrate_drop_stale_task_notifications(self) -> None:
+        """Drop legacy ``[TASK ASSIGNED]`` user-messages on agent load.
+
+        Pre-2026-05-11 ``Agent._notify_new_task`` permanently appended a
+        notification to ``self.messages``. Even after the underlying task
+        completed and dropped out of ``self.tasks``, the notification
+        stayed and kept getting re-sent to the LLM on every chat turn —
+        making the agent believe it had perpetual pending work on dead
+        topics.
+
+        The new ``_notify_new_task`` writes to the events stream instead
+        and ``_build_dynamic_context`` injects a live snapshot of
+        ``self.tasks`` (so the list auto-shrinks as tasks complete). One
+        loose end: agents created before this fix already carry the
+        legacy notifications inside their persisted messages history.
+        This migration sweeps them out exactly once at load time.
+
+        Idempotent: re-running on already-clean agents is a no-op.
+        """
+        try:
+            removed = 0
+            touched = 0
+            for agent in self.agents.values():
+                msgs = getattr(agent, "messages", None) or []
+                if not msgs:
+                    continue
+                before = len(msgs)
+                cleaned = [
+                    m for m in msgs
+                    if not (
+                        isinstance(m, dict)
+                        and isinstance(m.get("content"), str)
+                        and m["content"].lstrip().startswith("[TASK ASSIGNED]")
+                    )
+                ]
+                gone = before - len(cleaned)
+                if gone:
+                    agent.messages = cleaned
+                    removed += gone
+                    touched += 1
+                # Same sweep on per-context buckets if present
+                buckets = getattr(agent, "messages_by_context", None) or {}
+                for ctx_id, ctx_msgs in list(buckets.items()):
+                    if not isinstance(ctx_msgs, list):
+                        continue
+                    cleaned_ctx = [
+                        m for m in ctx_msgs
+                        if not (
+                            isinstance(m, dict)
+                            and isinstance(m.get("content"), str)
+                            and m["content"].lstrip().startswith("[TASK ASSIGNED]")
+                        )
+                    ]
+                    if len(cleaned_ctx) != len(ctx_msgs):
+                        buckets[ctx_id] = cleaned_ctx
+                        removed += len(ctx_msgs) - len(cleaned_ctx)
+                        touched += 1
+            if removed:
+                logger.info(
+                    "auto-migrate: dropped %d legacy [TASK ASSIGNED] "
+                    "notifications across %d agent(s)",
+                    removed, touched,
+                )
+                # Persist so the next start doesn't re-do it
+                try:
+                    self._save_agents()
+                except Exception as _se:
+                    logger.warning(
+                        "auto-migrate: save after task-notif sweep failed: %s",
+                        _se,
+                    )
+        except Exception as e:
+            logger.warning("auto-migrate task-notif sweep skipped: %s", e)
 
     def _auto_migrate_role_defaults(self) -> None:
         """Back-fill role_defaults onto existing agents at load time.

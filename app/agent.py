@@ -5474,6 +5474,18 @@ class Agent:
             sched_ctx = self._get_scheduled_context()
             _try_add(sched_ctx, "scheduled")
 
+        # 2.1 Pending tasks (2026-05-11): live snapshot of self.tasks
+        # filtered to TODO / IN_PROGRESS. Replaces the old
+        # ``_notify_new_task`` permanent-pollution scheme — tasks that
+        # complete or get cancelled drop out of this block on the very
+        # next chat turn, so the agent never sees stale "open work".
+        try:
+            _pending = self.get_pending_tasks_summary()
+            if _pending:
+                _try_add(_pending, "pending_tasks")
+        except Exception as _pte:
+            logger.debug("pending-tasks summary skipped: %s", _pte)
+
         # 2.5 Recent artifacts in workspace (deliverables agent produced).
         # Without this, agent forgets files it created earlier in the same
         # session and does wasteful web_fetch / read_file loops trying to
@@ -14353,25 +14365,42 @@ Write only the summary body. Do not include any preamble or prefix."""
         return task
 
     def _notify_new_task(self, task: AgentTask):
-        """Inject a system-level notification so the agent is aware of the new task."""
+        """Record a task notification on the events stream WITHOUT polluting
+        ``self.messages``.
+
+        Old behaviour (pre-2026-05-11): appended a "[TASK ASSIGNED] ..."
+        message to ``self.messages`` permanently. Even after the task
+        completed and was removed from ``self.tasks``, the notification
+        stayed in messages and kept getting re-sent to the LLM on every
+        chat turn — making the agent believe it had perpetual pending
+        work on dead topics. Real symptom: 刘老师 keeping to investigate
+        cleared-out cloud-ssc-insight skill tasks for days.
+
+        New behaviour: only emit a structured event (front-end can render
+        it as a "📌 New task" toast / chip in the agent's events panel)
+        and rely on :meth:`get_pending_tasks_summary` (now wired into
+        :meth:`_build_dynamic_context`) to inject the *currently open*
+        task list at chat time. Once a task transitions to DONE /
+        CANCELLED, it falls out of the summary automatically — no manual
+        cleanup needed.
+        """
         if task.notified:
             return
-        deadline_info = f" | Deadline: {task.deadline_str}" if task.deadline else ""
         priority_label = {0: "Normal", 1: "High", 2: "Urgent"}.get(task.priority, "Normal")
         source_label = f"{task.source}"
         if task.source_agent_id:
             source_label += f" (agent: {task.source_agent_id})"
-        notification = (
-            f"[TASK ASSIGNED] ID: {task.id}\n"
-            f"  Title: {task.title}\n"
-            f"  Description: {task.description or 'N/A'}\n"
-            f"  Priority: {priority_label}{deadline_info}\n"
-            f"  Source: {source_label}\n"
-            f"  Status: {task.status.value}\n"
-            f"  Please acknowledge and work on this task."
-        )
-        # Add as a system message so the agent sees it in its next turn
-        self.messages.append({"role": "user", "content": notification})
+        # Structured event — front-end renders this from /events. Task
+        # title / description are kept short here; full record lives in
+        # self.tasks (one source of truth).
+        self._log("task_notification", {
+            "task_id": task.id,
+            "title": task.title,
+            "description": (task.description or "")[:200],
+            "priority": priority_label,
+            "deadline": task.deadline_str or "",
+            "source": source_label,
+        })
         task.notified = True
         self._log("task", {"action": "notified", "task_id": task.id})
         logger.info("TASK notified: agent=%s task=%s", self.name, task.id)
