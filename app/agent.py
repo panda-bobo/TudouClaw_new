@@ -795,9 +795,28 @@ def _summarize_old_history(messages: list[dict],
 
     if not summary_text:
         import json as _json
-        # Compose a compact transcript. Truncate each message aggressively
-        # — we're sending this to the LLM to BE summarized, so we can afford
-        # bigger cuts than in the real prompt.
+        # 2026-05-11: role-aware per-message truncation.
+        #
+        # 旧版本: 所有 role 一律截到 1500 char。这把 user paste 的 4KB
+        # 审计报告 → 截成开头 1500 char → 再被 LLM 摘要压成 300 字 →
+        # 双重压缩, agent 收到的是 paraphrase 不是原文。
+        #
+        # 新策略 (按角色给预算):
+        #   user/system : 不截 — 这是 source of truth (用户指令 + 静态
+        #                 prompt), 信息密度最高, 必须原文给 summarizer
+        #   assistant   : 4000 char 头+尾保留 (推理过程可压, 但保留
+        #                 起手 + 收尾决策)
+        #   tool        : 4000 char 头+尾保留 (tool result 经常很大,
+        #                 头尾比单纯 head-only 信息更全)
+        #
+        # 头+尾比 head-only 强: head-only 看不到错误码/最终结果, 头尾
+        # 同时保留能让 summarizer 同时看到 "做了啥 / 结果如何"。
+        _PER_MSG_BUDGET = {
+            "user": None,        # never truncate
+            "system": None,      # never truncate
+            "assistant": 4000,
+            "tool": 4000,
+        }
         lines: list[str] = []
         for m in old_slice:
             role = m.get("role") or "?"
@@ -815,8 +834,12 @@ def _summarize_old_history(messages: list[dict],
                          for tc in tcs]
                 content = (content + " " if content else "") \
                     + f"[tool_calls: {', '.join(names)}]"
-            if len(content) > 1500:
-                content = content[:1500] + f"…({len(content)}c)"
+            budget = _PER_MSG_BUDGET.get(role, 2000)
+            if budget is not None and len(content) > budget:
+                half = budget // 2
+                content = (content[:half]
+                           + f"\n…[truncated {len(content) - budget}c]…\n"
+                           + content[-half:])
             lines.append(f"[{role}] {content}")
         transcript = "\n".join(lines)
 
