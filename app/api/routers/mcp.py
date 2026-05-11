@@ -519,6 +519,62 @@ async def manage_mcps(
             result = mcp_mgr.install_mcp(node_id, cap_id, env_values)
             return result
 
+        # ── 2026-05-11: actions the old portal_routes_post.py handler
+        # supported but were missing here. The frontend polls
+        # install_status every 2s after a click on "Install …", and
+        # without this handler each poll returned a 400 "Unknown
+        # action: install_status" forever, jamming the install flow.
+        elif action == "install_status" and mcp_mgr:
+            task_id = body.get("task_id", "")
+            if task_id and hasattr(mcp_mgr, "get_install_task"):
+                task = mcp_mgr.get_install_task(task_id)
+                return task or {"error": "Task not found",
+                                 "status": "not_found"}
+            if hasattr(mcp_mgr, "get_install_tasks"):
+                return {"tasks": mcp_mgr.get_install_tasks(node_id)}
+            return {"tasks": []}
+
+        elif action == "retry_install" and mcp_mgr:
+            mcp_id = body.get("mcp_id", "")
+            if hasattr(mcp_mgr, "retry_install"):
+                return mcp_mgr.retry_install(node_id, mcp_id)
+            raise HTTPException(501, "MCP manager does not support retry_install")
+
+        elif action == "prerequisites" and mcp_mgr:
+            cap_id = body.get("capability_id", "") or body.get("mcp_id", "")
+            if hasattr(mcp_mgr, "check_prerequisites"):
+                return mcp_mgr.check_prerequisites(node_id, cap_id)
+            return {"ok": True, "warnings": [],
+                    "note": "manager has no prerequisite-check support"}
+
+        elif action == "get_agent_env" and mcp_mgr:
+            agent_id = body.get("agent_id", "")
+            mcp_id = body.get("mcp_id", "")
+            if not agent_id:
+                raise HTTPException(400, "agent_id required")
+            env = (mcp_mgr.get_agent_mcp_env(node_id, agent_id, mcp_id)
+                   if hasattr(mcp_mgr, "get_agent_mcp_env") else {})
+            return {"ok": True, "env": env}
+
+        elif action in ("sync_global_to_node",
+                         "sync_global_to_all") and mcp_mgr:
+            if action == "sync_global_to_node":
+                target = body.get("node_id", node_id)
+                if hasattr(mcp_mgr, "sync_global_mcps_to_node"):
+                    return {"ok": True,
+                            "synced": mcp_mgr.sync_global_mcps_to_node(target)}
+            else:
+                if hasattr(mcp_mgr, "sync_global_mcps_to_all_nodes"):
+                    return {"ok": True,
+                            "synced": mcp_mgr.sync_global_mcps_to_all_nodes()}
+            return {"ok": False, "error": "sync helpers not available"}
+
+        elif action == "remove_global" and mcp_mgr:
+            mcp_id = body.get("mcp_id", "")
+            if hasattr(mcp_mgr, "remove_global_mcp"):
+                return {"ok": mcp_mgr.remove_global_mcp(mcp_id)}
+            raise HTTPException(501, "manager has no remove_global_mcp")
+
         # --- Fallback: hub-level uninstall/enable/disable ---
         mcp_id = body.get("mcp_id", "")
         scope = body.get("scope", "global")
