@@ -133,12 +133,10 @@ async function _floaterIsAlive() {
 }
 
 function _startFloaterHeartbeat() {
-  if (_floaterHeartbeatTimer) return;
-  _floaterFire('POST', '/heartbeat');
-  _floaterHeartbeatTimer = setInterval(
-    () => _floaterFire('POST', '/heartbeat'),
-    _FLOATER_HEARTBEAT_MS,
-  );
+  // 2026-05-11: floater feature is currently disabled in the UI
+  // (see _maybeActivateDesktopFloater note). No heartbeat needed.
+  // Re-enable when the floater ships by removing this guard.
+  return;
 }
 
 async function _maybeActivateDesktopFloater() {
@@ -7504,14 +7502,17 @@ function renderAgentChat(agentId) {
   // targeted was deleted along with the "普通 vs 状态机" UX dichotomy.
   populateQuickModelSwitch(agentId);
   loadAgentRuntimeStats(agentId);
-  // 周期刷新 token / memory 统计（每 8 秒一次） — 但 idle agent 跳过
-  // 网络往返,只在 busy 时拉取(stats 不变化的时候轮询是浪费)。
-  if (window._agentRuntimeStatsTimer) clearInterval(window._agentRuntimeStatsTimer);
-  window._agentRuntimeStatsTimer = setInterval(function(){
-    var ag = (agents || []).find(function(a){ return a.id === agentId; });
-    if (!ag || (ag.status !== 'busy' && ag.status !== 'running')) return;
-    loadAgentRuntimeStats(agentId);
-  }, 8000);
+  // 2026-05-11: removed setInterval-based runtime-stats polling.
+  // Stats are refreshed on page entry, on tab focus (refreshSidebar
+  // visibility hook below), and pushed live via the chat-task SSE
+  // stream while a task is running. The 8s background timer caused
+  // user-visible "卡死" complaints when several agents accumulated
+  // and timers leaked across re-renders. Manual refresh: re-open the
+  // agent or click any tab.
+  if (window._agentRuntimeStatsTimer) {
+    clearInterval(window._agentRuntimeStatsTimer);
+    window._agentRuntimeStatsTimer = null;
+  }
   // Reconnect to active task stream if agent is busy
   _reconnectActiveStream(agentId);
 }
@@ -7751,10 +7752,13 @@ function renderAgentChatTech(agentId) {
   } catch (_e) {}
   populateQuickModelSwitch(agentId);
   loadAgentRuntimeStats(agentId);
-  if (window._agentRuntimeStatsTimer) clearInterval(window._agentRuntimeStatsTimer);
-  window._agentRuntimeStatsTimer = setInterval(function(){
-    loadAgentRuntimeStats(agentId);
-  }, 8000);
+  // 2026-05-11: removed setInterval-based runtime-stats polling.
+  // (Same rationale as the legacy renderAgentChat path above —
+  // SSE pushes update during a task, manual refresh otherwise.)
+  if (window._agentRuntimeStatsTimer) {
+    clearInterval(window._agentRuntimeStatsTimer);
+    window._agentRuntimeStatsTimer = null;
+  }
   _reconnectActiveStream(agentId);
   // 段位条 chip — fires once on render. _cultLevelChipRefresh hides the
   // chip if the agent isn't cultivated, otherwise paints a clickable
@@ -25142,6 +25146,47 @@ function _toggleRagOnly(agentId) {
   window._ragOnly[agentId] = !window._ragOnly[agentId];
   _applyRagButtonStyle(agentId);
 }
+
+// 2026-05-11: separate "真正解绑 KB" action so users who think the
+// chat-header RAG toggle unbinds their knowledge base can actually do
+// it. _toggleRagOnly above is a pure client-side switch (controls the
+// rag_only tool restriction for the next message), it does NOT touch
+// agent.profile.rag_collection_ids. Wire this to a long-press / second
+// button in future UI; exposing it here as window.* so power users can
+// unbind from devtools.
+async function unbindAgentKnowledgeBase(agentId) {
+  if (!agentId) return false;
+  if (!confirm('解绑此 agent 的 RAG 知识库?\n\n' +
+               '解绑后,agent 不再被强制要求"先查知识库",检索协议从 system prompt 移除。\n' +
+               '已上传到知识库的文档不受影响。')) {
+    return false;
+  }
+  try {
+    const r = await api('POST', '/api/portal/agent/' + agentId + '/profile', {
+      rag_mode: 'none',
+      rag_collection_ids: [],
+    });
+    if (r === null) {
+      alert('解绑失败,请检查 console');
+      return false;
+    }
+    // Refresh the cached agent state so UI reflects the change without reload
+    try {
+      const fresh = await api('GET', '/api/portal/agent/' + agentId);
+      if (fresh && Array.isArray(window.agents)) {
+        const idx = window.agents.findIndex(a => a.id === agentId);
+        if (idx >= 0) window.agents[idx] = fresh;
+      }
+    } catch(_) {}
+    window._ragOnly[agentId] = false;
+    _applyRagButtonStyle(agentId);
+    return true;
+  } catch(e) {
+    alert('解绑失败: ' + e.message);
+    return false;
+  }
+}
+window.unbindAgentKnowledgeBase = unbindAgentKnowledgeBase;
 
 // Called once the chat panel has rendered — sets the toggle to the
 // sensible default for this agent (ON for advisors with a bound KB).
@@ -44018,4 +44063,15 @@ window.toggleSidebar = function() {
 
 // ============ Init ============
 refresh();
-setInterval(refreshSidebar, 15000);
+// 2026-05-11: removed setInterval(refreshSidebar, 15000).
+// The 15s background refresh fired GET /state + GET /projects forever,
+// even on idle pages. Sidebar now refreshes on:
+//   - page load (refresh() above)
+//   - tab visibility change (visibilitychange listener below)
+//   - explicit user action (clicking a nav item triggers refresh())
+// Users who need a hard refresh can hit ⌘R.
+document.addEventListener('visibilitychange', function() {
+  if (!document.hidden) {
+    try { refreshSidebar(); } catch(e) {}
+  }
+});
