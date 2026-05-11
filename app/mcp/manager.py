@@ -351,9 +351,10 @@ MCP_CATALOG: dict[str, MCPCapability] = {
         name="Terraform CLI (gated)",
         description="结构化的 terraform 工具面: init / validate / fmt / "
                     "plan / show / apply / destroy / output / state。"
-                    "apply 与 destroy 强制要求人类操作员签发的 approval_token,"
-                    "agent 不能自创令牌。plan 输出按 metadata.type 截断到 8KB,"
-                    "防止 provider 日志撑爆 LLM 上下文。",
+                    "apply 与 destroy 在 DEFAULT_TOOL_RISK 标记为 high,"
+                    "agent 调用时被 ToolPolicy 拦下进入 Portal Approvals 队列,"
+                    "操作员点 Approve 后 agent 续跑——和别的高风险工具同一个审批入口,"
+                    "不再单独搞 token。 plan 输出截断到 8 KB 防 provider 日志炸 context。",
         server_type="api",
         transport="stdio",
         command_template="python -m app.mcp.builtins.terraform",
@@ -362,7 +363,6 @@ MCP_CATALOG: dict[str, MCPCapability] = {
             "TF_BIN",
             "TF_ALLOW_DIRS",
             "TF_PLUGIN_CACHE_DIR",
-            "TF_AGENT_APPROVAL_SECRET",
         ],
         tools_provided=[
             "terraform_init", "terraform_validate", "terraform_fmt",
@@ -375,8 +375,9 @@ MCP_CATALOG: dict[str, MCPCapability] = {
         compatible_roles=["devops", "sre", "admin", "cloud_delivery"],
         install_command="brew install terraform  # or apt-get / choco install",
         notes=("内置 MCP server。需本机有 terraform 二进制 (≥1.0)。"
-               "强烈建议设 TF_ALLOW_DIRS 限制可操作目录,"
-               "并设 TF_AGENT_APPROVAL_SECRET 让 approval_token 跨重启稳定。"
+               "apply/destroy 走通用 ToolPolicy 审批 (Portal Approvals 面板),"
+               "destroy 还要 confirm_phrase='destroy <模块名>' 防选错模块。"
+               "强烈建议设 TF_ALLOW_DIRS 限制可操作目录。"
                "secrets (AWS_*/HCLOUD_TOKEN/...) 走宿主进程 env,"
                "不要让 agent 通过 tool 参数传。"),
         scope="node",

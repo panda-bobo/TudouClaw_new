@@ -175,6 +175,27 @@ DEFAULT_TOOL_RISK: dict[str, str] = {
     # ── Dangerous execution (高风险) ──
     "bash":             "high",     # Shell command execution
 
+    # ── Terraform MCP (see app/mcp/builtins/terraform.py) ──
+    # 2026-05-11: terraform_apply / destroy go through this generic
+    # ToolPolicy approval gate instead of carrying their own HMAC token.
+    # When the agent calls them, ``check_tool_call`` returns
+    # 'needs_approval' for high-risk ops; the Portal's Approvals queue
+    # surfaces them; an operator clicks "Approve" and the agent's
+    # invocation proceeds. No second auth layer in the MCP server itself
+    # (it would be redundant — the call never reaches the MCP unless
+    # ToolPolicy already let it through).
+    "terraform_init":           "low",       # idempotent, downloads providers
+    "terraform_validate":       "low",       # read-only schema check
+    "terraform_fmt":            "moderate",  # may rewrite source when write=true
+    "terraform_plan":           "low",       # read-only computation, writes only .tfplan
+    "terraform_show":           "low",       # read-only inspection
+    "terraform_apply":          "high",      # MUTATES INFRASTRUCTURE — operator approval
+    "terraform_destroy":        "high",      # WIPES INFRASTRUCTURE — approval + confirm_phrase
+    "terraform_output":         "low",       # read outputs
+    "terraform_state_list":     "low",       # read state index
+    "terraform_state_show":     "low",       # read one resource
+    "terraform_workspace_list": "low",       # read workspaces
+
     # ── Delete / Destructive (红线) ──
     # These are blocked by default. Admin must explicitly downgrade
     # the risk level if they want to allow them.

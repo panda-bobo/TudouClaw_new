@@ -17,32 +17,40 @@ Environment variables:
                            is rejected. (Recommended for prod.)
     TF_BIN               — path to the terraform binary (default: PATH lookup)
     TF_PLUGIN_CACHE_DIR  — shared provider-plugin cache (passed through to tf)
-    TF_AGENT_APPROVAL_SECRET — HMAC secret for apply/destroy approval tokens.
-                           When set, tokens must be HMAC(secret, plan_id).
-                           Defaults to a session-scoped random hex; an
-                           operator workflow that issues tokens out-of-band
-                           SHOULD set this so tokens survive restarts.
 
 Safety model
 ------------
-``apply`` and ``destroy`` MUST carry an ``approval_token`` issued
-out-of-band by an operator (the LLM cannot synthesize it). The server
-refuses without a valid token. ``plan`` saves a binary plan file under
-``<working_dir>/.plans/<plan_id>.tfplan`` and returns the id; ``apply``
-references that file (so "applying yesterday's plan against today's
-code" is impossible — terraform itself rejects mismatched plans).
+``terraform_apply`` and ``terraform_destroy`` are classified ``high``
+risk in ``app.auth.DEFAULT_TOOL_RISK``. The agent's standard tool-call
+gate (``ToolPolicy.check_tool_call``) intercepts them BEFORE they reach
+this MCP server, enqueues a PendingApproval on the Portal's Approvals
+queue, and only lets the call through after an operator clicks
+"Approve". The server therefore does not implement its own approval
+token layer — that would just be a second gate operators have to
+satisfy (and a place for the two gates to disagree).
 
-Output is truncated to 8 KB per stream so a 50,000-line provider log
-doesn't blow up the LLM's context window.
+What the server DOES enforce:
+  - ``plan`` writes ``<working_dir>/.plans/<plan_id>.tfplan`` and
+    ``apply plan_id=X`` reads from that path — so "apply yesterday's
+    plan against today's code" is structurally impossible (terraform
+    itself rejects mismatched plans).
+  - ``destroy`` additionally requires a ``confirm_phrase`` typed by a
+    human ("destroy <module-basename>"). This is belt-and-suspenders
+    on top of the approval gate: an LLM that scrapes its own chat
+    history can't forge the phrase from working_dir alone.
+  - ``TF_ALLOW_DIRS`` whitelist (env) limits which directories the
+    server will operate in, regardless of what the agent passes.
+  - All stdout/stderr truncated to 8 KB head/tail so a 50,000-line
+    provider log doesn't blow up the LLM's context window.
+
+Secrets (AWS_*, HCLOUD_TOKEN, ...) flow via this process's env, never
+via tool arguments. The agent has no way to read them.
 """
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import logging
 import os
-import secrets
 import shutil
 import subprocess
 import sys
@@ -58,12 +66,6 @@ logger = logging.getLogger("tudou.terraform_mcp")
 # ─────────────────────────────────────────────────────────────────────
 # Config helpers
 # ─────────────────────────────────────────────────────────────────────
-
-# Per-process approval-token secret. Falls back to a session-scoped
-# random hex when no env override is set; operator portals that issue
-# tokens out-of-band SHOULD set TF_AGENT_APPROVAL_SECRET so tokens
-# survive a server restart.
-_APPROVAL_SECRET = os.environ.get("TF_AGENT_APPROVAL_SECRET") or secrets.token_hex(32)
 
 # Per-module mutex so two concurrent agents can't race apply/state ops
 # on the same module. Held in-process; isn't a real distributed lock —
@@ -118,18 +120,6 @@ def _validate_working_dir(wd: str) -> tuple[bool, str]:
                 f"Allowed: {allow}"
             )
     return True, ""
-
-
-def _approval_token(plan_id: str) -> str:
-    """Deterministic HMAC token an operator can compute / re-issue."""
-    return hmac.new(
-        _APPROVAL_SECRET.encode(), plan_id.encode(), hashlib.sha256
-    ).hexdigest()[:32]
-
-
-def _verify_token(plan_id: str, token: str) -> bool:
-    expected = _approval_token(plan_id)
-    return hmac.compare_digest(expected, token or "")
 
 
 def _truncate(s: str, max_chars: int = 8000) -> str:
@@ -216,9 +206,13 @@ def tool_fmt(working_dir: str, write: bool = False) -> dict:
 
 def tool_plan(working_dir: str, var_file: str = "",
               targets: list[str] | None = None) -> dict:
-    """Save a plan under ``.plans/<plan_id>.tfplan`` and return the id +
-    a deterministic ``approval_token`` that an operator can later issue
-    back to the agent for ``apply``/``destroy``."""
+    """Save a plan under ``.plans/<plan_id>.tfplan`` and return its id.
+
+    Callers (agents) pass the returned ``plan_id`` to ``terraform_apply``
+    — the apply ALWAYS reads from the saved .tfplan file, so applying
+    a stale plan against drifted state is structurally impossible.
+    The Portal's Approvals queue gates apply itself (see module docstring).
+    """
     ok, err = _validate_working_dir(working_dir)
     if not ok:
         return {"ok": False, "error": err}
@@ -241,12 +235,6 @@ def tool_plan(working_dir: str, var_file: str = "",
         result["plan_id"] = plan_id
         result["plan_path"] = plan_path
         result["has_changes"] = has_changes
-        result["approval_token_for_operator"] = _approval_token(plan_id)
-        result["approval_hint"] = (
-            "Show this plan output to a human operator. They review, "
-            "then paste 'approval_token_for_operator' back into the "
-            "terraform_apply call. Agent MUST NOT invent a token."
-        )
     return result
 
 
@@ -265,23 +253,21 @@ def tool_show(working_dir: str, plan_id: str = "") -> dict:
     return _run(cmd, working_dir, timeout=120)
 
 
-def tool_apply(working_dir: str, plan_id: str, approval_token: str) -> dict:
-    """Apply a previously-saved plan. Refuses without a valid
-    ``approval_token`` issued for THAT plan_id."""
+def tool_apply(working_dir: str, plan_id: str) -> dict:
+    """Apply a previously-saved plan file.
+
+    Operator approval gating happens upstream in
+    ``ToolPolicy.check_tool_call`` — this entry point is only reached
+    AFTER the operator clicked "Approve" in the Portal Approvals queue.
+    The plan file is consumed on success so the same approval can't be
+    silently replayed against fresh state (terraform itself rejects
+    stale plans, but removing the file means we never even try).
+    """
     ok, err = _validate_working_dir(working_dir)
     if not ok:
         return {"ok": False, "error": err}
     if not plan_id:
         return {"ok": False, "error": "plan_id is required (run terraform_plan first)"}
-    if not _verify_token(plan_id, approval_token):
-        return {
-            "ok": False,
-            "error": "approval_token invalid or missing. The operator "
-                     "must review terraform_plan output and provide the "
-                     "approval_token_for_operator back to the agent. "
-                     "Agents MUST NOT synthesize tokens.",
-            "rejected_token_prefix": (approval_token or "")[:8] + "...",
-        }
     plan_path = os.path.join(working_dir, ".plans", f"{plan_id}.tfplan")
     if not os.path.isfile(plan_path):
         return {"ok": False, "error": f"plan {plan_id} not found at {plan_path}"}
@@ -290,8 +276,6 @@ def tool_apply(working_dir: str, plan_id: str, approval_token: str) -> dict:
     with _module_lock(working_dir):
         result = _run(cmd, working_dir, timeout=1800)
     if result.get("ok"):
-        # Plan can only be applied once; remove the file so a stale
-        # token can't be reused against fresh state.
         try:
             os.remove(plan_path)
         except OSError:
@@ -299,33 +283,28 @@ def tool_apply(working_dir: str, plan_id: str, approval_token: str) -> dict:
     return result
 
 
-def tool_destroy(working_dir: str, approval_token: str,
-                 confirm_phrase: str = "") -> dict:
+def tool_destroy(working_dir: str, confirm_phrase: str = "") -> dict:
     """terraform destroy — wipes all resources in the module.
-    Requires BOTH a valid approval_token AND the literal confirm_phrase
-    'destroy ' + basename(working_dir). Belt-and-suspenders so an LLM
-    that scrapes a token from chat history still can't fire destroy
-    without operator-typed confirmation."""
+
+    Two-layer gate:
+      1. ``terraform_destroy`` is risk=high in DEFAULT_TOOL_RISK, so
+         ToolPolicy.check_tool_call enqueues a PendingApproval before
+         the call ever reaches here.
+      2. confirm_phrase must literally be ``"destroy " + basename(wd)``.
+         The agent can read ``working_dir`` from its own context, so
+         this isn't unforgeable — but it's a clear "do you mean THIS
+         module?" check that fires after operator approval, catching
+         the case where the wrong module was approved.
+    """
     ok, err = _validate_working_dir(working_dir)
     if not ok:
         return {"ok": False, "error": err}
     expected_phrase = "destroy " + os.path.basename(os.path.realpath(working_dir))
-    if confirm_phrase.strip() != expected_phrase:
+    if (confirm_phrase or "").strip() != expected_phrase:
         return {
             "ok": False,
-            "error": f"confirm_phrase must be exactly: {expected_phrase!r}. "
-                     "This is operator-typed safety; not synthesizable from "
-                     "the working_dir alone.",
-        }
-    # destroy uses the SAME token scheme as apply, but with a "destroy:" prefix
-    # on the plan_id. Operator computes it the same way (HMAC) — but the input
-    # is intentionally different so apply tokens cannot be reused for destroy.
-    destroy_id = "destroy:" + os.path.realpath(working_dir)
-    if not _verify_token(destroy_id, approval_token):
-        return {
-            "ok": False,
-            "error": "approval_token invalid for destroy. Operator must "
-                     "compute HMAC for 'destroy:<absolute_working_dir>'.",
+            "error": f"confirm_phrase must be exactly {expected_phrase!r}. "
+                     "Catches 'approved the wrong module' mistakes.",
         }
     cmd = [_tf_bin(), "destroy", "-no-color", "-input=false", "-auto-approve"]
     with _module_lock(working_dir):
@@ -422,11 +401,11 @@ TOOLS_SCHEMA = [
     },
     {
         "name": "terraform_plan",
-        "description": "Run `terraform plan -out`. Returns plan_id, "
-                       "has_changes, and approval_token_for_operator. "
-                       "The agent MUST surface this approval_token to "
-                       "a human reviewer; do NOT pass it to "
-                       "terraform_apply on the agent's own initiative.",
+        "description": "Run `terraform plan -out`. Returns plan_id + "
+                       "has_changes. Surface the plan output to the "
+                       "operator; the next terraform_apply call will "
+                       "automatically pause for their approval in the "
+                       "Portal Approvals queue (no token needed).",
         "inputSchema": {
             "type": "object",
             "required": ["working_dir"],
@@ -456,40 +435,31 @@ TOOLS_SCHEMA = [
     },
     {
         "name": "terraform_apply",
-        "description": "Apply a previously-planned change. REQUIRES a "
-                       "valid approval_token issued by an operator for "
-                       "the given plan_id. The plan file is consumed "
-                       "(deleted) after a successful apply.",
+        "description": "Apply a previously-planned change. Risk=high — "
+                       "the ToolPolicy approval gate pauses this call "
+                       "in the Portal Approvals queue until an operator "
+                       "clicks Approve. The plan file is consumed on "
+                       "success.",
         "inputSchema": {
             "type": "object",
-            "required": ["working_dir", "plan_id", "approval_token"],
+            "required": ["working_dir", "plan_id"],
             "properties": {
                 **_BASE_WD_SCHEMA,
                 "plan_id": {"type": "string"},
-                "approval_token": {
-                    "type": "string",
-                    "description": "Opaque HMAC token from the operator. "
-                                   "Do NOT synthesize.",
-                },
             },
         },
     },
     {
         "name": "terraform_destroy",
-        "description": "DESTROY ALL RESOURCES in the module. Requires "
-                       "BOTH a valid approval_token AND the literal "
-                       "confirm_phrase ('destroy ' + module basename). "
-                       "Use only when the operator explicitly asks.",
+        "description": "DESTROY ALL RESOURCES in the module. Risk=high "
+                       "(approval queue). Also requires confirm_phrase "
+                       "= 'destroy <module basename>' as a second check "
+                       "against approving the wrong module.",
         "inputSchema": {
             "type": "object",
-            "required": ["working_dir", "approval_token", "confirm_phrase"],
+            "required": ["working_dir", "confirm_phrase"],
             "properties": {
                 **_BASE_WD_SCHEMA,
-                "approval_token": {
-                    "type": "string",
-                    "description": "HMAC token over 'destroy:<absolute "
-                                   "working_dir>'. Operator-issued.",
-                },
                 "confirm_phrase": {
                     "type": "string",
                     "description": "Must be exactly 'destroy <basename>' "
@@ -561,11 +531,9 @@ _TOOL_FNS = {
         working_dir=a["working_dir"], plan_id=a.get("plan_id", "")),
     "terraform_apply": lambda a: tool_apply(
         working_dir=a["working_dir"],
-        plan_id=a["plan_id"],
-        approval_token=a["approval_token"]),
+        plan_id=a["plan_id"]),
     "terraform_destroy": lambda a: tool_destroy(
         working_dir=a["working_dir"],
-        approval_token=a["approval_token"],
         confirm_phrase=a.get("confirm_phrase", "")),
     "terraform_output": lambda a: tool_output(working_dir=a["working_dir"]),
     "terraform_state_list": lambda a: tool_state_list(working_dir=a["working_dir"]),

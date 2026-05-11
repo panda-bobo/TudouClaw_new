@@ -4,6 +4,13 @@ We don't drive the terraform binary here (it isn't a CI dependency).
 Instead we monkey-patch the ``_run`` subprocess wrapper so we can
 exercise the JSON-RPC dispatch layer + safety gates without needing
 hashicorp/terraform installed.
+
+2026-05-11: dropped the in-server HMAC approval token. terraform_apply
+/ terraform_destroy now route through ``app.auth.ToolPolicy`` (risk
+classified as ``high`` in DEFAULT_TOOL_RISK) — operators approve via
+the existing Portal Approvals queue. The MCP server keeps the
+plan_id-binds-to-saved-file gate + the destroy confirm_phrase as
+defense-in-depth, but does not run its own approval scheme.
 """
 from __future__ import annotations
 
@@ -47,15 +54,6 @@ def captured_runs(monkeypatch):
     return calls
 
 
-@pytest.fixture(autouse=True)
-def stable_secret(monkeypatch):
-    """Lock the approval-token HMAC secret so token verification is
-    deterministic across tests (otherwise the per-process random
-    fallback drifts and tests interfere)."""
-    monkeypatch.setattr(tf_mcp, "_APPROVAL_SECRET",
-                        "test-secret-do-not-use-in-prod")
-
-
 # ─────────────────────────────────────────────────────────────────────
 # working_dir validation
 # ─────────────────────────────────────────────────────────────────────
@@ -97,55 +95,37 @@ def test_allow_dirs_whitelist_admits_insiders(fake_module, monkeypatch,
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Approval token plumbing
+# Apply: plan_id binds to saved file
 # ─────────────────────────────────────────────────────────────────────
 
-def test_apply_refuses_without_token(fake_module, captured_runs):
-    out = tf_mcp.tool_apply(working_dir=fake_module,
-                            plan_id="abc1234567",
-                            approval_token="")
+def test_apply_refuses_without_plan_id(fake_module, captured_runs):
+    out = tf_mcp.tool_apply(working_dir=fake_module, plan_id="")
     assert out["ok"] is False
-    assert "approval_token" in out["error"]
-    # Crucially: we never invoked terraform
-    assert not captured_runs
-
-
-def test_apply_refuses_with_wrong_token(fake_module, captured_runs):
-    out = tf_mcp.tool_apply(working_dir=fake_module,
-                            plan_id="abc1234567",
-                            approval_token="totally-fabricated")
-    assert out["ok"] is False
+    assert "plan_id" in out["error"]
     assert not captured_runs
 
 
 def test_apply_refuses_when_plan_file_missing(fake_module, captured_runs):
-    plan_id = "ghost12345"
-    token = tf_mcp._approval_token(plan_id)
-    out = tf_mcp.tool_apply(working_dir=fake_module,
-                            plan_id=plan_id,
-                            approval_token=token)
+    out = tf_mcp.tool_apply(working_dir=fake_module, plan_id="ghost12345")
     assert out["ok"] is False
     assert "not found" in out["error"]
+    assert not captured_runs
 
 
-def test_apply_runs_when_token_valid_and_plan_present(fake_module,
-                                                       captured_runs):
+def test_apply_runs_when_plan_file_present(fake_module, captured_runs):
     plan_id = "real123abc"
     plan_path = os.path.join(fake_module, ".plans", f"{plan_id}.tfplan")
     os.makedirs(os.path.dirname(plan_path), exist_ok=True)
     open(plan_path, "w").close()
-    token = tf_mcp._approval_token(plan_id)
-    out = tf_mcp.tool_apply(working_dir=fake_module,
-                            plan_id=plan_id,
-                            approval_token=token)
+    out = tf_mcp.tool_apply(working_dir=fake_module, plan_id=plan_id)
     assert out["ok"] is True
     assert any("apply" in c["cmd"] for c in captured_runs)
     # Successful apply consumes the plan file
     assert not os.path.isfile(plan_path)
 
 
-def test_plan_returns_id_and_token(fake_module, captured_runs, monkeypatch):
-    # Override fake_run for this one to simulate a plan with changes
+def test_plan_returns_id_with_changes(fake_module, captured_runs, monkeypatch):
+    # Simulate exit_code=2 → terraform reports changes
     def with_changes(cmd, cwd, timeout=600, extra_env=None):
         captured_runs.append({"cmd": cmd, "cwd": cwd, "timeout": timeout})
         return {"ok": False, "exit_code": 2, "stdout": "Plan: 3 to add",
@@ -153,12 +133,11 @@ def test_plan_returns_id_and_token(fake_module, captured_runs, monkeypatch):
     monkeypatch.setattr(tf_mcp, "_run", with_changes)
 
     out = tf_mcp.tool_plan(working_dir=fake_module)
-    assert out["ok"] is True  # exit-code 2 → has_changes, surfaced as ok
+    assert out["ok"] is True
     assert out["has_changes"] is True
     assert "plan_id" in out
-    # Verify the token actually validates for the returned plan_id
-    assert tf_mcp._verify_token(out["plan_id"],
-                                out["approval_token_for_operator"])
+    # No approval_token in response any more (handed off to ToolPolicy)
+    assert "approval_token_for_operator" not in out
 
 
 def test_plan_no_changes_still_ok(fake_module, captured_runs, monkeypatch):
@@ -172,55 +151,29 @@ def test_plan_no_changes_still_ok(fake_module, captured_runs, monkeypatch):
     out = tf_mcp.tool_plan(working_dir=fake_module)
     assert out["ok"] is True
     assert out["has_changes"] is False
-    assert "plan_id" in out
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Destroy: belt-and-suspenders gating
+# Destroy: confirm_phrase guards against approving the wrong module
 # ─────────────────────────────────────────────────────────────────────
 
 def test_destroy_refuses_without_confirm_phrase(fake_module, captured_runs):
-    destroy_id = "destroy:" + os.path.realpath(fake_module)
-    token = tf_mcp._approval_token(destroy_id)
-    out = tf_mcp.tool_destroy(working_dir=fake_module,
-                              approval_token=token,
-                              confirm_phrase="")
+    out = tf_mcp.tool_destroy(working_dir=fake_module, confirm_phrase="")
     assert out["ok"] is False
     assert "confirm_phrase" in out["error"]
     assert not captured_runs
 
 
 def test_destroy_refuses_wrong_confirm_phrase(fake_module, captured_runs):
-    destroy_id = "destroy:" + os.path.realpath(fake_module)
-    token = tf_mcp._approval_token(destroy_id)
     out = tf_mcp.tool_destroy(working_dir=fake_module,
-                              approval_token=token,
                               confirm_phrase="please destroy")
     assert out["ok"] is False
     assert not captured_runs
 
 
-def test_destroy_refuses_apply_token_reuse(fake_module, captured_runs):
-    # An apply token is HMAC over the plan_id, NOT over the destroy_id.
-    # This catches the case where an LLM scrapes a plan-approval token
-    # from chat history and tries to use it for destroy.
-    plan_id = "abc1234567"
-    apply_token = tf_mcp._approval_token(plan_id)
-    out = tf_mcp.tool_destroy(working_dir=fake_module,
-                              approval_token=apply_token,
-                              confirm_phrase=("destroy "
-                                              + os.path.basename(fake_module)))
-    assert out["ok"] is False
-    assert "destroy" in out["error"].lower()
-    assert not captured_runs
-
-
-def test_destroy_runs_when_all_gates_pass(fake_module, captured_runs):
-    destroy_id = "destroy:" + os.path.realpath(fake_module)
-    token = tf_mcp._approval_token(destroy_id)
+def test_destroy_runs_when_confirm_phrase_matches(fake_module, captured_runs):
     out = tf_mcp.tool_destroy(
         working_dir=fake_module,
-        approval_token=token,
         confirm_phrase="destroy " + os.path.basename(fake_module),
     )
     assert out["ok"] is True
@@ -329,3 +282,74 @@ def test_catalog_registers_terraform_capability():
     assert "terraform_apply" in cap.tools_provided
     assert "terraform_destroy" in cap.tools_provided
     assert cap.scope == "node"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Approval-system integration: terraform tools live in DEFAULT_TOOL_RISK
+# ─────────────────────────────────────────────────────────────────────
+
+def test_default_risk_apply_and_destroy_are_high():
+    """terraform_apply / destroy should be 'high' so the standard
+    ToolPolicy approval gate kicks in (not auto-approved as low,
+    not unconditionally denied as red)."""
+    from app.auth import DEFAULT_TOOL_RISK
+    assert DEFAULT_TOOL_RISK["terraform_apply"] == "high"
+    assert DEFAULT_TOOL_RISK["terraform_destroy"] == "high"
+
+
+def test_default_risk_read_only_tools_are_low():
+    """plan/show/output/state_list etc. should be auto-approved so
+    the agent can investigate without operator clicks."""
+    from app.auth import DEFAULT_TOOL_RISK
+    for tool in ("terraform_init", "terraform_validate", "terraform_plan",
+                 "terraform_show", "terraform_output",
+                 "terraform_state_list", "terraform_state_show",
+                 "terraform_workspace_list"):
+        assert DEFAULT_TOOL_RISK[tool] == "low", f"{tool} should be low risk"
+
+
+def test_default_risk_fmt_is_moderate():
+    """fmt write=True rewrites source files; moderate-risk so
+    privileged agents can self-approve, others escalate."""
+    from app.auth import DEFAULT_TOOL_RISK
+    assert DEFAULT_TOOL_RISK["terraform_fmt"] == "moderate"
+
+
+def test_tool_policy_routes_apply_to_needs_approval():
+    """End-to-end: when an agent calls terraform_apply, the standard
+    ToolPolicy returns 'needs_approval' (so the Portal Approvals queue
+    surfaces it). This is what replaces the deleted in-server HMAC
+    token."""
+    from app.auth import ToolPolicy
+    pol = ToolPolicy()
+    decision, reason = pol.check_tool(
+        "terraform_apply",
+        {"working_dir": "/tmp/x", "plan_id": "abc"},
+        agent_id="ag1", agent_name="bob", agent_priority=3,
+    )
+    assert decision == "needs_approval", (
+        f"expected needs_approval, got {decision} ({reason})"
+    )
+
+
+def test_tool_policy_routes_destroy_to_needs_approval():
+    from app.auth import ToolPolicy
+    pol = ToolPolicy()
+    decision, _ = pol.check_tool(
+        "terraform_destroy",
+        {"working_dir": "/tmp/x", "confirm_phrase": "destroy x"},
+        agent_id="ag1", agent_name="bob", agent_priority=3,
+    )
+    assert decision == "needs_approval"
+
+
+def test_tool_policy_allows_read_only_terraform_calls():
+    from app.auth import ToolPolicy
+    pol = ToolPolicy()
+    for tool in ("terraform_plan", "terraform_validate", "terraform_show",
+                 "terraform_output", "terraform_state_list"):
+        decision, reason = pol.check_tool(
+            tool, {"working_dir": "/tmp/x"},
+            agent_id="ag1", agent_name="bob", agent_priority=3,
+        )
+        assert decision == "allow", f"{tool} should allow, got {decision} ({reason})"
