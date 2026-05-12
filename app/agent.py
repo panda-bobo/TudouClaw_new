@@ -11552,15 +11552,17 @@ Write only the summary body. Do not include any preamble or prefix."""
                                               "content": final_content})
                             self._log(evt.kind, evt.data)
                             _emit(evt)
-                        _final_text = self._strip_redundant_plan_block(
-                            content or final_content)
+                        _final_text = self._strip_leaked_system_blocks(
+                            self._strip_redundant_plan_block(
+                                content or final_content))
                         self.messages.append({"role": "assistant",
                                               "content": _final_text,
                                               "_source": "llm"})
                         break
 
                     assistant_msg: dict = {"role": "assistant",
-                                           "content": self._strip_redundant_plan_block(content),
+                                           "content": self._strip_leaked_system_blocks(
+                                               self._strip_redundant_plan_block(content)),
                                            "_source": "llm"}
                     assistant_msg["tool_calls"] = tool_calls
                     if _reasoning_content:
@@ -14799,6 +14801,70 @@ Write only the summary body. Do not include any preamble or prefix."""
 
         lines.append("</plan_state>")
         return "\n".join(lines)
+
+    def _strip_leaked_system_blocks(self, content: str) -> str:
+        """Strip any XML-tagged system-prompt block the LLM accidentally
+        echoed back into its reply.
+
+        2026-05-12: user reported `<file_display>...</file_display>`
+        verbatim in assistant output. DeepSeek (and other models that
+        pattern-match XML wrappers) sometimes treat XML-bracketed
+        system instructions as "example output" and quote them back.
+
+        Generic per-tag strip — no per-block special-casing. Tag list
+        comes from system_settings (admin-editable) with a sensible
+        default mirroring every XML block we currently inject. Adding
+        a new system block? Just include its tag in
+        ``prompts.leak_filter_tags`` — no code change here.
+
+        Pure function — no I/O beyond the settings lookup. Returns
+        content unchanged when no leaked tag is found.
+        """
+        if not content or not isinstance(content, str):
+            return content
+        # Cheap fast-path: only one tag-character of these would even
+        # be present if a block leaked, so a single substring probe
+        # avoids the regex on the common no-leak case.
+        if "<" not in content:
+            return content
+
+        # Tag list: try system_settings, fall back to the union of
+        # every XML block we ship today. Admins can override the list
+        # without redeploying.
+        try:
+            from .system_settings import get_store as _get_ss
+            _ss = _get_ss()
+            tags = _ss.get("prompts.leak_filter_tags", None) if _ss else None
+        except Exception:
+            tags = None
+        if not tags or not isinstance(tags, list):
+            tags = [
+                "file_display",
+                "execution_discipline",
+                "image_display",
+                "memory_context",
+                "attachment_contract",
+                "dir",
+            ]
+
+        import re as _re
+        cleaned = content
+        for tag in tags:
+            if not isinstance(tag, str) or not tag:
+                continue
+            # Match optionally newlines around tag, non-greedy body.
+            # Case-insensitive to catch tone variants like <File_Display>.
+            pattern = _re.compile(
+                r"\n?<\s*" + _re.escape(tag) + r"\s*>"
+                r"[\s\S]*?"
+                r"<\s*/\s*" + _re.escape(tag) + r"\s*>\n?",
+                _re.IGNORECASE,
+            )
+            cleaned = pattern.sub("", cleaned)
+
+        # Collapse the gap a strip leaves behind (3+ newlines → 2).
+        cleaned = _re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        return cleaned
 
     def _strip_redundant_plan_block(self, content: str) -> str:
         """Remove a duplicate 📋 计划 block from `content` when an earlier
