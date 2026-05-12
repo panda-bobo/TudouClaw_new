@@ -108,7 +108,13 @@ def _validate_working_dir(wd: str) -> tuple[bool, str]:
     if not wd:
         return False, "working_dir is required"
     if not os.path.isabs(wd):
-        return False, f"working_dir must be absolute, got: {wd!r}"
+        # 2026-05-12: more actionable error so the LLM doesn't loop on
+        # the same mistake — tells it WHAT shape the path should be.
+        return False, (
+            f"working_dir must be an absolute path (starts with '/'), "
+            f"got: {wd!r}. Prefix with your workspace root, e.g. "
+            f"'/Users/<user>/workspace/{wd}'."
+        )
     if not os.path.isdir(wd):
         return False, f"working_dir does not exist or is not a directory: {wd}"
     allow = _allow_dirs()
@@ -355,8 +361,28 @@ def tool_workspace_list(working_dir: str) -> dict:
 _BASE_WD_SCHEMA = {
     "working_dir": {
         "type": "string",
-        "description": "Absolute path to the terraform module. When "
-                       "TF_ALLOW_DIRS is set, must be under the whitelist.",
+        # 2026-05-12: was just "Absolute path to..." — LLMs frequently
+        # supplied relative paths anyway (e.g. "landing-zone-sample/
+        # modules/monitoring"), which got rejected by _validate_working_dir
+        # with the cryptic "working_dir must be absolute" error. The
+        # agent-side mcp_call wrapper now auto-resolves relative paths
+        # using the caller's workspace_root, but we still declare the
+        # strict contract here + an example + pattern so the LLM gets
+        # it right on the FIRST attempt and the wrapper is just a
+        # safety net.
+        "description": (
+            "**MUST be an absolute path** (starts with '/'). Example: "
+            "'/Users/me/workspace/landing-zone-sample/modules/monitoring'. "
+            "Relative paths like 'landing-zone-sample/modules/x' will "
+            "either be auto-resolved against your workspace root (if "
+            "the wrapper recognises it) or rejected with "
+            "'working_dir must be absolute'. When in doubt, prefix your "
+            "module path with the agent's workspace_root."
+        ),
+        "pattern": "^/",
+        "examples": [
+            "/Users/me/workspace/landing-zone-sample/modules/monitoring"
+        ],
     },
 }
 
@@ -365,7 +391,10 @@ TOOLS_SCHEMA = [
         "name": "terraform_init",
         "description": "Run `terraform init`. Idempotent — safe to call "
                        "before any other op. Pass upgrade=true to refresh "
-                       "providers / modules.",
+                       "providers / modules. "
+                       "**working_dir must be an absolute path** "
+                       "(e.g. '/Users/me/workspace/modules/x'), not "
+                       "a relative one.",
         "inputSchema": {
             "type": "object",
             "required": ["working_dir"],
