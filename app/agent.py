@@ -10785,10 +10785,29 @@ Write only the summary body. Do not include any preamble or prefix."""
                 # varying args (the 2026-04-28 incident: 13× calls to
                 # mcp=42d8ca5e trying to send email), per-mcp count
                 # catches it even though no two args are byte-identical.
+                #
+                # 2026-05-12: but counting per-mcp_id ALONE breaks
+                # legitimate batch workflows. Real symptom: 刘老师 called
+                # terraform MCP 983197f1 8 times (4 modules × init+validate),
+                # all with DIFFERENT working_dir args — got blocked at the
+                # 6th. Switched to bash to keep going.
+                #
+                # Two-track counters:
+                #   _mcp_id_count          — total calls per mcp_id
+                #                            (warns at SOFT for "you're
+                #                            using this MCP a lot — sure?")
+                #   _mcp_sig_count         — counts (mcp_id, args_hash);
+                #                            this is the HARD blocker — only
+                #                            stops byte-identical repeats
+                #                            (the real loop pattern).
+                # Effect: 8 legitimate diff-args calls to the same MCP get
+                # one SOFT warning + zero hard blocks. A loop hammering the
+                # same args still gets blocked after _MCP_REPEAT_HARD.
                 _mcp_id_count: dict[str, int] = {}
+                _mcp_sig_count: dict[tuple[str, str], int] = {}
                 _mcp_id_warned: set[str] = set()
                 _MCP_REPEAT_SOFT = 3   # 4th call to same MCP → warn
-                _MCP_REPEAT_HARD = 5   # 6th call → block this batch's calls to it
+                _MCP_REPEAT_HARD = 5   # 6th call WITH SAME ARGS → block
 
                 # ── Task Checkpoint Injection: 任务恢复上下文 ──
                 # [F3] 先老化 stale active plan，防止 phase 卡死
@@ -11734,22 +11753,40 @@ Write only the summary body. Do not include any preamble or prefix."""
                             continue
                         _mcp_id_count[_mid] = _mcp_id_count.get(_mid, 0) + 1
                         _mcnt = _mcp_id_count[_mid]
-                        if _mcnt > _MCP_REPEAT_HARD:
+                        # 2026-05-12: signature-based hard-block uses
+                        # (mcp_id, args_hash) so legitimate batch
+                        # workflows (8 terraform validates with diff
+                        # working_dirs) don't get blocked. Only the
+                        # exact-same-args loop pattern triggers the wall.
+                        try:
+                            import hashlib as _hl
+                            import json as _json2
+                            _args_str = _json2.dumps(
+                                _args or {}, sort_keys=True,
+                                ensure_ascii=False, default=str)
+                            _args_hash = _hl.sha256(
+                                _args_str.encode()).hexdigest()[:12]
+                        except Exception:
+                            _args_hash = "?"
+                        _sig = (_mid, _args_hash)
+                        _mcp_sig_count[_sig] = _mcp_sig_count.get(_sig, 0) + 1
+                        _scnt = _mcp_sig_count[_sig]
+                        if _scnt > _MCP_REPEAT_HARD:
                             _blocked_calls[_cid] = (
-                                f"[Loop guard] 你已对 MCP `{_mid}` 发起 {_mcnt} 次调用,"
-                                f"超过单 MCP 阈值 {_MCP_REPEAT_HARD}。\n"
-                                f"该 MCP 之前的返回应该已经告诉你它能/不能做什么 —— "
-                                f"反复硬调说明:\n"
-                                f"  • 这个 MCP 不是你想要的工具(目标功能在别处) → "
-                                f"不要再调它,改用 built-in 工具或换思路\n"
-                                f"  • 或参数没填对 → 仔细看上次返回的错误信息\n"
-                                f"\n如果你在试图给队友发消息,**用 reply 里 @ 提及**或 "
-                                f"`send_message(to_agent=<id>, ...)`,**不是** mcp_call。\n"
-                                f"如果是其它意图,基于已有信息收尾 / submit_deliverable / 给结论。"
+                                f"[Loop guard] 你已对 MCP `{_mid}` 用**同样的参数** "
+                                f"调用 {_scnt} 次 (args_hash={_args_hash}),"
+                                f"超过阈值 {_MCP_REPEAT_HARD}。\n"
+                                f"完全相同的调用得到相同结果 — 继续重试不会改变。\n"
+                                f"  • 如果上次报错 → 看错误信息,改参数,不要原样重发\n"
+                                f"  • 如果功能错了 → 换工具或换 MCP,不要硬调\n"
+                                f"  • 如果在试图给队友发消息 → 用 send_message 或 @ 提及,"
+                                f"不是 mcp_call\n"
+                                f"基于已有信息收尾 / submit_deliverable / 给结论。"
                             )
                             logger.warning(
-                                "Agent %s: MCP repeat-block mcp=%s count=%d",
-                                self.id[:8], _mid[:8], _mcnt,
+                                "Agent %s: MCP signature-block "
+                                "mcp=%s args_hash=%s count=%d",
+                                self.id[:8], _mid[:8], _args_hash, _scnt,
                             )
                         elif _mcnt > _MCP_REPEAT_SOFT and _mid not in _mcp_id_warned:
                             _mcp_id_warned.add(_mid)
@@ -11757,10 +11794,11 @@ Write only the summary body. Do not include any preamble or prefix."""
                                 self.messages.append({
                                     "role": "system",
                                     "content": (
-                                        f"[预算提醒] 你对 MCP `{_mid}` 已经发起 {_mcnt} 次调用。"
-                                        f"再来 {_MCP_REPEAT_HARD - _mcnt + 1} 次,"
-                                        f"系统就会自动拦截后续对该 MCP 的调用。\n"
-                                        f"如果之前的返回已经明确这个 MCP 解决不了你的问题,"
+                                        f"[使用观察] 你对 MCP `{_mid}` 已经发起 "
+                                        f"{_mcnt} 次调用。\n"
+                                        f"如果是合理的批处理(每次参数不同),继续没问题 — "
+                                        f"系统只拦截**完全相同参数**的重复调用。\n"
+                                        f"如果之前返回已经明确这个 MCP 解决不了你的问题,"
                                         f"现在就停下,换工具或收尾。"
                                     ),
                                 })
