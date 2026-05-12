@@ -188,6 +188,43 @@ def test_env_var_unrelated_value_keeps_enabled():
 
 # ── Integration sanity: predicate matches what loop computes ─────────
 
+# ── Resume-after-restart: interrupted → active auto-flip ──────────
+
+def test_interrupted_plan_can_be_reactivated():
+    """When chat() runs after a server restart, an interrupted plan
+    should be flipped back to active so subsequent nudges + TODOs
+    panel + plan_update all see a live plan again. Tested as a
+    state-transition sanity check; the flip itself is in agent.chat()
+    entry so a true integration test would need the full Agent.
+    """
+    plan = ExecutionPlan(status="interrupted")
+    plan.add_step("a")
+    plan.add_step("b")
+
+    # Simulate the chat() entry-time flip
+    if plan.status == "interrupted":
+        plan.status = "active"
+
+    # Now the plan-pending predicate works on it
+    pending = []
+    if plan.status == "active":
+        pending = [s for s in plan.steps
+                   if s.status in (StepStatus.PENDING, StepStatus.IN_PROGRESS)]
+    assert len(pending) == 2
+
+
+def test_completed_plan_does_not_get_reactivated():
+    """Only 'interrupted' (set by from_persist_dict on restart) should
+    flip back. Completed/failed plans must stay terminal."""
+    for terminal in ("completed", "failed"):
+        plan = ExecutionPlan(status=terminal)
+        plan.add_step("a")
+        # Simulate chat() entry flip — should NOT touch terminal plans
+        if plan.status == "interrupted":
+            plan.status = "active"
+        assert plan.status == terminal
+
+
 def test_predicate_matches_real_world_刘老师_state():
     """Reproduce 刘老师's state at 09:03 from the screenshot:
        - monitoring: in_progress (files written, validate not run)

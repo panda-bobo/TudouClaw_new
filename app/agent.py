@@ -10074,6 +10074,24 @@ Write only the summary body. Do not include any preamble or prefix."""
             except Exception:
                 pass
             self.status = AgentStatus.BUSY
+            # 2026-05-12: when chat resumes after server restart, the
+            # _current_plan was loaded from disk with status flipped
+            # to "interrupted" (from_persist_dict guards against ghost
+            # work). The user engaging the agent again is implicit
+            # consent to resume — flip back to "active" so the rest of
+            # the chat loop (plan-pending nudge, TODOs panel, etc.)
+            # treats it as live. Agent can still abort via plan_update
+            # if it decides the resume is wrong.
+            try:
+                _cp = getattr(self, "_current_plan", None)
+                if _cp and getattr(_cp, "status", "") == "interrupted":
+                    _cp.status = "active"
+                    logger.info(
+                        "Agent %s: flipped interrupted plan back to "
+                        "active on resume (plan_id=%s)",
+                        self.id[:8], getattr(_cp, "id", "?"))
+            except Exception:
+                pass
             # Reset streaming buffer at the start of every turn so a
             # previous turn's text doesn't bleed into the "typing"
             # preview the polling endpoint shows.
