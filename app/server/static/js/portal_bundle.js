@@ -7925,7 +7925,9 @@ function _formatEventLogEntry(e) {
   }
   return (
     '<p style="margin:2px 0;line-height:1.4">' +
-      '<span style="color:var(--primary-tint-30)">[' + time + ']</span> ' +
+      // 2026-05-12: was var(--primary-tint-30) — too faint on dark
+      // log panel. Force #fff so timestamps are readable.
+      '<span style="color:#ffffff">[' + time + ']</span> ' +
       '<span style="color:' + color + ';font-weight:500">' + esc(e.kind).toUpperCase() + ':</span> ' +
       content +
     '</p>'
