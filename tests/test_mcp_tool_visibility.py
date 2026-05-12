@@ -83,7 +83,10 @@ def test_agent_helper_caches_per_turn(monkeypatch):
     monkeypatch.setattr("app.mcp.manager.get_mcp_manager", lambda: FakeMgr())
     s1 = a._get_bound_mcp_tool_names()
     s2 = a._get_bound_mcp_tool_names()
-    assert s1 == s2 == frozenset({"terraform_init", "terraform_plan"})
+    # 2026-05-12: when any MCP is bound, mcp_call dispatcher is also
+    # included (see test_mcp_call_dispatcher_allowed_when_any_mcp_bound).
+    assert s1 == s2 == frozenset(
+        {"terraform_init", "terraform_plan", "mcp_call"})
     assert calls["n"] == 1   # cached after first call
 
 
@@ -152,6 +155,63 @@ def test_fix_lets_mcp_tool_through_when_bound(monkeypatch):
         and tool_name not in mcp_tools
     )
     assert not rejected, "expected MCP-bound tool to bypass allowed_tools"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Bug 2026-05-12: mcp_call dispatcher rejection
+#
+# Followup to the 2026-05-11 fix. _get_bound_mcp_tool_names returned
+# only specific tool names (terraform_init, terraform_validate, ...).
+# But LLMs sometimes use the generic dispatcher pattern instead:
+#   mcp_call(mcp_id="983197f1", tool="terraform_validate", args={...})
+# `mcp_call` itself isn't in the bound names → DENIED → loop guard
+# trips after 5 retries.
+#
+# Fix: when at least one MCP is bound, also include `mcp_call` in
+# the bypass set. The dispatcher will then re-check permissions on
+# the underlying tool call.
+# ─────────────────────────────────────────────────────────────────────
+
+def test_mcp_call_dispatcher_allowed_when_any_mcp_bound():
+    """Real-world bug: agent with terraform MCP bound called mcp_call
+    6 times, all DENIED. Verifies the bypass set now includes the
+    generic dispatcher when any MCP is bound."""
+    from app.agent import Agent
+    from unittest.mock import patch
+
+    class FakeMgr:
+        def get_agent_tool_names(self, aid):
+            # Same set the real terraform MCP returns
+            return {"terraform_init", "terraform_validate",
+                    "terraform_plan", "terraform_apply"}
+
+    a = Agent(id="ag-real-1", name="t")
+    with patch("app.mcp.manager.get_mcp_manager", lambda: FakeMgr()):
+        names = a._get_bound_mcp_tool_names()
+
+    # Specific tools still present
+    assert "terraform_validate" in names
+    assert "terraform_init" in names
+    # NEW: dispatcher present
+    assert "mcp_call" in names
+
+
+def test_mcp_call_dispatcher_NOT_allowed_when_no_mcp_bound():
+    """If agent has zero bound MCPs, mcp_call must NOT be in the
+    bypass set — that would let any agent dispatch to any MCP."""
+    from app.agent import Agent
+    from unittest.mock import patch
+
+    class FakeMgr:
+        def get_agent_tool_names(self, aid):
+            return set()  # no bindings
+
+    a = Agent(id="ag-real-2", name="t")
+    with patch("app.mcp.manager.get_mcp_manager", lambda: FakeMgr()):
+        names = a._get_bound_mcp_tool_names()
+
+    assert "mcp_call" not in names
+    assert names == frozenset()
 
 
 def test_built_in_tool_not_in_allowed_tools_still_rejected(monkeypatch):

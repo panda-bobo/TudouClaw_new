@@ -7421,7 +7421,20 @@ class Agent:
             from .mcp.manager import get_mcp_manager
             mgr = get_mcp_manager()
             if mgr is not None:
-                out = frozenset(mgr.get_agent_tool_names(self.id))
+                names = set(mgr.get_agent_tool_names(self.id))
+                # 2026-05-12: also allow the generic ``mcp_call``
+                # dispatcher when the agent has at least one bound
+                # MCP. LLMs sometimes prefer the dispatcher pattern
+                # (mcp_call(mcp_id, tool, args)) over direct tool
+                # names (terraform_validate(...)). Without this the
+                # dispatcher is deny-listed even though the agent has
+                # legitimate MCPs to dispatch to. The dispatcher will
+                # re-check tool permissions on the underlying call.
+                # Real symptom: 刘老师 with terraform MCP bound called
+                # `mcp_call 983197f1` 6 times → all DENIED → loop guard.
+                if names:
+                    names.add("mcp_call")
+                out = frozenset(names)
         except Exception as _e:
             logger.debug("MCP tool-name lookup failed for %s: %s", self.id, _e)
         self._mcp_tool_names_cache = out
