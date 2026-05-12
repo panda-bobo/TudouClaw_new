@@ -16,6 +16,7 @@ compat with the portal REST handlers.
 from __future__ import annotations
 
 import json as _json
+import os as _os
 import threading
 import time
 from typing import Any
@@ -214,6 +215,68 @@ def _looks_like_external_email(args: Any) -> bool:
     return _scan(args)
 
 
+# Path-like arg keys we'll auto-resolve to absolute before sending to
+# MCP. Mirrors the set used by agent.py's loop-guard normalisation —
+# adding a new path-like arg only requires editing one place there.
+_MCP_PATH_LIKE_KEYS = frozenset({
+    "path", "file_path", "filepath", "dir", "directory",
+    "working_dir", "workdir", "cwd", "root", "base", "base_path",
+    "src", "dst", "source", "destination", "target", "from_path",
+    "to_path", "in_path", "out_path",
+})
+
+
+def _resolve_relative_path_args(args: dict, caller_id: str) -> dict:
+    """Resolve relative path-like values in ``args`` to absolute paths,
+    using the calling agent's ``working_dir`` as the base.
+
+    Returns a new dict; original is not mutated. If the agent has no
+    working_dir (rare) or args has no path-like keys, returns args
+    unchanged. Failures are silent (best-effort): the caller MCP will
+    still get the original value and produce its own error.
+    """
+    if not isinstance(args, dict) or not args:
+        return args
+    # Lazy lookup — most MCP calls won't have path keys, so skip the
+    # hub/agent fetch unless we see one.
+    has_relative = False
+    for k, v in args.items():
+        if k in _MCP_PATH_LIKE_KEYS and isinstance(v, str) and v:
+            if not _os.path.isabs(v):
+                has_relative = True
+                break
+    if not has_relative:
+        return args
+
+    workspace_root = ""
+    try:
+        # Resolve caller agent's working_dir from the active hub.
+        import sys as _sys
+        _llm_mod = _sys.modules.get("app.llm")
+        hub = getattr(_llm_mod, "_active_hub", None) if _llm_mod else None
+        if hub is not None:
+            agent = hub.agents.get(caller_id) if caller_id else None
+            if agent is not None:
+                workspace_root = str(getattr(agent, "working_dir", "") or "")
+    except Exception:
+        workspace_root = ""
+
+    if not workspace_root or not _os.path.isabs(workspace_root):
+        # No usable base — leave args as-is and let the MCP fail
+        # with its own error message. Better than producing a bogus
+        # absolute path that doesn't exist.
+        return args
+
+    out = dict(args)
+    for k, v in args.items():
+        if (k in _MCP_PATH_LIKE_KEYS
+                and isinstance(v, str)
+                and v
+                and not _os.path.isabs(v)):
+            out[k] = _os.path.normpath(_os.path.join(workspace_root, v))
+    return out
+
+
 def _tool_mcp_call(mcp_id: str = "", tool: str = "", arguments: Any = None,
                    list_mcps: bool = False, **_: Any) -> str:
     """Invoke an MCP tool bound to the calling agent.
@@ -273,6 +336,18 @@ def _tool_mcp_call(mcp_id: str = "", tool: str = "", arguments: Any = None,
             args = {}
         else:
             return f"Error: 'arguments' must be a JSON object, got: {type(arguments).__name__}"
+
+        # 2026-05-12: auto-resolve relative path args to absolute, using
+        # the calling agent's working_dir. Real symptom: terraform MCP
+        # (and others) reject relative paths with "working_dir must be
+        # absolute". Agent naturally writes
+        # working_dir="landing-zone-sample/modules/monitoring" — without
+        # this resolve, MCP fails in <200ms with no real work done,
+        # the failure cascades into the same_tool_halt guardrail, and
+        # the agent flips to bash thinking MCP is broken. The fix moves
+        # the resolution to the agent process (which knows the
+        # workspace) so every MCP gets absolute paths for free.
+        args = _resolve_relative_path_args(args, caller_id)
 
         return _stub.call(
             caller_id=caller_id,
