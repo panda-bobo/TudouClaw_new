@@ -955,7 +955,8 @@
   font-family: var(--font-mono, 'Space Grotesk', monospace);
   font-size: 10px;
   letter-spacing: 0.05em;
-  color: var(--outline);
+  /* 2026-05-12: was var(--outline) — too faint on dark bubbles. */
+  color: #ffffff;
   opacity: 1;
 }
 [data-theme="tech"] .chat-msg-content a { color: var(--primary); }

@@ -666,11 +666,13 @@ h4, h5 { letter-spacing: -0.01em; }
 .chat-msg-row.merged-follow .chat-msg-avatar { visibility: hidden; }
 .chat-msg-row.merged-follow .chat-msg { border-top-left-radius: 6px; }
 .chat-msg.user.merged-follow { margin-top: -10px; border-top-right-radius: 6px; }
-/* Timestamp visibility — was 11px/text3 (too faint). Nudge a shade darker. */
+/* 2026-05-12: timestamps were nearly invisible against dark bubbles
+   (text3 + 0.75 opacity). Force white at full opacity so they're
+   readable on every theme. */
 .chat-msg-time {
   font-size: 10px;
-  color: var(--text3);
-  opacity: 0.75;
+  color: #ffffff;
+  opacity: 1;
   letter-spacing: 0.2px;
 }
 .chat-msg-content {
