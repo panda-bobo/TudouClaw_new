@@ -286,7 +286,19 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read UTF-8 text from a file. Optional line range. Not for binary or content search.",
+            "description": (
+                "Read UTF-8 text from a file. Optional line range. "
+                "Not for binary or content search.\n"
+                "DO NOT call this tool when:\n"
+                "  - The user gave you the exact path AND a clear write/edit "
+                "instruction — just write/edit; you don't need to read first.\n"
+                "  - You already read this file this turn — the body is "
+                "cached and re-reads return [REPEAT-READ #N] markers, "
+                "wasting iterations.\n"
+                "  - You're 'verifying' a successful write/edit — if "
+                "tool_result had no error, trust it; the bug (if any) is in "
+                "your tool args, not in the file."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -329,7 +341,17 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "edit_file",
-            "description": "Replace exact substring in a file. old_string must appear exactly once.",
+            "description": (
+                "Replace exact substring in a file. old_string must "
+                "appear exactly once.\n"
+                "DO NOT call this tool when:\n"
+                "  - The whole file body is being rewritten — use write_file "
+                "(faster, no fragile string matching).\n"
+                "  - You haven't read the file this turn — read_file first "
+                "so you know the exact bytes; otherwise old_string mismatches "
+                "burn iterations.\n"
+                "  - The file doesn't exist — use write_file to create it."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -345,7 +367,18 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "Run a shell command. Foreground or background. Use background for dev servers.",
+            "description": (
+                "Run a shell command. Foreground or background. "
+                "Use background for dev servers.\n"
+                "DO NOT use bash to do things dedicated tools can do:\n"
+                "  - file read   → use read_file (NOT cat / head / tail / less)\n"
+                "  - file write  → use write_file (NOT echo > / heredoc / tee)\n"
+                "  - file edit   → use edit_file (NOT sed / awk in-place)\n"
+                "  - file search → use glob_files (NOT find -name) or "
+                "search_files (NOT grep -rn)\n"
+                "Bash is right for: terraform / git / npm / pytest / "
+                "make / curl / running scripts / anything not covered above."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -432,7 +465,17 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "search_files",
-            "description": "Regex-search file contents recursively (grep -rn). Returns path:line: match.",
+            "description": (
+                "Regex-search file contents recursively (grep -rn). "
+                "Returns path:line: match.\n"
+                "DO NOT call this tool when:\n"
+                "  - You already know the file path — use read_file directly.\n"
+                "  - You're looking for FILES BY NAME — use glob_files; "
+                "this tool greps file CONTENTS, not names.\n"
+                "  - You ran the same (pattern, path, include) earlier this "
+                "turn — pick a more specific pattern or move on; the "
+                "codebase didn't change since the last call."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -454,7 +497,20 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "glob_files",
-            "description": "Find files by name/path glob pattern. Sorted list, max 500.",
+            "description": (
+                "Find files by name/path glob pattern. Sorted list, "
+                "max 500.\n"
+                "DO NOT call this tool when:\n"
+                "  - The user already gave you the exact file_path — just "
+                "read_file/write_file directly.\n"
+                "  - You called glob with the same (path, pattern) earlier "
+                "this turn — repeats return [CACHED-GLOB] markers; the "
+                "filesystem hasn't changed, use the result you have.\n"
+                "  - You're trying to discover binaries / commands — use "
+                "`bash which X` instead.\n"
+                "Prefer search_files (content grep) when looking for code "
+                "patterns, not file names."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {

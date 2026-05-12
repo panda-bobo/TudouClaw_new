@@ -857,6 +857,11 @@ class AgentExecutionMixin:
                 try:
                     self._read_file_turn_cache = {}
                     self._read_file_path_counts = {}
+                    # 2026-05-12 P1: also reset glob_files turn-cache
+                    # so a fresh user message gets a clean exploration
+                    # budget (filesystem may have changed since the last
+                    # turn).
+                    self._glob_files_turn_cache = {}
                 except Exception:
                     pass
             msg = {"role": "user", "content": _msg_content, "source": source}

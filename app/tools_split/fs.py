@@ -104,6 +104,14 @@ def _rule_engine_check_file_write(resolved_path: str, content: str,
 
 _READ_FILE_CACHE_ATTR = "_read_file_turn_cache"
 
+# 2026-05-12 — P1 of "Claude-Code parity": same idea for glob_files.
+# Per-turn cache keyed by (caller_agent_id, abs_base_path, pattern).
+# Real symptom from today's log: 刘老师 called glob_files 13 times
+# in one turn while assembling its "explore" mode. With this cache,
+# repeats return prior results + a "[CACHED-GLOB]" marker so the LLM
+# stops re-globbing.
+_GLOB_FILES_CACHE_ATTR = "_glob_files_turn_cache"
+
 # Path-level read counter — independent of (offset, limit). Tracks how
 # many times the SAME PATH has been read this turn, regardless of which
 # slice. Tripped by agents that loop "read 50 lines → write fail → read
@@ -549,7 +557,7 @@ def _tool_search_files(pattern: str, path: str = ".", include: str = "",
 
 # ── glob_files ───────────────────────────────────────────────────────
 
-def _tool_glob_files(pattern: str, path: str = ".", **_: Any) -> str:
+def _tool_glob_files(pattern: str, path: str = ".", **ctx: Any) -> str:
     pol = _sandbox.get_current_policy()
     try:
         base = pol.safe_path(path)
@@ -557,6 +565,35 @@ def _tool_glob_files(pattern: str, path: str = ".", **_: Any) -> str:
         return f"Error: {e}"
     if not base.exists():
         return f"Error: Path not found: {path}"
+
+    # ── Per-turn dedup (P1, 2026-05-12) ──────────────────────────
+    # Today's log: agent called glob_files 13 times in one turn while
+    # exploring. Same (base_path, pattern) → return prior result with
+    # a [CACHED-GLOB] marker. LLM sees results immediately + a nudge
+    # to stop re-globbing.
+    caller_id = (ctx.get("_caller_agent_id", "")
+                 if isinstance(ctx, dict) else "")
+    agent = _get_caller_agent(caller_id) if caller_id else None
+    cache_key = (str(base.resolve()), str(pattern))
+    if agent is not None:
+        cache = getattr(agent, _GLOB_FILES_CACHE_ATTR, None)
+        if cache is None:
+            cache = {}
+            try:
+                setattr(agent, _GLOB_FILES_CACHE_ATTR, cache)
+            except Exception:
+                cache = None
+        if cache is not None and cache_key in cache:
+            cached_body, hit_count = cache[cache_key]
+            cache[cache_key] = (cached_body, hit_count + 1)
+            return (
+                f"[CACHED-GLOB #{hit_count + 1}] You already ran this exact "
+                f"glob (pattern={pattern!r}, path={path!r}) earlier this "
+                f"turn. Filesystem hasn't changed in the meantime — stop "
+                f"re-globbing the same pattern. Use the result you have, "
+                f"or pick a more specific pattern.\n\n"
+                + cached_body
+            )
 
     found = sorted(base.glob(pattern))
     # Filter out anything under a hidden directory.
@@ -566,9 +603,18 @@ def _tool_glob_files(pattern: str, path: str = ".", **_: Any) -> str:
                    for part in f.parts)
     ]
     if not filtered:
-        return "No files found."
-    if len(filtered) > _GLOB_MAX_RESULTS:
-        return ("\n".join(filtered[:_GLOB_MAX_RESULTS])
+        body = "No files found."
+    elif len(filtered) > _GLOB_MAX_RESULTS:
+        body = ("\n".join(filtered[:_GLOB_MAX_RESULTS])
                 + f"\n... ({len(filtered)} total, "
                 f"showing first {_GLOB_MAX_RESULTS})")
-    return "\n".join(filtered)
+    else:
+        body = "\n".join(filtered)
+
+    # Cache for the rest of this turn.
+    if agent is not None:
+        cache = getattr(agent, _GLOB_FILES_CACHE_ATTR, None)
+        if isinstance(cache, dict):
+            cache[cache_key] = (body, 1)
+
+    return body

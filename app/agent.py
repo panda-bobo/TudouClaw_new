@@ -10121,6 +10121,15 @@ Write only the summary body. Do not include any preamble or prefix."""
                 self._turn_query_cache = {}
             except Exception:
                 pass
+            # 2026-05-12 P1: reset filesystem turn-caches so a fresh
+            # user message gets a clean exploration budget. read_file
+            # already had this; glob_files added with this commit.
+            try:
+                self._read_file_turn_cache = {}
+                self._read_file_path_counts = {}
+                self._glob_files_turn_cache = {}
+            except Exception:
+                pass
 
             # ── Multimodal content handling ──
             # user_message can be str (text-only) or list[dict] (multimodal)
