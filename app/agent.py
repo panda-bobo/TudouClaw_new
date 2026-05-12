@@ -2714,6 +2714,16 @@ class Agent:
     turn_count: int = 0
     max_turns: int = 20
     max_budget_tokens: int = 200000
+    # --- Real-time persistence (2026-05-12) ---
+    # Hub sets `_persist_callback` after agent load/create. The agent
+    # calls `_maybe_persist()` at iteration boundaries inside chat()
+    # so chat history survives SIGKILL / crash / power loss instead of
+    # only saving on graceful shutdown (which never runs under
+    # `kill -9`). Throttled to 1 save per second per agent so a fast
+    # tool loop doesn't hammer the disk.
+    _persist_callback: Any = field(default=None, repr=False)
+    _last_persist_at: float = 0.0
+    _persist_min_interval: float = 1.0   # seconds; min gap between saves
     # --- Enhancement module ---
     enhancer: AgentEnhancer | None = field(default=None, repr=False)
     # --- Three-layer memory ---
@@ -2854,6 +2864,45 @@ class Agent:
                 and hasattr(self, "_active_context_id")
                 and isinstance(value, list)):
             self._messages_by_context[self._active_context_id] = value
+
+    # ---- real-time persistence (2026-05-12) ----
+
+    def _maybe_persist(self, *, force: bool = False) -> None:
+        """Throttled real-time save hook.
+
+        Called from chat() iteration boundaries so chat history survives
+        crash / SIGKILL / power loss. Without this, agent state was only
+        flushed on graceful shutdown (atexit + SIGTERM handler), and
+        ``run_tudou.sh --stop`` uses ``kill -9`` which bypasses both —
+        users were losing every message added since the last completed
+        chat() call.
+
+        Throttling: ``_persist_min_interval`` seconds between saves per
+        agent so a fast tool-call loop (10+ iterations/sec) doesn't hammer
+        the disk. Pass ``force=True`` to bypass (use after a user message
+        is appended at chat start, where you want it on disk immediately).
+
+        No-op if ``_persist_callback`` is None (callback set by hub
+        during agent load/create; tests + standalone use just skip).
+        """
+        cb = getattr(self, "_persist_callback", None)
+        if cb is None:
+            return
+        now = time.time()
+        if not force:
+            elapsed = now - getattr(self, "_last_persist_at", 0.0)
+            if elapsed < getattr(self, "_persist_min_interval", 1.0):
+                return
+        try:
+            cb(self)
+            self._last_persist_at = now
+        except Exception as e:
+            # Best-effort: a save failure must never break the chat loop.
+            try:
+                logger.warning("real-time persist failed for %s: %s",
+                               (self.id or "?")[:8], e)
+            except Exception:
+                pass
 
     # ---- persistence serialisation ----
 
@@ -10044,6 +10093,14 @@ Write only the summary body. Do not include any preamble or prefix."""
             if not _pre_appended:
                 self.messages.append(msg)
                 self._log("message", {"role": "user", "content": _user_text[:500], "source": source})
+            # Real-time persist (2026-05-12): force-save the user message
+            # IMMEDIATELY (bypass throttle) so a SIGKILL between here and
+            # the first LLM response can't lose what the user just typed.
+            # In-memory state is the only source of truth until this lands
+            # on disk. Pre-persist (b929c76) handles the portal path; this
+            # covers admin / API / inter-agent paths that don't go through
+            # portal_routes_post.
+            self._maybe_persist(force=True)
 
             # ── R4: red-line pre-check (cultivation safety) ──
             # Cultivated agents have a SpecialtyTemplate.PromptBlock with
@@ -10876,6 +10933,13 @@ Write only the summary body. Do not include any preamble or prefix."""
                     if _is_aborted():
                         final_content = final_content or "[Aborted]"
                         break
+                    # Real-time persist (2026-05-12): save at iteration
+                    # boundary so chat history survives SIGKILL. Throttled
+                    # to 1/sec inside _maybe_persist so a fast tool loop
+                    # doesn't hammer the disk. Each iteration appends
+                    # assistant + N tool_results, so saving here captures
+                    # a coherent snapshot between LLM turns.
+                    self._maybe_persist()
                     # Rebuild messages-to-send each iteration (self.messages
                     # may have grown with tool results from previous iteration).
                     # Dynamic context is appended at the end — keeps prefix stable.
@@ -12127,6 +12191,15 @@ Write only the summary body. Do not include any preamble or prefix."""
                     })
             except Exception as _trace_err:
                 logger.debug("[expert] trace write failed: %s", _trace_err)
+            # Real-time persist (2026-05-12): force-save the final
+            # assistant response on chat() exit. Without force=True, the
+            # throttle could swallow this save if the previous iteration
+            # already saved < 1s ago — meaning the LAST assistant message
+            # of a fast turn would still be in-memory only.
+            try:
+                self._maybe_persist(force=True)
+            except Exception:
+                pass
             return final_content
 
     def _chat_async_via_langgraph(

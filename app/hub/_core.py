@@ -1148,6 +1148,7 @@ class Hub:
                 for d in self._db.load_agents():
                     agent = Agent.from_persist_dict(d)
                     self.agents[agent.id] = agent
+                    self._wire_persist_callback(agent)
                 logger.info("Loaded %d agents from SQLite", len(self.agents))
             except Exception as e:
                 logger.warning("SQLite agent load failed: %s", e)
@@ -1164,12 +1165,59 @@ class Hub:
             for d in data.get("agents", []):
                 agent = Agent.from_persist_dict(d)
                 self.agents[agent.id] = agent
+                self._wire_persist_callback(agent)
         except Exception as e:
             import traceback
             traceback.print_exc()
         self._auto_migrate_role_defaults()
         self._auto_migrate_drop_stale_task_notifications()
         self._auto_migrate_dedupe_persona_fields()
+
+    def _wire_persist_callback(self, agent) -> None:
+        """Hook the agent's real-time persist callback to write THIS one
+        agent on demand (single-agent SQLite upsert + workspace sidecar).
+
+        2026-05-12 — agents call ``_maybe_persist()`` at iteration
+        boundaries inside chat() so chat history survives SIGKILL /
+        crash. Without this hook the callback is None and the
+        throttled-save is a no-op.
+
+        We do single-agent writes here (not the full ``_save_agents``
+        snapshot) because (a) it's cheaper and (b) per-agent atomic
+        writes can't corrupt other agents' rows on a partial failure.
+        """
+        try:
+            agent._persist_callback = self._save_one_agent_realtime
+        except Exception as e:
+            logger.debug("wire persist callback failed for %s: %s",
+                         (agent.id or "?")[:8], e)
+
+    def _save_one_agent_realtime(self, agent) -> None:
+        """Single-agent persist invoked from agent._maybe_persist().
+
+        Writes to: SQLite (source of truth) + per-workspace sidecar.
+        Does NOT rewrite the global agents.json snapshot — that's a
+        full O(N) operation done by _save_agents on shutdown / explicit
+        calls. For real-time saves at iteration boundaries we want O(1)
+        per-agent only.
+        """
+        try:
+            d = agent.to_persist_dict()
+            if self._db:
+                try:
+                    self._db.save_agent(d)
+                except Exception as e:
+                    logger.debug("realtime SQLite save failed for %s: %s",
+                                 (agent.id or "?")[:8], e)
+            # Sidecar JSON (workspaces/<id>/agent.json) — atomic write.
+            try:
+                self._save_agent_workspace(agent)
+            except Exception as e:
+                logger.debug("realtime workspace save failed for %s: %s",
+                             (agent.id or "?")[:8], e)
+        except Exception as e:
+            logger.warning("realtime persist failed for %s: %s",
+                           (agent.id or "?")[:8], e)
 
     def _auto_migrate_drop_stale_task_notifications(self) -> None:
         """Drop legacy ``[TASK ASSIGNED]`` user-messages on agent load.
@@ -2444,6 +2492,9 @@ class Hub:
 
         with self._lock:
             self.agents[agent.id] = agent
+        # Wire real-time persist callback so agent.chat() saves at every
+        # iteration boundary (not just on graceful shutdown). 2026-05-12.
+        self._wire_persist_callback(agent)
         self._save_agents()
         logger.info("HUB create_agent OK: id=%s name=%s role=%s", agent.id, agent.name, agent.role)
         return agent
