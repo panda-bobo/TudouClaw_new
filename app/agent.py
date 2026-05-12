@@ -11234,6 +11234,108 @@ Write only the summary body. Do not include any preamble or prefix."""
                                 pass
                             continue
 
+                        # ── Plan-pending continuation nudge ────────────
+                        # 2026-05-12: agent finishes one step (e.g. writes
+                        # 3 monitoring files) then asks "需要我继续推进
+                        # logging 模块吗?" and stops, even though the user
+                        # explicitly asked for sequential 4-module
+                        # execution and there are 3 pending plan steps.
+                        # Real symptom: 刘老师 wrote monitoring/, then sat
+                        # idle waiting for permission instead of moving on.
+                        #
+                        # Fix: before treating no-tool-calls as "final
+                        # answer", check if `_current_plan` still has
+                        # PENDING or IN_PROGRESS steps. If yes, inject a
+                        # user-role nudge telling the agent to proceed
+                        # autonomously to the next step. Reuses the
+                        # existing _nudge_count cap to avoid infinite
+                        # loops, and the same iteration cap.
+                        try:
+                            _plan = getattr(self, "_current_plan", None)
+                            _plan_pending = []
+                            if _plan and getattr(_plan, "status", "") == "active":
+                                from .agent_types import StepStatus as _SS
+                                _plan_pending = [
+                                    s for s in (getattr(_plan, "steps", []) or [])
+                                    if getattr(s, "status", None) in (
+                                        _SS.PENDING, _SS.IN_PROGRESS)
+                                ]
+                        except Exception:
+                            _plan_pending = []
+
+                        if (_plan_pending
+                                and _effective_tools
+                                and _nudge_count < _MAX_NUDGES_PER_TURN
+                                and iteration < max_iters - 1
+                                and stop_reason != "length"
+                                and stop_reason != "content_filter"
+                                and os.environ.get(
+                                    "TUDOU_PLAN_CONTINUE_NUDGE", "1") != "0"):
+                            # Persist the agent's "asking permission" reply
+                            # so the next iteration sees its own words —
+                            # makes the nudge feel like a continuation.
+                            self.messages.append({
+                                "role": "assistant",
+                                "content": content or final_content or "",
+                                "_source": "llm",
+                            })
+                            self._log("message",
+                                      {"role": "assistant",
+                                       "content": content or final_content or "",
+                                       "source": "llm"})
+                            # Build the nudge with the next step's title so
+                            # the agent has a concrete target.
+                            _next_step = _plan_pending[0]
+                            _next_title = (getattr(_next_step, "title", "")
+                                           or "").strip()
+                            _next_detail = (getattr(_next_step, "detail", "")
+                                            or "").strip()
+                            _pending_n = len(_plan_pending)
+                            nudge = (
+                                "[system nudge] 你的 plan 还有 "
+                                f"{_pending_n} 个未完成的 step。"
+                                f"下一步是: 「{_next_title}」"
+                                + (f" — {_next_detail}" if _next_detail else "")
+                                + "。\n\n"
+                                "用户已经在最初的 message 里授权了完整的 "
+                                "plan, 不需要再问'是否继续'。直接调用工具"
+                                "推进这一步, 完成后自动接下一步。最后所有"
+                                "step 都完成时再总结汇报。\n"
+                                "Don't ask permission — execute the next "
+                                "step now."
+                            )
+                            self.messages.append({
+                                "role": "user",
+                                "content": nudge,
+                                "_source": "system_nudge",
+                            })
+                            _nudge_count += 1
+                            # Rebuild outbound message list so the next
+                            # iteration sees both new messages.
+                            _msgs_to_send = _drop_orphan_tool_messages(
+                                _compress_old_tool_results(
+                                    _summarize_old_history(
+                                        _hoist_skill_guides(
+                                            _strip_old_images(
+                                                self._inject_dynamic_context(
+                                                    self.messages,
+                                                    current_query=_user_text))),
+                                        self)))
+                            try:
+                                _emit(AgentEvent(time.time(), "nudge",
+                                                 {"reason": "plan_pending_continue",
+                                                  "iteration": iteration,
+                                                  "pending_steps": _pending_n,
+                                                  "next_step": _next_title}))
+                            except Exception:
+                                pass
+                            logger.info(
+                                "Agent %s plan-continue nudge: %d pending "
+                                "steps, next='%s' (iteration=%d)",
+                                self.id[:8], _pending_n, _next_title,
+                                iteration)
+                            continue
+
                         # Final response — ensure we always emit something
                         if not content and final_content:
                             # LLM returned empty final response but we had
