@@ -156,19 +156,38 @@ class ToolCallGuardrailController:
         self._tool_fail: dict[str, int] = {}
         # tool_name → call count since last successful mutation
         self._idempotent_runs: dict[str, int] = {}
-        # latched halt (once tripped, every before_call returns it)
-        self._halt: GuardrailDecision | None = None
+        # 2026-05-12: was a singleton GuardrailDecision — once mcp_call
+        # tripped same_tool_halt, EVERY subsequent tool (bash, read_file,
+        # ...) inherited the same halt because `before_call` returned
+        # `self._halt` unconditionally. Real symptom user reported: agent
+        # halted bash with message "mcp_call has failed 8 times" because
+        # the halt was sticky across tools.
+        # Per-tool dict so each tool name halts independently.
+        self._halt: dict[str, GuardrailDecision] = {}
 
     @property
     def halt_decision(self) -> GuardrailDecision | None:
-        return self._halt
+        """Legacy accessor: returns SOME halt if any tool has one.
+        Newer callers should consult ``halt_for(tool_name)`` instead."""
+        if not self._halt:
+            return None
+        # Return any one (callers using this property usually just want
+        # to know "is anything halted"). Order: most recently inserted.
+        return next(reversed(self._halt.values()), None)
+
+    def halt_for(self, tool_name: str) -> GuardrailDecision | None:
+        """Per-tool halt lookup. None if this tool isn't halted."""
+        return self._halt.get(tool_name)
 
     def before_call(self, tool_name: str,
                     args: Mapping[str, Any] | None) -> GuardrailDecision:
         """Check whether to allow this tool call. Always called with the
         latest counters; never mutates them (that's after_call's job)."""
-        if self._halt is not None:
-            return self._halt
+        # Per-tool halt: only this tool's prior halt blocks this call.
+        # Other tools (e.g. bash after mcp_call halted) remain free.
+        existing = self._halt.get(tool_name)
+        if existing is not None:
+            return existing
 
         ah = _args_hash(args)
         cfg = self.config
@@ -184,7 +203,10 @@ class ToolCallGuardrailController:
                          f"that this won't work and try a different "
                          f"approach."),
             )
-            self._halt = d
+            # 2026-05-12: Signal 1 does NOT latch. It's per-(tool,
+            # args_hash). Latching it as per-tool would block bash
+            # ANY args after one (bash, "false") failed thrice. Other
+            # args might still succeed — let the recompute decide.
             return d
         if cfg.warnings_enabled and ec >= cfg.exact_failure_warn_after:
             return GuardrailDecision(
@@ -204,7 +226,7 @@ class ToolCallGuardrailController:
                          f"turn (with various args). Stop trying — fix "
                          f"the underlying issue or report you're stuck."),
             )
-            self._halt = d
+            self._halt[tool_name] = d   # per-tool halt (2026-05-12)
             return d
         if cfg.warnings_enabled and tc >= cfg.same_tool_failure_warn_after:
             return GuardrailDecision(
