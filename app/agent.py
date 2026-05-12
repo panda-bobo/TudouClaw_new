@@ -12468,21 +12468,78 @@ Write only the summary body. Do not include any preamble or prefix."""
             self._pending_chat_lock = threading.Lock()
 
         if has_active:
-            with self._pending_chat_lock:
-                self._pending_chat_queue.append((task, user_message, source))
-                queue_depth = len(self._pending_chat_queue)
-            logger.info(
-                "Agent %s busy — queued chat task %s (queue depth=%d)",
-                self.id[:8], task.id, queue_depth)
-            try:
-                task.push_event({
-                    "type": "queued",
-                    "content": f"⏳ 排队中 ({queue_depth}) — 等上一轮对话结束",
-                    "queue_position": queue_depth,
-                })
-            except Exception:
-                pass
-            return task
+            # 2026-05-12: Claude-Code style INTERRUPT mode (default ON).
+            # New user message preempts the running chat instead of
+            # queueing behind it. The user typing again is implicit
+            # "stop what you're doing, listen to this". Abort the
+            # current task + drop everything in the pending queue +
+            # let the new message run as a fresh turn.
+            #
+            # Old queue+merge behaviour: TUDOU_INTERRUPT_MODE=0
+            #
+            # Race-safety: chat() acquires self._lock (line 10054), so
+            # the new turn's _run thread will block on lock.acquire()
+            # until the old turn exits its iteration loop and releases.
+            # We don't wait synchronously — abort flag + lock handles it.
+            _interrupt_mode = (
+                os.environ.get("TUDOU_INTERRUPT_MODE", "1") != "0")
+            if _interrupt_mode:
+                aborted_count = 0
+                # 1. Abort the active ChatTask(s) — set abort flag, the
+                #    running chat() loop sees it at next iteration.
+                for existing_task in mgr.get_agent_tasks(self.id):
+                    if existing_task.status not in active_states:
+                        continue
+                    try:
+                        existing_task.abort()
+                        aborted_count += 1
+                    except Exception as e:
+                        logger.debug("interrupt: abort %s failed: %s",
+                                     existing_task.id, e)
+                # 2. Drain the pending queue — these are tasks that
+                #    were queued but never started running. Mark them
+                #    aborted so the UI hides their progress chip.
+                with self._pending_chat_lock:
+                    pending = self._pending_chat_queue
+                    for t, _, _ in pending:
+                        try:
+                            t.set_status(
+                                ChatTaskStatus.ABORTED,
+                                "Superseded by new message", -1)
+                            t.push_event({
+                                "type": "error",
+                                "content": "Superseded by newer user message",
+                            })
+                            t.push_event({"type": "done"})
+                            aborted_count += 1
+                        except Exception:
+                            pass
+                    pending.clear()
+                logger.info(
+                    "Agent %s INTERRUPT: aborted %d active/queued chat(s) "
+                    "for new message (task=%s)",
+                    self.id[:8], aborted_count, task.id)
+                # Fall through to launch the new task immediately.
+                # Don't return — flow continues below as if !has_active.
+            else:
+                with self._pending_chat_lock:
+                    self._pending_chat_queue.append(
+                        (task, user_message, source))
+                    queue_depth = len(self._pending_chat_queue)
+                logger.info(
+                    "Agent %s busy — queued chat task %s "
+                    "(queue depth=%d, INTERRUPT_MODE=0)",
+                    self.id[:8], task.id, queue_depth)
+                try:
+                    task.push_event({
+                        "type": "queued",
+                        "content": (f"⏳ 排队中 ({queue_depth}) — "
+                                    f"等上一轮对话结束"),
+                        "queue_position": queue_depth,
+                    })
+                except Exception:
+                    pass
+                return task
 
         def _run(task=task, user_message=user_message, source=source):
             # Capture turn start time for the "recent file" envelope fallback.
