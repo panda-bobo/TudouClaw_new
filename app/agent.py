@@ -11972,6 +11972,49 @@ Write only the summary body. Do not include any preamble or prefix."""
 
                             results.append((name, result, call_id))
 
+                    # 2026-05-12: cache hits don't count toward per-turn
+                    # budget. Rationale: a Read/glob returning a cached
+                    # body has no real cost — no disk I/O, no external
+                    # request, no novel decision. Counting them inflates
+                    # the budget against degenerate "model saw cache
+                    # marker but called again anyway" cases that the
+                    # model should self-correct from. Real symptom: 刘老师
+                    # hit 31/30 cap; several of those 31 were
+                    # [REPEAT-READ #N] / [CACHED-GLOB #N] hits returning
+                    # in microseconds.
+                    #
+                    # Tool-result markers that indicate cache:
+                    #   [REPEAT-READ #N]       — read_file same path
+                    #   [CACHED-GLOB #N]       — glob_files same pattern
+                    #   ⚠️ [READ-VALVE-WARN #N] — read_file path-cap warn
+                    #                            (still served from cache)
+                    _cache_hits = 0
+                    for _name, _res, _cid in results:
+                        _r = _res if isinstance(_res, str) else str(_res)
+                        _head = _r[:40]
+                        if ("[REPEAT-READ" in _head
+                                or "[CACHED-GLOB" in _head
+                                or "[READ-VALVE-WARN" in _head):
+                            _cache_hits += 1
+                    if _cache_hits:
+                        _response_tool_count = max(
+                            0, _response_tool_count - _cache_hits)
+                        # If decrement put us back under cap, lift the
+                        # force-text gate so the next iteration can keep
+                        # calling tools normally.
+                        if (_force_text_next_iter
+                                and _response_tool_count < _per_resp_cap):
+                            _force_text_next_iter = False
+                            try:
+                                logger.info(
+                                    "Agent %s: %d cache-hit call(s) excluded "
+                                    "from per-turn cap (count %d/%d, "
+                                    "force-text cleared)",
+                                    self.id[:8], _cache_hits,
+                                    _response_tool_count, _per_resp_cap)
+                            except Exception:
+                                pass
+
                     # Process and emit all results
                     for name, result, call_id in results:
                         # Ensure result is always a string for safe operations
