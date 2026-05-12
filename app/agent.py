@@ -799,6 +799,52 @@ def _extract_structured_facts(old_slice: list[dict]) -> dict:
     return out
 
 
+# Known "path-like" arg keys whose values should be normalised by
+# stripping trailing slashes — so the loop guard treats
+# "modules/monitoring" and "modules/monitoring/" as the same call.
+# Mirrored from the conventions used across our tool schemas.
+_PATH_LIKE_ARG_KEYS = frozenset({
+    "path", "file_path", "filepath", "dir", "directory",
+    "working_dir", "workdir", "cwd", "root", "base", "base_path",
+    "src", "dst", "source", "destination", "target", "from_path",
+    "to_path", "in_path", "out_path",
+})
+
+
+def _normalize_arg_value(key: str, value: Any) -> Any:
+    """Canonicalise a single arg value for loop-guard hashing.
+
+    Rules (user 2026-05-12: "算相同"):
+      - String leaves: .strip() outer whitespace
+      - Path-like keys: also strip trailing slashes
+      - Recurse into nested dict/list
+
+    The goal: 99% of "noise" LLMs use to dodge the loop guard
+    (trailing spaces, double slashes, etc.) hashes to the same
+    signature as the canonical form, so the guard catches them.
+    """
+    if isinstance(value, str):
+        v = value.strip()
+        if key in _PATH_LIKE_ARG_KEYS and v:
+            # Strip trailing slashes (keep ONE leading "/" for absolute)
+            while len(v) > 1 and v.endswith(("/", "\\")):
+                v = v[:-1]
+        return v
+    if isinstance(value, dict):
+        return {k: _normalize_arg_value(str(k), v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_normalize_arg_value(key, v) for v in value]
+    return value
+
+
+def _normalize_args_for_hash(args: dict) -> dict:
+    """Apply the rules above to every top-level key of an args dict.
+    Returns a new dict; the input is not mutated."""
+    if not isinstance(args, dict):
+        return {}
+    return {k: _normalize_arg_value(str(k), v) for k, v in args.items()}
+
+
 def _hash_old_slice(old_slice: list[dict]) -> str:
     """Stable content hash for compaction cache.
 
@@ -11761,8 +11807,15 @@ Write only the summary body. Do not include any preamble or prefix."""
                         try:
                             import hashlib as _hl
                             import json as _json2
+                            # 2026-05-12 (user "算相同"): normalize args
+                            # before hashing so cosmetic noise (trailing
+                            # whitespace, trailing slashes on paths) all
+                            # hashes to the canonical signature. LLM can't
+                            # dodge the guard by adding " " or "/" to args.
+                            _args_normalized = _normalize_args_for_hash(
+                                _args or {})
                             _args_str = _json2.dumps(
-                                _args or {}, sort_keys=True,
+                                _args_normalized, sort_keys=True,
                                 ensure_ascii=False, default=str)
                             _args_hash = _hl.sha256(
                                 _args_str.encode()).hexdigest()[:12]

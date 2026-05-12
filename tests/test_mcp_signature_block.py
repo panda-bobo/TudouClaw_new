@@ -177,3 +177,106 @@ def test_hash_length_consistent():
     assert len(sig[1]) == 12
     # Hex chars only
     int(sig[1], 16)
+
+
+# ── Args normalization (user 2026-05-12: "算相同") ────────────────
+
+# These tests use the REAL _normalize_args_for_hash from agent.py so
+# they break if someone simplifies the normalisation away later.
+from app.agent import _normalize_args_for_hash
+
+
+def _real_sig(mcp_id: str, args: dict) -> tuple[str, str]:
+    """Mirror agent.py's real signature flow (normalize → json → sha)."""
+    args_norm = _normalize_args_for_hash(args)
+    args_str = json.dumps(args_norm, sort_keys=True,
+                          ensure_ascii=False, default=str)
+    h = hashlib.sha256(args_str.encode()).hexdigest()[:12]
+    return (mcp_id, h)
+
+
+def test_trailing_whitespace_normalised():
+    """LLM tries to dodge guard by appending a space — must be caught."""
+    a = _real_sig("m", {"working_dir": "modules/monitoring"})
+    b = _real_sig("m", {"working_dir": "modules/monitoring "})
+    c = _real_sig("m", {"working_dir": " modules/monitoring"})
+    d = _real_sig("m", {"working_dir": "  modules/monitoring  "})
+    assert a == b == c == d
+
+
+def test_trailing_slash_on_path_normalised():
+    """LLM dodges with `/` — must be caught for path-like keys."""
+    a = _real_sig("m", {"working_dir": "modules/monitoring"})
+    b = _real_sig("m", {"working_dir": "modules/monitoring/"})
+    c = _real_sig("m", {"working_dir": "modules/monitoring//"})
+    d = _real_sig("m", {"working_dir": "modules/monitoring\\"})  # Windows-style
+    assert a == b == c == d
+
+
+def test_trailing_slash_NOT_normalised_for_non_path_keys():
+    """A trailing slash in a `query` or `pattern` value might be
+    meaningful (regex / URL / etc.) — don't touch it unless the key
+    is in the path-like allow list."""
+    a = _real_sig("m", {"query": "find me"})
+    b = _real_sig("m", {"query": "find me/"})
+    # Trailing space is still stripped (always safe)
+    c = _real_sig("m", {"query": "find me "})
+    assert a == c   # whitespace strip
+    assert a != b   # but slash kept for non-path keys
+
+
+def test_path_keys_all_recognised():
+    """All conventional path arg names normalise their values."""
+    for key in ("path", "file_path", "filepath", "dir", "directory",
+                "working_dir", "workdir", "cwd", "root", "base",
+                "base_path", "src", "dst", "source", "destination",
+                "target", "from_path", "to_path", "in_path", "out_path"):
+        a = _real_sig("m", {key: "/a/b"})
+        b = _real_sig("m", {key: "/a/b/"})
+        assert a == b, f"path key '{key}' not normalised"
+
+
+def test_nested_dict_normalised():
+    """Whitespace + slash dodges inside nested args also caught."""
+    a = _real_sig("m", {"config": {"working_dir": "modules/monitoring"}})
+    b = _real_sig("m", {"config": {"working_dir": "modules/monitoring/  "}})
+    assert a == b
+
+
+def test_list_of_strings_normalised():
+    """If args contains a list of strings (e.g. file paths), each
+    element is normalised."""
+    a = _real_sig("m", {"file_paths": ["a.tf", "b.tf"]})
+    b = _real_sig("m", {"file_paths": ["a.tf ", " b.tf"]})
+    assert a == b
+
+
+def test_non_string_values_unchanged():
+    """Numbers, bools, None stay as-is — wouldn't make sense to
+    normalise them."""
+    a = _real_sig("m", {"timeout": 30, "verbose": True, "label": None})
+    b = _real_sig("m", {"timeout": 30, "verbose": True, "label": None})
+    assert a == b
+
+
+def test_normalize_returns_new_dict_doesnt_mutate():
+    """The normaliser must not mutate caller's args dict."""
+    original = {"working_dir": "modules/x/", "other": "y "}
+    snapshot = json.dumps(original, sort_keys=True)
+    _normalize_args_for_hash(original)
+    # Original unchanged
+    assert json.dumps(original, sort_keys=True) == snapshot
+
+
+def test_absolute_path_keeps_leading_slash():
+    """Don't strip a SINGLE leading '/' — that would make
+    "/" and "" equal, breaking absolute root references."""
+    a = _real_sig("m", {"working_dir": "/"})
+    b = _real_sig("m", {"working_dir": ""})
+    assert a != b
+    # And a real absolute path round-trips
+    c = _real_sig("m", {"working_dir": "/etc/hosts"})
+    d = _real_sig("m", {"working_dir": "/etc/hosts/"})
+    assert c == d   # trailing stripped
+    e = _real_sig("m", {"working_dir": "/"})
+    assert c != e   # but root stays root
