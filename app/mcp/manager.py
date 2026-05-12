@@ -1510,6 +1510,7 @@ class MCPManager:
                     return self.global_mcps[mid]
                 return node_cfg.available_mcps.get(mid)
 
+            import dataclasses as _dc
             result: list[MCPServerConfig] = []
             for mid in bound_ids:
                 base = _resolve(mid)
@@ -1518,15 +1519,16 @@ class MCPManager:
                     # either scope. Silently skip — removing stale binds
                     # is a separate concern.
                     continue
-                mcp_copy = MCPServerConfig(
-                    id=base.id,
-                    name=base.name,
-                    transport=base.transport,
-                    command=base.command,
-                    url=base.url,
-                    env=dict(base.env),
-                    enabled=base.enabled,
-                )
+                # 2026-05-12: was a hand-rolled MCPServerConfig(...) copy
+                # of 7 fields — dropped capability_id, scope,
+                # install_status, install_error, install_command,
+                # installed_at. Real symptom: agent.profile.mcp_servers
+                # had capability_id="" everywhere even though the source
+                # config in mcp_configs.json had capability_id="terraform".
+                # dataclasses.replace copies ALL fields and only
+                # overrides what we explicitly pass — future-proof
+                # against new MCPServerConfig fields too.
+                mcp_copy = _dc.replace(base, env=dict(base.env))
                 # Layer 1: node-level overrides (even for global MCPs —
                 # a node can still tweak VOLC_REGION for one instance
                 # without touching the global base config).

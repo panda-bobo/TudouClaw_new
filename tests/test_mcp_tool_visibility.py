@@ -196,6 +196,83 @@ def test_mcp_call_dispatcher_allowed_when_any_mcp_bound():
     assert "mcp_call" in names
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Bug 2026-05-12: get_agent_effective_mcps dropped fields
+#
+# The function was hand-constructing MCPServerConfig copies with only
+# 7 of the 12 fields. capability_id, scope, install_status,
+# install_error, install_command, installed_at all got reset to their
+# dataclass defaults — so agent.profile.mcp_servers persisted with
+# capability_id="" instead of "terraform". This broke any code that
+# walks capability_id back to the catalog (tools_provided lookup,
+# install-status UI, etc.).
+#
+# Fix: use dataclasses.replace which copies ALL fields and only
+# overrides what we explicitly pass.
+# ─────────────────────────────────────────────────────────────────────
+
+def test_get_agent_effective_mcps_preserves_capability_id():
+    """Regression: copy must keep capability_id from source MCP."""
+    from app.mcp.manager import (
+        MCPManager, NodeMCPConfig, MCPServerConfig,
+    )
+    mgr = MCPManager()
+    nc = NodeMCPConfig(node_id="local")
+    mgr.node_configs["local"] = nc
+
+    src = MCPServerConfig(
+        id="983197f1",
+        name="Terraform CLI (gated)",
+        transport="stdio",
+        command="python -m app.mcp.builtins.terraform",
+        capability_id="terraform",   # <-- the field that was getting dropped
+        scope="node",
+        install_status="installed",
+    )
+    nc.add_mcp(src)
+    nc.bind_agent("ag-rt", "983197f1")
+
+    effective = mgr.get_agent_effective_mcps("local", "ag-rt")
+    assert len(effective) == 1
+    copy = effective[0]
+    assert copy.id == "983197f1"
+    assert copy.capability_id == "terraform"   # ← THE bug fix
+    assert copy.scope == "node"
+    assert copy.install_status == "installed"
+
+
+def test_get_agent_effective_mcps_env_overrides_still_work():
+    """Sanity: dataclasses.replace doesn't break the env-override chain."""
+    from app.mcp.manager import (
+        MCPManager, NodeMCPConfig, MCPServerConfig,
+    )
+    mgr = MCPManager()
+    nc = NodeMCPConfig(node_id="local")
+    mgr.node_configs["local"] = nc
+
+    src = MCPServerConfig(
+        id="x", name="x", env={"BASE_K": "base"},
+        capability_id="terraform",
+    )
+    nc.add_mcp(src)
+    nc.bind_agent("ag-env", "x")
+    nc.set_env_override("x", "NODE_K", "node")
+    nc.set_agent_env_override("ag-env", "x", "AGENT_K", "agent")
+
+    effective = mgr.get_agent_effective_mcps("local", "ag-env")
+    assert len(effective) == 1
+    e = effective[0]
+    # All three layers landed
+    assert e.env["BASE_K"] == "base"
+    assert e.env["NODE_K"] == "node"
+    assert e.env["AGENT_K"] == "agent"
+    # Capability_id still preserved alongside env overrides
+    assert e.capability_id == "terraform"
+    # Mutating the copy's env doesn't bleed to the source (defensive copy)
+    e.env["new_key"] = "x"
+    assert "new_key" not in src.env
+
+
 def test_mcp_call_dispatcher_NOT_allowed_when_no_mcp_bound():
     """If agent has zero bound MCPs, mcp_call must NOT be in the
     bypass set — that would let any agent dispatch to any MCP."""
