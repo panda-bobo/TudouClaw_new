@@ -2724,6 +2724,13 @@ class Agent:
     _persist_callback: Any = field(default=None, repr=False)
     _last_persist_at: float = 0.0
     _persist_min_interval: float = 1.0   # seconds; min gap between saves
+    # --- Human-readable session log (2026-05-12) ---
+    # Markdown transcript at ~/.tudou_claw/workspaces/{id}/sessions/
+    # YYYY-MM-DD.md. Distinct from agent.json (LLM-facing) — this is
+    # what humans grep / read later. Hub instantiates it during
+    # _wire_persist_callback. Agent._log() forwards user/assistant/
+    # tool events into the writer.
+    _session_log: Any = field(default=None, repr=False)
     # --- Enhancement module ---
     enhancer: AgentEnhancer | None = field(default=None, repr=False)
     # --- Three-layer memory ---
@@ -4113,6 +4120,37 @@ class Agent:
         # internally whether this agent has a task in progress before
         # mutating anything.
         if kind in ("message", "tool_call", "tool_result"):
+            # 2026-05-12: also forward to the human-readable Markdown
+            # session log. Best-effort, isolated try-block — disk full
+            # / permission denied must not stop the chat loop.
+            try:
+                sl = getattr(self, "_session_log", None)
+                if sl is not None:
+                    if kind == "message":
+                        _r = str(data.get("role") or "")
+                        _c = data.get("content") or ""
+                        if isinstance(_c, list):
+                            try:
+                                _c = " ".join(p.get("text", "")
+                                              for p in _c
+                                              if isinstance(p, dict)
+                                              and p.get("type") == "text")
+                            except Exception:
+                                _c = str(_c)
+                        sl.append_message(_r, str(_c),
+                                          source=str(data.get("source") or ""))
+                    elif kind == "tool_call":
+                        sl.append_tool_call(
+                            str(data.get("name") or "?"),
+                            data.get("arguments") or {})
+                    elif kind == "tool_result":
+                        sl.append_message(
+                            "tool", str(data.get("result") or ""),
+                            tool_name=str(data.get("name") or "?"))
+            except Exception:
+                # Silent — session log is observability, not data.
+                pass
+
             try:
                 from .conversation_observer import on_agent_event
                 on_agent_event(self.id, {

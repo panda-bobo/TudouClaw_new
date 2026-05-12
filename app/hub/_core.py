@@ -1177,6 +1177,9 @@ class Hub:
         """Hook the agent's real-time persist callback to write THIS one
         agent on demand (single-agent SQLite upsert + workspace sidecar).
 
+        Also instantiates the per-agent SessionMarkdownLog (human-
+        readable transcript at workspaces/<id>/sessions/YYYY-MM-DD.md).
+
         2026-05-12 — agents call ``_maybe_persist()`` at iteration
         boundaries inside chat() so chat history survives SIGKILL /
         crash. Without this hook the callback is None and the
@@ -1190,6 +1193,27 @@ class Hub:
             agent._persist_callback = self._save_one_agent_realtime
         except Exception as e:
             logger.debug("wire persist callback failed for %s: %s",
+                         (agent.id or "?")[:8], e)
+        # Markdown session log — separate sink from agent.json. This
+        # is what users grep / read later. Initialised eagerly so the
+        # first chat message doesn't pay the disk-scan cost.
+        try:
+            from ..session_log import SessionMarkdownLog
+            agent._session_log = SessionMarkdownLog(
+                agent_id=agent.id,
+                agent_name=agent.name,
+                data_dir=self._data_dir,
+            )
+            # Mark agent boot in the log so a session reader can see
+            # where each process restart began.
+            try:
+                agent._session_log.session_marker(
+                    "Agent loaded — process restart"
+                )
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug("wire session log failed for %s: %s",
                          (agent.id or "?")[:8], e)
 
     def _save_one_agent_realtime(self, agent) -> None:
