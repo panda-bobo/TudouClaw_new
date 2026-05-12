@@ -1324,10 +1324,35 @@ class ToolPolicy:
                     "history": [a.to_dict() for a in self.history[-3000:]],
                 }
             os.makedirs(os.path.dirname(p), exist_ok=True)
-            tmp = p + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, p)
+            # 2026-05-12: was a fixed `p + ".tmp"` shared by every thread.
+            # Two concurrent _save_pending_history calls would both write
+            # to the SAME tmp file, then the first os.replace would move
+            # the tmp away — the second os.replace would hit ENOENT.
+            # Real symptom: 11:48 + 12:33 today both logged
+            # "[Errno 2] No such file or directory: ...approvals_log.json
+            # .tmp -> approvals_log.json".
+            #
+            # Fix: per-call unique tmp name (pid + thread id + uuid frag)
+            # so concurrent saves never collide. Each thread atomically
+            # renames its own tmp; the last writer wins (which is fine
+            # for a snapshot — no state is lost since both have the
+            # same captured `data`).
+            import threading as _th
+            import uuid as _uu
+            tmp = (f"{p}.{os.getpid()}.{_th.get_ident()}."
+                   f"{_uu.uuid4().hex[:8]}.tmp")
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, p)
+            except Exception:
+                # Best-effort cleanup of our own tmp on failure
+                try:
+                    if os.path.exists(tmp):
+                        os.unlink(tmp)
+                except Exception:
+                    pass
+                raise
         except Exception as e:
             logging.getLogger("tudou.auth").warning(
                 "failed to save approvals_log.json: %s", e)
