@@ -1,0 +1,24 @@
+# Xiaomi MiMo (mimo-v2.5-pro 等)
+# 思考模式 (thinking-mode) 模型,与 DeepSeek-R 系列同类:
+#   - 必须保留 reasoning_content 字段 (drop_reasoning_content: false)
+#   - 历史里每条 assistant 都要带 reasoning_content (backfill 空字符串即可)
+#   - assistant 同时有 tool_calls 且 content 空时,删 content 字段
+#
+# 2026-05-13 真实事故: 调用 token-plan-sgp.xiaomimimo.com 报
+#   "Param Incorrect: The reasoning_content in the thinking mode must
+#    be passed back to the API."
+# 当时 MiMo 没注册 provider 类,落到 base default 把 reasoning_content
+# 主动剥掉,直接 400。这个 yaml + Python class (MiMoProvider) 解决。
+
+hosts:
+  - xiaomimimo.com
+  - mimo.xiaomi.com
+
+# resolve_strategy 在 URL 不匹配时按 model 名兜底,
+# 比如测试/proxy 没传 URL 但 model 含 "mimo" 的场景。
+model_fragments:
+  - mimo
+
+drop_reasoning_content: false       # 思考模式必需
+backfill_reasoning_content: true    # 给空的 assistant 补 ""
+drop_empty_content_with_tools: true # tool_calls + 空 content → 删 content

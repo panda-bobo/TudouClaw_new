@@ -1,0 +1,16 @@
+# Ollama (本地 :11434)
+# 本地 LLM 通用 OpenAI-compat 服务,但 JSON 解析较严:
+#   - assistant 同时有 tool_calls + 空 content → 删 content 字段
+#   - 不接受 assistant.name 字段
+
+hosts:
+  - "11434"
+  - /ollama
+
+model_fragments:
+  - llama
+  - mistral
+  - codellama
+
+drop_empty_content_with_tools: true
+drop_assistant_name: true

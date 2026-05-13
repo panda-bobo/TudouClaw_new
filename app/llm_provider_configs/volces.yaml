@@ -1,0 +1,14 @@
+# 火山引擎 Volces Ark (ark.cn-beijing.volces.com)
+# 用来 host DeepSeek-R1 等 — 当走 ark 域名时,reasoning_content 也得保留,
+# 但 yaml 重定向到 deepseek 适配器更准确.
+# 此处仅记录 hosts + 字符串化 list content.
+
+hosts:
+  - volces.com
+  - ark.cn-beijing
+
+model_fragments:
+  - doubao   # 字节豆包系列
+  - bytedance
+
+coerce_list_content_to_string: true

@@ -1,0 +1,8 @@
+# LM Studio (本地 :1234)
+# 行为接近 Ollama,但不要求删 assistant.name.
+
+hosts:
+  - "1234"
+  - lmstudio
+
+drop_empty_content_with_tools: true

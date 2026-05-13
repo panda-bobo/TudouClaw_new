@@ -1,0 +1,13 @@
+# Anthropic Claude (api.anthropic.com)
+# Native 不走 OpenAI-compat,但 OpenAI-compat 网关 (e.g. cursor / openrouter)
+# 还是经过这个 sanitizer,所以记一份.
+
+hosts:
+  - anthropic.com
+
+model_fragments:
+  - claude
+
+drop_reasoning_content: true        # Anthropic OpenAI-compat gateway 不识别
+backfill_reasoning_content: false
+supports_vision: true               # Claude 3+ 都 vision

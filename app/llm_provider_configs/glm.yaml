@@ -1,0 +1,19 @@
+# 智谱 GLM (open.bigmodel.cn 等)
+# - 不接受 list 形式 content (Anthropic-style multimodal),需扁平化为字符串
+# - 不接受 parallel_tool_calls 参数 (会 400)
+# - max_tool_call_rounds 默认就是 1 (基类),GLM-4.5-air 强制要求,不要改
+# - 不接受 assistant 同时有 tool_calls + 空 content (会 400),Python class
+#   里有 transform_message 合成短描述补 content.
+#   yaml 不能配置这个补充逻辑,留在 Python.
+
+hosts:
+  - bigmodel.cn
+  - open.bigmodel
+
+model_fragments:
+  - glm
+  - chatglm
+
+coerce_list_content_to_string: true
+# Don't set drop_empty_content_with_tools — GLM 拒绝 missing 也拒绝 null,
+# 必须有内容,Python class 里合成.

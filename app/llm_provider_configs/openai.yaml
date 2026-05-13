@@ -1,0 +1,21 @@
+# OpenAI (api.openai.com)
+# 基线 provider — 几乎所有默认都用 OpenAI 行为定义.
+# 此 yaml 主要为了一致性 (每个 provider 都有一个 yaml),
+# 字段都跟 base default 一致,移除任何一行都不影响行为.
+
+hosts:
+  - openai.com
+  - api.openai
+
+model_fragments:
+  - gpt-4
+  - gpt-5
+  - o1            # o1 是思考模式,但 OpenAI 隐式处理 reasoning,无需 round-trip 字段
+  - o3
+  - chatgpt
+
+drop_reasoning_content: true        # OpenAI 不接受 unknown 字段
+backfill_reasoning_content: false
+drop_empty_content_with_tools: false
+supports_parallel_tool_calls_param: true
+supports_vision: true               # gpt-4o, gpt-4-vision 等

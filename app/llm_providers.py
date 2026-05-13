@@ -140,6 +140,7 @@ class LLMProvider:
     # Whitelist so a stray YAML field can't poison unrelated behavior.
     _OVERLAY_KEYS: tuple = (
         "hosts",
+        "model_fragments",   # 2026-05-13: model-name routing fallback
         "drop_reasoning_content",
         "backfill_reasoning_content",
         "drop_empty_content_with_tools",
@@ -180,7 +181,7 @@ class LLMProvider:
             for k, v in data.items():
                 if k not in self._OVERLAY_KEYS:
                     continue
-                if k == "hosts" and isinstance(v, list):
+                if k in ("hosts", "model_fragments") and isinstance(v, list):
                     v = tuple(v)
                 setattr(self, k, v)
                 applied.append(k)

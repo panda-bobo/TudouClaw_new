@@ -1,0 +1,16 @@
+# DeepSeek (api.deepseek.com / api.deepseek.ai)
+# 思考模式 (deepseek-r1 / deepseek-v 系列): reasoning_content 必须 round-trip.
+# 也是 chat-text-only,不接受 image_url content parts
+# (vision 走单独的 deepseek-vl endpoint).
+
+hosts:
+  - deepseek
+
+model_fragments:
+  - deepseek
+
+drop_reasoning_content: false       # MUST keep, DeepSeek 必需
+backfill_reasoning_content: true    # 历史每条 assistant 都补
+drop_empty_content_with_tools: true # 同 MiMo
+supports_parallel_tool_calls_param: true   # 接受 parallel_tool_calls 参数
+supports_vision: false              # api.deepseek.com 文本模型不接受 image_url

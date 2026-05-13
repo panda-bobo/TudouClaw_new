@@ -1,0 +1,13 @@
+# 通义千问 Qwen (dashscope / aliyuncs)
+
+hosts:
+  - dashscope
+  - aliyuncs
+  - qwen
+
+model_fragments:
+  - qwen
+  - tongyi
+
+drop_empty_content_with_tools: true
+coerce_list_content_to_string: true
