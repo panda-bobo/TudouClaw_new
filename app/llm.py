@@ -725,6 +725,44 @@ def _strip_images_for_text_only(messages: list[dict]) -> tuple[list[dict], int]:
     return out, stripped
 
 
+# Hosts / model-name fragments that demand `reasoning_content` round-trip
+# on assistant messages. When the agent's history has an assistant with
+# tool_calls but no captured reasoning_content (model decided not to
+# think before calling, or context-compression dropped it), these
+# providers 400 with:
+#   "The reasoning_content in the thinking mode must be passed back"
+# We pre-emptively inject a placeholder so the request goes through.
+_THINKING_HOST_FRAGMENTS = (
+    "xiaomimimo.com",   # MiMo (Xiaomi)
+    "deepseek.com",
+    "deepseek.ai",
+    "ark.cn-",          # Volces Ark (DeepSeek-r1 hosted)
+)
+_THINKING_MODEL_FRAGMENTS = (
+    "mimo",
+    "deepseek-r",       # deepseek-r1 / deepseek-r-1
+    "deepseek-v",       # deepseek-v3 / v4 (some have thinking-mode variants)
+    "o1",                # OpenAI o1 (also requires reasoning round-trip)
+    "thinking",
+    "qwq",               # Qwen with-Question reasoning
+)
+
+
+def _is_thinking_mode_target(target_url: str, target_model: str) -> bool:
+    """Whether the target needs reasoning_content round-trip for assistants
+    that have tool_calls. Conservative: if either url or model matches a
+    known thinking-mode fragment, return True."""
+    u = (target_url or "").lower()
+    m = (target_model or "").lower()
+    for frag in _THINKING_HOST_FRAGMENTS:
+        if frag in u:
+            return True
+    for frag in _THINKING_MODEL_FRAGMENTS:
+        if frag in m:
+            return True
+    return False
+
+
 def _sanitize_messages_for_openai(messages: list[dict],
                                     target_url: str = "",
                                     target_model: str = "") -> list[dict]:
@@ -741,7 +779,7 @@ def _sanitize_messages_for_openai(messages: list[dict],
     # Single source of truth: LLMProvider.supports_vision in app/llm_providers.py.
     # Operators can opt providers in/out via llm_provider_configs/<name>.yaml.
     try:
-        _strategy = resolve_strategy(target_url)
+        _strategy = resolve_strategy(target_url, target_model)
         _vision_ok = bool(getattr(_strategy, "supports_vision", True))
     except Exception:
         _vision_ok = True  # conservative: don't strip when we can't resolve
@@ -909,6 +947,26 @@ def _sanitize_messages_for_openai(messages: list[dict],
                 and isinstance(clean.get("content"), str)
                 and not clean["content"].strip()):
             clean.pop("content", None)
+
+        # ── Thinking-mode reasoning_content round-trip (2026-05-13) ──
+        # MiMo / DeepSeek-thinking / o1 / qwq reject assistant messages
+        # that have tool_calls but no reasoning_content with:
+        #   "The reasoning_content in the thinking mode must be passed
+        #   back to the API."
+        # The model didn't always emit reasoning_content (some quick
+        # tool-routing decisions skip the chain-of-thought), or it got
+        # lost during history compaction. Inject a non-empty placeholder
+        # so the API accepts the message — this is what the prior
+        # auto-recovery (line ~2908) tried to fix reactively.
+        if (role == "assistant"
+                and clean.get("tool_calls")
+                and not (clean.get("reasoning_content") or "").strip()
+                and _is_thinking_mode_target(target_url, target_model)):
+            clean["reasoning_content"] = (
+                "(no chain-of-thought captured for this tool-routing "
+                "decision; placeholder injected to satisfy thinking-mode "
+                "API contract)"
+            )
 
         # Tool message content must be a string (some providers reject list).
         if role == "tool" and not isinstance(clean.get("content"), str):
@@ -1155,7 +1213,7 @@ def _sanitize_messages_for_openai(messages: list[dict],
     # Each LLM is its own self-contained adapter object. Resolution = one
     # call; per-message transform = one method call per message. Adding a
     # new LLM doesn't touch this code.
-    adapter = resolve_strategy(target_url)
+    adapter = resolve_strategy(target_url, target_model)
     # Fold first: providers with `max_tool_call_rounds` capped (e.g. GLM-
     # 4.5-air) need older tool rounds collapsed into plain text BEFORE
     # per-message field transforms run on the resulting messages.

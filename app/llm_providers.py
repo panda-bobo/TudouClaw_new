@@ -89,6 +89,11 @@ class LLMProvider:
     # Identity — override in subclass
     name: str = "generic"
     hosts: tuple = ()
+    # 2026-05-13: model-name fragments for adapter selection when URL
+    # alone doesn't disambiguate (e.g. proxies, custom front, tests with
+    # no URL). resolve_strategy(url, model) checks both — URL hosts
+    # first (as before), model_fragments as a tiebreaker.
+    model_fragments: tuple = ()
 
     # Field policy — declare quirks via class fields where possible
     # (subclass overrides these as simple attributes; rarely need to
@@ -361,12 +366,25 @@ def register_provider(adapter: LLMProvider) -> None:
     _provider_adapters.append(adapter)
 
 
-def resolve_strategy(url: str) -> LLMProvider:
-    """Return the most-recently-registered adapter that matches the URL,
-    or the default adapter if none match."""
+def resolve_strategy(url: str, model: str = "") -> LLMProvider:
+    """Return the most-recently-registered adapter that matches the URL
+    (or, as a tiebreaker, the model name fragment), or the default
+    adapter if none match.
+
+    URL match wins. Only when URL doesn't pin a provider do we look
+    at the model name — useful when a proxy hides the real host or
+    when callers pass model without URL (e.g. unit tests, abstract
+    routing layers).
+    """
     for adapter in reversed(_provider_adapters):
         if adapter.matches(url):
             return adapter
+    if model:
+        m_lower = model.lower()
+        for adapter in reversed(_provider_adapters):
+            for frag in (getattr(adapter, "model_fragments", ()) or ()):
+                if frag and frag in m_lower:
+                    return adapter
     return _default_adapter
 
 
@@ -399,6 +417,7 @@ class AnthropicProvider(LLMProvider):
 class DeepSeekProvider(LLMProvider):
     name = "deepseek"
     hosts = ("deepseek",)
+    model_fragments = ("deepseek",)
     drop_reasoning_content = False           # MUST keep
     backfill_reasoning_content = True        # required on every assistant
     drop_empty_content_with_tools = True
@@ -466,11 +485,32 @@ class LMStudioProvider(LLMProvider):
     drop_empty_content_with_tools = True
 
 
+class MiMoProvider(LLMProvider):
+    """Xiaomi MiMo (mimo-v2.5-pro etc.) — thinking-mode model.
+
+    2026-05-13: agent reported `400 Param Incorrect` from
+    token-plan-sgp.xiaomimimo.com:
+        "The reasoning_content in the thinking mode must be passed
+         back to the API."
+    Without explicit provider config, MiMo URLs resolved to the base
+    LLMProvider whose default `drop_reasoning_content = True` stripped
+    the field — guaranteeing the 400. Mirror DeepSeek's settings:
+    keep + backfill reasoning_content on every assistant turn.
+    """
+    name = "mimo"
+    hosts = ("xiaomimimo.com", "mimo.xiaomi.com")
+    model_fragments = ("mimo",)
+    drop_reasoning_content = False     # MUST keep, MiMo requires
+    backfill_reasoning_content = True  # auto-fill empty reasoning
+    drop_empty_content_with_tools = True
+
+
 # Register at import time. Order: less-specific first, more-specific last
 # (since last-registered wins on URL ambiguity).
 for _adapter in (OpenAIProvider(), AnthropicProvider(),
                  DeepSeekProvider(), GLMProvider(), QwenProvider(),
-                 VolcesProvider(), OllamaProvider(), LMStudioProvider()):
+                 VolcesProvider(), OllamaProvider(), LMStudioProvider(),
+                 MiMoProvider()):
     register_provider(_adapter)
 
 
