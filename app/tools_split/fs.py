@@ -404,8 +404,82 @@ def _format_write_result(path_str: str, content: str, byte_count: int,
 
 # ── edit_file ────────────────────────────────────────────────────────
 
+def _mark_stale_read_results_for_path(agent, target_abs_path: str) -> int:
+    """Mark prior read_file tool_results for ``target_abs_path`` as STALE.
+
+    User asked: "如果不行就把错误记忆清理掉" — when edit_file keeps
+    failing because the agent is referencing an outdated read_file
+    result from earlier in this conversation, surface a clear marker
+    so the next read shows the file is gone from memory.
+
+    Strategy: walk agent.messages, find every read_file tool_call for
+    target_abs_path, REPLACE the matching tool result's content with
+    a one-line `[STALE — re-read required]` marker. Keeps the
+    message structure intact so tool_call ↔ tool_result pairing
+    isn't broken (which would crash the sanitizer's Pass 3).
+
+    Returns the number of stale read results marked.
+    """
+    if agent is None:
+        return 0
+    msgs = getattr(agent, "messages", None)
+    if not isinstance(msgs, list) or not msgs:
+        return 0
+    # Pass 1: collect tool_call_ids of read_file calls targeting this path.
+    import json as _json
+    stale_ids: set[str] = set()
+    for m in msgs:
+        if m.get("role") != "assistant":
+            continue
+        for tc in (m.get("tool_calls") or []):
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function") or {}
+            if fn.get("name") != "read_file":
+                continue
+            args_raw = fn.get("arguments", "{}")
+            try:
+                args = (_json.loads(args_raw)
+                        if isinstance(args_raw, str) else args_raw)
+                if not isinstance(args, dict):
+                    continue
+            except Exception:
+                continue
+            target = (args.get("path") or args.get("file_path") or "").strip()
+            if not target:
+                continue
+            # Match by absolute-path equivalence (paths can be relative
+            # in args; resolve before compare).
+            try:
+                target_abs = (target if os.path.isabs(target)
+                              else os.path.abspath(target))
+            except Exception:
+                target_abs = target
+            if target_abs == target_abs_path:
+                tc_id = tc.get("id", "")
+                if tc_id:
+                    stale_ids.add(tc_id)
+    if not stale_ids:
+        return 0
+    # Pass 2: rewrite matching tool_result contents to a STALE marker.
+    marked = 0
+    stale_marker = (
+        f"[STALE — file {target_abs_path} was edited or attempted-to-be"
+        f"-edited after this read. The content captured here is no "
+        f"longer reliable. Call read_file({target_abs_path}) again "
+        f"before quoting any field name or line content from this read.]"
+    )
+    for m in msgs:
+        if (m.get("role") == "tool"
+                and m.get("tool_call_id") in stale_ids
+                and not str(m.get("content") or "").startswith("[STALE —")):
+            m["content"] = stale_marker
+            marked += 1
+    return marked
+
+
 def _tool_edit_file(path: str, old_string: str, new_string: str,
-                    **_: Any) -> str:
+                    **ctx: Any) -> str:
     pol = _sandbox.get_current_policy()
     try:
         p = pol.safe_path(path, for_write=True)
@@ -420,6 +494,20 @@ def _tool_edit_file(path: str, old_string: str, new_string: str,
 
     count = text.count(old_string)
     if count == 0:
+        # 2026-05-13: also auto-mark stale read_file results in agent
+        # memory so it can't quote outdated field names again. The
+        # marker survives one more turn; the next edit_file attempt
+        # will see "[STALE — re-read required]" instead of the
+        # outdated content.
+        try:
+            caller_id = (ctx.get("_caller_agent_id", "")
+                         if isinstance(ctx, dict) else "")
+            agent = (_get_caller_agent(caller_id)
+                     if caller_id else None)
+            stale_marked = _mark_stale_read_results_for_path(
+                agent, str(p))
+        except Exception:
+            stale_marked = 0
         # 2026-05-13: actionable "not found" error.
         # Real symptom: agent wrote `kms_key_rotation_enabled` /
         # `rotation_days` from memory but file actually has
@@ -460,6 +548,16 @@ def _tool_edit_file(path: str, old_string: str, new_string: str,
             preview = "\n".join(
                 f"{i:>4}  {ln}" for i, ln in enumerate(
                     file_lines[:preview_n], start=1))
+            stale_note = ""
+            if stale_marked:
+                stale_note = (
+                    f"\n\n[Auto-cleanup] {stale_marked} stale "
+                    f"read_file result(s) for this file in your "
+                    f"history have been marked '[STALE — re-read "
+                    f"required]'. Your earlier 'memory' of this "
+                    f"file's content is no longer accessible — you "
+                    f"MUST call read_file again before the next edit."
+                )
             return (
                 f"Error: old_string not found in {path}.\n"
                 f"Likely cause: the text you provided doesn't match the "
@@ -472,6 +570,7 @@ def _tool_edit_file(path: str, old_string: str, new_string: str,
                 f"DO NOT retry with the same old_string. Either copy "
                 f"from the preview above, or call read_file first to "
                 f"refresh your view, then retry."
+                f"{stale_note}"
             )
         except Exception:
             return f"Error: old_string not found in {path}"
