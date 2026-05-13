@@ -420,7 +420,61 @@ def _tool_edit_file(path: str, old_string: str, new_string: str,
 
     count = text.count(old_string)
     if count == 0:
-        return f"Error: old_string not found in {path}"
+        # 2026-05-13: actionable "not found" error.
+        # Real symptom: agent wrote `kms_key_rotation_enabled` /
+        # `rotation_days` from memory but file actually has
+        # `enable_key_rotation` / `interval`. Old error just said
+        # "not found" — agent retried with same wrong text 4 times
+        # then gave up. Now we surface the file head + best-effort
+        # nearest-match hint so the agent can self-correct on the
+        # next attempt instead of looping or guessing.
+        try:
+            from difflib import get_close_matches
+            # Search the first non-empty line of old_string against
+            # all lines in the file — usually a unique signature word.
+            target_line = next(
+                (ln for ln in old_string.splitlines() if ln.strip()), "")
+            file_lines = text.splitlines()
+            hint = ""
+            if target_line:
+                # Match by stripped content so whitespace differences
+                # don't hide near-misses
+                stripped_lines = [ln.strip() for ln in file_lines]
+                target_stripped = target_line.strip()
+                close = get_close_matches(
+                    target_stripped, stripped_lines, n=3, cutoff=0.55)
+                if close:
+                    hint_lines = []
+                    for cl in close:
+                        # Find the original (non-stripped) line + line number
+                        for i, sl in enumerate(stripped_lines, start=1):
+                            if sl == cl:
+                                hint_lines.append(
+                                    f"  line {i}: {file_lines[i-1]!r}")
+                                break
+                    hint = (
+                        "\n\nClosest matches in the file (line numbers + "
+                        "actual indentation/spelling):\n" +
+                        "\n".join(hint_lines))
+            preview_n = min(40, len(file_lines))
+            preview = "\n".join(
+                f"{i:>4}  {ln}" for i, ln in enumerate(
+                    file_lines[:preview_n], start=1))
+            return (
+                f"Error: old_string not found in {path}.\n"
+                f"Likely cause: the text you provided doesn't match the "
+                f"file byte-for-byte (whitespace, indentation, field "
+                f"names changed since you last read it)."
+                f"{hint}\n\n"
+                f"First {preview_n} lines of the file (use these for "
+                f"the next edit_file call, NOT your memory):\n"
+                f"{preview}\n\n"
+                f"DO NOT retry with the same old_string. Either copy "
+                f"from the preview above, or call read_file first to "
+                f"refresh your view, then retry."
+            )
+        except Exception:
+            return f"Error: old_string not found in {path}"
     if count > 1:
         return (f"Error: old_string found {count} times in {path}. "
                 "Must be unique. Provide more context.")
