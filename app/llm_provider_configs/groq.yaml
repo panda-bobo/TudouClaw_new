@@ -1,0 +1,14 @@
+# Groq Cloud (api.groq.com)
+# OpenAI-compat,LPU 加速,host Llama 3 / Mixtral / DeepSeek-R1-distill /
+# Qwen 等。行为接近 OpenAI 基线,但若加载 deepseek-r1-distill 等思考模式
+# 模型,可能要单独把 drop_reasoning_content 改成 false。
+
+hosts:
+  - api.groq.com
+
+model_fragments:
+  - groq
+
+drop_empty_content_with_tools: true     # tool-call routing 安全选项
+supports_parallel_tool_calls_param: true
+supports_vision: true                   # llama-3.2-vision 等

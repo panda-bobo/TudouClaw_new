@@ -5,16 +5,18 @@
 
 约定:**每个 provider 都建一份 yaml**,即使所有字段跟 base default 一致 — 这样新成员看 `ls llm_provider_configs/` 就知道支持哪些 provider + 各自的怪癖。
 
-当前已建:
+当前已建 (11 个):
 - `mimo.yaml`        — Xiaomi MiMo (思考模式)
 - `deepseek.yaml`    — DeepSeek (思考模式)
 - `glm.yaml`         — 智谱 GLM
 - `qwen.yaml`        — 通义千问
 - `volces.yaml`      — 火山引擎 Ark
-- `openai.yaml`      — 基线
+- `groq.yaml`        — Groq Cloud (LPU 加速)
+- `openai.yaml`      — OpenAI 基线
 - `anthropic.yaml`   — Claude
 - `ollama.yaml`      — 本地 :11434
 - `lmstudio.yaml`    — 本地 :1234
+- `mlx.yaml`         — 本地 Apple Silicon MLX :10240
 
 加新 provider: 写 Python class (subclass `LLMProvider`) **+** 同名 yaml.
 

@@ -1,0 +1,15 @@
+# 本地 Apple Silicon MLX server (mlx-lm / mlx-vlm)
+# 默认端口 10240。OpenAI-compat。本地模型,JSON parser 较严:
+#   - assistant 同时有 tool_calls + 空 content → 删 content
+#   - 不接受 assistant.name 字段
+
+hosts:
+  - "10240"
+  - /mlx
+  - mlx-server
+
+model_fragments:
+  - mlx
+
+drop_empty_content_with_tools: true
+drop_assistant_name: true

@@ -486,6 +486,36 @@ class LMStudioProvider(LLMProvider):
     drop_empty_content_with_tools = True
 
 
+class GroqProvider(LLMProvider):
+    """Groq cloud (api.groq.com) — OpenAI-compat, fast LPU inference.
+
+    Hosts Llama 3 / Mixtral / DeepSeek-R1-distill / qwen variants.
+    Behaviour close to OpenAI baseline but explicit class lets us
+    tune per-model quirks (e.g. when groq's deepseek-r1-distill
+    needs reasoning_content round-trip).
+    """
+    name = "groq"
+    hosts = ("api.groq.com",)
+    model_fragments = ("groq",)
+    drop_empty_content_with_tools = True   # safer for tool-call routing
+    supports_parallel_tool_calls_param = True
+    supports_vision = True   # groq's llama-3.2-vision endpoints support it
+
+
+class MLXProvider(LLMProvider):
+    """Local Apple-Silicon MLX server (mlx-lm / mlx-vlm).
+
+    Default port 10240 (and other ports — match by /v1 + localhost
+    fallback isn't practical, so we match the explicit ports we know
+    about). User can override via mlx.yaml hosts list.
+    """
+    name = "mlx"
+    hosts = ("10240", "/mlx", "mlx-server")
+    model_fragments = ("mlx",)
+    drop_empty_content_with_tools = True
+    drop_assistant_name = True   # local servers usually strict
+
+
 class MiMoProvider(LLMProvider):
     """Xiaomi MiMo (mimo-v2.5-pro etc.) — thinking-mode model.
 
@@ -511,7 +541,7 @@ class MiMoProvider(LLMProvider):
 for _adapter in (OpenAIProvider(), AnthropicProvider(),
                  DeepSeekProvider(), GLMProvider(), QwenProvider(),
                  VolcesProvider(), OllamaProvider(), LMStudioProvider(),
-                 MiMoProvider()):
+                 MiMoProvider(), GroqProvider(), MLXProvider()):
     register_provider(_adapter)
 
 

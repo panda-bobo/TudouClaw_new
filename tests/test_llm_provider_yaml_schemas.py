@@ -62,7 +62,7 @@ def test_every_yaml_has_a_provider():
 
 @pytest.mark.parametrize("name", [
     "mimo", "deepseek", "glm", "qwen", "volces",
-    "openai", "anthropic", "ollama", "lmstudio",
+    "groq", "openai", "anthropic", "ollama", "lmstudio", "mlx",
 ])
 def test_yaml_only_contains_whitelisted_keys(name):
     path = os.path.join(_CONFIG_DIR, f"{name}.yaml")
@@ -79,7 +79,7 @@ def test_yaml_only_contains_whitelisted_keys(name):
 
 @pytest.mark.parametrize("name", [
     "mimo", "deepseek", "glm", "qwen", "volces",
-    "openai", "anthropic", "ollama", "lmstudio",
+    "groq", "openai", "anthropic", "ollama", "lmstudio", "mlx",
 ])
 def test_yaml_loads_without_error(name):
     """Each yaml is valid YAML + parses to a dict."""
@@ -151,6 +151,30 @@ def test_overlay_key_includes_model_fragments():
     """Regression guard: the new model_fragments key must be in the
     overlay whitelist or yaml-driven fragments won't apply."""
     assert "model_fragments" in llm_providers.LLMProvider._OVERLAY_KEYS
+
+
+def test_groq_provider_registered():
+    p = _provider_by_name("groq")
+    assert "api.groq.com" in p.hosts
+    assert "groq" in p.model_fragments
+    assert p.supports_parallel_tool_calls_param is True
+
+
+def test_mlx_provider_registered():
+    p = _provider_by_name("mlx")
+    assert "10240" in p.hosts
+    assert p.drop_empty_content_with_tools is True
+    assert p.drop_assistant_name is True
+
+
+def test_no_known_url_falls_to_generic():
+    """Unknown URL still falls to base default (`generic`) — that's
+    expected for truly unknown providers. The 11 named providers
+    above should cover everything operators register, but a typo or
+    custom proxy URL wouldn't match any host fragment."""
+    adapter = llm_providers.resolve_strategy(
+        "https://some-unknown-cloud.example.com/v1/chat", "")
+    assert adapter.name == "generic"
 
 
 def test_yaml_list_to_tuple_normalization():
