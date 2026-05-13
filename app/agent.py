@@ -1290,6 +1290,70 @@ def _summarize_old_history(messages: list[dict],
             recent_start = adjusted
             old_slice = messages[sys_prefix_end:recent_start]
 
+    # 2026-05-13: orphan-tool prevention pass.
+    # _find_safe_cut_idx and the safety-net above only protect against
+    # cuts that LAND on a tool message. They miss the case where:
+    #   - cut lands on a user / system / assistant-without-tool_calls,
+    #     AND
+    #   - immediately AFTER the cut (in the recent slice) there are
+    #     tool messages whose owning assistant.tool_calls is in the
+    #     about-to-be-compressed old_slice
+    # The downstream sanitizer's Pass 1.5 then drops those tools as
+    # orphans, the next LLM call sees zero tool_results, and the model
+    # hallucinates "tool execution denied by guardrail" (real symptom
+    # from 13:20 today).
+    #
+    # Fix: scan recent slice for tool messages whose tool_call_id has no
+    # matching assistant.tool_calls inside recent. If found, walk back
+    # recent_start to include that owning assistant.
+    def _scan_orphan_tools_in_recent() -> int:
+        """Return the new recent_start that includes all orphan-source
+        assistants, or current recent_start if no orphans."""
+        nonlocal_start = recent_start
+        # Build set of tool_call_ids already provided by assistants in
+        # the current recent slice — anything tool with id outside this
+        # set is an orphan.
+        provided_in_recent: set[str] = set()
+        for _m in messages[nonlocal_start:]:
+            if _m.get("role") == "assistant":
+                for _tc in (_m.get("tool_calls") or []):
+                    if isinstance(_tc, dict):
+                        _tid = _tc.get("id", "")
+                        if _tid:
+                            provided_in_recent.add(_tid)
+        # Find first orphan tool in recent
+        first_orphan_id = ""
+        for _m in messages[nonlocal_start:]:
+            if (_m.get("role") == "tool"
+                    and _m.get("tool_call_id")
+                    and _m.get("tool_call_id") not in provided_in_recent):
+                first_orphan_id = _m.get("tool_call_id", "")
+                break
+        if not first_orphan_id:
+            return nonlocal_start
+        # Walk back from cut to find the assistant.tool_calls owning it
+        for _j in range(nonlocal_start - 1, sys_prefix_end - 1, -1):
+            _mm = messages[_j]
+            if _mm.get("role") == "assistant":
+                for _tc in (_mm.get("tool_calls") or []):
+                    if (isinstance(_tc, dict)
+                            and _tc.get("id") == first_orphan_id):
+                        return _j
+        # Owner not found — accept the orphan, sanitizer will drop it.
+        # (Better than infinite loop or crash.)
+        return nonlocal_start
+
+    _new_start = _scan_orphan_tools_in_recent()
+    if _new_start < recent_start:
+        logger.info(
+            "HISTORY_SUMMARY: orphan-tool prevention — backed up "
+            "recent_start %d → %d to include owning assistant.tool_calls "
+            "agent=%s",
+            recent_start, _new_start,
+            agent.id[:8] if agent else "?")
+        recent_start = _new_start
+        old_slice = messages[sys_prefix_end:recent_start]
+
     # 2026-05-11: preserve user messages verbatim.
     # The LLM-generated summary is fact-only and aggressively compressed
     # (300-500 chars target), which means user instructions get
