@@ -1678,6 +1678,50 @@ function showModal(name) {
       }
     } catch (e) { console.warn('v2 enhance inject failed', e); }
   }
+  // 2026-05-13: populate the Protocol dropdown from the yaml-driven
+  // provider catalog so the UI reflects all 11 registered adapters
+  // (mimo / deepseek / glm / qwen / volces / groq / mlx / ...) — not
+  // just the legacy 3 hardcoded options (openai / ollama / claude).
+  // The yaml schemas in app/llm_provider_configs/ are the single
+  // source of truth.
+  if (name === 'add-provider' || name === 'edit-provider') {
+    try { _populateProtocolDropdowns(); } catch(e) { console.warn('protocol dropdown populate failed', e); }
+  }
+}
+
+async function _populateProtocolDropdowns() {
+  // Cache once — protocols don't change without a restart.
+  if (!window._protocolCatalogCache) {
+    var resp = await api('GET', '/api/portal/providers/protocols');
+    window._protocolCatalogCache = (resp && resp.protocols) || [];
+  }
+  var protos = window._protocolCatalogCache;
+  if (!protos.length) return;
+  ['ap-kind', 'ep-kind'].forEach(function(elId) {
+    var sel = document.getElementById(elId);
+    if (!sel) return;
+    var prevValue = sel.value;
+    // Wipe + repopulate so re-opens stay in sync if catalog ever
+    // refreshed (e.g. after operator edits a yaml + restarts).
+    sel.innerHTML = '';
+    protos.forEach(function(p) {
+      var opt = document.createElement('option');
+      opt.value = p.name;
+      var labelExtras = [];
+      if (p.thinking_mode) labelExtras.push('thinking');
+      if (!p.supports_vision) labelExtras.push('no-vision');
+      var suffix = labelExtras.length ? ' [' + labelExtras.join(',') + ']' : '';
+      opt.textContent = (p.label || p.name) + suffix;
+      sel.appendChild(opt);
+    });
+    // Restore prior selection if it's still valid
+    if (prevValue) {
+      var match = Array.prototype.find.call(sel.options, function(o){
+        return o.value === prevValue;
+      });
+      if (match) sel.value = prevValue;
+    }
+  });
 }
 function hideModal(name) {
   document.getElementById('modal-'+name).classList.add('hidden');

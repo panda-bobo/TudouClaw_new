@@ -39,6 +39,54 @@ async def list_providers(
 
 
 # ---------------------------------------------------------------------------
+# Protocol catalog — yaml schema as single source of truth (2026-05-13)
+# ---------------------------------------------------------------------------
+
+@router.get("/providers/protocols")
+async def list_protocols(
+    user: CurrentUser = Depends(get_current_user),
+):
+    """List all registered LLM protocol adapters (one per yaml schema).
+
+    Frontend uses this to populate the "Protocol" dropdown in the
+    Add/Edit Provider modal so the UI is consistent with the yaml
+    schemas in app/llm_provider_configs/. Replaces the hardcoded
+    3-option dropdown (openai/ollama/claude) that didn't expose
+    deepseek / mimo / glm / qwen / volces / groq / mlx etc.
+    """
+    try:
+        from ...llm_providers import _provider_adapters
+
+        items = []
+        for p in _provider_adapters:
+            # Build a friendly label for the dropdown — no quirks here,
+            # just enough info for a user to pick the right one.
+            hosts_hint = ""
+            if p.hosts:
+                # First host is usually the canonical one
+                hosts_hint = f" — {p.hosts[0]}"
+            items.append({
+                "name": p.name,                   # machine id (the
+                                                  # value posted back)
+                "label": p.name + hosts_hint,
+                "hosts": list(p.hosts),
+                "model_fragments": list(
+                    getattr(p, "model_fragments", ()) or ()),
+                # Surface a few quirks so the UI can show a tooltip or
+                # warn (e.g. "this is a thinking-mode model").
+                "thinking_mode": (
+                    getattr(p, "drop_reasoning_content", True) is False
+                    and getattr(p, "backfill_reasoning_content", False)
+                ),
+                "supports_vision": bool(
+                    getattr(p, "supports_vision", True)),
+            })
+        return {"protocols": items, "count": len(items)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
 # Register a new provider — matches legacy handlers/providers.py
 # ---------------------------------------------------------------------------
 
