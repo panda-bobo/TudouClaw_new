@@ -12469,6 +12469,44 @@ Write only the summary body. Do not include any preamble or prefix."""
                     })
             except Exception as _trace_err:
                 logger.debug("[expert] trace write failed: %s", _trace_err)
+            # P2 (2026-05-13): silent-exit fallback. BaiLongma's pattern
+            # — every reply must reach the user, even if the model
+            # forgot to emit one. If chat() is about to return an empty
+            # final_content, synthesize a short status message based on
+            # what we know (plan progress, recent errors, budget hit,
+            # iteration cap) so the user is never left wondering "did
+            # anything happen?". Today's session had 5+ "agent 没继续推
+            # 进 / 没执行啥就直接结束了" frustrations from this.
+            if not final_content or not str(final_content).strip():
+                try:
+                    fallback = self._synthesize_silent_exit_reply()
+                except Exception as _fb_err:
+                    logger.debug("silent-exit fallback failed: %s", _fb_err)
+                    fallback = ""
+                if fallback:
+                    final_content = fallback
+                    # Surface to UI + persist as an assistant turn so the
+                    # next chat sees we already replied (no double-send).
+                    try:
+                        self.messages.append({
+                            "role": "assistant",
+                            "content": final_content,
+                            "_source": "runtime_fallback",
+                        })
+                        self._log("message", {
+                            "role": "assistant",
+                            "content": final_content,
+                            "source": "runtime_fallback",
+                        })
+                        if callable(on_event):
+                            on_event(AgentEvent(time.time(), "message", {
+                                "role": "assistant",
+                                "content": final_content,
+                                "source": "runtime_fallback",
+                            }))
+                    except Exception:
+                        pass
+
             # Real-time persist (2026-05-12): force-save the final
             # assistant response on chat() exit. Without force=True, the
             # throttle could swallow this save if the previous iteration
@@ -14872,6 +14910,73 @@ Write only the summary body. Do not include any preamble or prefix."""
 
         lines.append("</plan_state>")
         return "\n".join(lines)
+
+    def _synthesize_silent_exit_reply(self) -> str:
+        """P2 — runtime fallback when chat() is about to return empty.
+
+        Inspect agent state and craft a short status message so the
+        user always gets SOMETHING. BaiLongma's send_message-fallback
+        pattern: model can forget to emit, runtime backstops.
+
+        Priority order (most-actionable first):
+          1. Plan has pending steps  → "did N steps, X pending, next: Y"
+          2. Recent tool errors      → "tried X, hit error: <quote>"
+          3. Iteration cap hit       → "ran N iterations, paused"
+          4. Generic                 → "本轮处理结束 — 没有新内容回复"
+        """
+        # 1. Plan-pending — most-actionable
+        try:
+            plan = getattr(self, "_current_plan", None)
+            if plan and getattr(plan, "status", "") == "active":
+                from .agent_types import StepStatus as _SS
+                steps = getattr(plan, "steps", []) or []
+                done = [s for s in steps
+                        if getattr(s, "status", None) == _SS.COMPLETED]
+                pending = [s for s in steps
+                           if getattr(s, "status", None) in (
+                               _SS.PENDING, _SS.IN_PROGRESS)]
+                if pending and (done or len(steps) > 1):
+                    next_title = (getattr(pending[0], "title", "")
+                                  or "").strip() or "(未命名)"
+                    return (
+                        f"⏸ 本轮处理告一段落。\n\n"
+                        f"已完成 {len(done)}/{len(steps)} 步,"
+                        f"待办 {len(pending)} 步。\n"
+                        f"**下一步**: {next_title}\n\n"
+                        f"回复「继续」让我接下去做,或告诉我新指令。"
+                    )
+        except Exception:
+            pass
+
+        # 2. Recent tool errors — surface the last one if any
+        try:
+            recent_errors = []
+            # Scan last 10 messages for tool errors
+            for _m in (self.messages or [])[-10:]:
+                if _m.get("role") != "tool":
+                    continue
+                _c = _m.get("content") or ""
+                if isinstance(_c, list):
+                    _c = str(_c)
+                _c = str(_c)
+                if (_c.lower().startswith(("error:", "[error]"))
+                        or "exit code" in _c[:80].lower()
+                        and "0" not in _c[:80]):
+                    recent_errors.append(_c[:200])
+            if recent_errors:
+                return (
+                    f"⚠️ 本轮遇到工具错误,已暂停:\n\n"
+                    f"`{recent_errors[-1]}`\n\n"
+                    f"告诉我下一步怎么做。"
+                )
+        except Exception:
+            pass
+
+        # 3. Default — generic "I'm here, nothing to add"
+        return (
+            "✓ 本轮处理结束 — 没有新内容需要回复。\n"
+            "如果还有任务,告诉我下一步。"
+        )
 
     def _strip_leaked_system_blocks(self, content: str) -> str:
         """Strip any XML-tagged system-prompt block the LLM accidentally
