@@ -15043,6 +15043,12 @@ Write only the summary body. Do not include any preamble or prefix."""
                 "[REPEAT-READ #",
                 "[CACHED-GLOB #",
                 "[READ-VALVE-WARN",
+                # 2026-05-14: sanitizer Pass 3b salvage placeholder for
+                # orphan asst.tool_calls. Leaks into chat as
+                # "[Earlier tool call(s) — results not preserved across
+                # history compaction: edit_file({..." — clearly internal,
+                # never useful for the user.
+                "[Earlier tool call(s) — results not preserved",
             ]
 
         import re as _re
