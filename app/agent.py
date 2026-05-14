@@ -1236,9 +1236,14 @@ def _summarize_old_history(messages: list[dict],
                 summary_text = str(_m.get("content") or "").strip()
                 if not summary_text:
                     summary_text = str(_m.get("reasoning_content") or "").strip()
+            # NOTE: this only logs the LLM-generated NARRATIVE size, NOT
+            # the full assembled summary block. The full block also
+            # includes STRUCTURED_FACTS (deterministic extraction) and
+            # USER_VERBATIM (preserved user text). Real "compression
+            # ratio" is logged below at HISTORY_SUMMARY ASSEMBLED.
             logger.info(
-                "HISTORY_SUMMARY: compressed %d old messages (~%d chars) "
-                "into %d-char summary (agent=%s)",
+                "HISTORY_SUMMARY narrative: %d old msgs (~%d chars) → "
+                "%d-char LLM narrative (agent=%s)",
                 len(old_slice),
                 sum(len(str(m.get("content") or "")) for m in old_slice),
                 len(summary_text), agent.id[:8] if agent else "?")
@@ -1468,6 +1473,30 @@ def _summarize_old_history(messages: list[dict],
             "事实以上面 STRUCTURED_FACTS / USER_VERBATIM 为准]\n"
             + summary_text)
         summary_content = "\n\n".join(parts)
+
+        # Honest compression metric: full assembled block size, with the
+        # breakdown so anyone reading the log can see WHY the ratio is
+        # what it is (a high USER_VERBATIM number means we preserved
+        # user intent verbatim, which is GOOD even though it inflates
+        # the "compressed" size).
+        try:
+            _orig = sum(len(str(m.get("content") or ""))
+                        for m in old_slice)
+            _facts_len = len(structured_block) if structured_block else 0
+            _verbatim_len = sum(len(s) for s in user_lines)
+            _narr_len = len(summary_text)
+            _total = len(summary_content)
+            _ratio = (_total / _orig * 100) if _orig else 0
+            logger.info(
+                "HISTORY_SUMMARY ASSEMBLED: %d msgs %d chars → "
+                "%d chars (%.0f%%) "
+                "[facts=%d verbatim=%d(%dmsgs) narr=%d] "
+                "agent=%s",
+                len(old_slice), _orig, _total, _ratio,
+                _facts_len, _verbatim_len, len(user_lines), _narr_len,
+                agent.id[:8] if agent else "?")
+        except Exception:
+            pass
 
         # Step 4 cache write — store full_content + content hash so a
         # future iteration with identical old_slice can byte-reuse and
