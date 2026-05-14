@@ -413,8 +413,14 @@ def _handle_restore_engine(handler, path, hub, body, auth, actor_name, user_role
 
 def _handle_compact_memory(handler, path, hub, body, auth, actor_name, user_role) -> bool:
     agent_id = path.split("/")[4]
-    ok = hub.compact_agent_memory(agent_id)
-    handler._json({"ok": ok})
+    result = hub.compact_agent_memory(agent_id)
+    # 2026-05-14 P1: hub now returns a dict with before/after stats
+    # (transcript_compacted, history_compacted, chars_before/after).
+    # Legacy bool path still supported for nonexistent agents.
+    if isinstance(result, dict):
+        handler._json({"ok": True, **result})
+    else:
+        handler._json({"ok": bool(result)})
     return True
 
 

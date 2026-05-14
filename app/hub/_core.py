@@ -4127,13 +4127,27 @@ class Hub:
             return []
         return list(agent.replay_transcript())
 
-    def compact_agent_memory(self, agent_id: str) -> bool:
-        """Compact an agent's transcript and message memory."""
+    def compact_agent_memory(self, agent_id: str) -> dict | bool:
+        """Compact an agent's transcript and message memory.
+
+        2026-05-14 P1: now also force-compresses self.messages via
+        _summarize_old_history (the live chat history that goes to
+        the LLM each turn). Returns the dict from
+        Agent.compact_memory() so the portal can show real
+        before/after numbers; falls back to bool on legacy callers.
+        """
         agent = self.agents.get(agent_id)
         if not agent:
             return False
-        agent.compact_memory()
-        return True
+        result = agent.compact_memory()
+        # Persist the post-compaction state so reload sees the
+        # compressed messages (otherwise a server restart would lose
+        # the savings).
+        try:
+            self._save_agents()
+        except Exception:
+            pass
+        return result if isinstance(result, dict) else True
 
     # ---- Summary ----
 

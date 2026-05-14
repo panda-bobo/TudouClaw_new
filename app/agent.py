@@ -3954,13 +3954,79 @@ class Agent:
                              f"turns={len(results)} total_turn_count={self.turn_count}")
         return results
 
-    def compact_memory(self):
-        """Compact transcript and query engine messages (prevent unbounded growth)."""
+    def compact_memory(self, force_history_summary: bool = True):
+        """Compact transcript, query engine messages, AND the live
+        ``self.messages`` chat history (prevent unbounded growth).
+
+        2026-05-14 P1: previously only compacted ``transcript`` +
+        ``query_engine`` (both auxiliary stores). The actual chat
+        history that gets sent to the LLM each turn — ``self.messages``
+        — was untouched, so a manual /compact didn't free any context
+        for the next chat call. This is the user-visible "I ran
+        /compact but nothing changed" symptom.
+
+        Now: also force-runs ``_summarize_old_history`` against
+        ``self.messages`` with aggressive parameters (lower keep_last,
+        zero min_chars threshold) so the next chat() call sees the
+        9-section summary in place of the old turns.
+
+        Returns a dict describing what changed (chars freed, etc.)
+        for the portal /compact endpoint to surface to the user.
+        """
         keep = max(10, self.profile.max_context_messages // 3)
         self.transcript.compact(keep_last=keep)
         engine = self._ensure_query_engine()
         engine.compact_messages_if_needed()
         self.history_log.add("memory_compact", f"kept_last={keep}")
+
+        result = {
+            "transcript_compacted": True,
+            "engine_compacted": True,
+            "history_compacted": False,
+            "chars_before": 0,
+            "chars_after": 0,
+        }
+
+        if not force_history_summary:
+            return result
+
+        # Force-summarize self.messages so the NEXT chat() call sees
+        # the compressed prefix. Bypass the normal threshold gates
+        # (which exist for auto-compact triggering) by passing tiny
+        # threshold + min_old_chars.
+        try:
+            chars_before = sum(
+                len(str(m.get("content") or "")) for m in self.messages)
+            new_messages = _summarize_old_history(
+                self.messages,
+                self,
+                threshold_chars=1,           # bypass "fat & long" gate
+                keep_last=4,                 # aggressive — keep just last 4
+                max_tool_msgs=0,             # bypass tool-count gate
+            )
+            if new_messages is not self.messages:
+                # _summarize_old_history returns a NEW list; swap it in.
+                self.messages = new_messages
+                result["history_compacted"] = True
+                result["chars_before"] = chars_before
+                result["chars_after"] = sum(
+                    len(str(m.get("content") or ""))
+                    for m in self.messages)
+                self.history_log.add(
+                    "history_compact",
+                    f"{chars_before}→{result['chars_after']} chars")
+                logger.info(
+                    "Manual /compact: history %d → %d chars (agent=%s)",
+                    chars_before, result["chars_after"], self.id[:8])
+            else:
+                logger.info(
+                    "Manual /compact: history unchanged (no slice "
+                    "long enough to compress, agent=%s)",
+                    self.id[:8])
+        except Exception as e:
+            logger.warning("compact_memory: history compress failed: %s", e)
+
+        return result
 
     def replay_transcript(self) -> tuple[str, ...]:
         """Replay all user messages from transcript store."""
