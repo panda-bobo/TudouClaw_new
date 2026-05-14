@@ -1084,10 +1084,26 @@ def _sanitize_messages_for_openai(messages: list[dict],
                             f"{_name}({_args})"
                         )
                     if _orphan_summary_parts:
+                        # 2026-05-14: previous placeholder format
+                        # ("[Earlier tool call(s) — results not preserved
+                        # across history compaction: ...]") looked like
+                        # plain English chat narration; LLMs trained on
+                        # it and faithfully echoed it back as their reply
+                        # text — the user saw the placeholder character-
+                        # by-character via streaming text_delta, even
+                        # though the post-stream strip filter caught the
+                        # final assembled message. Two changes here:
+                        #   1) Wrap with ⟦…⟧ unusual brackets — visually
+                        #      distinct, far less mimic-able than [...].
+                        #   2) Inline an explicit "do not echo" directive
+                        #      so the LLM treats it as a framework note,
+                        #      not chat content.
                         _orphan_summary = (
-                            "[Earlier tool call(s) — results not "
-                            "preserved across history compaction: "
-                            + "; ".join(_orphan_summary_parts) + "]"
+                            "⟦framework note (invisible to user, do NOT "
+                            "echo this line in your reply): prior "
+                            "tool_call(s) lost during history "
+                            "compaction — "
+                            + "; ".join(_orphan_summary_parts) + "⟧"
                         )
                         mm = dict(m)
                         mm.pop("tool_calls", None)

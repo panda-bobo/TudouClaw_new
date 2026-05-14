@@ -11621,9 +11621,31 @@ Write only the summary body. Do not include any preamble or prefix."""
                                               "content": final_content})
                             self._log(evt.kind, evt.data)
                             _emit(evt)
+                        _raw_text = content or final_content
                         _final_text = self._strip_leaked_system_blocks(
-                            self._strip_redundant_plan_block(
-                                content or final_content))
+                            self._strip_redundant_plan_block(_raw_text))
+                        # 2026-05-14: when the strip filter removed
+                        # leaked-internal text that ALREADY went out via
+                        # streaming text_delta, the bubble is already
+                        # drawn in the chat UI — push a retract so the
+                        # user doesn't see the placeholder linger. Same
+                        # mechanism the meta-promise loop uses (line
+                        # ~11342). Trigger when the raw text was
+                        # non-trivial AND the cleaned text shrank by at
+                        # least 50% (avoids retracting on minor strips
+                        # like a stray <dir> tag mid-reply).
+                        try:
+                            _raw_len = len(_raw_text or "")
+                            _clean_len = len(_final_text or "")
+                            if (_raw_len >= 40
+                                    and _clean_len <= _raw_len // 2):
+                                _emit(AgentEvent(
+                                    time.time(),
+                                    "retract_last_assistant",
+                                    {"reason": "leaked_internal_marker",
+                                     "removed_chars": _raw_len - _clean_len}))
+                        except Exception:
+                            pass
                         self.messages.append({"role": "assistant",
                                               "content": _final_text,
                                               "_source": "llm"})
@@ -15060,11 +15082,16 @@ Write only the summary body. Do not include any preamble or prefix."""
                 "[CACHED-GLOB #",
                 "[READ-VALVE-WARN",
                 # 2026-05-14: sanitizer Pass 3b salvage placeholder for
-                # orphan asst.tool_calls. Leaks into chat as
-                # "[Earlier tool call(s) — results not preserved across
-                # history compaction: edit_file({..." — clearly internal,
-                # never useful for the user.
+                # orphan asst.tool_calls. Old format (still in stale
+                # persisted messages) used "[Earlier tool call(s) —
+                # results not preserved across history compaction".
+                # New format (post-2026-05-14 fix) uses ⟦framework
+                # note⟧ wrapping. Match BOTH — old strings still flow
+                # through agents whose history pre-dates the fix.
                 "[Earlier tool call(s) — results not preserved",
+                "⟦framework note (invisible to user, do NOT echo",
+                # Final-pass compaction salvage (app/llm.py:1380-1384)
+                "(框架在 sanitize 阶段丢失了对话上下文",
             ]
 
         import re as _re
