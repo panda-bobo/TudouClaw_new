@@ -2692,9 +2692,23 @@ class MemoryManager:
         }
         if tool_name in _SKIP_TOOLS:
             return
-        # Skip error results
-        if summary and summary.strip().startswith(("DENIED:", "Error:", "error:", "Failed")):
-            return
+        # 2026-05-14: previously skipped errors entirely ("Skip error
+        # results" — DENIED/Error/Failed prefixed). That made the
+        # buffer self-selecting for success: flush_action_buffer's
+        # LLM summarizer saw only happy outcomes and confidently
+        # concluded "成功完成,无失败原因" even when the agent was
+        # mid-failure-loop. Real symptom: 刘老师 stuck in terraform
+        # validate retry loop, MEMORY recorded "Agent 通过执行 bash
+        # 命令和编辑文件成功完成了任务" — false success.
+        # Now: keep errors in the buffer with an explicit `is_error`
+        # flag so the summarizer prompt can ground its outcome on
+        # actual error vs. success ratio.
+        is_error = bool(
+            summary
+            and summary.strip().startswith(
+                ("DENIED:", "Error:", "error:", "Failed", "❌")
+            )
+        )
 
         buf = self._action_buffer.setdefault(agent_id, [])
         buf.append({
@@ -2702,6 +2716,7 @@ class MemoryManager:
             "summary": summary[:200],
             "details": details[:150] if details else "",
             "ts": time.strftime("%H:%M"),
+            "is_error": is_error,
         })
         # Cap buffer to prevent unbounded growth
         if len(buf) > 50:
@@ -2718,25 +2733,65 @@ class MemoryManager:
         if len(buf) < 2:
             return None
 
-        # Group by tool for concise summary
-        tool_groups: dict[str, list[str]] = {}
+        # 2026-05-14: track error count per tool so the prompt has
+        # concrete grounding signal (was previously silent on errors —
+        # see buffer_agent_action change above).
+        tool_groups: dict[str, list[dict]] = {}
+        total_actions = 0
+        total_errors = 0
         for a in buf:
-            tool_groups.setdefault(a["tool"], []).append(a["summary"])
+            tool_groups.setdefault(a["tool"], []).append(a)
+            total_actions += 1
+            if a.get("is_error"):
+                total_errors += 1
 
         actions_text = ""
-        for tool, summaries in tool_groups.items():
-            actions_text += f"- {tool}: {len(summaries)}次 — {summaries[0]}"
-            if len(summaries) > 1:
-                actions_text += f" ... {summaries[-1]}"
+        for tool, entries in tool_groups.items():
+            ok_n = sum(1 for e in entries if not e.get("is_error"))
+            err_n = len(entries) - ok_n
+            label = (f"{tool}: {len(entries)}次"
+                     + (f" ({err_n} 失败)" if err_n else ""))
+            actions_text += f"- {label} — {entries[0]['summary']}"
+            if len(entries) > 1:
+                actions_text += f" ... {entries[-1]['summary']}"
             actions_text += "\n"
+
+        # Honest success/ambiguity ratio for the prompt to lean on.
+        if total_errors >= total_actions / 2:
+            outcome_hint = (
+                "（错误占多数,大概率仍在故障/重试中,不要写"
+                "\"成功完成\"）"
+            )
+        elif total_errors > 0:
+            outcome_hint = (
+                f"（{total_errors}/{total_actions} 步失败,outcome 必须"
+                "如实包含失败信号,不要笼统说\"完成\"）"
+            )
+        else:
+            outcome_hint = (
+                "（buffer 里没看到失败信号,但这只是工具调用层面,"
+                "无法判断用户最终目标是否达成 —— 措辞限定为"
+                "\"已执行 X / Y\",不要断言任务完成）"
+            )
 
         if llm_call:
             try:
                 agg_prompt = (
-                    "以下是 Agent 在一次会话中的操作列表。"
-                    "请用一句话总结最终结果和状态变化（不要列举每个操作）:\n\n"
-                    f"{actions_text}\n"
-                    "格式: [日期] 最终结果，状态变化，失败原因（如有）"
+                    "以下是 Agent 在一段会话中的工具调用记录。"
+                    "用**一句话**(≤80字)如实描述发生了什么，仅限工具层面。"
+                    "禁止使用以下表述:\n"
+                    "  - \"成功完成了任务\" / \"任务已完成\" / \"圆满\""
+                    " — 你看不到用户的真实目标,无权下成败结论\n"
+                    "  - \"无失败原因\" — 不要主动断言\n"
+                    "  - \"状态从 X 变为 Y\" — 不要编造状态机\n"
+                    "允许的写法举例:\n"
+                    "  - \"已执行 5 次 bash + 2 次 edit_file,1 次失败"
+                    "(account-factory validate)\"\n"
+                    "  - \"读取 outputs.tf 后修改 kms_key 引用,后续"
+                    "validate 仍报错,未收尾\"\n"
+                    f"\n动作列表:\n{actions_text}\n"
+                    f"判断提示: {outcome_hint}\n\n"
+                    "输出格式: [日期] <一句话事实>"
                 )
                 result_text = llm_call(agg_prompt).strip()
             except Exception:
