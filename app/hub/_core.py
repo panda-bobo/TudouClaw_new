@@ -447,6 +447,20 @@ class Hub:
         except Exception as _he:
             logger.warning("Failed to start heartbeat loop: %s", _he)
 
+        # P3 (2026-05-13): background deterministic scheduler.
+        # Layer 1 only — checks plan_stuck / stale_todos / etc., zero
+        # LLM calls. Disable via TUDOU_BG_SCHED=0 (e.g. for tests / CI).
+        try:
+            if os.environ.get("TUDOU_BG_SCHED", "1") != "0":
+                from .. import background_scheduler as _bg
+                _interval = float(
+                    os.environ.get("TUDOU_BG_SCHED_INTERVAL", "60") or 60)
+                _bg.start_for(self, interval_sec=_interval)
+        except Exception as _bg_err:
+            logger.warning(
+                "BackgroundScheduler init failed: %s — agent state checks "
+                "won't run, but main flow is unaffected.", _bg_err)
+
         # ── Boot-time upstream register (worker-node mode) ──
         # When TUDOU_UPSTREAM_HUB is set, this hub is a worker reporting
         # to a master. Heartbeat alone is not enough — the master needs
