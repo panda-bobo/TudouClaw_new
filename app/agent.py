@@ -11435,11 +11435,41 @@ Write only the summary body. Do not include any preamble or prefix."""
 
                     if content and not _suppress_display:
                         final_content = content
-                        evt = AgentEvent(time.time(), "message",
-                                         {"role": "assistant",
-                                          "content": content})
-                        self._log(evt.kind, evt.data)
-                        _emit(evt)
+                        # 2026-05-14: was emitting RAW content here, so
+                        # any internal-marker leak the LLM produced
+                        # (e.g. mimo echoing the ⟦framework note⟩
+                        # placeholder despite the inline "do NOT echo"
+                        # instruction) reached the UI as a chat bubble
+                        # AND a MESSAGE log event. The post-stream strip
+                        # at line ~11650 cleaned self.messages[] but
+                        # this earlier emit had already drawn the
+                        # bubble; retract events were too late.
+                        # Fix: strip BEFORE emitting/logging. If the
+                        # strip removes everything (pure leak), suppress
+                        # the message entirely.
+                        try:
+                            _display = self._strip_leaked_system_blocks(
+                                content)
+                        except Exception:
+                            _display = content
+                        if _display and _display.strip():
+                            evt = AgentEvent(
+                                time.time(), "message",
+                                {"role": "assistant",
+                                 "content": _display})
+                            self._log(evt.kind, evt.data)
+                            _emit(evt)
+                        else:
+                            # Whole reply was a leak. Skip emit and tell
+                            # the UI to remove anything already streamed.
+                            try:
+                                _emit(AgentEvent(
+                                    time.time(),
+                                    "retract_last_assistant",
+                                    {"reason": "leaked_internal_only",
+                                     "removed_chars": len(content)}))
+                            except Exception:
+                                pass
                     if _dup_abort:
                         # 把兜底消息发给 UI 作为本轮最终回复
                         try:
