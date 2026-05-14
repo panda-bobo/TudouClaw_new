@@ -610,8 +610,15 @@ def build_settings_block(agent_role: str = "") -> str:
     """Compose PART 2 — the operator-configured rules block.
 
     Reads ``global_system_prompt`` (legacy) + ``scene_prompts`` list,
-    filters by ``scope`` / ``roles``, wraps each in a labeled
-    ``<system_prompt name="...">`` block so the LLM can tell them apart.
+    filters by ``scope`` / ``roles``, labels each with a markdown
+    ``## <name>`` header so the LLM can tell them apart.
+
+    2026-05-14: switched from ``<system_prompt name="...">`` XML envelope
+    to markdown headers. The XML form was being mimicked back into chat
+    replies (LLM saw the outer envelope in its system message and
+    produced ``<system_prompt name=\"my reply\">...`` in output).
+    Markdown headers carry the same labeling intent without the
+    pattern-mimic hazard.
 
     Returns "" when nothing is configured — caller should drop the
     empty string rather than emit blank lines.
@@ -622,11 +629,7 @@ def build_settings_block(agent_role: str = "") -> str:
     # Legacy: global_system_prompt as the first block (back-compat)
     legacy = cfg.get("global_system_prompt") or ""
     if isinstance(legacy, str) and legacy.strip():
-        parts.append(
-            f"<system_prompt name=\"Global Rules\">\n"
-            f"{legacy.strip()}\n"
-            f"</system_prompt>"
-        )
+        parts.append(f"## Global Rules\n{legacy.strip()}")
 
     scene_prompts = cfg.get("scene_prompts", [])
     if not isinstance(scene_prompts, list):
@@ -647,11 +650,9 @@ def build_settings_block(agent_role: str = "") -> str:
         if not prompt:
             continue
         if name:
-            parts.append(
-                f"<system_prompt name=\"{name}\">\n{prompt}\n</system_prompt>"
-            )
+            parts.append(f"## {name}\n{prompt}")
         else:
-            parts.append(f"<system_prompt>\n{prompt}\n</system_prompt>")
+            parts.append(f"## System Rule\n{prompt}")
 
     return "\n\n".join(parts) if parts else ""
 

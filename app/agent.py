@@ -5052,7 +5052,12 @@ class Agent:
         except Exception:
             pass
         if global_sp:
-            parts.append(f"<system_prompt name=\"Global Rules\">\n{global_sp}\n</system_prompt>")
+            # 2026-05-14: dropped <system_prompt name="..."> XML wrapper
+            # in favor of markdown headers — the LLM kept mimicking the
+            # outer envelope into chat replies ("<system_prompt
+            # name=\"my answer\">..." leaks). Markdown headers carry
+            # the same labeling semantics with no temptation to mimic.
+            parts.append(f"## Global Rules\n{global_sp}")
 
         # System prompts (unified list) — filter by scope/role
         agent_role = getattr(self, "role", "") or ""
@@ -5074,9 +5079,9 @@ class Agent:
             if not prompt:
                 continue
             if name:
-                parts.append(f"<system_prompt name=\"{name}\">\n{prompt}\n</system_prompt>")
+                parts.append(f"## {name}\n{prompt}")
             else:
-                parts.append(f"<system_prompt>\n{prompt}\n</system_prompt>")
+                parts.append(f"## System Rule\n{prompt}")
 
         return "\n\n".join(parts) if parts else ""
 
@@ -15018,6 +15023,17 @@ Write only the summary body. Do not include any preamble or prefix."""
                 "memory_context",
                 "attachment_contract",
                 "dir",
+                # 2026-05-14: covers <system_prompt name="..."> and bare
+                # <system_prompt> envelopes. The wrapper was retired from
+                # NEW prompts (replaced by markdown ## headers) but old
+                # persisted messages[0] / scene_prompts still contain it,
+                # and the LLM has been mimicking the envelope into chat
+                # replies. Strip aggressively until the persisted state
+                # ages out.
+                "system_prompt",
+                # IntentHintSchema wraps category hints in <intent_hint>;
+                # never useful to surface to the user as chat text.
+                "intent_hint",
             ]
         # 2026-05-13: phrase list catches non-XML internal markers the
         # LLM accidentally regurgitates. User reported the

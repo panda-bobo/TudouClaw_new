@@ -699,7 +699,10 @@ class AgentLLMMixin:
         except Exception:
             pass
         if global_sp:
-            parts.append(f"<system_prompt name=\"Global Rules\">\n{global_sp}\n</system_prompt>")
+            # 2026-05-14: see app/system_prompt.py — switched from XML
+            # envelope to markdown headers to prevent the LLM from
+            # mimicking <system_prompt name="..."> back into chat.
+            parts.append(f"## Global Rules\n{global_sp}")
 
         # System prompts (unified list) — filter by scope/role
         agent_role = getattr(self, "role", "") or ""
@@ -719,9 +722,9 @@ class AgentLLMMixin:
             if not prompt:
                 continue
             if name:
-                parts.append(f"<system_prompt name=\"{name}\">\n{prompt}\n</system_prompt>")
+                parts.append(f"## {name}\n{prompt}")
             else:
-                parts.append(f"<system_prompt>\n{prompt}\n</system_prompt>")
+                parts.append(f"## System Rule\n{prompt}")
 
         return "\n\n".join(parts) if parts else ""
 
