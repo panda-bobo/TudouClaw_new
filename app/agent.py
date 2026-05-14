@@ -750,18 +750,38 @@ def _extract_structured_facts(old_slice: list[dict]) -> dict:
             out["tools_called_count"][name] = (
                 out["tools_called_count"].get(name, 0) + 1)
 
-            if name in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
-                p = args.get("file_path") or args.get("notebook_path")
+            # 2026-05-14: tool-name set was Claude Code's PascalCase
+            # (Write/Edit/Bash/TodoWrite), but TudouClaw uses snake_case
+            # (write_file/edit_file/bash/task_update). Result: facts
+            # extraction silently produced empty `files_touched` /
+            # `bash_commands` / `todos_changed` for years — the
+            # post-compression STRUCTURED_FACTS block had only tool
+            # counts + errors, no specifics. Agent forgot what it edited
+            # / what it ran → reread same files / reran same commands.
+            # Real symptom: 刘老师 looping on terraform validate retries.
+            # Fix: handle BOTH naming conventions; keep PascalCase for
+            # any sub-agent that bridges to Claude Code.
+            _name_lc = name.lower()
+            if (name in ("Write", "Edit", "MultiEdit", "NotebookEdit")
+                    or _name_lc in ("write_file", "edit_file",
+                                    "multi_edit", "notebook_edit",
+                                    "create_file", "patch_file")):
+                p = (args.get("filePath")             # TudouClaw camelCase
+                     or args.get("file_path")         # snake variant
+                     or args.get("notebook_path")     # Claude notebook
+                     or args.get("path"))             # generic
                 if p:
                     out["files_touched"].append(
                         {"tool": name, "path": str(p)})
-            elif name == "Bash":
+            elif name == "Bash" or _name_lc == "bash":
                 cmd = str(args.get("command") or "")
                 if cmd:
                     short = (cmd if len(cmd) <= 200
                              else cmd[:200] + f"…(+{len(cmd)-200}c)")
                     out["bash_commands"].append(short)
-            elif name == "TodoWrite":
+            elif (name == "TodoWrite"
+                  or _name_lc in ("task_update", "todo_write",
+                                  "plan_update")):
                 out["todos_changed"] += 1
 
     # Pass 2: tool results — which attempts errored?
