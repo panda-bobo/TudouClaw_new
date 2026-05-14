@@ -10742,6 +10742,12 @@ Write only the summary body. Do not include any preamble or prefix."""
             # --- Skill System: auto-match and inject skills ---
             self._active_skill_ids = []
             self._chat_start_time = time.time()
+            # 2026-05-14 P2: reset per-chat() emergency-compact retry
+            # flag so each user turn gets one fresh chance at the
+            # context-overflow recovery path. Without this reset, a
+            # second long task in the same agent session would skip
+            # the retry and fail outright.
+            self._ctx_overflow_retried = False
             try:
                 registry = get_prompt_pack_registry()
                 if registry.store.get_active():
@@ -11513,6 +11519,72 @@ Write only the summary body. Do not include any preamble or prefix."""
                                 f"LLM provider '{_eff_provider}' timed out "
                                 f"(model={_eff_model}): {llm_err}"
                             ) from llm_err
+                        # 2026-05-14 P2: detect "context too long" errors
+                        # and try ONE emergency-compact retry. Providers
+                        # use varied wording — match a broad pattern set.
+                        # Only retry on the FIRST occurrence per chat()
+                        # invocation (tracked via _ctx_overflow_retried)
+                        # so we don't infinite-loop if compression alone
+                        # can't bring us under the cap.
+                        _err_lc = str(llm_err).lower()
+                        _ctx_overflow = any(
+                            kw in _err_lc for kw in (
+                                "context_length_exceeded",
+                                "context length exceeded",
+                                "maximum context length",
+                                "prompt is too long",
+                                "input is too long",
+                                "context window",
+                                "tokens exceed",
+                                "too many tokens",
+                                "request too large",
+                            )
+                        )
+                        if (_ctx_overflow
+                                and not getattr(self,
+                                                "_ctx_overflow_retried",
+                                                False)):
+                            self._ctx_overflow_retried = True
+                            try:
+                                _before_n = len(self.messages)
+                                _before_c = sum(
+                                    len(str(m.get("content") or ""))
+                                    for m in self.messages)
+                                self.messages = _summarize_old_history(
+                                    self.messages,
+                                    self,
+                                    threshold_chars=1,
+                                    keep_last=2,         # only keep last 2
+                                    max_tool_msgs=0,
+                                )
+                                _after_c = sum(
+                                    len(str(m.get("content") or ""))
+                                    for m in self.messages)
+                                logger.warning(
+                                    "P2 emergency-compact: context overflow "
+                                    "(%s) → forced summary, %d msgs %d→%d "
+                                    "chars; retrying ONCE (agent=%s)",
+                                    str(llm_err)[:80],
+                                    _before_n, _before_c, _after_c,
+                                    self.id[:8])
+                                # Rebuild outbound messages and continue
+                                # the while-iteration loop so the next
+                                # pass picks up the compacted history.
+                                _msgs_to_send = _drop_orphan_tool_messages(
+                                    _compress_old_tool_results(
+                                        _summarize_old_history(
+                                            _hoist_skill_guides(
+                                                _strip_old_images(
+                                                    self._inject_dynamic_context(
+                                                        self.messages,
+                                                        current_query=_user_text))),
+                                            self)))
+                                continue
+                            except Exception as _compact_err:
+                                logger.warning(
+                                    "P2 emergency-compact itself failed: "
+                                    "%s — re-raising original error",
+                                    _compact_err)
                         raise
                     msg = response.get("message", {})
                     content = _ensure_str_content(msg.get("content"))
