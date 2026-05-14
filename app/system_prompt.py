@@ -45,78 +45,69 @@ logger = logging.getLogger("tudou.system_prompt")
 
 # ── Tool usage ─────────────────────────────────────────────────────
 
+# 2026-05-14 governance: this block describes framework MECHANICS only
+# (how tool_calls work, what plan_update does, where 📂/📦 markers come
+# from). Behavioral rules ("don't repeat the plan in chat", "don't
+# narrate before tool calls", batching style, etc.) live in admin-
+# editable scene_prompts so each install can tune them — code stays
+# the mechanism, scene_prompts hold the policy.
 _TOOL_RULES_ZH = (
-    "## 工具使用\n"
-    "• 独立工具 → 一条回复里并行返回多个 tool_calls;只在后一个依赖"
-    "前一个结果时串行。\n"
-    "• ≥3 步任务 → 先 plan_update(action='create_plan') 建计划,每步带 "
-    "acceptance 字段;complete_step 时 result_summary 引用 acceptance。"
-    "调完 plan_update 后直接进 start_step + 真正的工具调用,TODOs 面板"
-    "已经在显示步骤,无需在 chat 里复述。\n"
-    "• 独立子任务 → team_create 起子 agent 并行(3 个并行 ~1min vs "
-    "串行 ~3min)。\n"
-    "• Bash / 敏感写入 可能需要审批;被拒就告知用户并提替代方案。\n"
-    "• 📂 **指定输入文件**:任务消息出现 `## 📂 本步骤指定输入文件` 块时,"
-    "只 read_file 列出的路径(框架已经准备好上下游)。列表不够完成任务,"
-    "明确回复『缺少 X 文件』让上游补 —— glob_files / find / search 在"
-    "这种场景下毫无意义,得不到额外信息。\n"
-    "• 📦 **交付契约**:任务可能带 `output_files` + `must_contain` + "
-    "`min_lines`。每次 write_file 后框架会自动校验并以 ✅/❌ 注入 system "
-    "message。看到 ❌ 修复 args 重写;全部 ✅ 之后才能调 finalize_step / "
-    "complete_step —— 框架会拒绝未达标的完成动作。"
+    "## 工具调用机制\n"
+    "• **并行返回**:独立的 tool_calls 在一条回复里同时返回(框架自动并行执行);"
+    "后一个工具依赖前一个结果时才串行。\n"
+    "• **plan_update**:`action='create_plan'` 建计划,每步含 `acceptance` 字段;"
+    "`complete_step` 的 `result_summary` 必须引用 acceptance;TODOs 面板自动渲染。\n"
+    "• **team_create**:启子 agent 并行(适合可独立分解的子任务)。\n"
+    "• **审批**:bash / 敏感写入可能需要审批,被拒时告知用户并提替代方案。\n"
+    "• **📂 指定输入文件**:任务消息含 `## 📂 本步骤指定输入文件` 块时,"
+    "read_file 列表里的路径即可(框架已准备好上下游)。列表不足回复『缺少 X 文件』。\n"
+    "• **📦 交付契约**:任务可能带 `output_files` + `must_contain` + "
+    "`min_lines`,框架在 write_file 后自动校验并以 ✅/❌ 注入 system message;"
+    "全部 ✅ 才能 finalize_step / complete_step。"
 )
 
 _TOOL_RULES_EN = (
-    "## Tools\n"
-    "• Independent tools → return multiple tool_calls in ONE response "
-    "(parallel). Serialize only when a later tool's args depend on an "
-    "earlier result.\n"
-    "• Multi-step tasks (3+) → plan_update(action='create_plan') FIRST, "
-    "each step with an `acceptance` field; complete_step's "
-    "result_summary references that acceptance. After plan_update goes "
-    "straight to start_step + the real tool call — the TODOs panel "
-    "already displays the plan, no need to restate it in chat.\n"
-    "• Independent subtasks → team_create for parallel sub-agents "
-    "(~1min for 3 parallel vs ~3min serial).\n"
-    "• Bash / sensitive writes may need approval; if denied, tell the "
-    "user and propose an alternative.\n"
-    "• 📂 **Pinned input files**: When the task message contains a "
-    "`## 📂 Pinned input files` block, read_file only the listed paths "
-    "(the framework already prepared upstream/downstream context). If "
-    "the list is insufficient, reply \"missing file X\" so upstream can "
-    "supply it — glob_files / find / search are useless here, they "
-    "won't surface anything new.\n"
-    "• 📦 **Deliverable contract**: A task may carry `output_files` + "
-    "`must_contain` + `min_lines`. After each write_file, the framework "
-    "auto-verifies and injects ✅/❌ status as a system message. On ❌ "
-    "fix the args and re-write; only after every output_file is ✅ may "
-    "you call finalize_step / complete_step — the framework rejects "
-    "completion attempts on unmet requirements."
+    "## Tool-call mechanics\n"
+    "• **Parallel-return**: independent tool_calls go in ONE response "
+    "(framework runs them in parallel); serialize only when a later "
+    "tool's args depend on an earlier result.\n"
+    "• **plan_update**: `action='create_plan'` builds a plan; each "
+    "step needs an `acceptance` field; `complete_step`'s "
+    "`result_summary` must reference it. The TODOs panel auto-renders "
+    "the plan.\n"
+    "• **team_create**: spawn parallel sub-agents for independently-"
+    "decomposable subtasks.\n"
+    "• **Approval**: bash / sensitive writes may need approval; on "
+    "denial, tell the user and propose an alternative.\n"
+    "• **📂 Pinned input files**: When the task message contains a "
+    "`## 📂 Pinned input files` block, read_file the listed paths "
+    "(framework already prepared upstream context). If the list is "
+    "insufficient, reply \"missing file X\".\n"
+    "• **📦 Deliverable contract**: A task may carry `output_files` + "
+    "`must_contain` + `min_lines`; framework auto-verifies after each "
+    "write_file and injects ✅/❌ status. Only after every output_file "
+    "is ✅ may you call finalize_step / complete_step."
 )
 
 
 # ── Knowledge & experience (Karpathy wiki pattern) ────────────────
 
+# 2026-05-14 governance: signatures only. Detailed memory-fact-extraction
+# policy lives in admin scene_prompt "Agent 记忆提取补充规则" (config.yaml).
 _KNOWLEDGE_RULES_ZH = (
-    "## 知识 / 经验\n"
-    "• 写：调 wiki_ingest(kind, title, body)。kind ∈ "
-    "experience(场景+行动规则) | methodology(方法论) | "
-    "template(写作/结构模板) | pattern(固定逻辑) | reference(规范/wiki)。"
-    "scope 默认本角色;跨角色共享传 scope='global'。\n"
-    "• 查：调 knowledge_lookup(query) — 一次查询里压完所有关键词。\n"
-    "• 装新工具能力 → 让用户从技能库 UI 安装(不要自建 skill 或写 SKILL.md)。\n"
-    "• save_experience 已弃用,新内容写 wiki。"
+    "## 知识 / 经验工具\n"
+    "• `wiki_ingest(kind, title, body, scope='role'|'global')`:"
+    "kind ∈ experience | methodology | template | pattern | reference。\n"
+    "• `knowledge_lookup(query)`:跨角色检索 wiki。\n"
+    "• 装新能力 → 让用户从技能库 UI 安装。"
 )
 
 _KNOWLEDGE_RULES_EN = (
-    "## Knowledge & Experience\n"
-    "• Write reusable lessons: wiki_ingest(kind, title, body). "
-    "kind ∈ experience | methodology | template | pattern | reference. "
-    "scope defaults to your role; pass scope='global' for cross-role.\n"
-    "• Query: knowledge_lookup(query) — pack all keywords in ONE call.\n"
-    "• New capabilities → ask user to install via Skill Registry UI "
-    "(do NOT create skills or write SKILL.md yourself).\n"
-    "• save_experience is deprecated; new entries go to wiki."
+    "## Knowledge / experience tools\n"
+    "• `wiki_ingest(kind, title, body, scope='role'|'global')`: "
+    "kind ∈ experience | methodology | template | pattern | reference.\n"
+    "• `knowledge_lookup(query)`: cross-role wiki search.\n"
+    "• New capabilities → ask the user to install via Skill Registry UI."
 )
 
 
