@@ -1181,35 +1181,77 @@ def _summarize_old_history(messages: list[dict],
             lines.append(f"[{role}] {content}")
         transcript = "\n".join(lines)
 
-        # 2026-05-11: prompt rewritten — Step 2/4.
-        # Old prompt had hard "300-500 字" cap → forced over-compression
-        # (real ratio ~27:1) and lost specificity. New prompt:
-        #   - no hard char cap; length matches information density
-        #   - tells LLM that user verbatim + structured facts will be
-        #     appended downstream, so it should focus on the
-        #     *connecting tissue*: reasoning, what was tried & ruled
-        #     out, why decisions were made — the bits that no
-        #     deterministic extractor can recover
-        #   - explicit anti-hallucination + anti-paraphrase rules
+        # 2026-05-14 P0: switched from a free-form "narrative writer"
+        # prompt to Claude Code's 9-section structured summary
+        # template. The previous free-form output was ~750 chars of
+        # rambling narrative; fresh-context agents couldn't reliably
+        # recover task intent / current work / next step from it.
+        #
+        # Claude Code's official template has 9 named sections that
+        # downstream agents are well-trained to consume. We let the LLM
+        # generate sections 1, 2, 5, 7, 8, 9 (the synthesizing ones)
+        # and downstream merge with our deterministic STRUCTURED_FACTS
+        # (sections 3, 4) + USER_VERBATIM (section 6) so we keep the
+        # no-hallucination guarantee on facts/files/errors/user-text.
+        #
+        # The user can see Claude Code's actual output style at the top
+        # of THIS conversation — it's the same template.
         prompt = (
-            "你正在为一个长程 agent 压缩对话历史。下游会单独保留 "
-            "(a) 所有 user 消息原文 (b) 通过代码确定性抽取的事实 "
-            "(改过的文件/失败的工具/做出的决定/产出的 artifact)。\n\n"
-            "因此你只需要写 **过程性叙事** — 把那些代码抽不出来的"
-            "推理脉络写下来。\n\n"
-            "硬性规则:\n"
-            "1. 中文。长度按信息密度决定,不设字数上下限 — 简单段落"
-            "几十字就够,复杂段落写多少都可以。\n"
-            "2. 只记历史里真实出现过的事,禁止编造、禁止脑补、禁止"
-            "替用户'升华'意图。\n"
-            "3. 优先记: agent 尝试过但放弃的方案 / 关键 trade-off "
-            "/ 推理依据 / 工具调用之间的因果链 / 错误后是怎么诊断的。\n"
-            "4. 不要列已完成的工具调用清单 (代码会单独抽), 不要复述 "
-            "user 原文 (会单独贴), 不要写 '总结一下' 这种 meta 句。\n"
-            "5. 用 markdown, 段落之间空行。\n\n"
-            "--- 历史开始 ---\n"
+            "Your task is to summarize this agent conversation so that "
+            "a fresh-context agent can resume the work without losing "
+            "intent. Use Claude Code's standard 9-section template. "
+            "Output STRICTLY in the format below, in this order, with "
+            "markdown ## headers exactly as named.\n\n"
+            "Sections 3 (Files), 4 (Errors), 6 (User messages) are "
+            "filled by deterministic code downstream — for those three "
+            "sections OUTPUT ONLY the literal placeholder lines shown. "
+            "Sections 1, 2, 5, 7, 8, 9 you write yourself based on the "
+            "history below.\n\n"
+            "Hard rules (violations get the summary rejected):\n"
+            "• Only state facts visible in the history. No invention, "
+            "no extrapolation of user intent.\n"
+            "• Section 1 must be detailed enough that a stranger could "
+            "understand WHY this work is happening.\n"
+            "• Section 8 must include file names + code snippets where "
+            "applicable for what was being worked on right before "
+            "compaction.\n"
+            "• Section 9 must directly continue Section 8 (not invent "
+            "new directions).\n"
+            "• Match the user's working language (zh/en/auto) — don't "
+            "force a translation.\n\n"
+            "═══════════ OUTPUT TEMPLATE ═══════════\n"
+            "## 1. Primary Request and Intent\n"
+            "<the user's explicit requests + the underlying goal, in "
+            "detail. This is the most important section.>\n\n"
+            "## 2. Key Technical Concepts\n"
+            "<bulleted list of technologies / frameworks / libraries / "
+            "domain concepts touched in this conversation>\n\n"
+            "## 3. Files and Code Sections\n"
+            "(deterministic — see STRUCTURED_FACTS block below)\n\n"
+            "## 4. Errors and Fixes\n"
+            "(deterministic — see STRUCTURED_FACTS block below)\n\n"
+            "## 5. Problem Solving\n"
+            "<problems hit + how solved + ongoing troubleshooting. "
+            "Include the agent's reasoning chains and dead ends — "
+            "stuff a deterministic extractor can't capture.>\n\n"
+            "## 6. All user messages\n"
+            "(deterministic — see USER_VERBATIM block below)\n\n"
+            "## 7. Pending Tasks\n"
+            "<bulleted list of explicitly-requested tasks not yet "
+            "complete. If none, write 'None.'>\n\n"
+            "## 8. Current Work\n"
+            "<precisely what was being worked on right before this "
+            "summary. Include file names, function names, what step of "
+            "the plan, what tool was about to be called. Be specific.>\n\n"
+            "## 9. Optional Next Step\n"
+            "<the next step DIRECTLY continuing Section 8. Must align "
+            "with user's most recent intent in Section 1. If the user "
+            "asked for clarification last, write 'Awaiting user reply' "
+            "instead of inventing a step.>\n"
+            "═══════════════════════════════════════\n\n"
+            "--- CONVERSATION HISTORY ---\n"
             f"{transcript}\n"
-            "--- 历史结束 ---"
+            "--- END HISTORY ---"
         )
         summary_text = ""
         try:
@@ -1222,11 +1264,15 @@ def _summarize_old_history(messages: list[dict],
             resp = _llm.chat_no_stream(
                 messages=[
                     {"role": "system",
-                     "content": ("你是 agent 长程记忆的过程叙事器。"
-                                 "user 原文和确定性事实都由代码单独保留,"
-                                 "你只负责写'代码抽不出来的推理脉络'。"
-                                 "禁止编造,禁止替用户脑补意图,"
-                                 "长度按信息密度自决。")},
+                     "content": (
+                         "You are a context-compaction summarizer. Your "
+                         "summary will replace the conversation in a "
+                         "fresh context window — a different agent will "
+                         "resume work from your output ALONE. Be "
+                         "specific, factual, and faithful to user "
+                         "intent. No hallucination. Follow the 9-section "
+                         "template exactly. Match the conversation's "
+                         "language (zh stays zh, en stays en).")},
                     {"role": "user", "content": prompt},
                 ],
                 model=_mdl, provider=_prov,
@@ -1447,32 +1493,87 @@ def _summarize_old_history(messages: list[dict],
             logger.warning("structured fact extraction failed: %s", e)
             structured_block = ""
 
-        # Final layout (top-to-bottom in the assembled system message):
-        #   1. Header   — covers-N counter
-        #   2. FACTS    — deterministic, append-only — agent ground truth
-        #   3. VERBATIM — user msgs original text — source of truth
-        #   4. NARRATIVE — LLM-generated reasoning glue
-        # Narrative goes LAST so it sits adjacent to the recent-K
-        # window; the agent reads "here's why we are where we are"
-        # then immediately sees the next live messages. FACTS + VERBATIM
-        # are the stable prefix (helps prompt cache).
-        parts: list[str] = [
-            f"[HISTORY_SUMMARY — 覆盖 {len(old_slice)} 条旧消息]"
-        ]
-        if structured_block:
-            parts.append(
-                "[STRUCTURED_FACTS — 代码确定性抽取, 比 narrative 可靠]\n"
-                + structured_block)
+        # 2026-05-14 P0: assembled output now follows Claude Code's
+        # 9-section template, interleaving the LLM-generated synthesis
+        # sections (1, 2, 5, 7, 8, 9) with our deterministic blocks
+        # (3 = files, 4 = errors — both from STRUCTURED_FACTS;
+        #  6 = user messages — from USER_VERBATIM).
+        #
+        # The summary_text from the LLM is expected to contain its own
+        # ## headers for sections 1/2/5/7/8/9 plus placeholder lines
+        # for 3/4/6. Downstream we substitute those placeholders with
+        # our deterministic blocks. If the LLM didn't follow the
+        # template exactly, we fall back to dumping its raw output and
+        # appending the deterministic blocks (still better than the old
+        # free-form narrative).
+        verbatim_md = ""
         if user_lines:
-            parts.append(
-                f"[USER_VERBATIM — 在被压缩历史里用户说过的话, "
-                f"按时序保留原文 ({len(user_lines)} 条)]\n"
+            verbatim_md = (
+                f"({len(user_lines)} messages preserved verbatim, "
+                "in time order)\n\n"
                 + "\n\n---\n\n".join(user_lines))
-        parts.append(
-            "[NARRATIVE — agent 推理脉络, 由 LLM 总结, 仅供理解上下文,"
-            "事实以上面 STRUCTURED_FACTS / USER_VERBATIM 为准]\n"
-            + summary_text)
-        summary_content = "\n\n".join(parts)
+
+        files_md = ""
+        errors_md = ""
+        if structured_block:
+            # _render_structured_facts emits sections like
+            # "### Files modified\n..." and "### Tool errors..."
+            # Split them out so they can fill sections 3 and 4.
+            for chunk in structured_block.split("\n\n"):
+                if chunk.startswith("### Files modified"):
+                    files_md = chunk[len("### Files modified\n"):].strip()
+                elif chunk.startswith("### Tool errors"):
+                    # Drop the "### Tool errors (do NOT blindly retry...)"
+                    # subtitle line — section 4's title carries that.
+                    body = chunk.split("\n", 1)[1] if "\n" in chunk else ""
+                    errors_md = body.strip()
+                # 'Tools called (top 8)' / 'Recent bash' / 'TodoWrite'
+                # remain inline in summary_text as supporting detail.
+                # Adding them as their own ## sections would inflate the
+                # template beyond Claude's standard 9.
+
+        # Try template substitution first. If the LLM produced the
+        # placeholder lines we asked for, swap them with deterministic
+        # content. If it didn't, fall back to "narrative + appendix".
+        merged = summary_text
+        merged = merged.replace(
+            "(deterministic — see STRUCTURED_FACTS block below)",
+            files_md or "_No files modified in this slice._",
+            1,
+        )
+        merged = merged.replace(
+            "(deterministic — see STRUCTURED_FACTS block below)",
+            errors_md or "_No tool errors in this slice._",
+            1,
+        )
+        merged = merged.replace(
+            "(deterministic — see USER_VERBATIM block below)",
+            verbatim_md or "_(no user messages in this slice)_",
+            1,
+        )
+
+        # Detect template-compliance: if no placeholder substitutions
+        # happened (LLM didn't follow template), fall back to flat
+        # layout so we at least preserve the deterministic blocks.
+        if merged == summary_text:
+            parts: list[str] = [
+                f"[HISTORY_SUMMARY — covers {len(old_slice)} old "
+                "messages]\n_(LLM did not follow 9-section template; "
+                "raw narrative + deterministic appendix below)_",
+                summary_text,
+            ]
+            if structured_block:
+                parts.append(
+                    "## Files / Errors / Tool stats (deterministic)\n"
+                    + structured_block)
+            if verbatim_md:
+                parts.append("## User messages (verbatim)\n" + verbatim_md)
+            summary_content = "\n\n".join(parts)
+        else:
+            summary_content = (
+                f"[HISTORY_SUMMARY — covers {len(old_slice)} old "
+                "messages, follows Claude-Code 9-section template]\n\n"
+                + merged)
 
         # Honest compression metric: full assembled block size, with the
         # breakdown so anyone reading the log can see WHY the ratio is
