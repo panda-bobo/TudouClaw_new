@@ -103,10 +103,20 @@ def _stream_chat_to_response(llm_mod, messages: list[dict],
         for ev in llm_mod.chat_stream_events(
                 messages, tools=tools,
                 provider=provider, model=model,
-                temperature=temperature):
+                temperature=temperature,
+                # 2026-05-13 P0: pass abort signal all the way down to
+                # the HTTP layer so a user clicking "stop" closes the
+                # TCP stream in 0ms instead of waiting for the LLM to
+                # finish generating its current chunk.
+                is_aborted=is_aborted):
             if callable(is_aborted) and is_aborted():
                 break
             etype = ev.get("type")
+            if etype == "aborted":
+                # HTTP layer already closed the stream; surface the
+                # marker upward so the caller knows it ended on abort,
+                # not natural completion.
+                break
             if etype == "text_delta":
                 chunk = ev.get("text") or ""
                 if chunk:

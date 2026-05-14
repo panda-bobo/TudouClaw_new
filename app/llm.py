@@ -3242,6 +3242,7 @@ def _openai_stream_events(base_url: str, api_key: str,
                           model: str = "",
                           _provider_id: str = "openai",
                           temperature: float | None = None,
+                          is_aborted: Any = None,
                           ) -> Generator[dict, None, None]:
     """OpenAI-compat streaming with tool_calls delta support.
 
@@ -3380,6 +3381,27 @@ def _openai_stream_events(base_url: str, api_key: str,
                 resp.raise_for_status()
 
                 for line in resp.iter_lines():
+                    # 2026-05-13 P0: mid-stream abort check.
+                    # Before today, abort fired at the agent_execution.py
+                    # iteration boundary AFTER the whole LLM stream
+                    # finished — user clicking "stop" still waited
+                    # 10-30s for the in-flight stream to complete.
+                    # Now we check between every chunk (~50-100ms apart
+                    # in normal stream rate). On abort: close the TCP
+                    # connection so the server stops generating + we
+                    # stop reading, yield a final 'aborted' marker.
+                    if callable(is_aborted) and is_aborted():
+                        try:
+                            resp.close()
+                        except Exception:
+                            pass
+                        logger.info(
+                            "OpenAI stream aborted mid-call (model=%s, "
+                            "provider=%s) — closing TCP, partial reply "
+                            "discarded.", model, _provider_id)
+                        yield {"type": "aborted",
+                               "reason": "user_interrupt"}
+                        return
                     if not line:
                         continue
                     text = line.decode("utf-8", errors="replace")
@@ -4533,8 +4555,17 @@ def _dispatch_stream_events(entry: "ProviderEntry",
                             tools: list[dict] | None,
                             model: str,
                             temperature: float | None = None,
+                            is_aborted: Any = None,
                             ) -> Generator[dict, None, None]:
-    """Route to the right provider-specific stream parser based on kind."""
+    """Route to the right provider-specific stream parser based on kind.
+
+    is_aborted (2026-05-13 P0): callable returning True when the user
+    has cancelled the in-flight chat. Stream parsers check it between
+    chunks and close the underlying TCP connection on abort, so a
+    user clicking "stop" stops the LLM generating in 0ms instead of
+    waiting for the current stream to finish (was 10-30s on slow
+    models).
+    """
     kind = entry.kind
     if kind == "claude":
         return _claude_stream_events(
@@ -4549,6 +4580,7 @@ def _dispatch_stream_events(entry: "ProviderEntry",
         messages, tools=tools, model=model,
         _provider_id=entry.id,
         temperature=temperature,
+        is_aborted=is_aborted,
     )
 
 
@@ -4557,6 +4589,7 @@ def chat_stream_events(messages: list[dict],
                        provider: str = "",
                        model: str = "",
                        temperature: float | None = None,
+                       is_aborted: Any = None,
                        ) -> Generator[dict, None, None]:
     """Unified streaming entry yielding provider-agnostic event dicts.
 
@@ -4609,7 +4642,8 @@ def chat_stream_events(messages: list[dict],
     for idx, pentry in enumerate(provider_chain):
         try:
             gen_iter = iter(_dispatch_stream_events(
-                pentry, messages, tools, mdl, temperature=temperature))
+                pentry, messages, tools, mdl, temperature=temperature,
+                is_aborted=is_aborted))
             # Pull the first event here so we can fall over to the next
             # provider on a pre-stream error (connection refused, 429, DNS).
             try:
