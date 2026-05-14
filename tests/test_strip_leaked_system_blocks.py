@@ -215,6 +215,90 @@ def test_settings_returns_non_list_falls_back(agent, monkeypatch):
     assert "reply" in out
 
 
+# ── Phrase strip (2026-05-13) — non-XML internal markers ────────
+
+def test_thinking_mode_placeholder_phrase_stripped(agent):
+    """User-reported leak: the reasoning_content placeholder injected
+    for MiMo / DeepSeek-thinking models leaked verbatim into agent
+    output."""
+    text = (
+        "Here is my actual answer.\n"
+        "(no chain-of-thought captured for this tool-routing decision;"
+        " placeholder injected to satisfy thinking-mode API contract)\n"
+        "Then the rest of my answer."
+    )
+    out = agent._strip_leaked_system_blocks(text)
+    assert "no chain-of-thought" not in out
+    assert "placeholder injected" not in out
+    # Real content survives
+    assert "actual answer" in out
+    assert "rest of my answer" in out
+
+
+def test_stale_marker_phrase_stripped(agent):
+    """[STALE — file ...] phrases should not appear in assistant output;
+    they're tool_result markers."""
+    text = "I see that\n[STALE — file /etc/x was edited; re-read]\nthe config"
+    out = agent._strip_leaked_system_blocks(text)
+    assert "[STALE" not in out
+    assert "I see that" in out
+    assert "the config" in out
+
+
+def test_repeat_read_marker_phrase_stripped(agent):
+    text = "Looking at the file:\n[REPEAT-READ #3] You already read this\nResult was X"
+    out = agent._strip_leaked_system_blocks(text)
+    assert "[REPEAT-READ" not in out
+
+
+def test_phrase_match_case_insensitive(agent):
+    text = "Hi\n(NO Chain-Of-Thought Captured For This Tool-routing decision; placeholder injected)\nDone"
+    out = agent._strip_leaked_system_blocks(text)
+    # Even with weird casing, should still strip
+    assert "Chain-Of-Thought" not in out
+
+
+def test_phrase_in_middle_of_line_strips_whole_line(agent):
+    """Phrase mid-line → drop the whole line (cleaner than partial)."""
+    text = (
+        "Here's what I did.\n"
+        "Some setup text - [Auto-cleanup] 3 stale entries marked - more text\n"
+        "Real conclusion."
+    )
+    out = agent._strip_leaked_system_blocks(text)
+    assert "Auto-cleanup" not in out
+    assert "Some setup text" not in out   # whole line dropped
+    assert "Here's what I did" in out
+    assert "Real conclusion" in out
+
+
+def test_normal_content_with_no_markers_unchanged(agent):
+    text = "I read the file and saw field X. Now writing field Y."
+    out = agent._strip_leaked_system_blocks(text)
+    assert out == text
+
+
+def test_settings_phrase_list_used(agent, monkeypatch):
+    """Custom phrase list from settings overrides defaults."""
+    class FakeStore:
+        def get(self, key, default=None):
+            if key == "prompts.leak_filter_phrases":
+                return ["MY_CUSTOM_MARKER"]
+            return default
+    monkeypatch.setattr("app.system_settings.get_store",
+                        lambda: FakeStore())
+    text = (
+        "Hello\n"
+        "(no chain-of-thought captured for this tool-routing decision)\n"
+        "World MY_CUSTOM_MARKER yes"
+    )
+    out = agent._strip_leaked_system_blocks(text)
+    # Custom phrase stripped (whole line)
+    assert "MY_CUSTOM_MARKER" not in out
+    # Default thinking-mode phrase NOT stripped (custom list overrode)
+    assert "no chain-of-thought" in out
+
+
 def test_settings_empty_list_strips_nothing(agent, monkeypatch):
     """Admin explicitly cleared the list → no stripping happens."""
     class EmptyStore:

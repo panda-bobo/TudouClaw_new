@@ -14998,21 +14998,18 @@ Write only the summary body. Do not include any preamble or prefix."""
         """
         if not content or not isinstance(content, str):
             return content
-        # Cheap fast-path: only one tag-character of these would even
-        # be present if a block leaked, so a single substring probe
-        # avoids the regex on the common no-leak case.
-        if "<" not in content:
-            return content
 
-        # Tag list: try system_settings, fall back to the union of
-        # every XML block we ship today. Admins can override the list
-        # without redeploying.
+        # Tag list + phrase list both from system_settings (admin-
+        # editable) with sensible defaults.
         try:
             from .system_settings import get_store as _get_ss
             _ss = _get_ss()
             tags = _ss.get("prompts.leak_filter_tags", None) if _ss else None
+            phrases = (_ss.get("prompts.leak_filter_phrases", None)
+                       if _ss else None)
         except Exception:
             tags = None
+            phrases = None
         if not tags or not isinstance(tags, list):
             tags = [
                 "file_display",
@@ -15022,23 +15019,67 @@ Write only the summary body. Do not include any preamble or prefix."""
                 "attachment_contract",
                 "dir",
             ]
+        # 2026-05-13: phrase list catches non-XML internal markers the
+        # LLM accidentally regurgitates. User reported the
+        # reasoning_content placeholder leaking verbatim:
+        #   "(no chain-of-thought captured for this tool-routing
+        #    decision; placeholder injected to satisfy thinking-mode
+        #    API contract)"
+        # Same class of bug as the <file_display> one — model sees
+        # internal text in its history → mimics into output.
+        # Default list covers every internal marker we currently
+        # inject anywhere in the pipeline.
+        if not phrases or not isinstance(phrases, list):
+            phrases = [
+                # MiMo / DeepSeek-thinking reasoning_content placeholder
+                "no chain-of-thought captured for this tool-routing",
+                "placeholder injected to satisfy thinking-mode API contract",
+                # stale-read marker (already shown to user as tool result;
+                # don't want it in assistant text too)
+                "[STALE — file ",
+                # auto-cleanup notice (intended for tool-result, not reply)
+                "[Auto-cleanup]",
+                # cache markers from tool_result (assistant shouldn't echo)
+                "[REPEAT-READ #",
+                "[CACHED-GLOB #",
+                "[READ-VALVE-WARN",
+            ]
 
         import re as _re
         cleaned = content
-        for tag in tags:
-            if not isinstance(tag, str) or not tag:
+        # Pass 1: XML tag blocks (only run when '<' present — fast skip)
+        if "<" in cleaned:
+            for tag in tags:
+                if not isinstance(tag, str) or not tag:
+                    continue
+                pattern = _re.compile(
+                    r"\n?<\s*" + _re.escape(tag) + r"\s*>"
+                    r"[\s\S]*?"
+                    r"<\s*/\s*" + _re.escape(tag) + r"\s*>\n?",
+                    _re.IGNORECASE,
+                )
+                cleaned = pattern.sub("", cleaned)
+
+        # Pass 2: known phrases. Strip the line that contains the
+        # phrase + any surrounding whitespace. We do per-line strip
+        # (not phrase-only) because dropping the phrase mid-line would
+        # leave dangling words; line-level strip is cleaner.
+        for phrase in phrases:
+            if not isinstance(phrase, str) or not phrase:
                 continue
-            # Match optionally newlines around tag, non-greedy body.
-            # Case-insensitive to catch tone variants like <File_Display>.
+            # Quick substring check before regex (cheap fast-path)
+            if phrase.lower() not in cleaned.lower():
+                continue
+            # Drop any line containing the phrase (case-insensitive)
+            # plus optional surrounding parentheses/quotes around the
+            # phrase line.
             pattern = _re.compile(
-                r"\n?<\s*" + _re.escape(tag) + r"\s*>"
-                r"[\s\S]*?"
-                r"<\s*/\s*" + _re.escape(tag) + r"\s*>\n?",
-                _re.IGNORECASE,
+                r"^[ \t]*\(?[^\n]*?" + _re.escape(phrase) + r"[^\n]*\)?[ \t]*$",
+                _re.IGNORECASE | _re.MULTILINE,
             )
             cleaned = pattern.sub("", cleaned)
 
-        # Collapse the gap a strip leaves behind (3+ newlines → 2).
+        # Collapse the gap left behind (3+ newlines → 2).
         cleaned = _re.sub(r"\n{3,}", "\n\n", cleaned).strip()
         return cleaned
 
