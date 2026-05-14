@@ -1224,8 +1224,17 @@ async def send_chat(
     else:
         agent._skip_history_once = False
 
-    # Route through supervisor (handles both isolated and in-process)
-    task = hub.supervisor.chat_async(agent.id, chat_content, source="admin")
+    # Route through supervisor (handles both isolated and in-process).
+    # 2026-05-13 P1: respect explicit `preempt` from request body so the
+    # frontend can choose whether to interrupt the agent's current chat
+    # vs queue this message behind it. None = fall back to env var
+    # (TUDOU_INTERRUPT_MODE) — preserves existing behaviour for older
+    # clients that don't send the field.
+    _preempt = body.get("preempt")
+    if _preempt is not None:
+        _preempt = bool(_preempt)
+    task = hub.supervisor.chat_async(
+        agent.id, chat_content, source="admin", preempt=_preempt)
 
     # ── ConversationTask record (复杂任务的持久化恢复) ─────────────
     # 用户消息触发 complexity classifier → 复杂任务时,在 SQLite 创建一条

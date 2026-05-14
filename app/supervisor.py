@@ -394,8 +394,17 @@ class AgentSupervisor:
             return f"ERROR: {e}"
 
     def chat_async(self, agent_id: str, content: str,
-                   source: str = "admin") -> Any:
+                   source: str = "admin",
+                   preempt: bool | None = None) -> Any:
         """Route chat_async — isolated or in-process.
+
+        ``preempt`` (P1, 2026-05-13):
+            True   → if agent busy, abort current chat + run this one
+                     (Claude Code style; matches old TUDOU_INTERRUPT_MODE=1)
+            False  → if agent busy, queue this one + run after current
+                     (matches old TUDOU_INTERRUPT_MODE=0; safer default)
+            None   → defer to the env var; preserves existing behaviour
+                     for callers that don't pass the flag.
 
         Returns a ChatTask object (same as agent.chat_async).
         """
@@ -403,7 +412,7 @@ class AgentSupervisor:
             agent = self._get_agent(agent_id) if self._get_agent else None
             if agent is None:
                 raise ValueError(f"Agent not found: {agent_id}")
-            return agent.chat_async(content, source=source)
+            return agent.chat_async(content, source=source, preempt=preempt)
 
         # Isolated path: create ChatTask in Hub, dispatch to worker
         from .chat_task import get_chat_task_manager, ChatTask, ChatTaskStatus

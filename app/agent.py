@@ -12605,7 +12605,8 @@ Write only the summary body. Do not include any preamble or prefix."""
                           name=f"langgraph-{self.id[:8]}").start()
         return task
 
-    def chat_async(self, user_message, source: str = "admin") -> ChatTask:
+    def chat_async(self, user_message, source: str = "admin",
+                   preempt: bool | None = None) -> ChatTask:
         """Submit a chat as a background task. Returns immediately.
 
         source: "admin" for messages from portal UI, "agent:{agent_name}" for inter-agent,
@@ -12703,8 +12704,14 @@ Write only the summary body. Do not include any preamble or prefix."""
             # the new turn's _run thread will block on lock.acquire()
             # until the old turn exits its iteration loop and releases.
             # We don't wait synchronously — abort flag + lock handles it.
-            _interrupt_mode = (
-                os.environ.get("TUDOU_INTERRUPT_MODE", "1") != "0")
+            # 2026-05-13 P1: explicit `preempt` from the API call wins
+            # over the env-var default. Caller passes True (bypass
+            # queue) or False (force queue). None falls back to env var.
+            if preempt is not None:
+                _interrupt_mode = bool(preempt)
+            else:
+                _interrupt_mode = (
+                    os.environ.get("TUDOU_INTERRUPT_MODE", "1") != "0")
             if _interrupt_mode:
                 aborted_count = 0
                 # 1. Abort the active ChatTask(s) — set abort flag, the

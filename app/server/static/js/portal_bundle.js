@@ -10920,6 +10920,20 @@ async function sendAgentMsg(agentId) {
     if (slashFlags && slashFlags.skip_history) {
       chatBody.skip_history = true;
     }
+    // 2026-05-13 P1: explicit preempt semantics. Default to false
+    // (queue mode) so the backend NEVER interrupts an in-flight chat
+    // unless the operator explicitly opts in. Combined with the
+    // frontend's pendingQueue gate, this kills the "我又被中断了" UX
+    // bug. Power user opt-in: set window._forcePreempt[agentId] = true
+    // (e.g. a Shift+Enter UI handler) to send preempt=true on the
+    // next send.
+    chatBody.preempt = !!(window._forcePreempt
+                          && window._forcePreempt[agentId]);
+    if (chatBody.preempt && window._forcePreempt) {
+      // Single-shot: clear after consuming so the next send reverts
+      // to default queue behaviour.
+      delete window._forcePreempt[agentId];
+    }
     const resp = await fetch('/api/portal/agent/'+agentId+'/chat', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
