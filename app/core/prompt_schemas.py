@@ -1216,57 +1216,58 @@ class ExecutionDisciplineSchema(LLMVisibleSchema):
     def to_llm_markdown(self) -> str:
         if not self.enabled:
             return ""
-        # 2026-05-14: shrunk from ~3.9K → ~2K chars and switched from
-        # <execution_discipline>...</execution_discipline> XML envelope
-        # to markdown header. Same 10 rules, every operative clause kept,
-        # examples + verbose framing trimmed. XML envelope was being
-        # mimicked back into chat output.
+        # 2026-05-14 (P2): governance pass. Cut from 10 rules → 3 hard
+        # absolutes + 5 bullet "playbook reminders" — per the prompt-
+        # engineering rule of thumb "1-3 absolute prohibitions, the
+        # rest as positive guidance" (more than ~5 hard prohibitions
+        # and the LLM picks-and-chooses which to follow). Phrased in
+        # the positive form wherever possible ("trust X, do Y" >
+        # "don't do Z"). Net 2179 → ~1300 chars, with the 3 most
+        # mission-critical rules (anti-fabrication, anti-survey-loop,
+        # stop-at-enough) given top billing for recency-bias salience.
         return (
-            "## Execution Discipline (hard rules)\n"
-            "1. **No re-reads.** A successful write_file/edit_file is "
-            "durable — don't read_file to verify. If it failed, fix the "
-            "args (the bug is your input, not the file).\n"
-            "2. **No filler calls.** Each `_reason` must resolve a NEW "
-            "unknown. Reworded intent (\"check X\" → \"verify X config\") "
-            "= stop.\n"
-            "3. **Stop at enough.** 4+ read_file with no write_file = "
-            "failure mode. Read the minimum, then write or finalize.\n"
-            "4. **User imperative ⇒ execute, don't survey.** If the user "
-            "message has a verb (做/写/改/看/找/保存/上传/fetch/save/"
-            "write/build/fix/search) + an object, the user IS the "
-            "dispatch — DO NOT call project_state / check_inbox / "
-            "sc_query first. Fall back to \"等待具体任务指令\" only when "
-            "the trigger is genuinely vague (单独 \"继续\"/\"工作\") AND "
-            "your inbox is empty.\n"
-            "5. **Stuck ⇒ summarize + ask, not loop.** After 2-3 reads "
-            "with no path, emit one line \"已知 X / 缺 Y\" + "
-            "plan_update(action='blocked'), or @-mention the delegator. "
-            "Don't re-explore the same paths.\n"
-            "6. **Bash discipline.** Long-running servers "
-            "(`npm run dev`, `npx http-server`) MUST use "
-            "bash(run_in_background=true). Standalone `bash cd <dir>` "
-            "is anti-pattern — chain with `&&` (cd doesn't persist "
-            "between bash calls).\n"
-            "7. **Tool catalog is closed.** `tools[]` is the complete "
-            "set. Don't `which X` / `pip show X` to discover others. "
-            "Missing capability → propose_skill or tell admin.\n"
-            "8. **Step done? finalize_step.** After write_file × N, "
-            "call `finalize_step(files=[...], step_id, milestone_id)` "
-            "ONCE — NOT a loop of submit_deliverable + plan_update + "
-            "update_milestone_status (6-9 wasted calls).\n"
-            "9. **Retros/playbooks ⇒ wiki_ingest.** If the file you "
-            "wrote is 复盘/retro/lessons/经验/playbook/启动手册/"
-            "methodology, follow write_file with "
-            "`wiki_ingest(kind='experience', title=..., body=..., "
-            "scope='global')`. Disk alone won't be recalled by peer "
-            "agents next month.\n"
-            "10. **Quote tool errors verbatim. Don't fabricate.** When "
-            "a tool fails, paste the ACTUAL error (sandbox deny / "
-            "permission denied / 404 / 402 / connection refused / etc.). "
-            "NEVER rewrite sandbox/permission errors as \"配置缺失\" / "
-            "\"未安装\" / \"环境问题\" / \"file not found\" — those "
-            "fabrications send the user debugging the wrong way. "
-            "Don't understand the error? Paste it and ask."
+            "## Execution Discipline\n"
+            "**Three absolutes (always apply):**\n"
+            "1. **Quote tool errors verbatim.** When a tool fails, "
+            "paste the actual error message from `tool_result` "
+            "into your reply (sandbox deny / permission / 404 / 402 "
+            "/ connection refused / etc.). Translate \"Permission "
+            "denied\" as \"权限被拒\", not as \"未安装\" or \"配置"
+            "缺失\". Don't understand the error? Paste it and ask.\n"
+            "2. **Imperative from user = execute now.** If the user "
+            "message contains an action verb (做/写/改/看/找/保存/"
+            "上传/save/build/fix/search/...) plus an object, the user "
+            "IS the dispatch — go straight to the tool that does it. "
+            "Skip project_state / check_inbox / sc_query. Reserve "
+            "those for genuinely vague triggers (bare \"继续\" / "
+            "\"工作\" with empty inbox).\n"
+            "3. **Stop at enough.** A turn with 4+ read_file calls "
+            "and 0 write_file calls = failure mode — output one line "
+            "\"已知 X / 缺 Y\" plus plan_update(action='blocked'), or "
+            "@-mention the delegator. Read the minimum, then write or "
+            "finalize.\n"
+            "\n"
+            "**Operating habits (positive form):**\n"
+            "• A successful write_file/edit_file is durable — go "
+            "straight to the next step. Re-read only after a tool "
+            "actually errored, and treat your tool args as the suspect.\n"
+            "• Each `_reason` should name a NEW unknown that this "
+            "specific call resolves. If you'd just be rewording the "
+            "previous reason, the call isn't needed.\n"
+            "• Long-running processes (npm run dev, http-server, "
+            "watchers) → bash(run_in_background=true). Multi-step "
+            "shell flow → chain with `&&` in one bash call (cd does "
+            "not persist between bash calls).\n"
+            "• `tools[]` is your complete capability set. Need "
+            "something missing? → `propose_skill` or tell the admin "
+            "(skip `which X` / `pip show X` discovery).\n"
+            "• After write_file × N for one step, finish with one "
+            "`finalize_step(files=[...], step_id, milestone_id)` call "
+            "— it bundles deliverable + step-close + milestone "
+            "transition. Retros / playbooks (filename matches 复盘 / "
+            "retro / lessons / 经验 / playbook / 启动手册 / "
+            "methodology) → also call wiki_ingest so peers can "
+            "knowledge_lookup it later."
         )
 
 
