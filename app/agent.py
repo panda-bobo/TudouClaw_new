@@ -12207,10 +12207,12 @@ Write only the summary body. Do not include any preamble or prefix."""
                                 "content": content,
                                 "_source": "llm",
                             })
-                            self._log("message",
-                                      {"role": "assistant",
-                                       "content": content,
-                                       "source": "llm"})
+                            # 2026-05-15: REMOVED redundant _log("message")
+                            # here — the MESSAGE emit at line ~11993 (post-
+                            # stream-end, pre-nudge-check) already logs
+                            # the same content into agent.events. Calling
+                            # _log a second time creates a duplicate event
+                            # → frontend renders the chat bubble twice.
                             # Inject a user-role correction.  User-role (not
                             # system) because mid-turn system insertions
                             # confuse some providers; user-role corrections
@@ -12294,10 +12296,8 @@ Write only the summary body. Do not include any preamble or prefix."""
                                 "content": content or final_content or "",
                                 "_source": "llm",
                             })
-                            self._log("message",
-                                      {"role": "assistant",
-                                       "content": content or final_content or "",
-                                       "source": "llm"})
+                            # 2026-05-15: removed redundant _log here —
+                            # MESSAGE emit at line ~11993 already logged.
                             # Build the nudge with the next step's title so
                             # the agent has a concrete target.
                             _next_step = _plan_pending[0]
@@ -12392,10 +12392,8 @@ Write only the summary body. Do not include any preamble or prefix."""
                                 "content": content or final_content or "",
                                 "_source": "llm",
                             })
-                            self._log("message",
-                                      {"role": "assistant",
-                                       "content": content or final_content or "",
-                                       "source": "llm"})
+                            # 2026-05-15: removed redundant _log here —
+                            # MESSAGE emit at line ~11993 already logged.
                             nudge = (
                                 "[system nudge] 上一个工具结果含错误:\n"
                                 f"  {_last_tool_err[:200]}\n\n"
@@ -12473,10 +12471,8 @@ Write only the summary body. Do not include any preamble or prefix."""
                                 "content": content or final_content or "",
                                 "_source": "llm",
                             })
-                            self._log("message",
-                                      {"role": "assistant",
-                                       "content": content or final_content or "",
-                                       "source": "llm"})
+                            # 2026-05-15: removed redundant _log here —
+                            # MESSAGE emit at line ~11993 already logged.
                             nudge = (
                                 "[system nudge] 用户要求里包含『验证』动作 "
                                 "(validate / test / 检查 / 确认 / 跑通...), "
