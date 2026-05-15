@@ -150,7 +150,17 @@ CAPABILITY_SKILLS: dict[str, list[str]] = {
         "web_search", "web_fetch",
     ],
     "memory-ops": [
-        "knowledge_lookup", "save_experience",
+        # 2026-05-15: knowledge_lookup REMOVED from memory-ops
+        # capability per user request. Was the second auto-grant
+        # source after CORE_UNIVERSAL_TOOLS (commit d0b5bb4): any
+        # agent with the memory-ops skill capability got the tool
+        # automatically, bypassing the UI tick. With this removal,
+        # knowledge_lookup is now a normal opt-in tool — admin must
+        # explicitly tick it in Tool Permissions for each agent that
+        # needs always-on KB search. Even then, the chat-time
+        # explicit-opt-in filter (commit 2579e41) further gates it
+        # on user message phrasing.
+        "save_experience",
         "share_knowledge", "learn_from_peers",
         "memory_recall",
     ],
