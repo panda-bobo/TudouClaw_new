@@ -11225,6 +11225,23 @@ Write only the summary body. Do not include any preamble or prefix."""
                     "explicit-opt-in tool filter skipped: %s",
                     _opt_in_err)
 
+            # 2026-05-15 diag: log final tool count + names so we can see
+            # at a glance whether the agent ended up with EMPTY tools
+            # (which would route to the no-parser fallback streaming
+            # path → XML leaks as text + tool calls never extracted).
+            try:
+                _names = sorted({
+                    (t.get("function", {}) or {}).get("name", "?")
+                    for t in (tool_defs or [])
+                })
+                logger.info(
+                    "TOOL_SET agent=%s count=%d names=%s",
+                    self.id[:8], len(tool_defs or []),
+                    ",".join(_names[:20])
+                    + (",..." if len(_names) > 20 else ""))
+            except Exception:
+                pass
+
             final_content = ""
 
             # History: record chat start
