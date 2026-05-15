@@ -15756,24 +15756,6 @@ Write only the summary body. Do not include any preamble or prefix."""
                 # IntentHintSchema wraps category hints in <intent_hint>;
                 # never useful to surface to the user as chat text.
                 "intent_hint",
-                # 2026-05-15: backstop against weak-model tool-call
-                # XML emission. FunctionXMLParser SHOULD have stripped
-                # these by the time content reaches MESSAGE emit (it
-                # also extracts the structured tool_calls so the
-                # framework actually executes them). But if the parser
-                # didn't run (model not in YAML map and content-based
-                # override missed) OR the streaming path bypassed the
-                # parser, the XML would leak to chat. Stripping here
-                # is the last line of defense — chat stays clean even
-                # if no tool actually fires.
-                #
-                # Hermes/Functionary nested form:
-                #   <tool_call><function=NAME>...</function></tool_call>
-                # Both wrappers stripped; <function=...> blocks survive
-                # without the outer wrapper get caught by their own
-                # strip pattern (defined separately because the regex
-                # needs the `=NAME` part).
-                "tool_call",
             ]
         # 2026-05-13: phrase list catches non-XML internal markers the
         # LLM accidentally regurgitates. User reported the
