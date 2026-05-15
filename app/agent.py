@@ -148,6 +148,100 @@ def _apply_ephemeral_reminders(messages: list[dict], agent) -> list[dict]:
     return out
 
 
+# ── Explicit-opt-in retrieval detector (2026-05-15) ──────────────────
+#
+# Returns True iff the user's message phrasing explicitly asks the
+# agent to consult memory / knowledge base. Used by the chat() loop
+# to decide whether ``knowledge_lookup`` and ``memory_recall`` ship
+# in this turn's tool set at all.
+#
+# Rationale (Claude Code mirroring): Claude doesn't expose a
+# "knowledge_lookup" tool to the agent. Knowledge is pre-loaded from
+# CLAUDE.md / skills at session start; the agent just uses Read on
+# specific paths it knows. We can't fully delete our retrieval tools
+# (some workflows genuinely need fuzzy KB search), but we should
+# DEFAULT them OFF and only enable when the user asks.
+#
+# Conservative matcher — false-negative > false-positive:
+#   - User can always say "查 / lookup" explicitly to enable.
+#   - Better to make user retype than to let weak planners spam
+#     batched lookups.
+
+import re as _re_module
+
+# Patterns deliberately NOT anchored — they can appear anywhere in
+# the user message. ``\b`` would fail on Chinese boundaries; we use
+# context-rich anchors instead.
+_RETRIEVAL_PATTERNS_ZH = (
+    # 查/查找/查询/查一下/查下/查阅 + 关键词
+    r"(?:^|[，。、\s])查(?:一下|一查|找|询|阅|查)?(?:[一下]?)(?:\s|[一-鿿])",
+    # 搜/搜索/搜一下
+    r"(?:^|[，。、\s])搜(?:一下|索|搜)?(?:\s|[一-鿿])",
+    # 找/找一下/找下 + (相关/类似/之前 ...)? + 名词
+    # 名词扩到 "方案/计划/资料/记录/信息/文档/笔记/知识/wiki/资源/
+    #          案例/例子/样例/材料/文件/历史/数据/经验/做法/手册"
+    r"找(?:一下|下|找)?[一-鿿\s]{0,8}"
+    r"(?:资料|记录|信息|文档|笔记|知识|wiki|资源|方案|案例|"
+    r"例子|样例|材料|文件|历史|数据|经验|做法|手册|计划|内容)",
+    # 记得 / 记得吗 / 想起 / 回忆 / 之前说过 / 我说过 / 上次
+    r"(记得|想起|回忆|之前(说过|提到|讲过)|我(?:说过|提过|讲过)|上次)",
+    # 知识库 / wiki / 记忆 / memory + 里有 / 有没有 / 有哪些
+    r"(?:知识库|wiki|记忆|memory)\s*(?:里|中|内)?\s*"
+    r"(?:有|找|有没有|有哪些|有什么)",
+    # 显式调用工具名 (admin / power user)
+    r"\b(?:knowledge_lookup|memory_recall)\b",
+    # "看看 / 看下 + 知识库/记忆/wiki"
+    r"看\s*(?:一下|看|下)?\s*(?:知识库|wiki|记忆|memory)",
+    # "调取 / 调用 + 记忆/知识"
+    r"(?:调取|调用)\s*(?:记忆|知识|wiki)",
+)
+
+_RETRIEVAL_PATTERNS_EN = (
+    r"\b(?:search|searches|searching)\b",
+    r"\blook(?:\s+up|up|s\s+up|ed\s+up|ing\s+up)\b",
+    r"\bfind(?:\s+(?:in|the|me|my))\b",
+    r"\b(?:recall|recalls|recalling)\b",
+    r"\b(?:remember|remembers|remembering)\b",
+    r"\b(?:lookup|knowledge[-_\s]?lookup|memory[-_\s]?recall)\b",
+    r"\b(?:knowledge\s+base|wiki|memory)\b\s*"
+    r"(?:has|have|contains|stores|for|about)",
+    r"\bdid\s+(?:we|i|you)\s+(?:say|mention|talk|note|record|discuss)",
+    r"\bhave\s+(?:we|i|you)\s+(?:saved|noted|recorded|stored|"
+    r"mentioned|discussed|talked\s+about)",
+)
+
+_RETRIEVAL_RE_ZH = _re_module.compile(
+    "|".join(_RETRIEVAL_PATTERNS_ZH))
+_RETRIEVAL_RE_EN = _re_module.compile(
+    "|".join(_RETRIEVAL_PATTERNS_EN), _re_module.IGNORECASE)
+
+
+def _user_explicitly_requests_retrieval(user_text: str) -> bool:
+    """True iff user's message phrasing explicitly asks for memory/KB
+    retrieval. False for action verbs (改/做/继续/fix/build/...) and
+    for general questions that don't name retrieval explicitly.
+    """
+    if not user_text or not isinstance(user_text, str):
+        return False
+    txt = user_text.strip()
+    if not txt:
+        return False
+    # Cheap fast-path checks before regex
+    txt_lower = txt.lower()
+    if any(kw in txt for kw in (
+        "查", "搜", "找", "记得", "想起", "回忆", "之前", "我说过",
+        "知识库", "wiki", "记忆", "memory",
+    )) or any(kw in txt_lower for kw in (
+        "search", "lookup", "look up", "find", "recall", "remember",
+        "mention", "discuss", "noted", "recorded",
+    )):
+        if _RETRIEVAL_RE_ZH.search(txt):
+            return True
+        if _RETRIEVAL_RE_EN.search(txt):
+            return True
+    return False
+
+
 def _strip_old_images(messages: list[dict]) -> list[dict]:
     """Replace base64 image data in all but the last user message.
 
@@ -10949,6 +11043,53 @@ Write only the summary body. Do not include any preamble or prefix."""
                 return False
 
             tool_defs = self._get_effective_tools()
+
+            # 2026-05-15 architectural shift: knowledge_lookup +
+            # memory_recall are EXPLICIT-OPT-IN now. By default they
+            # are NOT in the agent's tool set — weak planners (mimo /
+            # qwen / early deepseek) can't reliably decide WHEN to
+            # query memory and end up either batching 4× per turn
+            # (token waste + ONE_SHOT_VIOLATIONs) or never querying
+            # when they should.
+            #
+            # The Claude Code design choice this mirrors: the framework
+            # decides what knowledge loads, not the agent. CLAUDE.md +
+            # skills auto-attach are pre-loaded; there is no agent-
+            # facing "knowledge_lookup" tool there.
+            #
+            # We restore the tools ONLY when the user message contains
+            # explicit retrieval phrasing ("查 X" / "记得 X" / "search
+            # for X" / "lookup X" / "知识库里 X" etc.). Action verbs
+            # ("继续 / 改 / 做 / fix / build") leave them filtered.
+            #
+            # If the user actually needs memory but doesn't phrase it
+            # as a retrieval request, two safety nets remain:
+            #   1. CLAUDE.md / PROJECT_CONTEXT.md still auto-load the
+            #      project's persistent context.
+            #   2. High-confidence preference facts get inlined into
+            #      the system prompt (separate workstream).
+            try:
+                if not _user_explicitly_requests_retrieval(_user_text):
+                    _OPT_IN_TOOLS = {"knowledge_lookup", "memory_recall"}
+                    _filtered = [
+                        t for t in (tool_defs or [])
+                        if (t.get("function", {}).get("name", "") or "")
+                        not in _OPT_IN_TOOLS
+                    ]
+                    if len(_filtered) != len(tool_defs or []):
+                        logger.info(
+                            "explicit-opt-in: filtered %d retrieval "
+                            "tool(s) out of agent=%s tool set "
+                            "(user msg=%r — no retrieval request "
+                            "phrasing detected)",
+                            len(tool_defs or []) - len(_filtered),
+                            self.id[:8], (_user_text or "")[:80])
+                        tool_defs = _filtered
+            except Exception as _opt_in_err:
+                logger.debug(
+                    "explicit-opt-in tool filter skipped: %s",
+                    _opt_in_err)
+
             final_content = ""
 
             # History: record chat start
