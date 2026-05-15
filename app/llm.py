@@ -164,12 +164,54 @@ def _log_payload_breakdown(safe_messages: list, tools: list | None,
             except Exception:
                 pass
 
+        # 2026-05-15: the log was labelled "TOKEN-BREAKDOWN" but
+        # actually carried CHAR counts (_measure_msg_chars returns
+        # len()). At ~4 chars/token (Latin) and ~2 chars/token
+        # (Chinese), this misled anyone reading "sys=27000" as 27K
+        # tokens when it was really ~6.7-13K tokens. Two changes:
+        #   1) Label renamed to "PAYLOAD-BREAKDOWN (chars)"
+        #   2) Compute and surface a separate token estimate using a
+        #      conservative mixed-language heuristic
+        #         - Chinese (CJK Unified Ideographs U+4E00-U+9FFF):
+        #           ~1 token / char (modern BPE rarely merges CJK)
+        #         - Other (latin, digits, punct): ~1 token / 4 chars
+        #      This is rough but ~2× closer to reality than chars/4.
+        try:
+            # Sample a chunk of the total text for ratio estimation
+            # — full payload scan would be O(N) per call.
+            def _est_tokens_from_chars(c_count: int, sample: str = "") -> int:
+                if not c_count:
+                    return 0
+                if not sample:
+                    return c_count // 4  # latin default
+                cjk = sum(1 for ch in sample
+                          if 0x4E00 <= ord(ch) <= 0x9FFF)
+                ratio_cjk = cjk / max(len(sample), 1)
+                # Effective tokens-per-char: cjk fraction × 1 +
+                # non-cjk fraction × 0.25
+                per_char = ratio_cjk + (1 - ratio_cjk) * 0.25
+                return int(c_count * per_char)
+
+            # Build a short sample from the sys + recent history for
+            # the ratio. System prompt usually dominates language mix.
+            _sample_parts = []
+            for _m in (safe_messages or [])[:3]:
+                _mc = _m.get("content")
+                if isinstance(_mc, str):
+                    _sample_parts.append(_mc[:500])
+            _sample = "".join(_sample_parts)[:1500]
+            est_total_tokens = _est_tokens_from_chars(total, _sample)
+            est_sys_tokens = _est_tokens_from_chars(sys_chars, _sample)
+        except Exception:
+            est_total_tokens = total // 4
+            est_sys_tokens = sys_chars // 4
+
         # Compact one-liner — searchable in logs
         log_method(
-            "TOKEN-BREAKDOWN agent=%s model=%s total=%d "
+            "PAYLOAD-BREAKDOWN (chars) agent=%s model=%s total=%d "
             "(sys=%d hist=%d tools=%d) "
             "hist_split=[user=%d/%d asst_text=%d/%d asst_tc=%d/%d(%dtcs) tool=%d/%d] "
-            "delta=%+d%s",
+            "delta=%+d ~tokens=%d (sys~%d)%s",
             (agent_id or "-")[:8], model,
             total,
             sys_chars, history_chars, tools_chars,
@@ -177,7 +219,9 @@ def _log_payload_breakdown(safe_messages: list, tools: list | None,
             asst_text_chars, n_asst_text,
             asst_tool_call_chars, n_asst_tc, total_tcs,
             tool_result_chars, n_tool,
-            delta, tool_caller_hint,
+            delta,
+            est_total_tokens, est_sys_tokens,
+            tool_caller_hint,
         )
     except Exception as _e:
         # Never let diagnostics crash a real LLM call.
