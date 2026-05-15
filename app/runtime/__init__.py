@@ -18,8 +18,11 @@ Modules:
 
   intent.py         — user-message intent detectors (retrieval /
                       wiki-write / verification request)
-  nudges.py         — nudge evaluation + tool-error / completion
-                      detection helpers
+  nudges.py         — tool-error / completion / verification-run
+                      detection primitives
+  nudge_evaluator.py — single-entry evaluate() that combines the
+                      detectors + emits a Nudge object the caller
+                      injects (used by both A and C)
   stream_filters.py — XML-tool-call leak detection in streamed
                       chunks (mimo / Hermes / Functionary defense)
   narrator.py       — "let me X:" stall detector
@@ -43,6 +46,7 @@ from .stream_filters import (
     XML_TOOL_LEAK_MARKERS,
 )
 from .narrator import looks_like_narrator_stall
+from .nudge_evaluator import Nudge, NudgeKind, evaluate as evaluate_nudge
 
 __all__ = [
     "user_explicitly_requests_retrieval",
@@ -54,4 +58,7 @@ __all__ = [
     "contains_tool_call_xml",
     "XML_TOOL_LEAK_MARKERS",
     "looks_like_narrator_stall",
+    "Nudge",
+    "NudgeKind",
+    "evaluate_nudge",
 ]
