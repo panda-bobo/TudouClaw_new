@@ -242,6 +242,83 @@ def _user_explicitly_requests_retrieval(user_text: str) -> bool:
     return False
 
 
+# ── Explicit-opt-in WRITE detector for wiki_ingest (2026-05-15) ──────
+#
+# wiki_ingest is the WRITE counterpart to knowledge_lookup. Same
+# architectural problem: weak planners decide "this is worth saving"
+# at the wrong moments (false "task completed" outcomes, low-signal
+# operational chatter, etc.) — polluting the cross-agent wiki.
+#
+# Same fix: default OFF, user explicit phrasing required.
+#
+# Triggers:
+#   - 中文: 记下来 / 存进 wiki / 写进知识库 / 总结(成) wiki / 复盘 / 整理成
+#   - EN:   save this / save to wiki / add to wiki / write a retro /
+#           record this / persist this / log this in wiki
+# Future framework triggers (NOT in this regex — coded separately):
+#   - finalize_step on a file whose name matches 复盘/retro/lessons/
+#     playbook/经验/启动手册/methodology
+
+_WIKI_WRITE_PATTERNS_ZH = (
+    r"(记下来|记一下|记录一下)",
+    r"(?:存|写|保存|放|加)(?:进|入|到)\s*(?:wiki|知识库|记忆)",
+    r"总结\s*(?:成|为|进)\s*(?:wiki|知识库|经验|笔记)",
+    # 做/写/来个/做一下/写个/做个 + 复盘/retro/...
+    # Allow 一下/个/出 between verb and noun.
+    r"(?:做|写|来个|整理)(?:一下|个|出)?\s*"
+    r"(?:复盘|retro|总结|经验|笔记|playbook)",
+    r"\bwiki_ingest\b",
+    r"整理\s*(?:成|为|进)\s*(?:wiki|知识库|经验|文档)",
+)
+
+_WIKI_WRITE_PATTERNS_EN = (
+    # Generic "save X to wiki" — accepts pronouns AND nouns
+    r"\bsave\s+(?:\w+\s+)?(?:to|in|into)\s+(?:the\s+)?"
+    r"(?:wiki|memory|knowledge\s*base|kb)\b",
+    r"\bsave\s+(?:this|that|it|these|them)\b",
+    # add/append/put/persist/store/log/record [pronoun] (to|in|into)
+    # [the] wiki|memory|kb
+    r"\b(?:add|append|put|persist|store|log|record)\s+"
+    r"(?:\w+\s+)?(?:to|into|in)\s+(?:the\s+)?"
+    r"(?:wiki|memory|knowledge\s*base|kb)\b",
+    r"\bwrite\s+(?:a|the|me\s+a)?\s*"
+    r"(?:retro|retrospective|playbook|summary|note|lesson|"
+    r"wiki\s*entry)",
+    r"\bwiki_ingest\b",
+    r"\bremember\s+this\b",
+)
+
+_WIKI_WRITE_RE_ZH = _re_module.compile("|".join(_WIKI_WRITE_PATTERNS_ZH))
+_WIKI_WRITE_RE_EN = _re_module.compile(
+    "|".join(_WIKI_WRITE_PATTERNS_EN), _re_module.IGNORECASE)
+
+
+def _user_explicitly_requests_wiki_write(user_text: str) -> bool:
+    """True iff user's message phrasing explicitly asks the agent to
+    save/persist something to the wiki/knowledge base. False for
+    action verbs that don't name the wiki ("修复 X" / "做 X").
+    """
+    if not user_text or not isinstance(user_text, str):
+        return False
+    txt = user_text.strip()
+    if not txt:
+        return False
+    txt_lower = txt.lower()
+    if any(kw in txt for kw in (
+        "记下", "记一下", "记录", "存进", "写进", "存到", "放进", "加到",
+        "总结", "复盘", "整理", "wiki", "知识库", "经验",
+    )) or any(kw in txt_lower for kw in (
+        "save", "wiki", "knowledge", "remember this", "memory",
+        "retro", "retrospective", "playbook", "persist",
+        "add this", "add it", "add to", "store", "log this",
+    )):
+        if _WIKI_WRITE_RE_ZH.search(txt):
+            return True
+        if _WIKI_WRITE_RE_EN.search(txt):
+            return True
+    return False
+
+
 def _strip_old_images(messages: list[dict]) -> list[dict]:
     """Replace base64 image data in all but the last user message.
 
@@ -11069,20 +11146,33 @@ Write only the summary body. Do not include any preamble or prefix."""
             #   2. High-confidence preference facts get inlined into
             #      the system prompt (separate workstream).
             try:
+                # Build the deny-set based on what the user did NOT
+                # explicitly request. Three opt-in tools currently:
+                #   - knowledge_lookup, memory_recall (READ side)
+                #   - wiki_ingest                     (WRITE side)
+                # See _user_explicitly_requests_retrieval +
+                # _user_explicitly_requests_wiki_write.
+                _opt_in_deny: set[str] = set()
                 if not _user_explicitly_requests_retrieval(_user_text):
-                    _OPT_IN_TOOLS = {"knowledge_lookup", "memory_recall"}
+                    _opt_in_deny.update(
+                        {"knowledge_lookup", "memory_recall"})
+                if not _user_explicitly_requests_wiki_write(_user_text):
+                    _opt_in_deny.add("wiki_ingest")
+                if _opt_in_deny:
+                    _orig_n = len(tool_defs or [])
                     _filtered = [
                         t for t in (tool_defs or [])
                         if (t.get("function", {}).get("name", "") or "")
-                        not in _OPT_IN_TOOLS
+                        not in _opt_in_deny
                     ]
-                    if len(_filtered) != len(tool_defs or []):
+                    _removed_n = _orig_n - len(_filtered)
+                    if _removed_n:
                         logger.info(
-                            "explicit-opt-in: filtered %d retrieval "
-                            "tool(s) out of agent=%s tool set "
-                            "(user msg=%r — no retrieval request "
-                            "phrasing detected)",
-                            len(tool_defs or []) - len(_filtered),
+                            "explicit-opt-in: filtered %d tool(s) %s "
+                            "out of agent=%s tool set "
+                            "(user msg=%r — no opt-in phrasing "
+                            "detected for these)",
+                            _removed_n, sorted(_opt_in_deny),
                             self.id[:8], (_user_text or "")[:80])
                         tool_defs = _filtered
             except Exception as _opt_in_err:
