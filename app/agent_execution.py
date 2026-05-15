@@ -145,9 +145,17 @@ def _stream_chat_to_response(llm_mod, messages: list[dict],
                     # We KEEP appending to text_parts so the parser
                     # downstream still sees the full payload.
                     if not _xml_tool_leak_detected:
-                        running = "".join(text_parts[-3:])
-                        if ("<tool_call>" in running
-                                or "<function=" in running):
+                        # 2026-05-15 fix: streaming chunks can be 1-2
+                        # chars each (token-by-token), so `<tool_call>`
+                        # (11 chars) or `<function=` (10 chars) easily
+                        # spans 5-10 chunks. Looking at only `[-3:]`
+                        # missed the marker entirely. Scan a rolling
+                        # 100-char tail of the full accumulated text —
+                        # bounded cost (only runs until trip), and
+                        # 100 chars > any marker we look for.
+                        tail = "".join(text_parts)[-100:]
+                        if ("<tool_call>" in tail
+                                or "<function=" in tail):
                             _xml_tool_leak_detected = True
                             if on_event and AE is not None:
                                 try:
