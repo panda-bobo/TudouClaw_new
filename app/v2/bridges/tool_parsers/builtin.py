@@ -433,6 +433,147 @@ class DSMLParser(ToolCallParser):
         )
 
 
+# ── 6. FunctionXMLParser ──────────────────────────────────────────────
+#
+# Hermes-2 / Functionary / mimo / some Qwen variants emit tool calls
+# as nested XML where the function NAME and parameter KEYS are part of
+# the tag name (not JSON values):
+#
+#     <tool_call>
+#     <function=bash>
+#     <parameter=command>cd /tmp && ls</parameter>
+#     <parameter=timeout>30</parameter>
+#     </function>
+#     </tool_call>
+#
+# This is structurally distinct from XMLTagJSONParser (which expects
+# JSON inside <tool_call>) and GLMArgKVParser (which uses
+# <arg_key>/<arg_value> pairs). Real symptom (2026-05-15): mimo-v2.5-pro
+# emitted the literal XML as text content, leaked to chat as
+# "<tool_call> <function=bash> <parameter=command>cd ...".
+
+
+# JSON-number regex: optional minus, digits, optional fractional part,
+# optional exponent. Anchored — ensures the whole string is a number,
+# not just starts with one.
+_JSON_NUMBER_RE = re.compile(r"^-?\d+(?:\.\d+)?(?:[eE][+\-]?\d+)?$")
+
+
+@dataclass
+class FunctionXMLParser(ToolCallParser):
+    """Parse Hermes/Functionary-style nested-XML tool calls.
+
+    Expected shape::
+
+        <tool_call>
+        <function=NAME>
+        <parameter=KEY1>VALUE1</parameter>
+        <parameter=KEY2>VALUE2</parameter>
+        </function>
+        </tool_call>
+
+    The outer ``<tool_call>`` wrapper is OPTIONAL (some variants emit
+    bare ``<function=...>`` blocks). Multiple function blocks per
+    response are supported (parallel calls).
+    """
+
+    name: str = "function_xml"
+    strip_content: bool = True
+
+    _func_pat: re.Pattern = field(init=False, repr=False, compare=False)
+    _param_pat: re.Pattern = field(init=False, repr=False, compare=False)
+    _wrapper_pat: re.Pattern = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self):
+        # <function=NAME>...</function> — capture name + body
+        self._func_pat = re.compile(
+            r"<function\s*=\s*([A-Za-z0-9_\-\.]+)\s*>"
+            r"([\s\S]*?)"
+            r"</function>",
+            re.IGNORECASE,
+        )
+        # <parameter=KEY>VALUE</parameter>
+        self._param_pat = re.compile(
+            r"<parameter\s*=\s*([A-Za-z0-9_\-\.]+)\s*>"
+            r"([\s\S]*?)"
+            r"</parameter>",
+            re.IGNORECASE,
+        )
+        # <tool_call>...</tool_call> wrapper (optional in source)
+        self._wrapper_pat = re.compile(
+            r"<tool_call>\s*([\s\S]*?)\s*</tool_call>",
+            re.IGNORECASE,
+        )
+
+    def parse(self, raw_message: dict) -> NormalizedMessage:
+        base = OpenAIPassthroughParser().parse(raw_message)
+        # Provider already normalized → just clean stray XML markup
+        # if any (defensive).
+        if base.tool_calls:
+            cleaned = self._strip(base.content)
+            return NormalizedMessage(
+                role=base.role, content=cleaned,
+                tool_calls=list(base.tool_calls),
+            )
+
+        content = base.content or ""
+        if "<function" not in content:
+            return base
+
+        tcs: list[dict] = []
+        # Walk every <function=NAME>...</function> block — wrapper is
+        # optional, so we don't require <tool_call>.
+        for m in self._func_pat.finditer(content):
+            fn_name = m.group(1).strip()
+            body = m.group(2) or ""
+            args: dict = {}
+            for pm in self._param_pat.finditer(body):
+                key = pm.group(1).strip()
+                val = pm.group(2)
+                # Trim trailing whitespace only — don't strip inside
+                # since shell commands etc. may legitimately have
+                # internal whitespace. Leading newline (from the
+                # template `<parameter=K>\nVAL\n</parameter>` shape)
+                # is harmless to strip.
+                v_stripped = val.strip("\n\r ").rstrip()
+                # Only attempt JSON parse when the value LOOKS like
+                # JSON. Calling _robust_json_loads on arbitrary shell
+                # text returns "" (json_repair is too aggressive),
+                # which would erase the actual command. Restrict
+                # JSON parsing to obvious JSON shapes:
+                #   {...}/[...]/"..."  → object / array / string
+                #   true|false|null    → keywords
+                #   ^-?\d+(\.\d+)?$    → integer or float
+                if (v_stripped[:1] in ("{", "[", '"')
+                        or v_stripped in ("true", "false", "null")
+                        or _JSON_NUMBER_RE.match(v_stripped)):
+                    parsed = _robust_json_loads(v_stripped)
+                    args[key] = parsed if parsed is not None else v_stripped
+                else:
+                    args[key] = v_stripped
+            if not fn_name:
+                continue
+            tcs.append(_coerce_tool_call(name=fn_name, arguments=args))
+
+        if not tcs:
+            return base
+
+        cleaned = self._strip(content) if self.strip_content else content
+        return NormalizedMessage(
+            role=base.role, content=cleaned, tool_calls=tcs,
+        )
+
+    def _strip(self, content: str) -> str:
+        if not content:
+            return content
+        # Remove the whole <tool_call>…</tool_call> wrappers first.
+        out = self._wrapper_pat.sub("", content)
+        # Then remove any bare <function=…>…</function> that survived
+        # (no wrapper case).
+        out = self._func_pat.sub("", out)
+        return out.strip()
+
+
 # ── registry of parser classes by name ────────────────────────────────
 
 
@@ -442,6 +583,7 @@ BUILTIN_CLASSES: dict[str, type] = {
     "JSONOnlyParser":          JSONOnlyParser,
     "GLMArgKVParser":          GLMArgKVParser,
     "DSMLParser":              DSMLParser,
+    "FunctionXMLParser":       FunctionXMLParser,
 }
 
 
@@ -451,5 +593,6 @@ __all__ = [
     "JSONOnlyParser",
     "GLMArgKVParser",
     "DSMLParser",
+    "FunctionXMLParser",
     "BUILTIN_CLASSES",
 ]

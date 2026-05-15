@@ -93,3 +93,22 @@ parsers:
   # Listed explicitly so diagnostics show a specific parser choice.
   - match: "deepseek*"
     class: OpenAIPassthroughParser
+
+  # ── MiMo (Xiaomi-Mimo / mimo-v2.5-pro) — Hermes-style nested XML ─
+  # Real symptom (2026-05-15): mimo-v2.5-pro emitted
+  #   <tool_call><function=bash><parameter=command>cd ...</parameter>
+  #   </function></tool_call>
+  # as plain text content. None of the existing parsers handled the
+  # nested-XML form (XMLTagJSONParser expects JSON inside the wrapper,
+  # GLMArgKVParser uses arg_key/arg_value pairs). FunctionXMLParser
+  # is the canonical handler for this Hermes/Functionary lineage.
+  - match: "mimo*"
+    class: FunctionXMLParser
+  - match: "*/mimo*"
+    class: FunctionXMLParser
+  - match: "*MiMo*"
+    class: FunctionXMLParser
+
+  # ── Functionary (Llama tunes that use the same nested-XML format) ─
+  - match: "*functionary*"
+    class: FunctionXMLParser

@@ -4528,6 +4528,11 @@ def _postprocess_xml_tool_calls(result: dict, *, model: str = "") -> dict:
         "<tool_call>" in content
         or ("<arg_key>" in content and "<arg_value>" in content)
         or ("<function" in content and "<parameter" in content)
+        # 2026-05-15: bare `<function=NAME>` even without <parameter>
+        # — mimo / Hermes variants sometimes emit just one block
+        # that wraps zero or one parameter. FunctionXMLParser still
+        # extracts the call.
+        or "<function=" in content
         # DeepSeek flash variants emit DSML markup
         or "DSML" in content
     )
@@ -4542,7 +4547,9 @@ def _postprocess_xml_tool_calls(result: dict, *, model: str = "") -> dict:
         return result
     try:
         from .v2.bridges.tool_parsers import get_registry
-        from .v2.bridges.tool_parsers.builtin import DSMLParser
+        from .v2.bridges.tool_parsers.builtin import (
+            DSMLParser, FunctionXMLParser,
+        )
     except Exception:
         return result
     registry = get_registry()
@@ -4557,6 +4564,14 @@ def _postprocess_xml_tool_calls(result: dict, *, model: str = "") -> dict:
     # time a new vendor variant retreats to DSML.
     if "DSML" in content and not isinstance(parser, DSMLParser):
         parser = DSMLParser()
+    # 2026-05-15: same defense for Hermes/Functionary <function=NAME>
+    # nested XML. mimo* is mapped explicitly in yaml, but other
+    # vendor-prefixed variants ("xiaomi/mimo-ft-coder", custom
+    # finetunes) might fall through to OpenAIPassthrough — content-
+    # based override catches them.
+    if ("<function=" in content
+            and not isinstance(parser, FunctionXMLParser)):
+        parser = FunctionXMLParser()
     try:
         normalized = parser.parse(msg)
     except Exception as _e:
