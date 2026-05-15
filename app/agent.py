@@ -646,6 +646,19 @@ def _build_recent_file_refs(agent, turn_started_at: float) -> list[dict]:
     _SKIP_NAMES = frozenset({
         "MCP.md", "Project.md", "Scheduled.md", "Skills.md", "Tasks.md",
         "AGENT.md", "agent.json",
+        # 2026-05-15: granted_skills.md is the renamed successor of
+        # Skills.md (see comment in agent.py:5160 about the rename).
+        # When it was renamed, this skip-list was never updated, so
+        # the file kept appearing as a FileCard every turn — user
+        # report: "这个显示一堆卡片1. 这个不是交付件,不应该展示".
+        # Same for any other framework-internal manifest that lives
+        # in the workspace root.
+        "granted_skills.md",
+        "PROJECT_CONTEXT.md",   # auto-loaded into prompt, not deliverable
+        "TUDOU_CLAW.md",        # legacy alias
+        "CLAW.md",              # legacy alias
+        "CLAUDE.md",            # admin instructions, not deliverable
+        "README.md",            # rarely a deliverable for a chat turn
     })
     _SKIP_DIRS = frozenset({"skills", "tool_outputs", "session", "logs",
                             "memory", ".git", "__pycache__"})
