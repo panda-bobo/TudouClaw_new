@@ -62,6 +62,12 @@ def _stream_chat_to_response(llm_mod, messages: list[dict],
         tool_buffers: dict[str, dict] = {}
         tool_order: list[str] = []  # preserve arrival order
         stop_reason = "end_turn"
+        # 2026-05-15: tripped by the text_delta loop when the running
+        # content begins to look like a tool_call XML emission (mimo /
+        # Hermes / Functionary leak). Once True, no further text_delta
+        # events forward to UI for this stream — but text_parts still
+        # accumulates so the post-stream parser sees the full payload.
+        _xml_tool_leak_detected: bool = False
 
         # ── Token breakdown (DEBUG) — 回答"为什么 in 还是 23k 那么多" ──
         # 把本次请求的几大组件各自字符数打一行, 方便用户定位 bloat 来源。
@@ -121,8 +127,43 @@ def _stream_chat_to_response(llm_mod, messages: list[dict],
                 chunk = ev.get("text") or ""
                 if chunk:
                     text_parts.append(chunk)
-                    # Live-emit text to UI for incremental rendering
-                    if on_event and AE is not None:
+                    # 2026-05-15: detect "model emits tool_call XML
+                    # as text" leak. mimo / Hermes / Functionary tunes
+                    # sometimes stream `<tool_call><function=NAME>...`
+                    # as plain content instead of the structured
+                    # tool_calls field. The post-stream parser
+                    # (FunctionXMLParser) extracts the call correctly,
+                    # but text_delta chunks have ALREADY drawn the raw
+                    # XML into the chat bubble character-by-character.
+                    # Detection runs on running concat (cheap O(N) per
+                    # chunk on a string we already have), and once
+                    # tripped:
+                    #   1) suppress all further text_delta forwarding
+                    #      this stream
+                    #   2) emit retract_last_assistant so the UI wipes
+                    #      whatever XML already streamed
+                    # We KEEP appending to text_parts so the parser
+                    # downstream still sees the full payload.
+                    if not _xml_tool_leak_detected:
+                        running = "".join(text_parts[-3:])
+                        if ("<tool_call>" in running
+                                or "<function=" in running):
+                            _xml_tool_leak_detected = True
+                            if on_event and AE is not None:
+                                try:
+                                    on_event(AE(
+                                        time.time(),
+                                        "retract_last_assistant",
+                                        {"reason":
+                                         "tool_call_xml_in_stream"}))
+                                except Exception:
+                                    pass
+                    # Live-emit text to UI for incremental rendering.
+                    # Suppressed once the XML-leak guard has tripped —
+                    # text_parts still accumulates for the post-stream
+                    # parser, but subsequent chunks don't reach UI.
+                    if (on_event and AE is not None
+                            and not _xml_tool_leak_detected):
                         try:
                             on_event(AE(time.time(), "text_delta",
                                          {"content": chunk}))
