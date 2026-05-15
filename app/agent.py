@@ -11211,7 +11211,14 @@ Write only the summary body. Do not include any preamble or prefix."""
                         not in _opt_in_deny
                     ]
                     _removed_n = _orig_n - len(_filtered)
-                    if _removed_n:
+                    # 2026-05-15 SAFETY: never let the opt-in filter
+                    # reduce tool_defs to EMPTY. An empty tool set
+                    # routes the chat loop to the no-tools fallback
+                    # streaming path (agent.py:11700) — that path
+                    # doesn't run the XML parser, so weak models that
+                    # emit <tool_call> XML as text leak it as content
+                    # AND no tool ever dispatches → "agent is idle".
+                    if _removed_n and _filtered:
                         logger.info(
                             "explicit-opt-in: filtered %d tool(s) %s "
                             "out of agent=%s tool set "
@@ -11220,6 +11227,14 @@ Write only the summary body. Do not include any preamble or prefix."""
                             _removed_n, sorted(_opt_in_deny),
                             self.id[:8], (_user_text or "")[:80])
                         tool_defs = _filtered
+                    elif _removed_n and not _filtered:
+                        logger.warning(
+                            "explicit-opt-in SKIPPED filtering: would "
+                            "empty agent=%s tool set. Originals kept "
+                            "to avoid routing to no-parser fallback. "
+                            "Consider adding read_file/bash to role's "
+                            "allowed_tools.",
+                            self.id[:8])
             except Exception as _opt_in_err:
                 logger.debug(
                     "explicit-opt-in tool filter skipped: %s",
