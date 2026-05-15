@@ -1965,6 +1965,51 @@ _NARRATOR_STALL_PATTERNS = (
 )
 
 
+_TOOL_ERROR_MARKERS = (
+    "Error:", "ERROR:", "error:", "Failed", "FAILED",
+    "Traceback", "Exception:", "❌",
+    "exit code: 1", "exit code: 2", "exit code: 3",
+    "non-zero exit", "non zero exit",
+    "Permission denied", "command not found",
+    "Validation failed", "validation failed",
+    "Errno", "[ERROR]",
+    # Terraform-specific
+    "Error: ", "│ Error:",
+    # Python-specific
+    "ModuleNotFoundError", "AttributeError", "TypeError", "NameError",
+)
+
+
+def _detect_recent_tool_error(messages: list[dict]) -> str | None:
+    """Scan ``messages`` backward. If the most recent ``role=='tool'``
+    message in the current turn (since the last user msg) carries an
+    error signal in its first ~1500 chars, return a brief description
+    line; else None.
+
+    Used by the chat() loop to decide whether to inject a "tool
+    errored, you stopped — keep going or explicitly bail" nudge for
+    weak planners that don't loop on their own.
+    """
+    for m in reversed(messages):
+        role = m.get("role")
+        if role == "user":
+            return None  # crossed turn boundary, no recent tool error
+        if role != "tool":
+            continue
+        c = m.get("content") or ""
+        if not isinstance(c, str):
+            continue
+        head = c[:1500]
+        for marker in _TOOL_ERROR_MARKERS:
+            if marker in head:
+                # Return the line containing the marker for the nudge.
+                for line in head.splitlines():
+                    if marker in line:
+                        return line.strip()[:200]
+                return marker
+    return None
+
+
 def _looks_like_narrator_stall(text: str) -> bool:
     """True if `text` looks like a promise-without-action ("Let me X:" style).
 
@@ -12159,6 +12204,90 @@ Write only the summary body. Do not include any preamble or prefix."""
                                 "steps, next='%s' (iteration=%d)",
                                 self.id[:8], _pending_n, _next_title,
                                 iteration)
+                            continue
+
+                        # ── Tool-error continuation nudge (2026-05-15) ──
+                        # Catches the "weak planner runs one bash, sees
+                        # error, stops" pattern (mimo, qwen smaller).
+                        # Plan-pending nudge above only fires when an
+                        # active plan exists; mimo often skips
+                        # plan_update entirely, so without this branch
+                        # the agent would emit "I see there's an error"
+                        # text and end the turn — leaving the user
+                        # with an unfixed bug.
+                        #
+                        # Trigger:
+                        #   - Most recent tool result THIS turn has an
+                        #     error marker (Error/Failed/Traceback/❌/
+                        #     Permission denied/non-zero exit code/...)
+                        #   - Agent emitted no further tool_calls
+                        #   - Iteration budget + nudge cap not hit
+                        #
+                        # Nudge text is "fix-or-explain": agent must
+                        # either call a fixing tool OR explicitly tell
+                        # the user it can't proceed. NOT pure prose.
+                        try:
+                            _last_tool_err = _detect_recent_tool_error(
+                                self.messages)
+                        except Exception:
+                            _last_tool_err = None
+
+                        if (_last_tool_err
+                                and _effective_tools
+                                and _nudge_count < _MAX_NUDGES_PER_TURN
+                                and iteration < max_iters - 1
+                                and stop_reason != "length"
+                                and stop_reason != "content_filter"
+                                and os.environ.get(
+                                    "TUDOU_TOOL_ERROR_NUDGE", "1") != "0"):
+                            # Persist the agent's reply so the next
+                            # iteration sees its own words.
+                            self.messages.append({
+                                "role": "assistant",
+                                "content": content or final_content or "",
+                                "_source": "llm",
+                            })
+                            self._log("message",
+                                      {"role": "assistant",
+                                       "content": content or final_content or "",
+                                       "source": "llm"})
+                            nudge = (
+                                "[system nudge] 上一个工具结果含错误:\n"
+                                f"  {_last_tool_err[:200]}\n\n"
+                                "你不能在这停下只输出文字描述错误。下一步必须做下面之一:\n"
+                                "  (a) 直接调工具修复 — read_file 看具体行 / "
+                                "edit_file 改 / bash 重试 / 调对应诊断工具,\n"
+                                "  (b) 或在回复里**明确告诉用户**'我无法继续因为 "
+                                "X' 并停止 (不是含糊带过)。\n"
+                                "禁止只描述错误而不动作。"
+                            )
+                            self.messages.append({
+                                "role": "user",
+                                "content": nudge,
+                                "_source": "system_nudge",
+                            })
+                            _nudge_count += 1
+                            _msgs_to_send = _drop_orphan_tool_messages(
+                                _compress_old_tool_results(
+                                    _summarize_old_history(
+                                        _hoist_skill_guides(
+                                            _strip_old_images(
+                                                self._inject_dynamic_context(
+                                                    self.messages,
+                                                    current_query=_user_text))),
+                                        self)))
+                            try:
+                                _emit(AgentEvent(time.time(), "nudge",
+                                                 {"reason": "tool_error_no_continuation",
+                                                  "iteration": iteration,
+                                                  "error_snippet": _last_tool_err[:120]}))
+                            except Exception:
+                                pass
+                            logger.info(
+                                "Agent %s tool-error continuation nudge "
+                                "(iter=%d, err=%r)",
+                                self.id[:8], iteration,
+                                _last_tool_err[:80])
                             continue
 
                         # Final response — ensure we always emit something
