@@ -1980,6 +1980,97 @@ _TOOL_ERROR_MARKERS = (
 )
 
 
+# ── Must-verify detection (2026-05-15) ───────────────────────────────
+#
+# Real symptom: user asks "继续 terraform validate" → agent runs a few
+# bash sed commands → emits "修复完成" → ends turn. But it never
+# actually ran `terraform validate` to confirm zero errors.
+#
+# Heuristic detector: if the user's CURRENT-TURN message asks for a
+# verification action (validate / check / test / lint / 验证 / 跑通 /
+# terraform validate / npm test / pytest / ...) AND the agent's reply
+# claims completion (修复完成 / 全部修好 / done / fixed / ...)
+# AND the agent did NOT actually invoke a verification tool in this
+# turn → trigger nudge "show me the verify result, don't just claim".
+
+_VERIFY_INTENT_KEYWORDS = (
+    # ZH
+    "验证", "确认", "检查", "测试", "跑通", "通过验证", "全部通过",
+    "0 错误", "0 个错误", "无错误", "0 errors",
+    # specific tools
+    "terraform validate", "terraform plan", "terraform apply",
+    "npm test", "npm run test", "pytest", "jest", "mypy", "lint",
+    "go test", "cargo test", "gradle test", "mvn test",
+    # EN
+    "validate", "verify", "test", "lint", "check ",
+)
+
+_COMPLETION_CLAIM_PATTERNS = (
+    "修复完成", "全部修好", "全部修复", "已完成", "已修好", "已修复",
+    "全部完成", "搞定了", "弄好了", "修好了", "改完了",
+    "all fixed", "all done", "all set", "completed", "finished",
+    "done!", "done.", "fixed all", "all good", "done!",
+)
+
+_VERIFY_TOOL_HINTS = (
+    "validate", "verify", "test", "lint", "check",
+    "tflint", "terraform plan", "terraform apply",
+    "pytest", "npm test", "jest", "mypy", "go test", "cargo test",
+)
+
+
+def _user_asked_for_verification(user_text: str) -> bool:
+    """True iff user's message implies a verification step is part of
+    'done'. Conservative — false-negatives are fine (no nudge), but
+    false-positives would loop the agent on a non-verification task.
+    """
+    if not user_text or not isinstance(user_text, str):
+        return False
+    txt_lower = user_text.lower()
+    return any(kw in user_text for kw in _VERIFY_INTENT_KEYWORDS) \
+        or any(kw in txt_lower for kw in _VERIFY_INTENT_KEYWORDS)
+
+
+def _agent_claimed_completion(agent_text: str) -> bool:
+    """True iff agent's reply contains a completion-claim phrase."""
+    if not agent_text or not isinstance(agent_text, str):
+        return False
+    txt_lower = agent_text.lower()
+    return any(p in agent_text for p in _COMPLETION_CLAIM_PATTERNS) \
+        or any(p in txt_lower for p in _COMPLETION_CLAIM_PATTERNS)
+
+
+def _agent_ran_verification_this_turn(messages: list[dict]) -> bool:
+    """Walk messages backward from end. Stop at last user message
+    (turn boundary). Look for any tool_call whose name OR bash command
+    matches a verification hint (validate / test / lint / etc.).
+    """
+    import json as _json
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            return False  # crossed turn boundary, no verify call
+        if m.get("role") != "assistant":
+            continue
+        for tc in (m.get("tool_calls") or []):
+            fn = tc.get("function") or {}
+            n = (fn.get("name") or "").lower()
+            # Direct verify tool
+            if any(h in n for h in _VERIFY_TOOL_HINTS):
+                return True
+            # bash command containing verify pattern
+            if n == "bash":
+                args_raw = fn.get("arguments") or "{}"
+                try:
+                    args = (_json.loads(args_raw)
+                            if isinstance(args_raw, str) else args_raw)
+                    cmd = str((args or {}).get("command") or "").lower()
+                    if any(h in cmd for h in _VERIFY_TOOL_HINTS):
+                        return True
+                except Exception:
+                    pass
+    return False
+
+
 def _detect_recent_tool_error(messages: list[dict]) -> str | None:
     """Scan ``messages`` backward. If the most recent ``role=='tool'``
     message in the current turn (since the last user msg) carries an
@@ -12342,6 +12433,92 @@ Write only the summary body. Do not include any preamble or prefix."""
                                 "(iter=%d, err=%r)",
                                 self.id[:8], iteration,
                                 _last_tool_err[:80])
+                            continue
+
+                        # ── Must-verify nudge (2026-05-15) ──────────────
+                        # Catches the "agent claims '修复完成' without
+                        # actually running terraform validate / npm test"
+                        # pattern. Three conditions ALL must hold:
+                        #   1. User's current-turn message implies a
+                        #      verification step is part of the task
+                        #      (validate / test / verify / 验证 / ...)
+                        #   2. Agent's reply contains a completion-claim
+                        #      phrase (修复完成 / done / fixed / ...)
+                        #   3. Agent did NOT actually invoke any
+                        #      verification tool this turn (no bash
+                        #      with "validate" in cmd, no test runner
+                        #      tool call, etc.)
+                        # Conservative: false-negatives (no nudge) are
+                        # fine; false-positives would loop the agent
+                        # on a non-verification task.
+                        try:
+                            _need_verify = (
+                                _user_asked_for_verification(_user_text)
+                                and _agent_claimed_completion(content or "")
+                                and not _agent_ran_verification_this_turn(
+                                    self.messages))
+                        except Exception:
+                            _need_verify = False
+
+                        if (_need_verify
+                                and _effective_tools
+                                and _nudge_count < _MAX_NUDGES_PER_TURN
+                                and iteration < max_iters - 1
+                                and stop_reason != "length"
+                                and stop_reason != "content_filter"
+                                and os.environ.get(
+                                    "TUDOU_VERIFY_NUDGE", "1") != "0"):
+                            self.messages.append({
+                                "role": "assistant",
+                                "content": content or final_content or "",
+                                "_source": "llm",
+                            })
+                            self._log("message",
+                                      {"role": "assistant",
+                                       "content": content or final_content or "",
+                                       "source": "llm"})
+                            nudge = (
+                                "[system nudge] 用户要求里包含『验证』动作 "
+                                "(validate / test / 检查 / 确认 / 跑通...), "
+                                "但你这一轮**没真正跑过验证命令**就声明"
+                                "『修复完成』。\n\n"
+                                "不允许只声明完成。下一步必须做下面之一:\n"
+                                "  (a) 立即调验证工具 (bash terraform "
+                                "validate / npm test / pytest / 对应的 "
+                                "lint / verify 命令), 拿到 0 errors 才能"
+                                "声明完成,\n"
+                                "  (b) 或在回复里**明确告诉用户**还有"
+                                "什么没修好、为什么暂时没法跑验证 "
+                                "(具体到模块/文件/行)。\n"
+                                "禁止笼统'修复完成'/'已完成'而不出示"
+                                "验证证据。"
+                            )
+                            self.messages.append({
+                                "role": "user",
+                                "content": nudge,
+                                "_source": "system_nudge",
+                            })
+                            _nudge_count += 1
+                            _msgs_to_send = _drop_orphan_tool_messages(
+                                _compress_old_tool_results(
+                                    _summarize_old_history(
+                                        _hoist_skill_guides(
+                                            _strip_old_images(
+                                                self._inject_dynamic_context(
+                                                    self.messages,
+                                                    current_query=_user_text))),
+                                        self)))
+                            try:
+                                _emit(AgentEvent(time.time(), "nudge",
+                                                 {"reason": "claimed_done_no_verify",
+                                                  "iteration": iteration}))
+                            except Exception:
+                                pass
+                            logger.info(
+                                "Agent %s must-verify nudge "
+                                "(iter=%d, user asked verify + agent "
+                                "claimed done + no verify call this turn)",
+                                self.id[:8], iteration)
                             continue
 
                         # Final response — ensure we always emit something
