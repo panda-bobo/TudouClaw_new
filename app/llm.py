@@ -4572,15 +4572,37 @@ def _postprocess_xml_tool_calls(result: dict, *, model: str = "") -> dict:
     if ("<function=" in content
             and not isinstance(parser, FunctionXMLParser)):
         parser = FunctionXMLParser()
+    # 2026-05-15: surface the parser invocation + outcome to INFO level
+    # so we can see in production logs whether the parser is even
+    # being called and what it extracts. Was DEBUG-level which is
+    # invisible by default — silent failures consumed hours of
+    # debugging the "agent emits XML as text" bug.
+    logger.info(
+        "XML_PARSE invoking model=%s parser=%s "
+        "content_preview=%r",
+        model, type(parser).__name__, content[:80])
     try:
         normalized = parser.parse(msg)
     except Exception as _e:
-        logger.debug("V2 parser failed for model=%s: %s", model, _e)
+        logger.warning(
+            "XML_PARSE FAILED model=%s parser=%s err=%s — "
+            "content stays raw (will leak as text in chat)",
+            model, type(parser).__name__, _e)
         return result
     try:
         normalized_dict = normalized.to_openai_dict()
-    except Exception:
+    except Exception as _e2:
+        logger.warning(
+            "XML_PARSE to_openai_dict FAILED model=%s err=%s — "
+            "content stays raw",
+            model, _e2)
         return result
+    _extracted = len(normalized_dict.get("tool_calls") or []) if isinstance(normalized_dict, dict) else 0
+    logger.info(
+        "XML_PARSE OK model=%s extracted=%d tool_call(s) "
+        "content_after=%r",
+        model, _extracted,
+        (normalized_dict.get("content") or "")[:80] if isinstance(normalized_dict, dict) else "")
     if isinstance(normalized_dict, dict):
         # Replace just the assistant message; keep envelope keys
         result["message"] = normalized_dict
