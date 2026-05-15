@@ -167,156 +167,14 @@ def _apply_ephemeral_reminders(messages: list[dict], agent) -> list[dict]:
 #   - Better to make user retype than to let weak planners spam
 #     batched lookups.
 
-import re as _re_module
-
-# Patterns deliberately NOT anchored — they can appear anywhere in
-# the user message. ``\b`` would fail on Chinese boundaries; we use
-# context-rich anchors instead.
-_RETRIEVAL_PATTERNS_ZH = (
-    # 查/查找/查询/查一下/查下/查阅 + 关键词
-    r"(?:^|[，。、\s])查(?:一下|一查|找|询|阅|查)?(?:[一下]?)(?:\s|[一-鿿])",
-    # 搜/搜索/搜一下
-    r"(?:^|[，。、\s])搜(?:一下|索|搜)?(?:\s|[一-鿿])",
-    # 找/找一下/找下 + (相关/类似/之前 ...)? + 名词
-    # 名词扩到 "方案/计划/资料/记录/信息/文档/笔记/知识/wiki/资源/
-    #          案例/例子/样例/材料/文件/历史/数据/经验/做法/手册"
-    r"找(?:一下|下|找)?[一-鿿\s]{0,8}"
-    r"(?:资料|记录|信息|文档|笔记|知识|wiki|资源|方案|案例|"
-    r"例子|样例|材料|文件|历史|数据|经验|做法|手册|计划|内容)",
-    # 记得 / 记得吗 / 想起 / 回忆 / 之前说过 / 我说过 / 上次
-    r"(记得|想起|回忆|之前(说过|提到|讲过)|我(?:说过|提过|讲过)|上次)",
-    # 知识库 / wiki / 记忆 / memory + 里有 / 有没有 / 有哪些
-    r"(?:知识库|wiki|记忆|memory)\s*(?:里|中|内)?\s*"
-    r"(?:有|找|有没有|有哪些|有什么)",
-    # 显式调用工具名 (admin / power user)
-    r"\b(?:knowledge_lookup|memory_recall)\b",
-    # "看看 / 看下 + 知识库/记忆/wiki"
-    r"看\s*(?:一下|看|下)?\s*(?:知识库|wiki|记忆|memory)",
-    # "调取 / 调用 + 记忆/知识"
-    r"(?:调取|调用)\s*(?:记忆|知识|wiki)",
+# 2026-05-15: extracted to app/runtime/intent.py — see
+# docs/MIGRATION_OPENAI_AGENTS_SDK.md §10. The names here are
+# preserved as thin pass-through aliases so existing call sites
+# inside agent.py keep working byte-identical.
+from .runtime.intent import (
+    user_explicitly_requests_retrieval as _user_explicitly_requests_retrieval,
+    user_explicitly_requests_wiki_write as _user_explicitly_requests_wiki_write,
 )
-
-_RETRIEVAL_PATTERNS_EN = (
-    r"\b(?:search|searches|searching)\b",
-    r"\blook(?:\s+up|up|s\s+up|ed\s+up|ing\s+up)\b",
-    r"\bfind(?:\s+(?:in|the|me|my))\b",
-    r"\b(?:recall|recalls|recalling)\b",
-    r"\b(?:remember|remembers|remembering)\b",
-    r"\b(?:lookup|knowledge[-_\s]?lookup|memory[-_\s]?recall)\b",
-    r"\b(?:knowledge\s+base|wiki|memory)\b\s*"
-    r"(?:has|have|contains|stores|for|about)",
-    r"\bdid\s+(?:we|i|you)\s+(?:say|mention|talk|note|record|discuss)",
-    r"\bhave\s+(?:we|i|you)\s+(?:saved|noted|recorded|stored|"
-    r"mentioned|discussed|talked\s+about)",
-)
-
-_RETRIEVAL_RE_ZH = _re_module.compile(
-    "|".join(_RETRIEVAL_PATTERNS_ZH))
-_RETRIEVAL_RE_EN = _re_module.compile(
-    "|".join(_RETRIEVAL_PATTERNS_EN), _re_module.IGNORECASE)
-
-
-def _user_explicitly_requests_retrieval(user_text: str) -> bool:
-    """True iff user's message phrasing explicitly asks for memory/KB
-    retrieval. False for action verbs (改/做/继续/fix/build/...) and
-    for general questions that don't name retrieval explicitly.
-    """
-    if not user_text or not isinstance(user_text, str):
-        return False
-    txt = user_text.strip()
-    if not txt:
-        return False
-    # Cheap fast-path checks before regex
-    txt_lower = txt.lower()
-    if any(kw in txt for kw in (
-        "查", "搜", "找", "记得", "想起", "回忆", "之前", "我说过",
-        "知识库", "wiki", "记忆", "memory",
-    )) or any(kw in txt_lower for kw in (
-        "search", "lookup", "look up", "find", "recall", "remember",
-        "mention", "discuss", "noted", "recorded",
-    )):
-        if _RETRIEVAL_RE_ZH.search(txt):
-            return True
-        if _RETRIEVAL_RE_EN.search(txt):
-            return True
-    return False
-
-
-# ── Explicit-opt-in WRITE detector for wiki_ingest (2026-05-15) ──────
-#
-# wiki_ingest is the WRITE counterpart to knowledge_lookup. Same
-# architectural problem: weak planners decide "this is worth saving"
-# at the wrong moments (false "task completed" outcomes, low-signal
-# operational chatter, etc.) — polluting the cross-agent wiki.
-#
-# Same fix: default OFF, user explicit phrasing required.
-#
-# Triggers:
-#   - 中文: 记下来 / 存进 wiki / 写进知识库 / 总结(成) wiki / 复盘 / 整理成
-#   - EN:   save this / save to wiki / add to wiki / write a retro /
-#           record this / persist this / log this in wiki
-# Future framework triggers (NOT in this regex — coded separately):
-#   - finalize_step on a file whose name matches 复盘/retro/lessons/
-#     playbook/经验/启动手册/methodology
-
-_WIKI_WRITE_PATTERNS_ZH = (
-    r"(记下来|记一下|记录一下)",
-    r"(?:存|写|保存|放|加)(?:进|入|到)\s*(?:wiki|知识库|记忆)",
-    r"总结\s*(?:成|为|进)\s*(?:wiki|知识库|经验|笔记)",
-    # 做/写/来个/做一下/写个/做个 + 复盘/retro/...
-    # Allow 一下/个/出 between verb and noun.
-    r"(?:做|写|来个|整理)(?:一下|个|出)?\s*"
-    r"(?:复盘|retro|总结|经验|笔记|playbook)",
-    r"\bwiki_ingest\b",
-    r"整理\s*(?:成|为|进)\s*(?:wiki|知识库|经验|文档)",
-)
-
-_WIKI_WRITE_PATTERNS_EN = (
-    # Generic "save X to wiki" — accepts pronouns AND nouns
-    r"\bsave\s+(?:\w+\s+)?(?:to|in|into)\s+(?:the\s+)?"
-    r"(?:wiki|memory|knowledge\s*base|kb)\b",
-    r"\bsave\s+(?:this|that|it|these|them)\b",
-    # add/append/put/persist/store/log/record [pronoun] (to|in|into)
-    # [the] wiki|memory|kb
-    r"\b(?:add|append|put|persist|store|log|record)\s+"
-    r"(?:\w+\s+)?(?:to|into|in)\s+(?:the\s+)?"
-    r"(?:wiki|memory|knowledge\s*base|kb)\b",
-    r"\bwrite\s+(?:a|the|me\s+a)?\s*"
-    r"(?:retro|retrospective|playbook|summary|note|lesson|"
-    r"wiki\s*entry)",
-    r"\bwiki_ingest\b",
-    r"\bremember\s+this\b",
-)
-
-_WIKI_WRITE_RE_ZH = _re_module.compile("|".join(_WIKI_WRITE_PATTERNS_ZH))
-_WIKI_WRITE_RE_EN = _re_module.compile(
-    "|".join(_WIKI_WRITE_PATTERNS_EN), _re_module.IGNORECASE)
-
-
-def _user_explicitly_requests_wiki_write(user_text: str) -> bool:
-    """True iff user's message phrasing explicitly asks the agent to
-    save/persist something to the wiki/knowledge base. False for
-    action verbs that don't name the wiki ("修复 X" / "做 X").
-    """
-    if not user_text or not isinstance(user_text, str):
-        return False
-    txt = user_text.strip()
-    if not txt:
-        return False
-    txt_lower = txt.lower()
-    if any(kw in txt for kw in (
-        "记下", "记一下", "记录", "存进", "写进", "存到", "放进", "加到",
-        "总结", "复盘", "整理", "wiki", "知识库", "经验",
-    )) or any(kw in txt_lower for kw in (
-        "save", "wiki", "knowledge", "remember this", "memory",
-        "retro", "retrospective", "playbook", "persist",
-        "add this", "add it", "add to", "store", "log this",
-    )):
-        if _WIKI_WRITE_RE_ZH.search(txt):
-            return True
-        if _WIKI_WRITE_RE_EN.search(txt):
-            return True
-    return False
 
 
 def _strip_old_images(messages: list[dict]) -> list[dict]:
@@ -1967,173 +1825,25 @@ def _hoist_skill_guides(messages: list[dict]) -> list[dict]:
 # nudge ("you promised — now call the tool") and re-prompt once, instead of
 # silently stalling.  Guarded by env var TUDOU_NUDGE_WEAK_MODELS (default on;
 # set to "0" to disable globally).
-_NARRATOR_STALL_PATTERNS = (
-    # English
-    "let me ", "let's ", "i'll ", "i will ", "i am going to",
-    "i'm going to", "now let me", "first, let me", "first let me",
-    "next, i'll", "next i'll", "i am about to", "i'm about to",
-    # Chinese
-    "让我", "我来", "我将", "我会", "我要", "接下来", "马上", "现在我",
-    "下面我", "我准备",
+# 2026-05-15: extracted to app/runtime/ — see
+# docs/MIGRATION_OPENAI_AGENTS_SDK.md §10. The single source of
+# truth lives in app/runtime/{nudges,narrator}.py; the names below
+# are pass-through aliases so existing call sites in agent.py
+# (chat-loop nudge branches, stall guard) keep working byte-
+# identical without churn. The future SDK adapter (app/agent_runtime/)
+# imports the same functions from app.runtime, so behavior stays
+# identical regardless of which runtime the agent is on.
+from .runtime.nudges import (
+    detect_recent_tool_error as _detect_recent_tool_error,
+    agent_claimed_completion as _agent_claimed_completion,
+    agent_ran_verification_this_turn as _agent_ran_verification_this_turn,
 )
-
-
-_TOOL_ERROR_MARKERS = (
-    "Error:", "ERROR:", "error:", "Failed", "FAILED",
-    "Traceback", "Exception:", "❌",
-    "exit code: 1", "exit code: 2", "exit code: 3",
-    "non-zero exit", "non zero exit",
-    "Permission denied", "command not found",
-    "Validation failed", "validation failed",
-    "Errno", "[ERROR]",
-    # Terraform-specific
-    "Error: ", "│ Error:",
-    # Python-specific
-    "ModuleNotFoundError", "AttributeError", "TypeError", "NameError",
+from .runtime.intent import (
+    user_asked_for_verification as _user_asked_for_verification,
 )
-
-
-# ── Must-verify detection (2026-05-15) ───────────────────────────────
-#
-# Real symptom: user asks "继续 terraform validate" → agent runs a few
-# bash sed commands → emits "修复完成" → ends turn. But it never
-# actually ran `terraform validate` to confirm zero errors.
-#
-# Heuristic detector: if the user's CURRENT-TURN message asks for a
-# verification action (validate / check / test / lint / 验证 / 跑通 /
-# terraform validate / npm test / pytest / ...) AND the agent's reply
-# claims completion (修复完成 / 全部修好 / done / fixed / ...)
-# AND the agent did NOT actually invoke a verification tool in this
-# turn → trigger nudge "show me the verify result, don't just claim".
-
-_VERIFY_INTENT_KEYWORDS = (
-    # ZH
-    "验证", "确认", "检查", "测试", "跑通", "通过验证", "全部通过",
-    "0 错误", "0 个错误", "无错误", "0 errors",
-    # specific tools
-    "terraform validate", "terraform plan", "terraform apply",
-    "npm test", "npm run test", "pytest", "jest", "mypy", "lint",
-    "go test", "cargo test", "gradle test", "mvn test",
-    # EN
-    "validate", "verify", "test", "lint", "check ",
+from .runtime.narrator import (
+    looks_like_narrator_stall as _looks_like_narrator_stall,
 )
-
-_COMPLETION_CLAIM_PATTERNS = (
-    "修复完成", "全部修好", "全部修复", "已完成", "已修好", "已修复",
-    "全部完成", "搞定了", "弄好了", "修好了", "改完了",
-    "all fixed", "all done", "all set", "completed", "finished",
-    "done!", "done.", "fixed all", "all good", "done!",
-)
-
-_VERIFY_TOOL_HINTS = (
-    "validate", "verify", "test", "lint", "check",
-    "tflint", "terraform plan", "terraform apply",
-    "pytest", "npm test", "jest", "mypy", "go test", "cargo test",
-)
-
-
-def _user_asked_for_verification(user_text: str) -> bool:
-    """True iff user's message implies a verification step is part of
-    'done'. Conservative — false-negatives are fine (no nudge), but
-    false-positives would loop the agent on a non-verification task.
-    """
-    if not user_text or not isinstance(user_text, str):
-        return False
-    txt_lower = user_text.lower()
-    return any(kw in user_text for kw in _VERIFY_INTENT_KEYWORDS) \
-        or any(kw in txt_lower for kw in _VERIFY_INTENT_KEYWORDS)
-
-
-def _agent_claimed_completion(agent_text: str) -> bool:
-    """True iff agent's reply contains a completion-claim phrase."""
-    if not agent_text or not isinstance(agent_text, str):
-        return False
-    txt_lower = agent_text.lower()
-    return any(p in agent_text for p in _COMPLETION_CLAIM_PATTERNS) \
-        or any(p in txt_lower for p in _COMPLETION_CLAIM_PATTERNS)
-
-
-def _agent_ran_verification_this_turn(messages: list[dict]) -> bool:
-    """Walk messages backward from end. Stop at last user message
-    (turn boundary). Look for any tool_call whose name OR bash command
-    matches a verification hint (validate / test / lint / etc.).
-    """
-    import json as _json
-    for m in reversed(messages):
-        if m.get("role") == "user":
-            return False  # crossed turn boundary, no verify call
-        if m.get("role") != "assistant":
-            continue
-        for tc in (m.get("tool_calls") or []):
-            fn = tc.get("function") or {}
-            n = (fn.get("name") or "").lower()
-            # Direct verify tool
-            if any(h in n for h in _VERIFY_TOOL_HINTS):
-                return True
-            # bash command containing verify pattern
-            if n == "bash":
-                args_raw = fn.get("arguments") or "{}"
-                try:
-                    args = (_json.loads(args_raw)
-                            if isinstance(args_raw, str) else args_raw)
-                    cmd = str((args or {}).get("command") or "").lower()
-                    if any(h in cmd for h in _VERIFY_TOOL_HINTS):
-                        return True
-                except Exception:
-                    pass
-    return False
-
-
-def _detect_recent_tool_error(messages: list[dict]) -> str | None:
-    """Scan ``messages`` backward. If the most recent ``role=='tool'``
-    message in the current turn (since the last user msg) carries an
-    error signal in its first ~1500 chars, return a brief description
-    line; else None.
-
-    Used by the chat() loop to decide whether to inject a "tool
-    errored, you stopped — keep going or explicitly bail" nudge for
-    weak planners that don't loop on their own.
-    """
-    for m in reversed(messages):
-        role = m.get("role")
-        if role == "user":
-            return None  # crossed turn boundary, no recent tool error
-        if role != "tool":
-            continue
-        c = m.get("content") or ""
-        if not isinstance(c, str):
-            continue
-        head = c[:1500]
-        for marker in _TOOL_ERROR_MARKERS:
-            if marker in head:
-                # Return the line containing the marker for the nudge.
-                for line in head.splitlines():
-                    if marker in line:
-                        return line.strip()[:200]
-                return marker
-    return None
-
-
-def _looks_like_narrator_stall(text: str) -> bool:
-    """True if `text` looks like a promise-without-action ("Let me X:" style).
-
-    Heuristic:
-      1. Non-empty text that ends with ``:`` or ``：`` (the "commitment colon")
-      2. The trailing line contains an intent phrase ("let me", "让我" …)
-
-    Both conditions must hold — this keeps false positives low (e.g. a
-    genuine answer that happens to end with a colon before a code block
-    won't match unless it also announces future work).
-    """
-    if not text:
-        return False
-    t = text.strip()
-    if not t:
-        return False
-    if not (t.endswith(":") or t.endswith("：")):
-        return False
-    last_line = t.rsplit("\n", 1)[-1].lower()
-    return any(p in last_line for p in _NARRATOR_STALL_PATTERNS)
 
 
 # ── B: Granted-skills roster (Nov 2026) ──────────────────────────────────
