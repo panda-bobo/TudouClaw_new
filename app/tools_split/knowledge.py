@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any
 
 from .. import knowledge as _knowledge
@@ -332,7 +333,10 @@ def _build_tool_call_state(agent, tool_name: str, current_query: str) -> str:
     for tn in _EXPLORATION_TOOLS:
         bucket = cache.get(tn) or []
         total += len(bucket)
-        for q, _ in bucket:
+        for entry in bucket:
+            # 2026-05-15: bucket entries are now 3-tuples (q, result, ts);
+            # legacy 2-tuples may still be in flight at process boundary.
+            q = entry[0] if entry else ""
             if q:
                 queries.append(q)
     if total == 0 and not current_query:
@@ -414,7 +418,37 @@ def _check_turn_dedup(agent, tool_name: str, query: str,
             # _cache_turn_result will add it. For now we just don't reject.
             pass
         else:
-            prev_q, prev_result = bucket[0]
+            # 2026-05-15: bucket entries now carry a timestamp so we can
+            # detect parallel-batch duplicates (mimo emits 4 calls in
+            # one assistant message → all 4 dispatch nearly
+            # simultaneously). For those, the agent already sees the
+            # first call's REAL result in the same tool_results batch,
+            # so re-pasting it in the violation message is pure waste
+            # (~2K-5K chars × N duplicate calls). Emit ultra-short
+            # message instead. Cross-turn dups (≥0.5s gap) keep the
+            # full re-paste because the prior result is no longer
+            # adjacent in context.
+            prev_entry = bucket[0]
+            if len(prev_entry) >= 3:
+                prev_q, prev_result, prev_ts = prev_entry[0], prev_entry[1], prev_entry[2]
+            else:
+                prev_q, prev_result = prev_entry[0], prev_entry[1]
+                prev_ts = 0
+            is_parallel_batch = (
+                prev_ts and (time.time() - prev_ts) < 0.5
+            )
+
+            if is_parallel_batch:
+                return (
+                    f"[BATCH_DUP — {tool_name} called multiple times in "
+                    f"the SAME assistant response]\n"
+                    f"Framework dropped this duplicate. The real result "
+                    f"is in the FIRST {tool_name} tool_result in this "
+                    f"same batch (query: {prev_q!r}). Don't batch "
+                    f"{tool_name} — emit ONE call, then read its result, "
+                    f"then decide if you need another."
+                )
+
             mode_hint = ""
             if tool_name == "knowledge_lookup":
                 modes_left = ", ".join(sorted({"search","count","list","outline"} - modes_seen))
@@ -443,10 +477,12 @@ def _check_turn_dedup(agent, tool_name: str, query: str,
             f"继续调用**不会有新信息**。请立即:\n"
             f"  (a) 基于已掌握的信息直接交付(写文档 / 给结论),\n"
             f"  (b) 或明确告知用户信息不足,需要 TA 补充。\n"
-            f"已查过的关键词: {[q[:20] for q, _ in bucket[-5:]]}"
+            f"已查过的关键词: {[entry[0][:20] for entry in bucket[-5:]]}"
         )
 
-    for prev_q, prev_result in bucket:
+    for entry in bucket:
+        prev_q = entry[0]
+        prev_result = entry[1]
         sim = _query_similarity(prev_q, query)
         if sim >= threshold:
             return (
@@ -473,7 +509,9 @@ def _cache_turn_result(agent, tool_name: str, query: str, result: str,
         except Exception:
             return
     bucket = cache.setdefault(tool_name, [])
-    bucket.append((query, result))
+    # 2026-05-15: append timestamp so _check_turn_dedup can tell
+    # parallel-batch duplicates (within ~500ms) from cross-turn dups.
+    bucket.append((query, result, time.time()))
     # Cap per-tool bucket to avoid unbounded growth
     if len(bucket) > 10:
         del bucket[:-10]
