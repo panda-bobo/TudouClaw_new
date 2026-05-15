@@ -89,8 +89,19 @@ logger = logging.getLogger("tudou.capabilities")
 CORE_UNIVERSAL_TOOLS: frozenset[str] = frozenset({
     "plan_update",
     "get_skill_guide",
+    # 2026-05-15: knowledge_lookup REMOVED from CORE per user request.
+    # Reason: even though it's read-only, weak planners (mimo / qwen)
+    # reflexively call it on every multi-step task and hit ONE_SHOT
+    # violations. With explicit-opt-in (commit 2579e41) the framework
+    # now restores it to the tool set only when the user message
+    # contains explicit retrieval phrasing (查/搜/find/lookup/...). For
+    # agents that genuinely need always-on KB access, tick the box in
+    # Tool Permissions UI for that specific agent.
+    #
+    # memory_recall + wiki_ingest left for now (less abused than
+    # knowledge_lookup in observed traces). If those also start
+    # showing reflexive over-call patterns, remove them the same way.
     "memory_recall",
-    "knowledge_lookup",
     "wiki_ingest",
 })
 
