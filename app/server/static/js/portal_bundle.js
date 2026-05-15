@@ -20201,10 +20201,18 @@ function _eaCollectKnowledgeTemplates() {
 // the first call to _eaFetchToolCatalog and reused afterwards.
 window._eaToolCatalog = null;
 
-// Tool names that are ALWAYS available (matches _INFRA_TOOLS in
-// _execute_tool_with_policy). Displayed but disabled/checked.
+// Tool names that are ALWAYS available (matches CORE_UNIVERSAL_TOOLS
+// in app/tool_capabilities.py). Displayed with the "核心" badge,
+// auto-checked, and disabled (admin can't uncheck them).
+//
+// 2026-05-15: knowledge_lookup REMOVED from this list per backend
+// CORE_UNIVERSAL_TOOLS change (commit d0b5bb4). It now requires an
+// explicit tick — the explicit-opt-in chat-time filter additionally
+// only restores it when the user message contains retrieval phrasing
+// (查/搜/find/lookup). Both layers must permit it before the tool
+// reaches the LLM.
 window._eaInfraTools = [
-  'memory_recall', 'knowledge_lookup', 'save_experience',
+  'memory_recall', 'save_experience',
   'get_skill_guide', 'plan_update', 'complete_step',
 ];
 
@@ -20224,7 +20232,10 @@ async function _eaFetchToolCatalog() {
       return window._eaToolCatalog;
     }
   } catch(e){}
-  // Fallback hardcoded list if /api/portal/tools unavailable
+  // Fallback hardcoded list if /api/portal/tools unavailable.
+  // knowledge_lookup KEPT in this catalog (admins may want to tick
+  // it for specific agents) — it's only removed from _eaInfraTools
+  // above so it isn't auto-checked / disabled as "core".
   window._eaToolCatalog = [
     'read_file','write_file','edit_file','search_files','glob_files',
     'bash','run_tests','web_search','web_fetch',
