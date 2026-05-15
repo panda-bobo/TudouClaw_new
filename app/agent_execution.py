@@ -1320,11 +1320,32 @@ class AgentExecutionMixin:
                                 temperature=self._effective_temperature(),
                             )
                             content = ""
+                            # 2026-05-15 defense: see same guard in
+                            # _stream_chat_to_response + agent.py:11695.
+                            # Three fallback paths exist; all need the
+                            # tool_call XML leak filter or the bug
+                            # resurfaces from whichever path the loop
+                            # picks.
+                            _xml_leak = False
+                            from .agent_types import AgentEvent
                             for chunk in gen:
                                 if _is_aborted():
                                     break
                                 content += chunk
-                                from .agent_types import AgentEvent
+                                if (not _xml_leak
+                                        and ("<tool_call>" in content[-100:]
+                                             or "<function=" in content[-100:])):
+                                    _xml_leak = True
+                                    try:
+                                        _emit(AgentEvent(
+                                            time.time(),
+                                            "retract_last_assistant",
+                                            {"reason":
+                                             "tool_call_xml_in_stream"}))
+                                    except Exception:
+                                        pass
+                                if _xml_leak:
+                                    continue
                                 evt = AgentEvent(time.time(), "text_delta",
                                                  {"content": chunk})
                                 _emit(evt)
