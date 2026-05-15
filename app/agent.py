@@ -11737,15 +11737,89 @@ Write only the summary body. Do not include any preamble or prefix."""
                             if _is_aborted():
                                 final_content = content or "[Aborted]"
                                 break
-                            final_content = content
-                            self.messages.append({"role": "assistant",
-                                                  "content": content,
-                                                  "_source": "llm"})
-                            self._log("message",
-                                      {"role": "assistant",
-                                       "content": content,
-                                       "source": "llm"})
-                            break
+                            # 2026-05-15 fix: this fallback path was
+                            # appending raw chunks to messages without
+                            # ever running _postprocess_xml_tool_calls.
+                            # If mimo emitted <tool_call><function=...>
+                            # XML as text (very common — they don't
+                            # always honor structured tool_calls field),
+                            # the XML stayed as content forever and no
+                            # tool ever dispatched. Run the parser
+                            # explicitly here so this path matches
+                            # _stream_chat_to_response's behavior.
+                            try:
+                                from . import llm as _llm
+                                _r = _llm._postprocess_xml_tool_calls(
+                                    {"message": {"role": "assistant",
+                                                 "content": content},
+                                     "stop_reason": "end_turn"},
+                                    model=_eff_model)
+                                _msg_post = _r.get("message", {})
+                                _post_content = _msg_post.get("content") or ""
+                                _post_tcs = _msg_post.get("tool_calls") or []
+                                if _post_tcs:
+                                    # Parser extracted real tool_calls.
+                                    # Re-shape as if we'd taken the
+                                    # tool-capable path: append assistant
+                                    # message with structured tool_calls
+                                    # AND clean content, then continue
+                                    # the iteration loop so tool dispatch
+                                    # happens next.
+                                    _asst_msg = {
+                                        "role": "assistant",
+                                        "content": _post_content,
+                                        "tool_calls": _post_tcs,
+                                        "_source": "llm",
+                                    }
+                                    self.messages.append(_asst_msg)
+                                    # Set local vars so the loop's
+                                    # downstream tool-dispatch code sees
+                                    # them.
+                                    content = _post_content
+                                    final_content = _post_content
+                                    tool_calls = _post_tcs
+                                    response = _r
+                                    msg = _msg_post
+                                    logger.info(
+                                        "fallback path: parser extracted "
+                                        "%d tool_call(s) from XML in "
+                                        "content (agent=%s)",
+                                        len(_post_tcs), self.id[:8])
+                                    # Don't break — fall through to the
+                                    # tool-dispatch logic below.
+                                else:
+                                    # No tool_calls extracted — content
+                                    # may still be cleaned (XML stripped).
+                                    content = _post_content or content
+                                    final_content = content
+                                    self.messages.append({
+                                        "role": "assistant",
+                                        "content": content,
+                                        "_source": "llm",
+                                    })
+                                    self._log("message", {
+                                        "role": "assistant",
+                                        "content": content,
+                                        "source": "llm",
+                                    })
+                                    break
+                            except Exception as _pp_err:
+                                logger.warning(
+                                    "fallback parser failed: %s — "
+                                    "appending raw content (agent=%s)",
+                                    _pp_err, self.id[:8])
+                                final_content = content
+                                self.messages.append({
+                                    "role": "assistant",
+                                    "content": content,
+                                    "_source": "llm",
+                                })
+                                self._log("message", {
+                                    "role": "assistant",
+                                    "content": content,
+                                    "source": "llm",
+                                })
+                                break
                         except Exception:
                             pass  # Fall through
 
