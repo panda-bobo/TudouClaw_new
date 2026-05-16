@@ -272,17 +272,240 @@ def _build_real_tudou_model_class():
                 response_id=None,
             )
 
-        def stream_response(self, *args, **kwargs) -> AsyncIterator:
-            """Streaming not wired yet — SDKAgentRunner uses Runner.run
-            (non-streaming) since 2026-05-16 to bypass the SDK
-            streaming + parallel-tool_calls bug. If/when we re-enable
-            streaming, point this at ``app.llm.chat_stream_events``."""
-            raise NotImplementedError(
-                "TudouClawModel streaming not implemented; SDKAgentRunner "
-                "uses Runner.run (non-streaming). If this is being "
-                "called, something switched back to Runner.run_streamed "
-                "— either revert that or wire stream_response to "
-                "app.llm.chat_stream_events.")
+        async def stream_response(
+            self,
+            system_instructions: str | None,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            tracing,
+            *,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        ):
+            """Streaming variant — delegates to legacy
+            ``app.llm.chat_stream_events``.
+
+            Why we have this AT ALL when get_response already works:
+              The non-streaming path (Runner.run + get_response) makes
+              voice-mode TTS feel laggy — first audio doesn't play
+              until the LLM finishes the whole reply. With streaming,
+              ``text_delta`` events flow as tokens arrive and the
+              frontend's sentence-by-sentence TTS pipeline can start
+              speaking within ~2s instead of ~10s.
+
+            How we sidestep the SDK streaming + parallel-tool_calls bug:
+              The SDK's ChatCmplStreamHandler accumulates tool_call
+              deltas across chunks and CAN drop one of them when
+              DeepSeek emits parallel tool_calls in alternating
+              chunks. We never feed the SDK raw delta chunks —
+              instead we run legacy ``chat_stream_events`` (which has
+              its own correct accumulator), and yield SDK events
+              ONLY when each piece is fully resolved:
+                - text_delta: yielded chunk-by-chunk (no accumulation
+                  needed, each chunk is independent)
+                - tool_call: yielded as a COMPLETE
+                  ``ResponseFunctionToolCall`` only at
+                  ``tool_use_complete`` time — SDK never sees deltas
+                  so its buggy accumulator never runs
+              This is the same workaround we used for non-streaming
+              (Runner.run + get_response), now extended to streaming.
+
+            Event protocol the SDK Runner expects:
+              - ``ResponseTextDeltaEvent`` per text chunk
+              - ``ResponseOutputItemDoneEvent`` wrapping each completed
+                output item (message or function_call)
+              - ``ResponseCompletedEvent`` with the assembled response
+                at end-of-stream
+            """
+            from openai.types.responses import (
+                ResponseTextDeltaEvent,
+                ResponseOutputItemDoneEvent,
+                ResponseCompletedEvent,
+                ResponseFunctionToolCall,
+                ResponseOutputMessage,
+                ResponseOutputText,
+                Response,
+            )
+            from openai.types.responses.response_usage import (
+                ResponseUsage, InputTokensDetails, OutputTokensDetails,
+            )
+            import json as _json
+            import time as _time
+
+            # 1. Convert SDK input → OpenAI chat messages
+            messages = Converter.items_to_messages(
+                input,
+                model=self.model_name,
+                base_url=self.base_url,
+            )
+            if system_instructions:
+                messages.insert(0, {
+                    "role": "system",
+                    "content": system_instructions,
+                })
+
+            # 2. Convert SDK tools → OpenAI tools
+            oai_tools = None
+            if tools:
+                try:
+                    oai_tools = [
+                        Converter.tool_to_openai(t) for t in tools
+                    ]
+                except Exception as e:
+                    logger.warning(
+                        "tudou_model stream: tool_to_openai failed "
+                        "(%s) — proceeding without tools", e)
+
+            # 3. Drain the sync legacy generator into an async queue
+            # so we can yield SDK events as they arrive.
+            import asyncio as _asyncio
+            import queue as _queue
+            import threading as _threading
+
+            q: _queue.Queue = _queue.Queue()
+            DONE = object()
+
+            def _drain():
+                try:
+                    for ev in _llm.chat_stream_events(
+                        messages,
+                        tools=oai_tools,
+                        provider=self.provider_id,
+                        model=self.model_name,
+                        temperature=getattr(
+                            model_settings, "temperature", None),
+                    ):
+                        q.put(ev)
+                except Exception as e:
+                    q.put(("__ERR__", e))
+                finally:
+                    q.put(DONE)
+
+            _threading.Thread(target=_drain, daemon=True).start()
+
+            # 4. Stream out SDK events as legacy events arrive.
+            seq = 0          # sequence_number for SDK events
+            text_buf = ""    # accumulating text for final message item
+            output_items = []  # final ResponseCompletedEvent collects all
+            input_tokens = 0
+            output_tokens = 0
+            text_item_id = f"msg_{int(_time.time() * 1000)}"
+
+            while True:
+                ev = await _asyncio.to_thread(q.get)
+                if ev is DONE:
+                    break
+                # Background thread surfaced an exception
+                if isinstance(ev, tuple) and ev and ev[0] == "__ERR__":
+                    raise ev[1]
+
+                ev_type = ev.get("type", "")
+
+                if ev_type == "text_delta":
+                    chunk = ev.get("text", "") or ""
+                    if not chunk:
+                        continue
+                    text_buf += chunk
+                    yield ResponseTextDeltaEvent(
+                        delta=chunk,
+                        content_index=0,
+                        item_id=text_item_id,
+                        output_index=len(output_items),
+                        sequence_number=seq,
+                        type="response.output_text.delta",
+                        logprobs=[],
+                    )
+                    seq += 1
+
+                elif ev_type == "tool_use_complete":
+                    # COMPLETE tool_call — yield as a finished output
+                    # item. SDK has nothing to accumulate (we built it
+                    # ourselves), so the parallel-tool_calls bug never
+                    # gets a chance to trigger.
+                    call_id = str(ev.get("id") or "")
+                    name = str(ev.get("name") or "")
+                    raw_input = ev.get("input") or {}
+                    args_str = (raw_input if isinstance(raw_input, str)
+                                else _json.dumps(raw_input,
+                                                 ensure_ascii=False))
+                    tc = ResponseFunctionToolCall(
+                        arguments=args_str,
+                        call_id=call_id,
+                        name=name,
+                        type="function_call",
+                    )
+                    output_items.append(tc)
+                    yield ResponseOutputItemDoneEvent(
+                        item=tc,
+                        output_index=len(output_items) - 1,
+                        sequence_number=seq,
+                        type="response.output_item.done",
+                    )
+                    seq += 1
+
+                elif ev_type == "usage":
+                    input_tokens = int(ev.get("input_tokens", 0) or 0)
+                    output_tokens = int(ev.get("output_tokens", 0) or 0)
+
+                # text/tool_input_delta/tool_use_start: ignore (we
+                # only need the COMPLETE form for SDK).
+                # stop/error: ignored here, end-of-stream handled
+                # by DONE sentinel.
+
+            # 5. If there was streamed text, emit the message as a
+            # completed output item (so SDK has it in response.output).
+            if text_buf:
+                msg = ResponseOutputMessage(
+                    id=text_item_id,
+                    type="message",
+                    role="assistant",
+                    status="completed",
+                    content=[ResponseOutputText(
+                        type="output_text",
+                        text=text_buf,
+                        annotations=[],
+                    )],
+                )
+                output_items.append(msg)
+                yield ResponseOutputItemDoneEvent(
+                    item=msg,
+                    output_index=len(output_items) - 1,
+                    sequence_number=seq,
+                    type="response.output_item.done",
+                )
+                seq += 1
+
+            # 6. Final ResponseCompletedEvent. Without this the SDK
+            # won't know the stream is finished and will hang.
+            usage = ResponseUsage(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=input_tokens + output_tokens,
+                input_tokens_details=InputTokensDetails(
+                    cached_tokens=0),
+                output_tokens_details=OutputTokensDetails(
+                    reasoning_tokens=0),
+            )
+            response = Response(
+                id=text_item_id,
+                created_at=_time.time(),
+                model=self.model_name,
+                object="response",
+                output=output_items,
+                parallel_tool_calls=True,
+                tool_choice="auto",
+                tools=[],
+                usage=usage,
+            )
+            yield ResponseCompletedEvent(
+                response=response,
+                sequence_number=seq,
+                type="response.completed",
+            )
 
     return _TudouClawModelImpl
 

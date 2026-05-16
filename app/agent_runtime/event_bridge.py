@@ -99,36 +99,17 @@ class EventBridge:
                     return
                 item_type = getattr(item, "type", "") or ""
 
-                if item_type == "tool_call_item":
-                    # Agent decided to invoke a tool — emit ``tool_call``
-                    # (matches legacy agent.py:12617 + portal_bundle.js:
-                    # 7944). Was emitting ``tool_call_start`` which the
-                    # frontend silently dropped.
-                    raw = getattr(item, "raw_item", None)
-                    name = getattr(raw, "name", "") if raw else ""
-                    args_raw = getattr(raw, "arguments", "") if raw else ""
-                    self._emit("tool_call", {
-                        "name": name,
-                        "arguments": args_raw,
-                    })
-                    return
-
-                if item_type == "tool_call_output_item":
-                    # Tool returned a result — emit ``tool_result``
-                    # (matches legacy + portal_bundle.js:7951). Field
-                    # is ``result`` not ``output`` — frontend keys on
-                    # that exact name when rendering the card.
-                    output = getattr(item, "output", "") or ""
-                    # Need the tool name too — pull from raw_item if
-                    # available so the card label is right.
-                    raw = getattr(item, "raw_item", None)
-                    name = ""
-                    if isinstance(raw, dict):
-                        name = raw.get("name") or ""
-                    self._emit("tool_result", {
-                        "name": name,
-                        "result": str(output)[:1000],
-                    })
+                if item_type in ("tool_call_item",
+                                 "tool_call_output_item"):
+                    # ── 2026-05-16 (streaming switch-back) ────────
+                    # Skip — hooks (on_tool_start / on_tool_end in
+                    # hooks.py) emit tool_call / tool_result with
+                    # better timing (at actual dispatch moment +
+                    # tool_arguments from ToolContext). Forwarding
+                    # the item event too would double-render in UI +
+                    # double-log to agent.events.
+                    # Pre-streaming, this code path was the only
+                    # source and was correct. Now hooks own it.
                     return
 
                 if item_type == "message_output_item":
@@ -188,9 +169,18 @@ class EventBridge:
     def _emit_retract(self, reason: str) -> None:
         self._emit("retract_last_assistant", {"reason": reason})
 
+    # Events that are TOO FREQUENT to persist to agent.events on every
+    # emit — they're for live streaming UI only, not restart replay.
+    # text_delta fires per-token (potentially hundreds per turn); if we
+    # _log every one, agent.events would grow ~30× larger than legacy
+    # and the chat-UI replay would render the same bubble character-
+    # by-character on every page load. The bridge still emits these
+    # to on_event (live SSE) — just doesn't persist.
+    _EPHEMERAL_KINDS = frozenset({"text_delta"})
+
     def _emit(self, kind: str, data: dict) -> None:
-        """Translate to legacy AgentEvent shape, persist via _log, and
-        forward to portal via on_event.
+        """Translate to legacy AgentEvent shape, persist via _log
+        (except ephemeral kinds), and forward to portal via on_event.
 
         ── Persist to agent.events (2026-05-16) ──
         Without this, SDK runtime events only went to the live SSE
@@ -202,14 +192,17 @@ class EventBridge:
 
         Legacy chat loop does both at every event emission site
         (agent.py:12620 + 12758): ``self._log(evt.kind, evt.data)`` +
-        ``_emit(evt)``. Mirror that here so SDK runtime achieves
-        the same persistence semantics.
+        ``_emit(evt)``. Mirror that here for semantic events
+        (tool_call / tool_result / message / retract / nudge);
+        skip persistence for ephemeral high-volume streaming events
+        like text_delta (see ``_EPHEMERAL_KINDS``).
         """
-        try:
-            if self.tudou_agent is not None and hasattr(self.tudou_agent, "_log"):
-                self.tudou_agent._log(kind, data)
-        except Exception as e:
-            logger.debug("EventBridge _log to agent.events failed: %s", e)
+        if kind not in self._EPHEMERAL_KINDS:
+            try:
+                if self.tudou_agent is not None and hasattr(self.tudou_agent, "_log"):
+                    self.tudou_agent._log(kind, data)
+            except Exception as e:
+                logger.debug("EventBridge _log to agent.events failed: %s", e)
 
         if self.on_event is None:
             return

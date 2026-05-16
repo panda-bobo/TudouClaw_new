@@ -306,11 +306,15 @@ def test_round_trip_history_through_both_helpers(fake_agent):
 # 3. EventBridge — kind names + agent.events persistence
 # ──────────────────────────────────────────────────────────────────
 
-def test_event_bridge_emits_legacy_kind_names(fake_agent):
-    """Bridge must emit `tool_call` / `tool_result` / `message` — NOT
-    `tool_call_start` / `tool_call_end` (portal_bundle.js:7944 keys
-    on these exact strings, fallthrough → JSON dump rendered as
-    raw debug text the user can't read)."""
+def test_event_bridge_emits_legacy_kind_names_for_message(fake_agent):
+    """Bridge must emit ``message`` for message_output_item — matches
+    legacy + portal_bundle.js:7958.
+
+    NOTE: tool_call_item / tool_call_output_item are NOT handled by
+    bridge (2026-05-16 streaming switch). They're emitted by hooks
+    instead — see test_hooks_emit_tool_call below. Including them in
+    bridge would double-emit (item event + hook event same turn).
+    """
     from app.agent_runtime.event_bridge import EventBridge
     captured = []
     bridge = EventBridge(
@@ -318,7 +322,28 @@ def test_event_bridge_emits_legacy_kind_names(fake_agent):
         tudou_agent=fake_agent,
     )
 
-    # Synthesize each item type
+    class _Ev:
+        type = "run_item_stream_event"
+
+        def __init__(self, item):
+            self.item = item
+
+    bridge.forward(_Ev(_FakeMessageOutputItem("hello")))
+    kinds = [getattr(e, "kind", None) for e in captured]
+    assert kinds == ["message"], (
+        f"bridge should emit 'message' for message_output_item, "
+        f"got: {kinds}")
+
+
+def test_event_bridge_skips_tool_items_to_avoid_double_emit():
+    """tool_call_item + tool_call_output_item must be SKIPPED by
+    bridge.forward (hooks own these). Pre-2026-05-16-afternoon the
+    bridge emitted them too — under streaming that caused double-
+    render in UI and double-log in agent.events."""
+    from app.agent_runtime.event_bridge import EventBridge
+    captured = []
+    bridge = EventBridge(on_event=lambda evt: captured.append(evt))
+
     class _Ev:
         type = "run_item_stream_event"
 
@@ -327,16 +352,15 @@ def test_event_bridge_emits_legacy_kind_names(fake_agent):
 
     bridge.forward(_Ev(_FakeToolCallItem("c1", "ping", "{}")))
     bridge.forward(_Ev(_FakeToolCallOutputItem("c1", "pong")))
-    bridge.forward(_Ev(_FakeMessageOutputItem("hello")))
-
-    kinds = [getattr(e, "kind", None) for e in captured]
-    assert kinds == ["tool_call", "tool_result", "message"], \
-        f"event kinds drifted from legacy: {kinds}"
+    assert captured == [], \
+        f"bridge should NOT emit for tool items (hooks own them); " \
+        f"emitted: {[e.kind for e in captured]}"
 
 
 def test_event_bridge_persists_to_agent_events(fake_agent):
     """Every _emit must _log to agent.events (so chat UI restart
-    replay via GET /agent/{id}/events works)."""
+    replay via GET /agent/{id}/events works) — EXCEPT ephemeral
+    high-volume kinds (text_delta), which would flood events list."""
     from app.agent_runtime.event_bridge import EventBridge
     bridge = EventBridge(
         on_event=lambda _evt: None,
@@ -346,31 +370,67 @@ def test_event_bridge_persists_to_agent_events(fake_agent):
                  {"name": "x", "arguments": "{}"})
     bridge._emit("message",
                  {"role": "assistant", "content": "hi"})
+    # text_delta is ephemeral — should NOT _log
+    for _ in range(50):
+        bridge._emit("text_delta", {"content": "x"})
 
-    assert len(fake_agent.events) == 2
+    # Only the 2 semantic events landed in agent.events
+    assert len(fake_agent.events) == 2, (
+        f"text_delta should not persist to agent.events; "
+        f"got {len(fake_agent.events)} events: "
+        f"{[e['kind'] for e in fake_agent.events]}")
     assert fake_agent.events[0]["kind"] == "tool_call"
     assert fake_agent.events[1]["kind"] == "message"
-    assert fake_agent.events[1]["data"]["content"] == "hi"
 
 
-def test_event_bridge_tool_result_uses_field_named_result():
-    """portal_bundle.js:7951 reads d.result (not d.output). Bridge
-    must emit with the right field name."""
+def test_hooks_emit_tool_call_with_legacy_shape(fake_agent):
+    """Hooks own tool_call / tool_result emission (since 2026-05-16
+    streaming switch). Verify the shape matches legacy + frontend
+    expectations: ``{name, arguments}`` for tool_call, ``{name,
+    result}`` for tool_result. Frontend keys on these exact field
+    names; using wrong fields = silently dropped UI events."""
+    import asyncio
+    from app.agent_runtime.hooks import build_run_hooks
     from app.agent_runtime.event_bridge import EventBridge
+
     captured = []
     bridge = EventBridge(
         on_event=lambda evt: captured.append(evt),
+        tudou_agent=fake_agent,
     )
+    hooks = build_run_hooks(fake_agent, bridge)
+    assert hooks is not None
 
-    class _Ev:
-        type = "run_item_stream_event"
-        item = _FakeToolCallOutputItem("c1", "the actual result")
+    # Fake the SDK's ToolContext shape: needs tool_name + tool_arguments
+    class _ToolCtx:
+        tool_name = "get_weather"
+        tool_arguments = '{"city":"Beijing"}'
 
-    bridge.forward(_Ev())
-    assert captured[0].kind == "tool_result"
-    assert "result" in captured[0].data, \
+    class _Tool:
+        name = "get_weather"
+
+    # Fire hook lifecycle synchronously (it's async, so run via loop)
+    asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+        hooks.on_tool_start(_ToolCtx(), None, _Tool()))
+
+    assert len(captured) == 1
+    ev = captured[0]
+    assert ev.kind == "tool_call"
+    assert ev.data["name"] == "get_weather"
+    assert ev.data["arguments"] == '{"city":"Beijing"}'
+
+    # Now tool result
+    asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+        hooks.on_tool_end(_ToolCtx(), None, _Tool(),
+                          "Sunny 24C"))
+    assert len(captured) == 2
+    ev2 = captured[1]
+    assert ev2.kind == "tool_result"
+    assert ev2.data["name"] == "get_weather"
+    # CRITICAL field name: 'result' not 'output' (portal_bundle.js:7951)
+    assert "result" in ev2.data, \
         "frontend keys on 'result' field; 'output' silently dropped"
-    assert captured[0].data["result"] == "the actual result"
+    assert ev2.data["result"] == "Sunny 24C"
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -426,3 +486,152 @@ def test_tudou_model_imports_lazily():
     import app.agent_runtime.tudou_model as mod
     assert hasattr(mod, "TudouClawModel")
     assert hasattr(mod, "build_tudou_model")
+
+
+# ──────────────────────────────────────────────────────────────────
+# 6. stream_response — yields complete tool_calls (not deltas)
+# ──────────────────────────────────────────────────────────────────
+
+def test_stream_response_exists_and_is_async_gen():
+    """TudouClawModel.stream_response must be an async generator —
+    Runner.run_streamed will call it and ``async for`` over the
+    yielded events."""
+    import inspect
+    from app.agent_runtime.tudou_model import build_tudou_model
+    m = build_tudou_model("any", "any", "https://x")
+    assert inspect.isasyncgenfunction(m.stream_response), (
+        "stream_response must be an async generator (`async def` + "
+        "yield), not a regular function returning a generator")
+
+
+def test_stream_response_yields_complete_tool_calls(monkeypatch):
+    """The bug we worked around: SDK accumulator drops one of N
+    parallel tool_calls when it sees them as deltas. Our stream_
+    response must yield FULLY-FORMED ResponseFunctionToolCall objects
+    (no SDK accumulation needed) to bypass that bug.
+
+    Mocks ``app.llm.chat_stream_events`` to yield 2 ``tool_use_complete``
+    events; asserts stream_response surfaces 2 ResponseOutputItemDoneEvent
+    wrapping ResponseFunctionToolCall.
+    """
+    import asyncio
+    from app.agent_runtime.tudou_model import build_tudou_model
+
+    fake_events = [
+        {"type": "tool_use_complete",
+         "id": "call_1", "name": "get_weather",
+         "input": {"city": "Beijing"}},
+        {"type": "tool_use_complete",
+         "id": "call_2", "name": "get_time",
+         "input": {"tz": "PST"}},
+        {"type": "stop", "reason": "tool_use"},
+    ]
+
+    def _fake_chat_stream_events(*args, **kwargs):
+        for ev in fake_events:
+            yield ev
+
+    # Patch at module-level since stream_response does
+    # `from app import llm as _llm` inside `_build_real_...`.
+    from app import llm as _llm
+    monkeypatch.setattr(_llm, "chat_stream_events",
+                        _fake_chat_stream_events)
+
+    m = build_tudou_model("any", "test-model", "https://x")
+
+    # Drain the async generator
+    class _Settings:
+        temperature = None
+
+    async def _drain():
+        events = []
+        async for ev in m.stream_response(
+            system_instructions=None, input=[], model_settings=_Settings(),
+            tools=[], output_schema=None, handoffs=[], tracing=None,
+        ):
+            events.append(ev)
+        return events
+
+    events = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+        _drain())
+
+    # Look for the 2 ResponseOutputItemDoneEvent wrapping function_call
+    from openai.types.responses import (
+        ResponseOutputItemDoneEvent, ResponseFunctionToolCall,
+        ResponseCompletedEvent,
+    )
+    tool_items = [
+        e for e in events
+        if isinstance(e, ResponseOutputItemDoneEvent)
+        and isinstance(e.item, ResponseFunctionToolCall)
+    ]
+    assert len(tool_items) == 2, (
+        f"expected 2 complete function_call items (no accumulation), "
+        f"got {len(tool_items)}")
+    assert tool_items[0].item.call_id == "call_1"
+    assert tool_items[0].item.name == "get_weather"
+    assert tool_items[1].item.call_id == "call_2"
+    assert tool_items[1].item.name == "get_time"
+
+    # Must end with ResponseCompletedEvent so SDK knows the stream is done
+    assert isinstance(events[-1], ResponseCompletedEvent), (
+        f"stream must end with ResponseCompletedEvent; got "
+        f"{type(events[-1]).__name__}")
+
+
+def test_stream_response_yields_text_deltas(monkeypatch):
+    """Voice-mode sentence-level TTS needs text_delta events to flow
+    as tokens arrive. Stream_response must yield ResponseTextDeltaEvent
+    for each ``text_delta`` from chat_stream_events."""
+    import asyncio
+    from app.agent_runtime.tudou_model import build_tudou_model
+
+    fake_events = [
+        {"type": "text_delta", "text": "Hello"},
+        {"type": "text_delta", "text": " world"},
+        {"type": "text_delta", "text": "!"},
+        {"type": "stop", "reason": "end_turn"},
+    ]
+
+    def _fake_chat_stream_events(*args, **kwargs):
+        for ev in fake_events:
+            yield ev
+
+    from app import llm as _llm
+    monkeypatch.setattr(_llm, "chat_stream_events",
+                        _fake_chat_stream_events)
+
+    m = build_tudou_model("any", "test-model", "https://x")
+
+    class _Settings:
+        temperature = None
+
+    async def _drain():
+        return [ev async for ev in m.stream_response(
+            system_instructions=None, input=[], model_settings=_Settings(),
+            tools=[], output_schema=None, handoffs=[], tracing=None,
+        )]
+
+    events = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+        _drain())
+
+    from openai.types.responses import (
+        ResponseTextDeltaEvent, ResponseOutputItemDoneEvent,
+        ResponseOutputMessage,
+    )
+    deltas = [e for e in events if isinstance(e, ResponseTextDeltaEvent)]
+    assert len(deltas) == 3
+    assert deltas[0].delta == "Hello"
+    assert deltas[1].delta == " world"
+    assert deltas[2].delta == "!"
+
+    # Should also emit one completed message at end with the full text
+    msgs = [
+        e for e in events
+        if isinstance(e, ResponseOutputItemDoneEvent)
+        and isinstance(e.item, ResponseOutputMessage)
+    ]
+    assert len(msgs) == 1
+    full_text = "".join(
+        p.text for p in msgs[0].item.content if hasattr(p, "text"))
+    assert full_text == "Hello world!"

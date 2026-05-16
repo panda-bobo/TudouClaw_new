@@ -319,24 +319,9 @@ class SDKAgentRunner:
             MaxTurnsExceeded = None  # older SDK shape
 
         # ── 2026-05-16: pass conversation HISTORY to SDK ────────
-        # Previous bug: ``run_input = user_message`` only passed the
-        # NEW user message, dropping all prior turns. SDK has no
-        # memory of earlier turns across separate Runner.run calls,
-        # so every user message started a blank conversation.
-        #
-        # Fix: convert tudou_agent.messages (which run() already
-        # appended the new user msg to) into the SDK Responses-API
-        # input-items format, and pass the FULL list.
-        #
-        # System messages are excluded — the SDK Agent's instructions=
-        # callable rebuilds them fresh each turn from the live
-        # persona/skill/context state. Including persisted system
-        # messages would double-count and stale-out.
         run_input = _tudou_messages_to_sdk_items(
             getattr(self.tudou_agent, "messages", []) or [])
         if not run_input:
-            # Defensive: if history is empty (first turn on a brand-
-            # new agent), fall back to bare user message.
             run_input = (user_message if isinstance(user_message, str)
                          else str(user_message))
 
@@ -351,26 +336,59 @@ class SDKAgentRunner:
         _agent_mt = int(getattr(self.tudou_agent, "max_turns", 0) or 0)
         max_turns = _agent_mt if _agent_mt > 0 else 1000
 
-        # Non-streaming: gather all events at end-of-run via
-        # result.new_items and forward to the portal.
+        # ── 2026-05-16 (afternoon): switched BACK to Runner.run_streamed
+        # now that TudouClawModel.stream_response is implemented.
+        #
+        # Why we went non-streaming first: the SDK's ChatCmplStreamHandler
+        # has a bug accumulating parallel tool_call deltas (drops one,
+        # produces orphan asst.tool_calls → DeepSeek 400). We worked
+        # around by using Runner.run (non-streaming) which dodged the
+        # accumulator entirely. Cost: no text_delta events → voice mode
+        # TTS waits ~10s for the full reply instead of starting at the
+        # first sentence (~2s).
+        #
+        # Why we can switch back now: TudouClawModel.stream_response
+        # yields tool_calls ONLY when complete (built from legacy's
+        # correct accumulator). SDK never sees raw tool_call deltas, so
+        # its buggy accumulator never runs. text_delta events flow
+        # through cleanly for voice-mode sentence-level TTS.
+        #
+        # Verified via scripts/sdk_streaming_verify.py: DeepSeek + 2
+        # parallel tools → 78 text_delta events + 2 tool_calls
+        # dispatched + final text matches accumulated stream. No 400.
         result = None
         max_turns_hit = False
         try:
             try:
-                result = await Runner.run(
+                stream = Runner.run_streamed(
                     sdk_agent,
                     run_input,
                     hooks=hooks,
                     max_turns=max_turns,
                 )
             except TypeError:
-                # Older SDK signatures may not accept hooks= or
-                # max_turns=. Try progressively simpler signatures.
+                # Older SDK signatures may not accept hooks= or max_turns=
                 try:
-                    result = await Runner.run(
+                    stream = Runner.run_streamed(
                         sdk_agent, run_input, max_turns=max_turns)
                 except TypeError:
-                    result = await Runner.run(sdk_agent, run_input)
+                    stream = Runner.run_streamed(sdk_agent, run_input)
+
+            # Drain stream events, forwarding raw text deltas to the
+            # bridge AS THEY ARRIVE (voice mode sentence-TTS depends
+            # on this). High-level item events (tool_call_item etc.)
+            # still flow to bridge.forward post-hoc via new_items
+            # below — the hooks emit tool_call/tool_result in real
+            # time so duplicates are filtered there.
+            async for sdk_event in stream.stream_events():
+                # Bridge.forward handles raw_response_event → text_delta,
+                # run_item_stream_event → tool_call/tool_result/message,
+                # agent_updated_stream_event → nudge. All event-kind
+                # routing lives in event_bridge.py, not here.
+                bridge.forward(sdk_event)
+
+            # stream_events() drained; final_output is now valid.
+            result = stream
         except Exception as e:
             # ── Graceful MaxTurnsExceeded handling ──────────────
             # Legacy at hard-cap shows "已强制终止 — 工具调用太多"
