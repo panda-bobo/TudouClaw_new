@@ -203,15 +203,20 @@ class SDKAgentRunner:
 
             if ("tool_calls" in err_str
                     and "tool messages" in err_str):
+                # 2026-05-16: this should no longer be reachable
+                # since we switched _run_streamed to Runner.run
+                # (non-streaming) — the SDK streaming + parallel
+                # tool_calls bug that produced these orphans is
+                # bypassed. If it shows up again, the root cause
+                # is somewhere new (e.g. tool dispatch raising
+                # without returning a string). Check backend logs
+                # for "SDK tool wrapper error" — every tool MUST
+                # return a string, never raise.
                 hint = (
                     "[SDK runtime error — orphan asst.tool_calls. "
-                    "This usually means a tool dispatch failed mid-"
-                    "turn (sync tool blocked the event loop, or the "
-                    "model emitted a tool_call shape the SDK couldn't "
-                    "parse). Check backend logs for "
-                    "'SDK tool wrapper error' lines. As a fallback, "
-                    "switch this agent's runtime_mode back to "
-                    "'legacy' in the edit modal.]"
+                    "Should not happen post-2026-05-16 fix. Check "
+                    "backend logs for 'SDK tool wrapper error' to "
+                    "find which tool didn't return a string.]"
                 )
             elif "401" in err_str or "Incorrect API key" in err_str:
                 hint = (
@@ -227,8 +232,7 @@ class SDKAgentRunner:
             else:
                 hint = (
                     f"[SDK runtime error: {err_type}: "
-                    f"{err_str[:200]}. Switch runtime_mode back to "
-                    "'legacy' in agent edit modal if this persists.]"
+                    f"{err_str[:200]}]"
                 )
 
             final_text = hint
@@ -254,12 +258,32 @@ class SDKAgentRunner:
         bridge: Any,
         hooks: Any,
     ) -> str:
-        """Async streaming inner loop. Iterates SDK events and
-        forwards each through the bridge to the portal UI.
+        """Run the agent through the SDK and forward events to the
+        portal UI.
 
-        Returns the final assistant text (same as Runner.run_sync's
-        ``result.final_output`` but assembled from streamed deltas
-        so the user gets live updates)."""
+        ── 2026-05-16: switched from Runner.run_streamed to Runner.run
+
+        Reproduced (scripts/sdk_streaming_repro): SDK's
+        Runner.run_streamed has a real bug with DeepSeek-style
+        OpenAI-compat backends + parallel tool_calls. The streaming
+        delta accumulator drops one of the parallel tool_call entries,
+        so the SECOND LLM call sends a conversation with N tool_calls
+        in the asst message but only N-1 tool results — DeepSeek
+        rejects with HTTP 400 "insufficient tool messages following
+        tool_calls". The same setup with Runner.run (non-streaming)
+        works perfectly.
+
+        Trade-off: lose token-by-token typing animation in chat. We
+        still emit a single MESSAGE event with the full assembled
+        reply at end-of-run + tool_call_start / tool_call_end events
+        for each tool dispatch. This matches the legacy A behavior
+        for non-streaming providers; UX downgrade is "spinner +
+        result" instead of "typing animation". Acceptable.
+
+        When the upstream SDK fixes the streaming-tool_call
+        accumulator, switch this back to Runner.run_streamed +
+        async stream_events loop. Until then, stable > pretty.
+        """
         from agents import Runner
 
         # Pass the user message as-is — SDK Runner accepts str or
@@ -267,22 +291,34 @@ class SDKAgentRunner:
         run_input = (user_message if isinstance(user_message, str)
                      else str(user_message))
 
+        # Non-streaming: gather all events at end-of-run via
+        # result.new_items and forward to the portal.
         try:
-            stream = Runner.run_streamed(
+            result = await Runner.run(
                 sdk_agent,
                 run_input,
                 hooks=hooks,
             )
         except TypeError:
             # Older SDK signatures may not accept hooks=; degrade.
-            stream = Runner.run_streamed(sdk_agent, run_input)
+            result = await Runner.run(sdk_agent, run_input)
 
-        async for event in stream.stream_events():
-            bridge.forward(event)
+        # Forward post-hoc events to the portal so the chat UI sees
+        # what tool calls happened + the final assistant text. The
+        # bridge translates each item into the legacy AgentEvent
+        # shape exactly the same way it would for streamed events.
+        try:
+            for item in (getattr(result, "new_items", []) or []):
+                # Wrap each item as a fake "run_item_stream_event"
+                # so the bridge's existing dispatcher handles it.
+                fake_event = _FakeRunItemEvent(item)
+                bridge.forward(fake_event)
+        except Exception as e:
+            logger.warning(
+                "post-run event forwarding failed: %s — final reply "
+                "still returned to chat", e)
 
-        # After the stream completes, ``stream.final_output`` carries
-        # the assembled final text.
-        return getattr(stream, "final_output", "") or ""
+        return getattr(result, "final_output", "") or ""
 
     def _build_sdk_model(self):
         """Construct the SDK Model object pointing at TudouClaw's
@@ -366,3 +402,21 @@ class SDKAgentRunner:
             model=model_name,
             openai_client=client,
         )
+
+
+class _FakeRunItemEvent:
+    """Minimal shim that lets the bridge's stream-event handler
+    process post-run items the same way it would streamed events.
+    The bridge looks at .type and .item — that's all we need.
+
+    Used by ``SDKAgentRunner._run_streamed`` to wrap each item from
+    ``RunResult.new_items`` so we can reuse the bridge's existing
+    streamed-event dispatcher (which keys on ``event.type ==
+    'run_item_stream_event'``) for post-hoc items too. This keeps
+    one event-routing path in event_bridge.py — no need for a
+    separate "non-streaming items" handler.
+    """
+    type = "run_item_stream_event"
+
+    def __init__(self, item):
+        self.item = item

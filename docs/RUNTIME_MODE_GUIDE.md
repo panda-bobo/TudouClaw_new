@@ -97,13 +97,40 @@ under legacy until you actually install the SDK.
    `wiki_ingest` — same as legacy  
 ✅ XML tool_call leak detection on streamed text deltas (same B
    helper, same retract event)  
-✅ Stream events forwarded to portal in legacy `AgentEvent` shape
-   (text_delta / tool_call_start / tool_call_end / message)  
+✅ Events forwarded to portal in legacy `AgentEvent` shape
+   (tool_call_start / tool_call_end / message). NOTE: as of
+   2026-05-16 the SDK runtime is **non-streaming** — see "Why
+   non-streaming" below. Tool-call cards still appear; the final
+   message arrives as one bubble instead of typing animation.  
 ✅ L3 action buffer + flush on agent_end (long-term memory still
    accumulates)  
 ✅ Switch-back to legacy at any time, persisted across restart  
 
+## Why non-streaming (2026-05-16)
+
+`Runner.run_streamed` has a reproducible bug with DeepSeek-style
+OpenAI-compat backends + parallel `tool_calls`: the streaming delta
+accumulator drops one of the parallel tool_call entries, so the
+SECOND LLM call sends N tool_calls in the asst message but only
+N-1 tool results. DeepSeek correctly rejects that with HTTP 400
+"insufficient tool messages following tool_calls". Same setup with
+`Runner.run` (non-streaming) works perfectly — verified via
+`scripts/sdk_nonstreaming_verify.py`.
+
+So `_run_streamed` now uses `Runner.run` and forwards
+`result.new_items` via a `_FakeRunItemEvent` shim into the same
+event bridge dispatcher. Everything the portal needs (tool_call
+cards, final assistant text, retract events) still works; only
+the per-token typing animation is lost. UX downgrade is acceptable;
+correctness wins. When upstream SDK fixes the streaming
+accumulator, flip `_run_streamed` back to `Runner.run_streamed`.
+
 ## What's NOT yet wired (Phase 3+)
+
+⏳ Token-by-token typing animation. Lost when we moved to
+   `Runner.run`; restoring it requires either (a) upstream SDK
+   fix for the streaming + parallel-tool_calls bug, or (b) our own
+   manual streaming wrapper that doesn't trip the accumulator.
 
 ⏳ Nudge **injection** (re-running the LLM with an injected system
    message). Currently `evaluate_nudge` runs in `on_llm_end`, would-
@@ -111,8 +138,8 @@ under legacy until you actually install the SDK.
    isn't bound — SDK 0.17 exposes input mutation only via the
    Runner's input_items parameter for the NEXT call, which doesn't
    directly map to the legacy "inject + continue" pattern. Phase 3
-   work: switch from `Runner.run_streamed` to a manual loop calling
-   `Runner.run` per turn so we can mutate input between turns.
+   work: wrap a manual loop calling `Runner.run` per turn so we can
+   mutate input between turns.
 
 ⏳ History compaction trigger from inside the SDK loop. Currently
    compaction is driven by the legacy chat loop's outer iteration
