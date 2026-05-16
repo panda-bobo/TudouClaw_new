@@ -170,6 +170,51 @@ def _build_real_tudou_model_class():
 
             # ── 4. Legacy result → SDK ModelResponse ────────────────
             msg_dict = result.get("message") or {}
+            # Diagnostic — keep until SDK runtime is rock-solid;
+            # tells us EXACTLY what mimo/DeepSeek/etc. returned so we
+            # can tell "model returned empty" vs "converter dropped
+            # something". Captures content len, has-tool-calls, has-
+            # reasoning, stop_reason. Non-PII (just shape, not text).
+            try:
+                logger.info(
+                    "tudou_model: chat_no_stream → provider=%s model=%s "
+                    "content_len=%d tool_calls=%d reasoning_len=%d "
+                    "stop=%s",
+                    self.provider_id, self.model_name,
+                    len(str(msg_dict.get("content") or "")),
+                    len(msg_dict.get("tool_calls") or []),
+                    len(str(msg_dict.get("reasoning_content") or "")),
+                    result.get("stop_reason", "?"),
+                )
+            except Exception:
+                pass
+
+            # ── Thinking-mode content fallback (matches legacy
+            #    agent.py:13922-13926) ─────────────────────────────
+            # mimo / DeepSeek thinking-mode sometimes returns
+            # content="" with everything in reasoning_content. Without
+            # this fallback, SDK sees empty content → empty final_output
+            # → "empty_reply" nudge fires but agent UI shows nothing.
+            # Legacy already documented + handles this; we copy the
+            # same fallback so SDK gets identical behavior.
+            _content = str(msg_dict.get("content") or "").strip()
+            if not _content:
+                _reasoning = str(msg_dict.get("reasoning_content") or "").strip()
+                if _reasoning and not (msg_dict.get("tool_calls") or []):
+                    # Only surface reasoning AS content when there are
+                    # no tool_calls (if there ARE tool_calls, the model
+                    # is in mid-thought routing to a tool — let the
+                    # tool dispatch happen, don't surface CoT as reply).
+                    logger.info(
+                        "tudou_model: empty content + reasoning_content "
+                        "present (%d chars) — using reasoning as visible "
+                        "reply (legacy fallback)", len(_reasoning))
+                    # Mutate the dict so the ChatCompletionMessage
+                    # builder picks up the fallback content. Also keep
+                    # original reasoning_content for sanitize roundtrip.
+                    msg_dict = dict(msg_dict)
+                    msg_dict["content"] = _reasoning
+
             # Legacy may keep ``reasoning_content`` on the assistant
             # message — that's fine, it gets sent back on the next
             # turn (sanitize sees it pre-set, doesn't placeholder).
@@ -201,6 +246,17 @@ def _build_real_tudou_model_class():
                 # Fall back to a single text item so the agent has
                 # SOMETHING to return.
                 items = []
+
+            # Second diagnostic: how many output items did the converter
+            # produce? If chat_no_stream returned content but items is
+            # empty, that's a converter bug (not a model issue).
+            try:
+                item_types = [type(i).__name__ for i in items]
+                logger.info(
+                    "tudou_model: → SDK output_items=%d types=%s",
+                    len(items), item_types)
+            except Exception:
+                pass
 
             usage_dict = result.get("usage") or {}
             sdk_usage = Usage(
