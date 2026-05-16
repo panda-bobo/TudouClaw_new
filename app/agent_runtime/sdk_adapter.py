@@ -621,24 +621,58 @@ def _compact_history_if_needed(tudou_agent):
         logger.debug("history compaction skipped (import failed): %s", e)
         return
 
+    # ── SDK-specific tunings ──
+    # 1. keep_last bumped 6 → 12. Tool-heavy turns under SDK can be
+    #    1 user → asst.tool_calls → tool_result → asst.tool_calls →
+    #    tool_result → asst.text = 6 messages for ONE conversational
+    #    round. keep_last=6 then preserves just one round verbatim;
+    #    12 covers ~2 rounds, which matches "the LLM should still
+    #    see what just happened" intuition.
+    # 2. Other params left at legacy defaults — they govern char-
+    #    based thresholds, not message count, so SDK doesn't need
+    #    to override them.
+    SDK_KEEP_LAST = 12
+
     try:
         msgs_before = list(tudou_agent.messages or [])
         before_chars = sum(len(str(m.get("content") or ""))
                            for m in msgs_before)
-        compacted = _summarize_old_history(msgs_before, tudou_agent)
+        compacted = _summarize_old_history(
+            msgs_before, tudou_agent,
+            keep_last=SDK_KEEP_LAST,
+        )
         if compacted is msgs_before:
             return  # nothing compressed; no need to reassign
+
+        after_chars = sum(len(str(m.get("content") or ""))
+                          for m in compacted)
+
+        # ── Bloat guard (2026-05-16): if the summary made things
+        # WORSE (e.g. LLM expanded narrative beyond what was being
+        # compressed), abort and keep the original. Threshold: 80%
+        # of original — anything above is below the "worth the
+        # compression cost" line.
+        if after_chars > int(before_chars * 0.8):
+            logger.warning(
+                "SDK runtime: history compaction REVERTED — summary "
+                "(%d chars) is ≥80%% of original (%d chars). Most "
+                "likely the 9-section template's narrative inflated "
+                "rather than compressed. Keeping original. agent=%s",
+                after_chars, before_chars,
+                getattr(tudou_agent, "id", "?")[:8])
+            return
+
         # Mutate in place — Agent.__setattr__ has a hook that re-routes
         # writes to ``self.messages`` into _messages_by_context, so the
         # context binding stays consistent.
         tudou_agent.messages = compacted
-        after_chars = sum(len(str(m.get("content") or ""))
-                          for m in compacted)
         logger.info(
             "SDK runtime: compacted history "
-            "%d msgs / %d chars → %d msgs / %d chars (agent=%s)",
+            "%d msgs / %d chars → %d msgs / %d chars "
+            "(saved %.0f%%) agent=%s",
             len(msgs_before), before_chars,
             len(compacted), after_chars,
+            (1 - after_chars / max(1, before_chars)) * 100,
             getattr(tudou_agent, "id", "?")[:8])
     except Exception as e:
         # Same fail-safe as legacy — never block the chat turn.

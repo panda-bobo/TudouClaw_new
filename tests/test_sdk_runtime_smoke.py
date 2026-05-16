@@ -621,6 +621,67 @@ def test_history_compaction_runs_before_sending(monkeypatch):
     assert "compressed history" in agent.messages[0]["content"]
 
 
+def test_history_compaction_aborts_if_summary_bigger_than_80pct(monkeypatch):
+    """Edge case: LLM 9-section template can EXPAND rather than
+    compress (especially Section 5 "Problem Solving" which invites
+    free-form narrative). If the "compacted" version is ≥80% of
+    the original, the compression isn't worth applying — revert.
+
+    Without this guard, every history-bloating turn would also
+    PERMANENTLY replace the agent's messages with the bloated
+    version — making the next turn even worse.
+    """
+    from app.agent_runtime import sdk_adapter
+
+    agent = _FakeAgent()
+    # Seed with messages totaling ~10000 chars
+    agent.messages = [
+        {"role": "user", "content": "x" * 1000},
+        {"role": "assistant", "content": "y" * 1000},
+    ] * 5  # 10 messages, ~10000 chars
+
+    def _bloated_summarize(messages, ag, **kw):
+        # LLM produced a "summary" that's 9000 chars — 90% of original.
+        # Compression net-negative.
+        return [
+            {"role": "system",
+             "content": "BLOATED SUMMARY " + ("z" * 8800)},
+        ]
+
+    monkeypatch.setattr("app.agent._summarize_old_history",
+                        _bloated_summarize)
+
+    original_msgs = agent.messages
+    sdk_adapter._compact_history_if_needed(agent)
+
+    # Original messages PRESERVED — bloated summary was rejected
+    assert agent.messages is original_msgs, (
+        "bloat guard should revert to original when summary is "
+        "≥80% of original size")
+
+
+def test_history_compaction_applies_when_actually_smaller(monkeypatch):
+    """Inverse: when the summary IS smaller (the normal case),
+    compaction applies."""
+    from app.agent_runtime import sdk_adapter
+
+    agent = _FakeAgent()
+    agent.messages = [
+        {"role": "user", "content": "x" * 1000},
+    ] * 10  # ~10000 chars
+
+    def _good_summarize(messages, ag, **kw):
+        # 2000 chars = 20% of original. Much better.
+        return [{"role": "system", "content": "summary " * 250}]
+
+    monkeypatch.setattr("app.agent._summarize_old_history",
+                        _good_summarize)
+
+    sdk_adapter._compact_history_if_needed(agent)
+    assert len(agent.messages) == 1
+    assert agent.messages[0]["role"] == "system"
+
+
 def test_history_compaction_no_op_when_unchanged(monkeypatch):
     """If _summarize_old_history returns the SAME list (identity —
     legacy contract: 'returns same list if no change'), don't
