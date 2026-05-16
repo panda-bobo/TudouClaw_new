@@ -204,6 +204,26 @@ class EventBridge:
             except Exception as e:
                 logger.debug("EventBridge _log to agent.events failed: %s", e)
 
+            # ── Mid-run persistence (2026-05-16 evening) ──────────────
+            # Legacy chat loop calls _maybe_persist at every iteration
+            # boundary so a SIGKILL / abort mid-run doesn't lose data.
+            # SDK runtime previously only persisted at end-of-run
+            # (in SDKAgentRunner.run finalization). If the process
+            # died mid-stream, the user msg + any partial tool calls
+            # would be in memory but not on disk.
+            #
+            # _maybe_persist is throttled (default 1s between saves)
+            # so calling it on every semantic event doesn't pound the
+            # disk. Final force-persist in run() still fires for the
+            # guaranteed end-of-turn save.
+            try:
+                if self.tudou_agent is not None and hasattr(
+                        self.tudou_agent, "_maybe_persist"):
+                    self.tudou_agent._maybe_persist()
+            except Exception as e:
+                logger.debug(
+                    "EventBridge mid-run _maybe_persist failed: %s", e)
+
         if self.on_event is None:
             return
         try:

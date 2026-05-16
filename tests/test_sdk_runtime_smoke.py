@@ -849,6 +849,42 @@ def test_opt_in_lets_tool_run_when_user_requests_retrieval(monkeypatch):
     assert calls == [("memory_recall", '{"query":"xxx"}')]
 
 
+def test_event_emit_triggers_maybe_persist(fake_agent):
+    """Every semantic event emit must trigger ``_maybe_persist()`` —
+    so mid-run crashes / aborts don't lose data. Throttle (default 1s)
+    handles disk-thrash protection; we only need to verify the CALL
+    actually happens.
+
+    Caught: 2026-05-16 evening — SDK runtime only persisted at
+    end-of-run. Crash mid-stream lost the user msg + any partial
+    progress. Legacy persists at every iteration boundary.
+    """
+    from app.agent_runtime.event_bridge import EventBridge
+
+    bridge = EventBridge(
+        on_event=lambda _evt: None,
+        tudou_agent=fake_agent,
+    )
+    # Semantic event → triggers persist
+    bridge._emit("tool_call",
+                 {"name": "x", "arguments": "{}"})
+    assert fake_agent._persist_calls == 1, (
+        "semantic event must trigger _maybe_persist; "
+        f"got {fake_agent._persist_calls} calls")
+
+    bridge._emit("message",
+                 {"role": "assistant", "content": "hi"})
+    assert fake_agent._persist_calls == 2
+
+    # Ephemeral event (text_delta) → must NOT trigger persist
+    # (throttle alone isn't enough if N text_deltas fire in same
+    # second — we want zero calls, not throttled-to-1).
+    bridge._emit("text_delta", {"content": "x"})
+    assert fake_agent._persist_calls == 2, (
+        "ephemeral text_delta must NOT trigger persist (would fire "
+        "hundreds of times per turn even with throttle)")
+
+
 def test_message_event_not_duplicated_in_agent_events(fake_agent):
     """Each LLM message must result in EXACTLY ONE entry in
     agent.events (kind=message). Bug 2026-05-16 evening: after switch

@@ -191,6 +191,12 @@ class SDKAgentRunner:
                 "content": _preview_text[:500],
                 "source": source,
             })
+            # ── Persist immediately so user msg survives any mid-run
+            # crash. Throttle (1s default) protects against thrashing
+            # when several events fire within the same second. The
+            # FIRST call always falls through because _last_persist_at
+            # starts at 0; subsequent ones throttle.
+            self.tudou_agent._maybe_persist()
         except Exception:
             pass
 
