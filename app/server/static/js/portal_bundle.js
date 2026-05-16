@@ -26810,23 +26810,35 @@ function _voiceModeDraw() {
 }
 
 function _voiceModeCheckTTS() {
-  // Per-agent TTS resolution (2026-05-09):
+  // Per-agent TTS resolution (2026-05-09; 2026-05-16 fallback fix):
   //   - If the agent has tts_provider_id set, use it (server TTS).
-  //   - Otherwise, fall back to browser Web Speech API.
+  //   - Otherwise, fall back to Edge TTS (zh-CN-XiaoxiaoNeural).
+  //     Was falling back to browser Web Speech API which sounds like
+  //     a 1990s GPS robot — @user 反馈 "默认语调，机器人生硬风格的".
+  //     Edge TTS is free, no API key needed, ~500ms first-audio
+  //     latency, and the Neural voices (XiaoxiaoNeural / XiaoyiNeural)
+  //     sound human. Per-agent override still wins.
   if (!_VoiceMode) return;
   var aid = _VoiceMode.agentId;
   var ag = (typeof agents !== 'undefined') && agents.find
     ? agents.find(function(a){ return a.id === aid; })
     : null;
   var pid = (ag && ag.tts_provider_id) || '';
-  _VoiceMode.ttsVoice = (ag && ag.tts_voice) || '';
-  _VoiceMode.ttsModel = (ag && ag.tts_model) || '';
+  var voice = (ag && ag.tts_voice) || '';
   if (pid) {
+    // Per-agent config wins.
     _VoiceMode.serverTTS = true;
     _VoiceMode.ttsProviderId = pid;
+    _VoiceMode.ttsVoice = voice;
+    _VoiceMode.ttsModel = (ag && ag.tts_model) || '';
   } else {
-    _VoiceMode.serverTTS = false;
-    _VoiceMode.ttsProviderId = '';
+    // No per-agent config → default to Edge TTS Xiaoxiao Neural.
+    // Backend handles __edge_tts__ sentinel; voice list at
+    // app/api/routers/tts.py:202.
+    _VoiceMode.serverTTS = true;
+    _VoiceMode.ttsProviderId = '__edge_tts__';
+    _VoiceMode.ttsVoice = 'zh-CN-XiaoxiaoNeural';
+    _VoiceMode.ttsModel = '';
   }
 }
 

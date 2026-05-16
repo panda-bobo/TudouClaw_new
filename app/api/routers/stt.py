@@ -229,22 +229,46 @@ _HALLUCINATIONS = {
 }
 
 
-def _is_whisper_hallucination(text: str) -> bool:
+# Legit single-char zh replies that often slip through Whisper-style
+# STT as the FULL transcript when the user says them. Without
+# whitelisting these, the "len < 2" filter eats every voice-mode
+# confirmation. (Groq still hallucinates "好" on near-silence — the
+# audio_duration_s arg below disambiguates: hallucinated single-chars
+# come from very short audio (< 0.6s), real ones come from clips ≥
+# that.) Add to this set conservatively — false positives here mean
+# Groq noise becomes a user message, which is annoying but recoverable
+# (agent replies "嗯?"). False NEGATIVES (real speech filtered) make
+# voice mode appear broken, which is worse.
+_LEGIT_SINGLE_CHAR_ZH = {
+    "好", "嗯", "对", "是", "行", "停", "等", "继续", "走",
+    "可以", "不行", "没事",
+}
+
+
+def _is_whisper_hallucination(text: str,
+                              audio_duration_s: float = 0.0) -> bool:
     """Return True if `text` is almost certainly a Whisper artifact
     rather than real user speech, so the caller can substitute "".
 
     Detection layers (ordered cheapest first):
-      1. Empty / sub-2-char strings.
+      1. Empty strings — always drop.
       2. Exact match against the `_HALLUCINATIONS` blocklist (known
          English/Chinese tokens Whisper emits on silence/breath).
-      3. Repeated-half-sentence ("Sean Sean Sean") — confidence collapse.
-      4. **Mixed-script tinies** (added 2026-05-10 after user reported
+      3. Sub-2-char strings — drop UNLESS:
+          (a) it's in ``_LEGIT_SINGLE_CHAR_ZH`` (real reply word), AND
+          (b) ``audio_duration_s`` ≥ 0.6 (clip is long enough to
+              actually contain speech, not just breath/silence that
+              Groq misclassified as "好" / "嗯")
+         Without the duration check, every "好" / "嗯" got dropped —
+         that's the @user 13:05 voice-mode regression.
+      4. Repeated-half-sentence ("Sean Sean Sean") — confidence collapse.
+      5. **Mixed-script tinies** (added 2026-05-10 after user reported
          `är冷` slipping through): if the entire transcript is short
          (≤ 6 stripped chars) AND contains BOTH ASCII letters and CJK
          characters, it's overwhelmingly likely garbage. Real Chinese
          speakers don't randomly insert Swedish into 3-character
          utterances.
-      5. **Latin-only tinies in zh context** (≤ 3 chars, no CJK, no
+      6. **Latin-only tinies in zh context** (≤ 3 chars, no CJK, no
          digit) — Whisper drifting into another language on near-
          silent input. Drops "you" / "ok" / "är" but a real "OK" is
          rare in Chinese voice mode and easily re-stated.
@@ -252,10 +276,17 @@ def _is_whisper_hallucination(text: str) -> bool:
     if not text:
         return True
     norm = text.lower().strip()
-    if len(norm) < 2:
-        return True
     if norm in _HALLUCINATIONS:
         return True
+    # Layer 3: short strings — whitelist real zh replies if audio
+    # was long enough to actually contain a word.
+    if len(norm) < 2:
+        if (norm in _LEGIT_SINGLE_CHAR_ZH
+                and audio_duration_s >= 0.6):
+            # Real speech — let it through.
+            pass
+        else:
+            return True
     # Repeated-half-sentence
     halves = norm.split()
     if len(halves) >= 2:
@@ -354,13 +385,33 @@ def _llm_provider_transcribe(llm_p, wav_path: str, lang: str,
         )
     # Reuse the same hallucination guard for whisper-style providers —
     # they're prone to the same "Look at that" / "感谢观看" artifacts.
-    if _is_whisper_hallucination(text):
+    # Pass audio duration so the filter can let through legitimate short
+    # zh replies ("好" / "嗯" / "对") when the audio is meaningfully long
+    # (≥ 0.6s) — distinguishes real speech from silence-misclassified
+    # noise that Groq emits as the same word.
+    audio_duration_s = _wav_duration_seconds(wav_path)
+    if _is_whisper_hallucination(text, audio_duration_s=audio_duration_s):
         logger.info(
-            "stt provider hallucination filtered: provider=%s text=%r",
-            llm_p.name, text,
+            "stt provider hallucination filtered: provider=%s text=%r "
+            "dur=%.2fs",
+            llm_p.name, text, audio_duration_s,
         )
         return ""
     return text
+
+
+def _wav_duration_seconds(wav_path: str) -> float:
+    """Read the duration of a WAV file in seconds. Returns 0.0 if the
+    file can't be read — caller treats 0.0 as "no signal" (the strictest
+    filter behavior, same as pre-fix)."""
+    try:
+        import soundfile as sf
+        with sf.SoundFile(wav_path) as f:
+            if f.samplerate > 0:
+                return float(f.frames) / float(f.samplerate)
+    except Exception:
+        pass
+    return 0.0
 
 
 # ── Audio decoding (shared across engines) ────────────────────────
