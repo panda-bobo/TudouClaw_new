@@ -319,6 +319,11 @@ class SDKAgentRunner:
             MaxTurnsExceeded = None  # older SDK shape
 
         # ── 2026-05-16: pass conversation HISTORY to SDK ────────
+        # Also: compact old history first (legacy does this at every
+        # iteration via _summarize_old_history; SDK runtime had NO
+        # compaction wired, so history grew unbounded — @user
+        # observed hist=123k chars / 51k tokens per turn).
+        _compact_history_if_needed(self.tudou_agent)
         run_input = _tudou_messages_to_sdk_items(
             getattr(self.tudou_agent, "messages", []) or [])
         if not run_input:
@@ -581,6 +586,65 @@ class SDKAgentRunner:
             model_name=model_name,
             base_url=base_url,
         )
+
+
+def _compact_history_if_needed(tudou_agent):
+    """Run TudouClaw's existing ``_summarize_old_history`` on the
+    agent's messages, replacing in place if it compressed anything.
+
+    SDK runtime never had history compaction wired (@user observed
+    hist=123k chars / 51k tokens per turn before this fix). Legacy
+    chat loop calls _summarize_old_history at every iteration (see
+    agent.py:11416, 11587, 11774, etc.) so old turns get rolled up
+    into a single summary system message; we mirror that here for
+    SDK runtime by hooking the same function at the one entry point
+    we have (start of _run_streamed, before history is converted to
+    SDK items + sent to LLM).
+
+    Defaults (from app.agent module-level constants):
+      - TUDOU_HISTORY_SUMMARY_CHARS=25000 (soft trigger)
+      - hard cap = 2× = 50000 chars (force-compress)
+      - TUDOU_HISTORY_SUMMARY_KEEP_LAST=6 (recent msgs kept verbatim)
+      - TUDOU_HISTORY_SUMMARY_OFF=1 → disable entirely
+
+    Fail-safe: if summarize fails (LLM call timeout, parse error,
+    etc.), legacy returns the same list unchanged and logs. We do
+    the same — never block the chat turn on summarization.
+
+    Mutates ``tudou_agent.messages`` in place (same as legacy at
+    agent.py:11774) so the COMPRESSED version is what gets persisted
+    to disk on the next _maybe_persist call — disk doesn't bloat.
+    """
+    try:
+        from app.agent import _summarize_old_history
+    except Exception as e:
+        logger.debug("history compaction skipped (import failed): %s", e)
+        return
+
+    try:
+        msgs_before = list(tudou_agent.messages or [])
+        before_chars = sum(len(str(m.get("content") or ""))
+                           for m in msgs_before)
+        compacted = _summarize_old_history(msgs_before, tudou_agent)
+        if compacted is msgs_before:
+            return  # nothing compressed; no need to reassign
+        # Mutate in place — Agent.__setattr__ has a hook that re-routes
+        # writes to ``self.messages`` into _messages_by_context, so the
+        # context binding stays consistent.
+        tudou_agent.messages = compacted
+        after_chars = sum(len(str(m.get("content") or ""))
+                          for m in compacted)
+        logger.info(
+            "SDK runtime: compacted history "
+            "%d msgs / %d chars → %d msgs / %d chars (agent=%s)",
+            len(msgs_before), before_chars,
+            len(compacted), after_chars,
+            getattr(tudou_agent, "id", "?")[:8])
+    except Exception as e:
+        # Same fail-safe as legacy — never block the chat turn.
+        logger.warning(
+            "SDK runtime: history compaction failed (%s) — "
+            "sending uncompressed history", e)
 
 
 def _persist_sdk_items_to_messages(tudou_agent, new_items):

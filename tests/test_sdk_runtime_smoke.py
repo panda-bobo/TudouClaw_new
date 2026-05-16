@@ -579,6 +579,75 @@ def test_stream_response_yields_complete_tool_calls(monkeypatch):
         f"{type(events[-1]).__name__}")
 
 
+def test_history_compaction_runs_before_sending(monkeypatch):
+    """SDK runtime must call ``_summarize_old_history`` on the
+    agent's messages before converting to SDK input items —
+    otherwise history grows unbounded (legacy does this at every
+    iteration; @user observed hist=123k chars per turn in SDK mode
+    when this was missing).
+
+    Mocks _summarize_old_history to confirm it gets called and that
+    its return value replaces tudou_agent.messages in place.
+    """
+    from app.agent_runtime import sdk_adapter
+
+    agent = _FakeAgent()
+    # Seed with 20 fat messages (over the 25k char default threshold)
+    agent.messages = [
+        {"role": "user", "content": "x" * 2000},
+    ] * 20
+
+    called = []
+
+    def _fake_summarize(messages, ag, **kw):
+        called.append((len(messages), kw))
+        # Pretend we compressed 18 messages into 2
+        return [
+            {"role": "system",
+             "content": "[compressed history of N old turns]"},
+            messages[-1],
+        ]
+
+    monkeypatch.setattr("app.agent._summarize_old_history",
+                        _fake_summarize)
+
+    sdk_adapter._compact_history_if_needed(agent)
+
+    # Confirm summarize got called
+    assert len(called) == 1, "_summarize_old_history must be invoked"
+    # Confirm agent.messages got replaced with the compacted version
+    assert len(agent.messages) == 2
+    assert agent.messages[0]["role"] == "system"
+    assert "compressed history" in agent.messages[0]["content"]
+
+
+def test_history_compaction_no_op_when_unchanged(monkeypatch):
+    """If _summarize_old_history returns the SAME list (identity —
+    legacy contract: 'returns same list if no change'), don't
+    reassign tudou_agent.messages. Reassignment fires the dataclass
+    __setattr__ hook which has side effects (re-routes through
+    _messages_by_context); skipping it when nothing changed is the
+    right thing to do."""
+    from app.agent_runtime import sdk_adapter
+
+    agent = _FakeAgent()
+    original_msgs = [{"role": "user", "content": "small"}]
+    agent.messages = original_msgs
+
+    def _fake_summarize(messages, ag, **kw):
+        # Legacy contract: return same list (identity) if nothing
+        # was compressed (under threshold).
+        return messages
+
+    monkeypatch.setattr("app.agent._summarize_old_history",
+                        _fake_summarize)
+
+    sdk_adapter._compact_history_if_needed(agent)
+
+    # Same list (identity) preserved
+    assert agent.messages is original_msgs
+
+
 def test_opt_in_denied_tool_registered_but_soft_denied(monkeypatch):
     """Opt-in gate (memory_recall / knowledge_lookup / wiki_ingest)
     must NOT strip tools from SDK's registered list. SDK is strict
