@@ -55,30 +55,32 @@ def build_sdk_tools(tudou_agent, user_message: Any) -> List[Any]:
         logger.warning("_get_effective_tools failed: %s", e)
         legacy_specs = []
 
-    # ── Step 2: B's intent-based opt-in (same as A path) ──────────
+    # ── Step 2: B's intent-based opt-in → SOFT-DENY (2026-05-16) ──
+    # Was: strip tools from the SDK tool list entirely. Legacy could
+    # tolerate that — tool_registry.dispatch returns an error string
+    # for unknown tools, the LLM adapts. SDK is STRICTER: it validates
+    # tool names against the registered list BEFORE dispatch and
+    # raises ModelBehaviorError("Tool memory_recall not found"),
+    # aborting the entire run.
+    #
+    # Now: keep the tools registered, but mark them ``opt_in_denied``
+    # so the _invoke closure (below) intercepts the call and returns
+    # a friendly skip message instead of running the real handler.
+    # SDK is happy (tool exists), no retrieval cost incurred, and the
+    # LLM gets a useful hint to avoid the tool next time.
     user_text = user_message if isinstance(user_message, str) else ""
+    opt_in_deny: set = set()
     try:
         from app.runtime import (
             user_explicitly_requests_retrieval,
             user_explicitly_requests_wiki_write,
         )
-        opt_in_deny: set = set()
         if not user_explicitly_requests_retrieval(user_text):
             opt_in_deny.update({"knowledge_lookup", "memory_recall"})
         if not user_explicitly_requests_wiki_write(user_text):
             opt_in_deny.add("wiki_ingest")
-
-        if opt_in_deny:
-            filtered = [
-                t for t in legacy_specs
-                if (t.get("function", {}).get("name", "") or "")
-                not in opt_in_deny
-            ]
-            # Safety: never empty the tool set (same gate as A)
-            if filtered:
-                legacy_specs = filtered
     except Exception as e:
-        logger.debug("opt-in filter skipped: %s", e)
+        logger.debug("opt-in gate skipped: %s", e)
 
     # ── Step 3: wrap each legacy spec as an SDK FunctionTool ──────
     sdk_tools: List[Any] = []
@@ -109,8 +111,26 @@ def build_sdk_tools(tudou_agent, user_message: Any) -> List[Any]:
         # messages following tool_calls". Fix: dispatch in a thread
         # via asyncio.to_thread so the sync tool runs without
         # blocking the loop.
-        async def _invoke(ctx: Any, args_json: str, _name=name):
+        async def _invoke(ctx: Any, args_json: str, _name=name,
+                          _deny=opt_in_deny):
             import asyncio as _asyncio
+            # ── Soft-deny intercept (2026-05-16) ─────────────────
+            # If intent gate denied this tool, return a hint instead
+            # of running the real handler. Saves cost (no retrieval)
+            # and gives the LLM a useful message to course-correct.
+            if _name in _deny:
+                logger.info(
+                    "SDK tool soft-denied (intent gate): %s — "
+                    "user message lacked retrieval keywords; returning "
+                    "skip hint instead of dispatching", _name)
+                return (
+                    f"(tool '{_name}' was not invoked — the user's "
+                    f"message did not explicitly mention past "
+                    f"conversations / knowledge lookup. Only call this "
+                    f"tool when the user says things like '上次', "
+                    f"'记得', '之前你说过', '搜一下知识库', etc. "
+                    f"For this turn, answer from current context.)"
+                )
             try:
                 logger.info(
                     "SDK tool call: %s args=%s",

@@ -579,6 +579,94 @@ def test_stream_response_yields_complete_tool_calls(monkeypatch):
         f"{type(events[-1]).__name__}")
 
 
+def test_opt_in_denied_tool_registered_but_soft_denied(monkeypatch):
+    """Opt-in gate (memory_recall / knowledge_lookup / wiki_ingest)
+    must NOT strip tools from SDK's registered list. SDK is strict
+    about ``ModelBehaviorError: Tool memory_recall not found`` and
+    aborts the whole run when the LLM calls a missing tool.
+
+    Correct behavior: register the tool, intercept in _invoke when
+    the intent gate denies, return a friendly skip-hint string.
+
+    Caught: 2026-05-16 voice mode @user error
+        ``Tool memory_recall not found in agent 小土`` — LLM called
+        memory_recall after the opt-in filter had removed it.
+    """
+    import asyncio
+    from app.agent_runtime.tool_registry import build_sdk_tools
+
+    # Fake an agent with memory_recall in its allowed tool set.
+    class _Tudou:
+        id = "agent-abc"
+        name = "test"
+        def _get_effective_tools(self):
+            return [{
+                "type": "function",
+                "function": {
+                    "name": "memory_recall",
+                    "description": "Recall past conversations",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }]
+
+    # User text without any retrieval keywords (no '上次', '记得'...)
+    sdk_tools = build_sdk_tools(_Tudou(), "你好")
+    # Tool MUST still be registered (otherwise SDK errors on
+    # ModelBehaviorError when LLM calls it).
+    names = [getattr(t, "name", "") for t in sdk_tools]
+    assert "memory_recall" in names, (
+        "opt-in gate must NOT strip the tool from the registered "
+        "list; SDK aborts the run with ModelBehaviorError when LLM "
+        "calls an unregistered tool")
+
+    # When the LLM actually calls it, _invoke should return a
+    # skip-hint string (NOT dispatch the real handler).
+    tool = next(t for t in sdk_tools if getattr(t, "name", "") == "memory_recall")
+    result = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+        tool.on_invoke_tool(None, '{"query":"anything"}'))
+    assert isinstance(result, str)
+    assert "not invoked" in result or "skip" in result.lower(), (
+        f"soft-deny should return a skip hint; got: {result!r}")
+
+
+def test_opt_in_lets_tool_run_when_user_requests_retrieval(monkeypatch):
+    """Same tool, but user message contains '记得' / '上次' / etc. —
+    the intent gate allows the tool, _invoke dispatches normally."""
+    import asyncio
+    from app.agent_runtime import tool_registry as tr
+
+    # Mock the dispatcher so we don't need a real handler
+    calls = []
+
+    def _fake_dispatch(agent, name, args_json):
+        calls.append((name, args_json))
+        return "dispatched OK"
+
+    monkeypatch.setattr(tr, "_dispatch_tudou_tool", _fake_dispatch)
+
+    class _Tudou:
+        id = "agent-abc"
+        name = "test"
+        def _get_effective_tools(self):
+            return [{
+                "type": "function",
+                "function": {
+                    "name": "memory_recall",
+                    "description": "Recall past conversations",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }]
+
+    # Trigger phrase present
+    sdk_tools = tr.build_sdk_tools(_Tudou(),
+                                    "记得上次我们聊过什么吗？")
+    tool = next(t for t in sdk_tools if getattr(t, "name", "") == "memory_recall")
+    result = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+        tool.on_invoke_tool(None, '{"query":"xxx"}'))
+    assert result == "dispatched OK"
+    assert calls == [("memory_recall", '{"query":"xxx"}')]
+
+
 def test_stream_response_yields_text_deltas(monkeypatch):
     """Voice-mode sentence-level TTS needs text_delta events to flow
     as tokens arrive. Stream_response must yield ResponseTextDeltaEvent
