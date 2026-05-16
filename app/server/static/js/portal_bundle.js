@@ -20442,6 +20442,36 @@ async function editAgentProfile(agentId) {
   _renderAvatarGrid('ea-avatar-grid', '_eaSelectedAvatar', 'eaPickAvatar');
   document.getElementById('ea-language').value = prof.language || 'auto';
   document.getElementById('ea-prompt').value = prof.custom_instructions || '';
+
+  // 2026-05-16: runtime_mode toggle (legacy ↔ sdk).
+  // Per docs/MIGRATION_OPENAI_AGENTS_SDK.md — admin can flip any
+  // agent to the new SDK runtime, and back to legacy at any time.
+  var _eaRtMode = document.getElementById('ea-runtime-mode');
+  if (_eaRtMode) {
+    _eaRtMode.value = agent.runtime_mode || 'legacy';
+  }
+  // Probe SDK availability and surface in the status pill so the
+  // admin sees if a flip-to-sdk would actually engage.
+  var _eaRtStatus = document.getElementById('ea-runtime-status');
+  if (_eaRtStatus) {
+    _eaRtStatus.textContent = '...';
+    api('GET', '/api/portal/agent/' + agentId + '/events').catch(()=>{});
+    // Cheap probe: tries to import agent_runtime — backend exposes
+    // SDK availability via the runtime-mode change endpoint's
+    // response, but we can also do a one-shot dry-run by calling
+    // it without changing mode (POST current value back).
+    api('POST', '/api/portal/agent/' + agentId + '/runtime-mode', {
+      mode: agent.runtime_mode || 'legacy'
+    }).then(function(r){
+      if (r && r.sdk_available) {
+        _eaRtStatus.innerHTML = '<span style="color:#10b981">SDK ready</span>';
+      } else {
+        _eaRtStatus.innerHTML = '<span style="color:#f59e0b">SDK not installed</span>';
+      }
+    }).catch(function(){
+      _eaRtStatus.textContent = '';
+    });
+  }
   // 2026-05-11: surface SOUL/persona so the operator can see what's
   // actually driving their agent. Pre-fix this was invisible (to_dict
   // omitted soul_md / system_prompt) and a stale "你是 SSC 架构师"
@@ -20619,6 +20649,29 @@ async function saveAgentProfile() {
       payload.allowed_tools = _policy.allowed_tools;
       payload.denied_tools = _policy.denied_tools;
     } catch(e) { console.warn('tool policy collect failed:', e); }
+
+    // 2026-05-16: persist runtime_mode toggle via dedicated endpoint
+    // (not in /profile since runtime_mode is on Agent, not on
+    // profile). Done BEFORE the /profile save so a runtime change
+    // survives even if /profile fails.
+    try {
+      var _rtModeEl = document.getElementById('ea-runtime-mode');
+      var _newMode = _rtModeEl ? _rtModeEl.value : 'legacy';
+      var _rtResult = await api(
+        'POST',
+        '/api/portal/agent/' + agentId + '/runtime-mode',
+        { mode: _newMode }
+      );
+      if (_rtResult && _rtResult.warning) {
+        // Surface backend warning (e.g. SDK not installed) in the
+        // status pill so admin sees it.
+        var _eaRtStatus = document.getElementById('ea-runtime-status');
+        if (_eaRtStatus) {
+          _eaRtStatus.innerHTML =
+            '<span style="color:#f59e0b">⚠ ' + esc(_rtResult.warning) + '</span>';
+        }
+      }
+    } catch(e) { console.warn('runtime_mode save failed:', e); }
 
     console.log('saveAgentProfile payload:', agentId, payload);
     const result = await api('POST', '/api/portal/agent/' + agentId + '/profile', payload);

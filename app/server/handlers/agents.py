@@ -100,6 +100,10 @@ def try_handle(handler, path: str, hub, body: dict, auth,
     if path.startswith("/api/portal/agent/") and path.endswith("/compact-memory"):
         return _handle_compact_memory(handler, path, hub, body, auth, actor_name, user_role)
 
+    # ── Runtime mode toggle (legacy ↔ sdk) ──
+    if path.startswith("/api/portal/agent/") and path.endswith("/runtime-mode"):
+        return _handle_runtime_mode(handler, path, hub, body, auth, actor_name, user_role)
+
     # ── SRC integration ──
     if path.startswith("/api/portal/agent/") and path.endswith("/exec-src-tool"):
         return _handle_exec_src_tool(handler, path, hub, body, auth, actor_name, user_role)
@@ -421,6 +425,78 @@ def _handle_compact_memory(handler, path, hub, body, auth, actor_name, user_role
         handler._json({"ok": True, **result})
     else:
         handler._json({"ok": bool(result)})
+    return True
+
+
+def _handle_runtime_mode(handler, path, hub, body, auth, actor_name, user_role) -> bool:
+    """Toggle agent.runtime_mode between 'legacy' and 'sdk'.
+
+    Per docs/MIGRATION_OPENAI_AGENTS_SDK.md — admin can flip any
+    agent to the new SDK runtime, and flip back at any time. The
+    SDK adapter falls back to legacy if openai-agents isn't
+    installed (one-time warning, no crash).
+
+    POST body: {"mode": "legacy" | "sdk"}
+    Response: {"ok": bool, "previous": "...", "current": "...",
+               "sdk_available": bool, "warning": "..."}
+    """
+    agent_id = path.split("/")[4]
+    agent = hub.get_agent(agent_id)
+    if not agent:
+        handler._json({"ok": False, "error": "agent not found"}, status=404)
+        return True
+
+    new_mode = (body.get("mode") or "").strip().lower()
+    if new_mode not in ("legacy", "sdk"):
+        handler._json({
+            "ok": False,
+            "error": f"invalid mode {new_mode!r}, must be 'legacy' or 'sdk'",
+        }, status=400)
+        return True
+
+    previous = getattr(agent, "runtime_mode", "legacy")
+    agent.runtime_mode = new_mode
+
+    # Probe SDK availability for diagnostic so the admin sees if
+    # they're switching to a runtime that won't actually engage.
+    sdk_available = False
+    warning = ""
+    try:
+        from app.agent_runtime import is_sdk_available
+        sdk_available = is_sdk_available()
+        if new_mode == "sdk" and not sdk_available:
+            warning = (
+                "openai-agents not installed — agent will fall back "
+                "to legacy until you `pip install openai-agents` "
+                "and restart"
+            )
+    except Exception as e:
+        warning = f"SDK probe failed: {e}"
+
+    # Persist immediately so the toggle survives restart
+    try:
+        hub._save_agents()
+    except Exception as e:
+        handler._json({
+            "ok": False,
+            "error": f"persist failed: {e}",
+            "previous": previous,
+            "current": agent.runtime_mode,
+        }, status=500)
+        return True
+
+    auth.audit("runtime_mode_change", actor=actor_name,
+               role=user_role, target=agent_id,
+               extra={"previous": previous, "new": new_mode})
+
+    handler._json({
+        "ok": True,
+        "agent_id": agent_id,
+        "previous": previous,
+        "current": new_mode,
+        "sdk_available": sdk_available,
+        "warning": warning,
+    })
     return True
 
 

@@ -2007,6 +2007,27 @@ h4, h5 { letter-spacing: -0.01em; }
       <label>Custom Instructions (ad-hoc additions)</label>
       <textarea id="ea-prompt" rows="3" placeholder="Additional instructions..."></textarea>
     </div>
+
+    <!-- Runtime Mode (legacy chat loop ↔ OpenAI Agents SDK) -->
+    <!-- 2026-05-16: per-agent toggle. Default 'legacy'. -->
+    <!-- See docs/MIGRATION_OPENAI_AGENTS_SDK.md + RUNTIME_MODE_GUIDE.md -->
+    <div class="form-group" style="padding:10px;background:var(--surface2);border-radius:8px;border:1px solid var(--border-light)">
+      <label style="display:flex;align-items:center;gap:8px;font-weight:600;font-size:13px;margin-bottom:6px">
+        <span class="material-symbols-outlined" style="font-size:18px;color:var(--primary)">settings_input_component</span>
+        Runtime Mode
+      </label>
+      <div style="display:flex;align-items:center;gap:10px">
+        <select id="ea-runtime-mode" style="flex:1;padding:6px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;font-size:13px;font-family:Menlo,monospace">
+          <option value="legacy">legacy — 自研 chat loop (默认, 稳定)</option>
+          <option value="sdk">sdk — OpenAI Agents SDK (实验性, 可随时切回)</option>
+        </select>
+        <span id="ea-runtime-status" style="font-size:11px;color:var(--text3);min-width:120px"></span>
+      </div>
+      <div style="margin-top:6px;font-size:11px;color:var(--text3);line-height:1.5">
+        切到 <code>sdk</code> 走 <code>app/agent_runtime/</code> (OpenAI Agents SDK 0.17+)。SDK 未装时自动 fallback 到 legacy。可随时切回 <code>legacy</code> 恢复旧行为。
+      </div>
+    </div>
+
     <!-- Tool Permissions (allowed_tools / denied_tools) -->
     <div id="ea-tools-section" style="margin:12px 0;padding:14px;background:var(--surface2);border-radius:10px;border:1px solid var(--border-light)">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
