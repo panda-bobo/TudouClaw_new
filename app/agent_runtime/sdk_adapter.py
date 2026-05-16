@@ -295,12 +295,14 @@ class SDKAgentRunner:
         run_input = (user_message if isinstance(user_message, str)
                      else str(user_message))
 
-        # ── max_turns: match legacy agent.py:11180 ──────────────
-        # SDK default is 10; legacy uses 20 (+ per-tool soft/hard
-        # budget caps inside the loop). Read from the agent's
-        # persisted ``max_turns`` field so per-agent overrides via
-        # the edit modal apply to SDK runtime too.
-        max_turns = int(getattr(self.tudou_agent, "max_turns", 20) or 20)
+        # ── max_turns: read agent's per-agent field (2026-05-16) ──
+        # SDK default is 10; legacy bug was hardcoded 20 ignoring
+        # the per-agent setting. Now BOTH paths read from the same
+        # Agent.max_turns field (default 100, configurable via edit
+        # modal). Claude's official design has no default cap —
+        # budget + user interrupt + per-tool budget are the real
+        # protection. 100 is a high catastrophic-loop safety net.
+        max_turns = int(getattr(self.tudou_agent, "max_turns", 100) or 100)
 
         # Non-streaming: gather all events at end-of-run via
         # result.new_items and forward to the portal.

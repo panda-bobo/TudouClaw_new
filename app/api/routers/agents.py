@@ -919,6 +919,22 @@ async def update_agent_profile(
             agent.coding_provider = str(body.get("coding_provider") or "")
         if "coding_model" in body:
             agent.coding_model = str(body.get("coding_model") or "")
+        # max_turns: per-agent chat-loop iteration cap (2026-05-16).
+        # Legacy now reads agent.max_turns instead of hardcoded 20;
+        # SDK Runner.run also receives this. UI sends as a number.
+        if "max_turns" in body:
+            try:
+                _mt = int(body.get("max_turns"))
+                if _mt < 1:
+                    _mt = 1
+                if _mt > 999:
+                    _mt = 999
+                agent.max_turns = _mt
+            except (TypeError, ValueError):
+                # Silently drop invalid values rather than 400ing —
+                # frontend will fix on next render from the persisted
+                # field.
+                pass
         if "tts_provider_id" in body:
             # Empty string is a valid value — clears the binding so the
             # frontend falls back to browser Web Speech API.

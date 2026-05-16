@@ -2028,6 +2028,24 @@ h4, h5 { letter-spacing: -0.01em; }
       </div>
     </div>
 
+    <!-- Max Turns (per-agent chat-loop iteration cap) -->
+    <!-- 2026-05-16: legacy was hardcoded max_iters=20 ignoring this -->
+    <!-- field; SDK Runner.run default was 10. Now both honor it. -->
+    <div class="form-group" style="padding:10px;background:var(--surface2);border-radius:8px;border:1px solid var(--border-light)">
+      <label style="display:flex;align-items:center;gap:8px;font-weight:600;font-size:13px;margin-bottom:6px">
+        <span class="material-symbols-outlined" style="font-size:18px;color:var(--primary)">repeat</span>
+        Max Turns
+      </label>
+      <div style="display:flex;align-items:center;gap:10px">
+        <input id="ea-max-turns" type="number" min="1" max="999" value="100"
+               style="flex:1;padding:6px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;font-size:13px;font-family:Menlo,monospace">
+        <span style="font-size:11px;color:var(--text3);min-width:140px">连续 tool-call 轮次上限</span>
+      </div>
+      <div style="margin-top:6px;font-size:11px;color:var(--text3);line-height:1.5">
+        一次对话内最多 N 轮 LLM ↔ 工具往返。默认 <code>100</code>（够大多数任务；Claude 官方设计是无 hard cap，靠 budget + 用户中断兜底）。轻量 Q&amp;A 可调到 <code>20</code>，复杂工程任务可调到 <code>200+</code>。
+      </div>
+    </div>
+
     <!-- Tool Permissions (allowed_tools / denied_tools) -->
     <div id="ea-tools-section" style="margin:12px 0;padding:14px;background:var(--surface2);border-radius:10px;border:1px solid var(--border-light)">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
