@@ -237,17 +237,45 @@ class SDKAgentRunner:
 
             final_text = hint
 
-        # Persist agent reply to self.messages (mirrors legacy
-        # chat() finalization, so transcript / L3 / dynamic context
-        # see it on the next turn).
+        # ── Persistence finalization ─────────────────────────────────
+        # The intermediate items (asst with tool_calls + tool results)
+        # were already appended to tudou_agent.messages inside
+        # _run_streamed via _persist_sdk_items_to_messages. That helper
+        # also appends the FINAL assistant text — but only if it found
+        # a message_output_item in result.new_items.
+        #
+        # Edge cases where we need a fallback append here:
+        #   - SDK errored before producing a final message (final_text
+        #     is the "[SDK runtime error: ...]" hint above)
+        #   - max_turns hit (final_text is "已强制终止" salvage)
+        #   - result.new_items was empty for some reason
+        # Check the last persisted asst message; only append if it
+        # doesn't match what we're about to return (avoid duplicates).
         try:
-            self.tudou_agent.messages.append({
-                "role": "assistant",
-                "content": final_text or "",
-                "_source": "sdk-runtime",
-            })
+            msgs = self.tudou_agent.messages or []
+            last = msgs[-1] if msgs else None
+            last_is_matching = (
+                isinstance(last, dict)
+                and last.get("role") == "assistant"
+                and (last.get("content") or "") == (final_text or "")
+            )
+            if not last_is_matching:
+                self.tudou_agent.messages.append({
+                    "role": "assistant",
+                    "content": final_text or "",
+                    "_source": "sdk-runtime",
+                })
         except Exception:
             pass
+
+        # Force-persist to disk so chat history survives crash / SIGKILL.
+        # Legacy does this at iteration boundaries inside chat(); SDK
+        # runtime has no equivalent loop, so we persist once at end-of-
+        # run. force=True bypasses the throttle so this save always lands.
+        try:
+            self.tudou_agent._maybe_persist(force=True)
+        except Exception as e:
+            logger.debug("SDK runtime _maybe_persist failed: %s", e)
 
         return final_text or ""
 
@@ -385,6 +413,30 @@ class SDKAgentRunner:
                     "post-run event forwarding failed: %s — final reply "
                     "still returned to chat", e)
 
+        # ── 2026-05-16: persist intermediate turn items to messages ──
+        # Before this fix, only the user message + final assistant text
+        # got written to tudou_agent.messages. The intermediate
+        # asst-with-tool_calls and tool-result messages were dropped, so:
+        #   1. Next turn's history conversion lost the tool-call history
+        #      — agent didn't "remember" what it called
+        #   2. Transcript replay was incomplete (showed final reply but
+        #      not how the agent got there)
+        #   3. L3 fact extraction had less material to work with
+        # Walk result.new_items, convert each to legacy ChatCompletion
+        # shape, append to agent.messages. The final assistant text is
+        # appended separately by run() — we skip the LAST message_output_
+        # item here to avoid duplicating it.
+        if result is not None:
+            try:
+                _persist_sdk_items_to_messages(
+                    self.tudou_agent,
+                    getattr(result, "new_items", []) or [],
+                )
+            except Exception as e:
+                logger.warning(
+                    "SDK item persistence failed: %s — chat history may "
+                    "be incomplete on next turn", e)
+
         if max_turns_hit:
             # Salvage: stitch together a coherent reply that tells
             # the user we hit the cap. Mirrors legacy's "已强制终止"
@@ -511,6 +563,142 @@ class SDKAgentRunner:
             model_name=model_name,
             base_url=base_url,
         )
+
+
+def _persist_sdk_items_to_messages(tudou_agent, new_items):
+    """Convert SDK ``RunResult.new_items`` into legacy ChatCompletion-
+    shape dicts and append to ``tudou_agent.messages``.
+
+    Inverse of ``_tudou_messages_to_sdk_items`` (which goes the other
+    direction for history input). Used at end-of-run to make sure
+    intermediate turn state (asst with tool_calls, tool results) gets
+    persisted, not just the final assistant text.
+
+    Mapping:
+      - ``tool_call_item.raw_item`` (Responses API function_call shape)
+        → buffered until we know whether the NEXT message is a text
+        asst reply, since legacy stores a single asst msg with both
+        ``content`` AND ``tool_calls`` together
+      - ``tool_call_output_item`` → tool-role message with
+        ``tool_call_id`` and ``content``
+      - ``message_output_item`` (assistant text)
+        → either flushed alone (no preceding tool_calls) or merged
+        into the buffered asst that holds the tool_calls
+
+    SDK items arrive in this typical order per turn:
+        [reasoning?] [text?] [tool_call+] [tool_output+] [reasoning?] [text]
+    We flush whenever we hit a tool_call_output_item (end of a
+    function_call group) or at the end of new_items.
+    """
+    if not new_items:
+        return
+
+    pending_asst_text = ""    # text from message_output_item that
+                              # precedes / accompanies tool_calls in the
+                              # SAME asst turn
+    pending_tool_calls = []   # accumulated tool_call dicts for current
+                              # asst turn
+    appended_count = 0
+
+    def _flush_asst():
+        """Write the current pending asst message (text + tool_calls)
+        if either field is non-empty."""
+        nonlocal pending_asst_text, pending_tool_calls
+        if not pending_asst_text and not pending_tool_calls:
+            return
+        msg = {
+            "role": "assistant",
+            "content": pending_asst_text or "",
+            "_source": "sdk-runtime",
+        }
+        if pending_tool_calls:
+            msg["tool_calls"] = pending_tool_calls
+        try:
+            tudou_agent.messages.append(msg)
+        except Exception:
+            pass
+        pending_asst_text = ""
+        pending_tool_calls = []
+
+    for item in new_items:
+        item_type = getattr(item, "type", "") or ""
+
+        if item_type == "tool_call_item":
+            # function_call from the asst. Pull the OpenAI ChatCompletion
+            # shape we need: {id, type:"function", function:{name, args}}.
+            raw = getattr(item, "raw_item", None)
+            if raw is None:
+                continue
+            name = getattr(raw, "name", "") or ""
+            args = getattr(raw, "arguments", "") or ""
+            call_id = (
+                getattr(raw, "call_id", "")
+                or getattr(raw, "id", "")
+                or "")
+            if not call_id:
+                continue
+            pending_tool_calls.append({
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": args if isinstance(args, str)
+                                 else __import__("json").dumps(args),
+                },
+            })
+
+        elif item_type == "tool_call_output_item":
+            # First flush any pending asst (must precede the tool result
+            # in chat-completion order).
+            _flush_asst()
+            # Output → tool-role message.
+            raw = getattr(item, "raw_item", None)
+            call_id = ""
+            output = ""
+            if isinstance(raw, dict):
+                call_id = raw.get("call_id") or raw.get("id") or ""
+                output = raw.get("output") or ""
+            if not call_id:
+                call_id = getattr(item, "call_id", "") or ""
+            if not output:
+                output = getattr(item, "output", "") or ""
+            if not isinstance(output, str):
+                try:
+                    output = str(output)
+                except Exception:
+                    output = ""
+            try:
+                tudou_agent.messages.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": output,
+                    "_source": "sdk-runtime",
+                })
+                appended_count += 1
+            except Exception:
+                pass
+
+        elif item_type == "message_output_item":
+            # Assistant text message. Buffer it (may be paired with
+            # following tool_call_items in the same turn).
+            raw = getattr(item, "raw_item", None)
+            text = ""
+            try:
+                for part in (getattr(raw, "content", []) or []):
+                    if hasattr(part, "text"):
+                        text += part.text or ""
+            except Exception:
+                pass
+            if text:
+                pending_asst_text += text
+
+        # reasoning_item → skipped (legacy doesn't persist CoT either)
+
+    # Final flush at end of run.
+    _flush_asst()
+    logger.debug(
+        "SDK persistence: appended %d intermediate item(s) to "
+        "tudou_agent.messages", appended_count)
 
 
 def _tudou_messages_to_sdk_items(messages):
