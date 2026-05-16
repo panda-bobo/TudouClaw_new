@@ -60,14 +60,11 @@ def build_sdk_tools(tudou_agent, user_message: Any) -> List[Any]:
     # tolerate that — tool_registry.dispatch returns an error string
     # for unknown tools, the LLM adapts. SDK is STRICTER: it validates
     # tool names against the registered list BEFORE dispatch and
-    # raises ModelBehaviorError("Tool memory_recall not found"),
-    # aborting the entire run.
+    # raises ModelBehaviorError("Tool X not found"), aborting the run.
     #
     # Now: keep the tools registered, but mark them ``opt_in_denied``
     # so the _invoke closure (below) intercepts the call and returns
     # a friendly skip message instead of running the real handler.
-    # SDK is happy (tool exists), no retrieval cost incurred, and the
-    # LLM gets a useful hint to avoid the tool next time.
     user_text = user_message if isinstance(user_message, str) else ""
     opt_in_deny: set = set()
     try:
@@ -81,6 +78,65 @@ def build_sdk_tools(tudou_agent, user_message: Any) -> List[Any]:
             opt_in_deny.add("wiki_ingest")
     except Exception as e:
         logger.debug("opt-in gate skipped: %s", e)
+
+    # ── Step 2b: prompt-mentioned-but-ungranted tools (2026-05-16) ──
+    # System prompts in app/agent_llm.py / meeting.py / project.py /
+    # agent.py hardcode references to certain "infra" tool names
+    # (mcp_call, memory_recall, save_experience, etc.) regardless of
+    # whether the specific agent role has been granted them. This
+    # creates the SAME ModelBehaviorError class of bug as the opt-in
+    # path above: LLM reads "you can use mcp_call" in its prompt,
+    # tries to call it, SDK aborts because the tool isn't in the
+    # registered list for THIS agent.
+    #
+    # Fix: register every "infra-mentioned" tool as a STUB if it's
+    # not in legacy_specs already. Stub returns a clean error string
+    # when invoked. SDK no longer aborts; LLM sees the error message
+    # and self-corrects.
+    _INFRA_MENTIONED_TOOLS = {
+        # Tools the system prompts mention by name across roles
+        "mcp_call":         "MCP tool invocation",
+        "memory_recall":    "L3 memory query",
+        "knowledge_lookup": "Knowledge base search",
+        "wiki_ingest":      "Wiki write",
+        "save_experience":  "Save learning to experience library",
+        "web_fetch":        "Fetch a URL",
+        "web_search":       "Search the web",
+    }
+    _granted_names = {
+        (s.get("function") or {}).get("name", "")
+        for s in legacy_specs
+    }
+    _prompt_only_stubs = []
+    for _name, _desc in _INFRA_MENTIONED_TOOLS.items():
+        if _name and _name not in _granted_names:
+            _prompt_only_stubs.append({
+                "type": "function",
+                "function": {
+                    "name": _name,
+                    "description": _desc + " (NOT AUTHORIZED for this agent — calling returns error)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": True,
+                    },
+                },
+                "_is_unauthorized_stub": True,
+            })
+    if _prompt_only_stubs:
+        legacy_specs = list(legacy_specs) + _prompt_only_stubs
+        # Also mark these as soft-denied so _invoke returns error
+        # without trying to dispatch (the real handler doesn't exist
+        # for this agent's grant).
+        for s in _prompt_only_stubs:
+            opt_in_deny.add(s["function"]["name"])
+        logger.debug(
+            "tool_registry: registered %d unauthorized-stub(s) so "
+            "SDK doesn't ModelBehaviorError on prompt-mentioned-but-"
+            "ungranted tools (agent=%s, stubs=%s)",
+            len(_prompt_only_stubs),
+            getattr(tudou_agent, "id", "?")[:8],
+            [s["function"]["name"] for s in _prompt_only_stubs])
 
     # ── Step 3: wrap each legacy spec as an SDK FunctionTool ──────
     sdk_tools: List[Any] = []
@@ -115,28 +171,28 @@ def build_sdk_tools(tudou_agent, user_message: Any) -> List[Any]:
                           _deny=opt_in_deny):
             import asyncio as _asyncio
             # ── Soft-deny intercept (2026-05-16) ─────────────────
-            # If intent gate denied this tool, return a CLEAN ERROR
-            # string (same shape legacy uses for unauthorized tools).
-            # SDK still gets a tool result so the run continues; LLM
-            # sees the error and self-corrects on the next turn.
+            # If denied (intent gate OR unauthorized-stub), return
+            # CLEAN ERROR string. SDK still gets a tool result so
+            # the run continues; LLM sees the error and self-corrects.
             #
-            # Note: LLM may keep calling denied tools because the
-            # SYSTEM PROMPT itself mentions them by name (see
-            # app/agent_llm.py:850,853,934,937 + experience_library.py:
-            # 1302). Filtering tool list ≠ filtering tool names from
-            # prompts. The proper fix is either (a) remove the opt-in
-            # filter entirely (treat denied tools as just always-
-            # available — cost is negligible), or (b) scrub the system
-            # prompt to not mention denied tools. This soft-deny is
-            # the holding pattern until that's decided.
+            # Two paths land here:
+            #   1. Intent-gated: memory_recall/knowledge_lookup/wiki_ingest
+            #      stripped because user message lacked trigger phrases
+            #   2. Unauthorized-stub: tool mentioned in system prompt
+            #      but not in agent's effective tool grants (e.g. coder
+            #      role doesn't get mcp_call but prompt talks about it)
+            #
+            # Without this stub, SDK aborts with ModelBehaviorError on
+            # case 2 — fatal. With it, LLM just sees a polite error
+            # and tries a different approach.
             if _name in _deny:
                 logger.info(
-                    "SDK tool denied (intent gate): %s — user "
-                    "message lacked retrieval keywords", _name)
+                    "SDK tool denied: %s — returning Error string "
+                    "(LLM will see + self-correct)", _name)
                 return (
                     f"Error: tool '{_name}' is not authorized for "
-                    f"this turn (the user's message did not request "
-                    f"retrieval / past-conversation lookup)."
+                    f"this agent. Use a different tool or skip this "
+                    f"step."
                 )
             try:
                 logger.info(

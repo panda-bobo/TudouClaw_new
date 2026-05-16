@@ -761,6 +761,56 @@ def test_opt_in_denied_tool_registered_but_soft_denied(monkeypatch):
     assert "not authorized" in result or "not_authorized" in result
 
 
+def test_unauthorized_infra_tools_get_stub_registered(monkeypatch):
+    """Tools mentioned in system prompts (mcp_call, save_experience,
+    etc.) but NOT granted to a specific agent's role MUST still be
+    registered as soft-deny stubs — otherwise SDK aborts the whole
+    run with ModelBehaviorError when the LLM tries to call them.
+
+    Caught: 2026-05-16 小新 (role=coder) ModelBehaviorError on
+    mcp_call. coder role doesn't grant mcp_call, but agent_llm.py
+    line 394+395 hardcodes 'use `mcp_call(list_mcps=true)`' in the
+    system prompt for all roles. LLM follows the instruction → SDK
+    'Tool mcp_call not found' → run dead.
+
+    With this stub, SDK never errors on the tool name; LLM gets
+    an error string + self-corrects.
+    """
+    import asyncio
+    from app.agent_runtime.tool_registry import build_sdk_tools
+
+    # Agent with only `bash` in its effective tools — NO mcp_call.
+    class _Tudou:
+        id = "agent-abc"
+        name = "test"
+        def _get_effective_tools(self):
+            return [{
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "description": "Run a shell command",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }]
+
+    sdk_tools = build_sdk_tools(_Tudou(), "hello")
+    names = [getattr(t, "name", "") for t in sdk_tools]
+
+    # mcp_call MUST appear (as stub) even though agent didn't grant it
+    assert "mcp_call" in names, (
+        "mcp_call MUST be registered as a soft-deny stub even when "
+        "agent role doesn't grant it — prompt mentions it, LLM may "
+        "call it, SDK aborts without a stub. This is the @user "
+        "2026-05-16 ModelBehaviorError fix.")
+    # Calling it should return an Error string, NOT dispatch
+    stub = next(t for t in sdk_tools if getattr(t, "name", "") == "mcp_call")
+    result = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+        stub.on_invoke_tool(None, '{"mcp_id":"x","tool":"y"}'))
+    assert isinstance(result, str)
+    assert result.startswith("Error:")
+    assert "not authorized" in result
+
+
 def test_opt_in_lets_tool_run_when_user_requests_retrieval(monkeypatch):
     """Same tool, but user message contains '记得' / '上次' / etc. —
     the intent gate allows the tool, _invoke dispatches normally."""
