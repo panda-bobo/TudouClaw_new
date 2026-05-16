@@ -98,8 +98,39 @@ def build_sdk_tools(tudou_agent, user_message: Any) -> List[Any]:
         # ``on_invoke_tool`` must be an async callable that takes
         # (ctx, args_json_str). We make a closure capturing the
         # tool name so dispatch goes to the right handler.
+        #
+        # 2026-05-16: TudouClaw tools (bash, write_file, edit_file,
+        # mcp_call, etc.) are SYNCHRONOUS and can block for seconds
+        # to minutes. Running them inline in the SDK's async event
+        # loop freezes the loop — the SDK's stream then can't send
+        # tool results back to the LLM in time, leaving an orphan
+        # asst.tool_calls without matching tool results, which the
+        # NEXT LLM call rejects with 400 "insufficient tool
+        # messages following tool_calls". Fix: dispatch in a thread
+        # via asyncio.to_thread so the sync tool runs without
+        # blocking the loop.
         async def _invoke(ctx: Any, args_json: str, _name=name):
-            return _dispatch_tudou_tool(tudou_agent, _name, args_json)
+            import asyncio as _asyncio
+            try:
+                logger.info(
+                    "SDK tool call: %s args=%s",
+                    _name, (args_json or "")[:100])
+                result = await _asyncio.to_thread(
+                    _dispatch_tudou_tool,
+                    tudou_agent, _name, args_json)
+                logger.info(
+                    "SDK tool result: %s len=%d preview=%s",
+                    _name, len(result or ""), (result or "")[:100])
+                return result
+            except Exception as e:
+                # MUST return a string, never raise — otherwise the
+                # SDK won't add a tool result for this call and the
+                # next LLM call will hit the orphan-tool-calls 400.
+                logger.warning(
+                    "SDK tool wrapper error %s: %s — returning "
+                    "error string to keep tool/result pairing",
+                    _name, e)
+                return f"Error in {_name}: {type(e).__name__}: {e}"
 
         try:
             tool = FunctionTool(

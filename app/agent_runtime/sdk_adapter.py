@@ -195,12 +195,43 @@ class SDKAgentRunner:
             logger.exception(
                 "SDKAgentRunner.run failed (agent=%s): %s",
                 getattr(self.tudou_agent, "id", "?")[:8], e)
-            # Don't crash the chat — surface a clear error message
-            # the user can see.
-            final_text = (
-                f"[SDK runtime error — falling back to legacy turn: "
-                f"{type(e).__name__}: {str(e)[:200]}]"
-            )
+
+            # Helpful per-error-class messages so the user sees what
+            # to do, not just a stack-trace excerpt.
+            err_str = str(e)
+            err_type = type(e).__name__
+
+            if ("tool_calls" in err_str
+                    and "tool messages" in err_str):
+                hint = (
+                    "[SDK runtime error — orphan asst.tool_calls. "
+                    "This usually means a tool dispatch failed mid-"
+                    "turn (sync tool blocked the event loop, or the "
+                    "model emitted a tool_call shape the SDK couldn't "
+                    "parse). Check backend logs for "
+                    "'SDK tool wrapper error' lines. As a fallback, "
+                    "switch this agent's runtime_mode back to "
+                    "'legacy' in the edit modal.]"
+                )
+            elif "401" in err_str or "Incorrect API key" in err_str:
+                hint = (
+                    "[SDK runtime error — provider auth failed (401). "
+                    "Check that the agent's provider has a valid "
+                    "api_key in Settings → Providers.]"
+                )
+            elif "404" in err_str or "model" in err_str.lower():
+                hint = (
+                    f"[SDK runtime error — provider rejected the "
+                    f"model name. {err_type}: {err_str[:200]}]"
+                )
+            else:
+                hint = (
+                    f"[SDK runtime error: {err_type}: "
+                    f"{err_str[:200]}. Switch runtime_mode back to "
+                    "'legacy' in agent edit modal if this persists.]"
+                )
+
+            final_text = hint
 
         # Persist agent reply to self.messages (mirrors legacy
         # chat() finalization, so transcript / L3 / dynamic context
