@@ -100,21 +100,34 @@ class EventBridge:
                 item_type = getattr(item, "type", "") or ""
 
                 if item_type == "tool_call_item":
-                    # Agent decided to invoke a tool
+                    # Agent decided to invoke a tool — emit ``tool_call``
+                    # (matches legacy agent.py:12617 + portal_bundle.js:
+                    # 7944). Was emitting ``tool_call_start`` which the
+                    # frontend silently dropped.
                     raw = getattr(item, "raw_item", None)
                     name = getattr(raw, "name", "") if raw else ""
                     args_raw = getattr(raw, "arguments", "") if raw else ""
-                    self._emit("tool_call_start", {
+                    self._emit("tool_call", {
                         "name": name,
                         "arguments": args_raw,
                     })
                     return
 
                 if item_type == "tool_call_output_item":
-                    # Tool returned a result
+                    # Tool returned a result — emit ``tool_result``
+                    # (matches legacy + portal_bundle.js:7951). Field
+                    # is ``result`` not ``output`` — frontend keys on
+                    # that exact name when rendering the card.
                     output = getattr(item, "output", "") or ""
-                    self._emit("tool_call_end", {
-                        "output": str(output)[:1000],
+                    # Need the tool name too — pull from raw_item if
+                    # available so the card label is right.
+                    raw = getattr(item, "raw_item", None)
+                    name = ""
+                    if isinstance(raw, dict):
+                        name = raw.get("name") or ""
+                    self._emit("tool_result", {
+                        "name": name,
+                        "result": str(output)[:1000],
                     })
                     return
 
