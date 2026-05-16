@@ -27653,6 +27653,7 @@ async function _voiceModeResumeMic() {
 function _voiceModeShortenForSpeech(text) {
   if (!text) return '';
   text = String(text).trim();
+  // ── Pass 1: strip markdown structure (was the only thing this fn did) ──
   text = text
     .replace(/```[\s\S]*?```/g, ' ')    // fenced code blocks
     .replace(/`([^`]+)`/g, '$1')         // inline code
@@ -27662,7 +27663,32 @@ function _voiceModeShortenForSpeech(text) {
     .replace(/^#{1,6}\s+/gm, '')         // headings
     .replace(/^[-*•]\s+/gm, '')          // list bullets
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')  // [text](url) → text
-    .replace(/\n{2,}/g, '。')            // double-newline → sentence break
+    .replace(/\n{2,}/g, '。');           // double-newline → sentence break
+  // ── Pass 2 (2026-05-16): strip non-essential punctuation + emoji ──
+  // @user "语音的时候能不能去掉标点符号的的朗读么" — Edge TTS Neural
+  // adds awkward pauses at every comma / paren / quote; emoji gets
+  // read as "笑脸" or skipped raw. Strip them for cleaner cadence.
+  // KEEP sentence terminators 。！？.!?\n — they're what gives the
+  // TTS natural sentence-end intonation. Strip everything internal.
+  text = text
+    // Emoji — Extended_Pictographic covers all emoji-class chars
+    // (🌤 ☀ ⏰ ✓ etc.) in one rule. Variation selectors (FE0F)
+    // and zero-width joiners (200D) cleaned separately so combined
+    // emoji like 👨‍💻 don't leave stragglers.
+    .replace(/\p{Extended_Pictographic}/gu, '')
+    .replace(/[︀-️‍]/g, '')
+    // Misc symbols / arrows often emitted by LLMs
+    .replace(/[★☆→←↑↓↔↕⇒⇐⇑⇓]/g, '')
+    // Brackets / parens (CN + EN) — TTS doesn't need to know they were there
+    .replace(/[\[\](){}（）【】〈〉《》「」『』<>]/g, ' ')
+    // Quotes
+    .replace(/["'""''「」`'']/g, '')
+    // Internal punctuation that adds choppy pauses — drop entirely
+    // (CN: ，、；：·…—  EN: ,;:~|/\)
+    .replace(/[，、；：·…\-–—~～|/\\,;:]/g, ' ')
+    // Trailing decorative chars (e.g. " — done" after stripping → " done")
+    // collapse the gaps left by stripped punctuation
+    .replace(/\s{2,}/g, ' ')
     .trim();
   return text;
 }
