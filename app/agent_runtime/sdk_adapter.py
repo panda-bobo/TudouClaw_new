@@ -285,38 +285,86 @@ class SDKAgentRunner:
         async stream_events loop. Until then, stable > pretty.
         """
         from agents import Runner
+        try:
+            from agents.exceptions import MaxTurnsExceeded
+        except ImportError:
+            MaxTurnsExceeded = None  # older SDK shape
 
         # Pass the user message as-is — SDK Runner accepts str or
         # the OpenAI-style multimodal list (we already match shape).
         run_input = (user_message if isinstance(user_message, str)
                      else str(user_message))
 
+        # ── max_turns: match legacy agent.py:11180 ──────────────
+        # SDK default is 10; legacy uses 20 (+ per-tool soft/hard
+        # budget caps inside the loop). Read from the agent's
+        # persisted ``max_turns`` field so per-agent overrides via
+        # the edit modal apply to SDK runtime too.
+        max_turns = int(getattr(self.tudou_agent, "max_turns", 20) or 20)
+
         # Non-streaming: gather all events at end-of-run via
         # result.new_items and forward to the portal.
+        result = None
+        max_turns_hit = False
         try:
-            result = await Runner.run(
-                sdk_agent,
-                run_input,
-                hooks=hooks,
-            )
-        except TypeError:
-            # Older SDK signatures may not accept hooks=; degrade.
-            result = await Runner.run(sdk_agent, run_input)
+            try:
+                result = await Runner.run(
+                    sdk_agent,
+                    run_input,
+                    hooks=hooks,
+                    max_turns=max_turns,
+                )
+            except TypeError:
+                # Older SDK signatures may not accept hooks= or
+                # max_turns=. Try progressively simpler signatures.
+                try:
+                    result = await Runner.run(
+                        sdk_agent, run_input, max_turns=max_turns)
+                except TypeError:
+                    result = await Runner.run(sdk_agent, run_input)
+        except Exception as e:
+            # ── Graceful MaxTurnsExceeded handling ──────────────
+            # Legacy at hard-cap shows "已强制终止 — 工具调用太多"
+            # instead of a raw error so the user gets a coherent reply.
+            # Mirror that here: log, then return a salvage message
+            # rather than re-raising (which would bubble up to the
+            # generic "[SDK runtime error...]" hint in run()).
+            if MaxTurnsExceeded is not None and isinstance(e, MaxTurnsExceeded):
+                max_turns_hit = True
+                logger.warning(
+                    "SDK runtime: agent %s hit max_turns=%d — "
+                    "returning salvage message",
+                    getattr(self.tudou_agent, "id", "?")[:8], max_turns)
+            else:
+                # Other exceptions: re-raise so SDKAgentRunner.run's
+                # outer try/except categorizes them with a useful hint.
+                raise
 
         # Forward post-hoc events to the portal so the chat UI sees
         # what tool calls happened + the final assistant text. The
         # bridge translates each item into the legacy AgentEvent
         # shape exactly the same way it would for streamed events.
-        try:
-            for item in (getattr(result, "new_items", []) or []):
-                # Wrap each item as a fake "run_item_stream_event"
-                # so the bridge's existing dispatcher handles it.
-                fake_event = _FakeRunItemEvent(item)
-                bridge.forward(fake_event)
-        except Exception as e:
-            logger.warning(
-                "post-run event forwarding failed: %s — final reply "
-                "still returned to chat", e)
+        if result is not None:
+            try:
+                for item in (getattr(result, "new_items", []) or []):
+                    # Wrap each item as a fake "run_item_stream_event"
+                    # so the bridge's existing dispatcher handles it.
+                    fake_event = _FakeRunItemEvent(item)
+                    bridge.forward(fake_event)
+            except Exception as e:
+                logger.warning(
+                    "post-run event forwarding failed: %s — final reply "
+                    "still returned to chat", e)
+
+        if max_turns_hit:
+            # Salvage: stitch together a coherent reply that tells
+            # the user we hit the cap. Mirrors legacy's "已强制终止"
+            # behavior so the chat doesn't dead-end on a raw exception.
+            return (
+                f"[已强制终止 — 已连续调用工具 {max_turns} 轮仍未收敛。"
+                f"请简化任务或在 agent 编辑界面提高 max_turns 上限"
+                f"（当前 {max_turns}）后重试。]"
+            )
 
         return getattr(result, "final_output", "") or ""
 
