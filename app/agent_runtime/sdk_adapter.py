@@ -361,15 +361,23 @@ class SDKAgentRunner:
                 # outer try/except categorizes them with a useful hint.
                 raise
 
-        # Forward post-hoc events to the portal so the chat UI sees
-        # what tool calls happened + the final assistant text. The
-        # bridge translates each item into the legacy AgentEvent
-        # shape exactly the same way it would for streamed events.
+        # Forward post-hoc events to the portal — but ONLY the final
+        # message_output_item. Tool call cards already showed up in
+        # real time via the hooks (on_tool_start / on_tool_end emit
+        # tool_call_start / tool_call_end directly). Forwarding the
+        # tool items here too would double-render them.
         if result is not None:
             try:
                 for item in (getattr(result, "new_items", []) or []):
-                    # Wrap each item as a fake "run_item_stream_event"
-                    # so the bridge's existing dispatcher handles it.
+                    item_type = getattr(item, "type", "") or ""
+                    # Skip duplicates: tool_call_item +
+                    # tool_call_output_item are already emitted by
+                    # hooks. Reasoning items also skipped — we don't
+                    # surface CoT in the portal (legacy doesn't either).
+                    if item_type in ("tool_call_item",
+                                     "tool_call_output_item",
+                                     "reasoning_item"):
+                        continue
                     fake_event = _FakeRunItemEvent(item)
                     bridge.forward(fake_event)
             except Exception as e:

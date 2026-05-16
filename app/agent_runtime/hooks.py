@@ -142,29 +142,61 @@ def build_run_hooks(tudou_agent, event_bridge):
                 logger.debug("on_llm_end nudge eval skipped: %s", e)
 
         async def on_tool_start(self, context, agent, tool) -> None:
-            """Tool dispatch start — already covered by EventBridge's
-            run_item_stream_event handling, but having this hook lets
-            us add per-tool budget tracking / approval gates if
-            needed later."""
-            tool_name = getattr(tool, "name", "?")
+            """Tool dispatch start — emit ``tool_call_start`` event to
+            the portal IN REAL TIME so the chat UI shows the tool-call
+            card as soon as the dispatch begins, not at end-of-run.
+
+            The ``context`` parameter is typically a ``ToolContext`` for
+            function-tool calls, exposing tool_name + tool_arguments +
+            tool_call_id. For other tool families it's a plain
+            RunContextWrapper — fall back gracefully.
+            """
+            tool_name = (
+                getattr(context, "tool_name", None)
+                or getattr(tool, "name", "?"))
+            tool_args = getattr(context, "tool_arguments", "") or ""
             logger.debug(
                 "SDK on_tool_start: %s (agent=%s)",
                 tool_name,
                 getattr(self.tudou_agent, "id", "?")[:8])
+            # Real-time portal emit. EventBridge._emit handles the
+            # AgentEvent wrapping; we bypass run_item_stream_event
+            # plumbing entirely for hooks-driven events.
+            try:
+                self.event_bridge._emit("tool_call_start", {
+                    "name": tool_name,
+                    "arguments": tool_args,
+                })
+            except Exception as e:
+                logger.debug("tool_call_start emit failed: %s", e)
 
         async def on_tool_end(self, context, agent, tool, result) -> None:
-            """Tool finished — bookkeeping point for L3 action
-            buffer + turn query cache (knowledge_lookup dedup, etc.).
-            Without this, the SDK runtime would skip these
-            TudouClaw-specific behaviors that legacy A relies on."""
-            tool_name = getattr(tool, "name", "?")
+            """Tool finished — bookkeeping + REAL-TIME portal emit.
+
+            Emits ``tool_call_end`` to the portal so the chat UI updates
+            the card with the result as soon as the tool returns, rather
+            than waiting for the entire Runner.run to complete. Also
+            buffers the action for L3 memory flush at on_agent_end.
+            """
+            tool_name = (
+                getattr(context, "tool_name", None)
+                or getattr(tool, "name", "?"))
+            result_str = str(result) if result is not None else ""
+            # Real-time portal emit (1000-char cap matches legacy /
+            # event_bridge run_item_stream_event handling).
+            try:
+                self.event_bridge._emit("tool_call_end", {
+                    "output": result_str[:1000],
+                })
+            except Exception as e:
+                logger.debug("tool_call_end emit failed: %s", e)
             try:
                 # Buffer the action so the L3 flush at on_agent_end
                 # has something to summarize. Mirrors legacy A's
                 # tool-result handling.
                 from app.core import memory as _mem
                 mm = _mem.get_memory_manager()
-                summary = str(result)[:200] if result else ""
+                summary = result_str[:200]
                 mm.buffer_agent_action(
                     self.tudou_agent.id,
                     tool_name=tool_name,
