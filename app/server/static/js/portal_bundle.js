@@ -25831,6 +25831,13 @@ function openVoiceMode(agentId) {
   _voiceModeInitParticles();
   _voiceModeStartLoop();
   _voiceModeCheckTTS();
+  // 2026-05-16: replay recent chat history into the voice-mode
+  // bubble panel. Was always blank on entry — @user reported
+  // "VOICE的页面没有hist么，每次进入都是空的". Fetches the same
+  // events endpoint the regular chat UI uses, filters to message
+  // events, renders them as bubbles. Non-blocking — mic + STT
+  // start in parallel so voice ready time isn't affected.
+  _voiceModeLoadHistory(agentId);
   _voiceModeStartMic();
   _voiceModeStartSTT();
   // Poll the agent's plan/steps every 2s so the right column reflects
@@ -26295,6 +26302,55 @@ function _voiceModeLog(msg) {
 }
 
 // ── Helper: append a chat bubble (middle column) ──
+// 2026-05-16: replay recent message history into the voice-mode
+// bubble panel on entry. Reads /api/portal/agent/{id}/events
+// (same endpoint the regular chat UI uses for restart replay) and
+// filters to kind=='message' so we only render user/assistant
+// bubbles — not tool_call cards, nudges, or other event types
+// which would clutter the voice UI. Tool history is still implicit
+// (LLM sees it via agent.messages on the next turn).
+async function _voiceModeLoadHistory(agentId) {
+  if (!_VoiceMode) return;
+  try {
+    var resp = await fetch('/api/portal/agent/' + encodeURIComponent(agentId)
+                            + '/events', { credentials: 'include' });
+    if (!resp.ok) {
+      console.warn('[voice-mode] history fetch failed:', resp.status);
+      return;
+    }
+    var data = await resp.json();
+    var events = (data && data.events) || [];
+    // Tail-only — voice mode is the "current conversation" view, not
+    // a full transcript. 30 recent messages keeps the scroll-back
+    // useful without flooding on agents with hundreds of turns.
+    var msgs = [];
+    for (var i = 0; i < events.length; i++) {
+      var ev = events[i];
+      if (!ev || ev.kind !== 'message') continue;
+      var d = (ev.data && typeof ev.data === 'object') ? ev.data : {};
+      var role = d.role || '';
+      var content = d.content || '';
+      if (role !== 'user' && role !== 'assistant') continue;
+      if (!content || typeof content !== 'string') continue;
+      msgs.push({ role: role, content: content });
+    }
+    var tail = msgs.slice(-30);
+    if (!tail.length) return;
+    // Re-check the singleton — user may have closed voice mode
+    // during the fetch.
+    if (!_VoiceMode || _VoiceMode.agentId !== agentId) return;
+    for (var j = 0; j < tail.length; j++) {
+      _voiceModeAppendChat(tail[j].role === 'user' ? 'user' : 'agent',
+                           tail[j].content);
+    }
+    console.log('[voice-mode] replayed', tail.length,
+                'message(s) into bubble panel');
+  } catch (e) {
+    console.warn('[voice-mode] history load error:', e);
+  }
+}
+
+
 function _voiceModeAppendChat(role, text) {
   if (!_VoiceMode || !_VoiceMode.transcriptEl || !text) return;
   // Drop the empty-state placeholder on first message
