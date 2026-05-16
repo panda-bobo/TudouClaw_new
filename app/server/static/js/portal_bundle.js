@@ -20451,12 +20451,16 @@ async function editAgentProfile(agentId) {
     _eaRtMode.value = agent.runtime_mode || 'legacy';
   }
   // 2026-05-16: max_turns input — per-agent chat-loop iteration cap.
-  // Default 100 (Claude-style: high default, real cap is budget +
-  // user interrupt). Was hardcoded 20 in legacy and 10 in SDK before
-  // we wired it through.
+  // 0 = unlimited (Claude-style design). Real anti-loop protection
+  // is per-tool budget caps + abort_check, not a turn ceiling. Was
+  // hardcoded 20 in legacy and 10 in SDK before we wired this up.
   var _eaMaxTurnsEl = document.getElementById('ea-max-turns');
   if (_eaMaxTurnsEl) {
-    _eaMaxTurnsEl.value = agent.max_turns || 100;
+    // Use ?? not || — agent.max_turns=0 is a meaningful value
+    // (unlimited), not a falsy "default me to something else".
+    var _mt = (agent.max_turns !== undefined && agent.max_turns !== null)
+      ? agent.max_turns : 0;
+    _eaMaxTurnsEl.value = _mt;
   }
   // Probe SDK availability and surface in the status pill so the
   // admin sees if a flip-to-sdk would actually engage.
@@ -20640,12 +20644,12 @@ async function saveAgentProfile() {
       tts_provider_id: ((document.getElementById('ea-tts-provider') || {}).value || '').trim(),
       tts_voice: ((document.getElementById('ea-tts-voice') || {}).value || '').trim(),
       tts_model: ((document.getElementById('ea-tts-model') || {}).value || '').trim(),
-      // 2026-05-16: max_turns — coerced to int, clamped 1..999.
-      // Backend also validates; this is just defensive.
+      // 2026-05-16: max_turns — 0 = unlimited (Claude-style),
+      // 1..999 = explicit cap. Backend also validates + clamps.
       max_turns: (function(){
         var _el = document.getElementById('ea-max-turns');
-        var _v = _el ? parseInt(_el.value, 10) : 100;
-        if (isNaN(_v) || _v < 1) _v = 1;
+        var _v = _el ? parseInt(_el.value, 10) : 0;
+        if (isNaN(_v) || _v < 0) _v = 0;  // 0 = unlimited
         if (_v > 999) _v = 999;
         return _v;
       })(),

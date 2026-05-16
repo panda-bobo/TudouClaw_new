@@ -2029,20 +2029,21 @@ h4, h5 { letter-spacing: -0.01em; }
     </div>
 
     <!-- Max Turns (per-agent chat-loop iteration cap) -->
-    <!-- 2026-05-16: legacy was hardcoded max_iters=20 ignoring this -->
-    <!-- field; SDK Runner.run default was 10. Now both honor it. -->
+    <!-- 2026-05-16: Claude-style design — 0 = unlimited (default). -->
+    <!-- Real anti-loop protection: per-tool budget caps + abort_check. -->
     <div class="form-group" style="padding:10px;background:var(--surface2);border-radius:8px;border:1px solid var(--border-light)">
       <label style="display:flex;align-items:center;gap:8px;font-weight:600;font-size:13px;margin-bottom:6px">
         <span class="material-symbols-outlined" style="font-size:18px;color:var(--primary)">repeat</span>
         Max Turns
       </label>
       <div style="display:flex;align-items:center;gap:10px">
-        <input id="ea-max-turns" type="number" min="1" max="999" value="100"
+        <input id="ea-max-turns" type="number" min="0" max="999" value="0"
+               placeholder="0 = 不限"
                style="flex:1;padding:6px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;font-size:13px;font-family:Menlo,monospace">
-        <span style="font-size:11px;color:var(--text3);min-width:140px">连续 tool-call 轮次上限</span>
+        <span style="font-size:11px;color:var(--text3);min-width:140px">0 = 不限 (Claude 风格)</span>
       </div>
       <div style="margin-top:6px;font-size:11px;color:var(--text3);line-height:1.5">
-        一次对话内最多 N 轮 LLM ↔ 工具往返。默认 <code>100</code>（够大多数任务；Claude 官方设计是无 hard cap，靠 budget + 用户中断兜底）。轻量 Q&amp;A 可调到 <code>20</code>，复杂工程任务可调到 <code>200+</code>。
+        默认 <code>0</code>（不限）—— 跟 Claude Agent SDK 一样，不写死轮数；靠 <strong>per-tool 工具预算</strong>（web_search / mcp_call 单独有 soft+hard cap）+ <strong>用户中断</strong>（portal Stop 按钮）+ <strong>模型自己收敛</strong>（不再调工具就停）兜底。仅当 agent 是单一职责（如 Q&amp;A bot）想强制 N 轮内必须答完时，才设 <code>>0</code> 的硬上限。
       </div>
     </div>
 

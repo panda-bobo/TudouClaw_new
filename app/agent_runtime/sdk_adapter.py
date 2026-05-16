@@ -295,14 +295,16 @@ class SDKAgentRunner:
         run_input = (user_message if isinstance(user_message, str)
                      else str(user_message))
 
-        # ── max_turns: read agent's per-agent field (2026-05-16) ──
-        # SDK default is 10; legacy bug was hardcoded 20 ignoring
-        # the per-agent setting. Now BOTH paths read from the same
-        # Agent.max_turns field (default 100, configurable via edit
-        # modal). Claude's official design has no default cap —
-        # budget + user interrupt + per-tool budget are the real
-        # protection. 100 is a high catastrophic-loop safety net.
-        max_turns = int(getattr(self.tudou_agent, "max_turns", 100) or 100)
+        # ── max_turns: Claude-style design (2026-05-16) ──────────
+        # Agent.max_turns default is 0 = UNLIMITED. Real protection
+        # is per-tool budget caps + abort_check, not an arbitrary
+        # turn count. SDK Runner.run requires a positive int, so
+        # when unlimited we pass a high sentinel (1000) and rely on
+        # the inner caps to stop runaway loops.
+        # Per-agent override: set max_turns to N>0 in the edit modal
+        # for agents that should never run >N turns (e.g. Q&A bots).
+        _agent_mt = int(getattr(self.tudou_agent, "max_turns", 0) or 0)
+        max_turns = _agent_mt if _agent_mt > 0 else 1000
 
         # Non-streaming: gather all events at end-of-run via
         # result.new_items and forward to the portal.
@@ -362,11 +364,25 @@ class SDKAgentRunner:
             # Salvage: stitch together a coherent reply that tells
             # the user we hit the cap. Mirrors legacy's "已强制终止"
             # behavior so the chat doesn't dead-end on a raw exception.
-            return (
-                f"[已强制终止 — 已连续调用工具 {max_turns} 轮仍未收敛。"
-                f"请简化任务或在 agent 编辑界面提高 max_turns 上限"
-                f"（当前 {max_turns}）后重试。]"
-            )
+            if _agent_mt > 0:
+                msg = (
+                    f"[已强制终止 — 已连续调用工具 {max_turns} 轮仍未收敛。"
+                    f"该 agent 的 max_turns 显式设为 {max_turns}；"
+                    f"请简化任务或在 edit modal 改大（设 0 = 不限）。]"
+                )
+            else:
+                # Hit the unlimited sentinel — should be VERY rare.
+                # If we get here, per-tool budget caps + abort weren't
+                # enough to stop the loop. Probably a model genuinely
+                # stuck; user should investigate the agent's behavior.
+                msg = (
+                    f"[已强制终止 — 已连续调用工具 {max_turns} 轮仍未收敛。"
+                    f"该 agent max_turns=0 (不限)，但 SDK 内部 sentinel "
+                    f"({max_turns}) 触发了。这通常说明 agent 卡在某个工具"
+                    f"调用循环里，请检查 agent 行为或在 edit modal 设"
+                    f"显式上限。]"
+                )
+            return msg
 
         return getattr(result, "final_output", "") or ""
 

@@ -920,13 +920,16 @@ async def update_agent_profile(
         if "coding_model" in body:
             agent.coding_model = str(body.get("coding_model") or "")
         # max_turns: per-agent chat-loop iteration cap (2026-05-16).
-        # Legacy now reads agent.max_turns instead of hardcoded 20;
-        # SDK Runner.run also receives this. UI sends as a number.
+        # 0 = UNLIMITED (Claude-style design); >0 = explicit cap.
+        # Real anti-loop protection is per-tool budget caps inside
+        # chat() + abort_check, not an arbitrary turn ceiling.
+        # Clamp to 0..999; negative values normalize to 0 (unlimited)
+        # since "negative max_turns" makes no sense.
         if "max_turns" in body:
             try:
                 _mt = int(body.get("max_turns"))
-                if _mt < 1:
-                    _mt = 1
+                if _mt < 0:
+                    _mt = 0  # 0 = unlimited (Claude-style)
                 if _mt > 999:
                     _mt = 999
                 agent.max_turns = _mt

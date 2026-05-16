@@ -3010,14 +3010,20 @@ class Agent:
     _permission_ctx: ToolPermissionContext | None = field(default=None, repr=False)
     turn_count: int = 0
     # ── max_turns: per-agent cap on chat-loop iterations (legacy)
-    # AND SDK Runner.run max_turns (sdk_adapter). Bumped 20→100 on
-    # 2026-05-16 because real engineering tasks (e.g. 刘老师's
-    # Landing Zone verification) routinely need >20 turns; 20 was
-    # an arbitrary leftover. Claude's official design has NO default
-    # cap (budget + user interrupt are the real protection). We
-    # keep 100 as a catastrophic-loop safety net only; the per-tool
-    # budget caps inside chat() are the real anti-loop layer.
-    max_turns: int = 100
+    # AND SDK Runner.run max_turns (sdk_adapter). Default 0 = UNLIMITED
+    # (Claude-style, per code.claude.com/docs/en/agent-sdk/agent-loop).
+    # The real anti-loop protection lives elsewhere:
+    #   - Per-tool soft/hard budget caps inside chat() — already
+    #     hard-stops on individual tool floods (web_search, mcp_call,
+    #     etc. each have their own ceiling)
+    #   - abort_check (user clicks Stop in portal) — both runtimes
+    #     honor this between turns
+    #   - max_budget_tokens (currently soft-pressure only; making it
+    #     a hard stop is the natural follow-up to this redesign)
+    # If you want a hard turn cap for a specific agent (e.g. Q&A bot
+    # that should never run >10 turns), set it explicitly. 0 means
+    # "no artificial ceiling — let the model decide convergence".
+    max_turns: int = 0
     max_budget_tokens: int = 200000
     # --- Real-time persistence (2026-05-12) ---
     # Hub sets `_persist_callback` after agent load/create. The agent
@@ -3403,7 +3409,7 @@ class Agent:
             total_output_tokens=d.get("total_output_tokens", 0),
             # --- src memory engine restore ---
             turn_count=d.get("turn_count", 0),
-            max_turns=d.get("max_turns", 100),
+            max_turns=d.get("max_turns", 0),
             max_budget_tokens=d.get("max_budget_tokens", 200000),
         )
         # Restore per-context message buckets. Prefer the new
@@ -11185,18 +11191,25 @@ Write only the summary body. Do not include any preamble or prefix."""
                 logger.info("Agent %s (%s) using provider=%s model=%s",
                             self.name, self.id[:8], _eff_provider, _eff_model)
 
-                # ── 2026-05-16: was hardcoded ``max_iters = 20``,
-                # ignored the per-agent ``Agent.max_turns`` field
-                # that's already persisted via to_dict/from_persist_dict.
-                # Bug: user could change max_turns in the edit modal
-                # but legacy chat loop ignored it. Now read from the
-                # actual field. Claude's official agent design has NO
-                # default turn cap (relies on budget + user interrupt
-                # + model self-decision) — see Claude Agent SDK docs.
-                # We keep a high default (100) instead of unlimited
-                # only as a catastrophic-loop safety net; per-tool
-                # budget caps below are the REAL anti-loop protection.
-                max_iters = int(getattr(self, "max_turns", 100) or 100)
+                # ── 2026-05-16: Claude-style turn-cap design.
+                # Was hardcoded ``max_iters = 20``, then briefly bumped
+                # to a 100 fallback. Now: read agent's max_turns;
+                # 0 (the new default) means UNLIMITED — match Claude
+                # Agent SDK's official design where there's no turn
+                # cap by default and budget + user interrupt are the
+                # real protection.
+                #
+                # When unlimited, we cap at sys.maxsize internally
+                # (so the ``while iteration < max_iters`` loop is
+                # well-defined). What actually stops the loop:
+                #   - per-tool soft/hard budget caps below (catches
+                #     specific failure modes like web_search /
+                #     mcp_call infinite loops)
+                #   - abort_check (user clicks Stop)
+                #   - model emits no more tool_calls (natural finish)
+                import sys as _sys
+                _mt = int(getattr(self, "max_turns", 0) or 0)
+                max_iters = _mt if _mt > 0 else _sys.maxsize
 
                 # ── Per-turn tool-call budgets (anti infinite-loop) ──
                 # Catches the failure mode where the agent hops between
@@ -13147,7 +13160,11 @@ Write only the summary body. Do not include any preamble or prefix."""
                 # rounds — too low for real work. Set to 4× our
                 # max_iterations cap so the *agent's* iter limit always
                 # bites first (with a clearer error than LangGraph's).
-                _max_iter = int(getattr(self, "max_turns", 100) or 100)
+                # 2026-05-16: max_turns=0 means unlimited (Claude-style);
+                # use a large sentinel so LangGraph still gets a bounded
+                # recursion limit but it effectively won't bite first.
+                _mt_agent = int(getattr(self, "max_turns", 0) or 0)
+                _max_iter = _mt_agent if _mt_agent > 0 else 1000
                 final = graph.invoke(
                     {
                         "messages": initial_msgs,
