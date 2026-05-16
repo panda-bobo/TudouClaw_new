@@ -558,29 +558,19 @@ class SDKAgentRunner:
                 # outer try/except categorizes them with a useful hint.
                 raise
 
-        # Forward post-hoc events to the portal — but ONLY the final
-        # message_output_item. Tool call cards already showed up in
-        # real time via the hooks (on_tool_start / on_tool_end emit
-        # tool_call_start / tool_call_end directly). Forwarding the
-        # tool items here too would double-render them.
-        if result is not None:
-            try:
-                for item in (getattr(result, "new_items", []) or []):
-                    item_type = getattr(item, "type", "") or ""
-                    # Skip duplicates: tool_call_item +
-                    # tool_call_output_item are already emitted by
-                    # hooks. Reasoning items also skipped — we don't
-                    # surface CoT in the portal (legacy doesn't either).
-                    if item_type in ("tool_call_item",
-                                     "tool_call_output_item",
-                                     "reasoning_item"):
-                        continue
-                    fake_event = _FakeRunItemEvent(item)
-                    bridge.forward(fake_event)
-            except Exception as e:
-                logger.warning(
-                    "post-run event forwarding failed: %s — final reply "
-                    "still returned to chat", e)
+        # ── 2026-05-16 (evening): NO MORE post-hoc event forwarding ──
+        # When SDKAgentRunner was non-streaming (Runner.run), we had
+        # to iterate result.new_items after-the-fact to feed the
+        # bridge — that was the only way events reached the UI.
+        # After switching back to Runner.run_streamed, stream_events()
+        # already emits RunItemStreamEvent("message_output_created")
+        # for the final message; bridge.forward handles it inline
+        # during the async-for above. Forwarding result.new_items
+        # again here was DOUBLE-emitting every message → @user found
+        # back-to-back identical chat bubbles in agent.events.
+        # Persistence (write to agent.messages) is still done below
+        # via _persist_sdk_items_to_messages — that's a SEPARATE
+        # concern (long-term history, not UI event log).
 
         # ── 2026-05-16: persist intermediate turn items to messages ──
         # Before this fix, only the user message + final assistant text

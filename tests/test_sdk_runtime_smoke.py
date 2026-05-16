@@ -849,6 +849,44 @@ def test_opt_in_lets_tool_run_when_user_requests_retrieval(monkeypatch):
     assert calls == [("memory_recall", '{"query":"xxx"}')]
 
 
+def test_message_event_not_duplicated_in_agent_events(fake_agent):
+    """Each LLM message must result in EXACTLY ONE entry in
+    agent.events (kind=message). Bug 2026-05-16 evening: after switch
+    back to Runner.run_streamed, the post-hoc result.new_items
+    forwarding loop was still running — so every message got _log'd
+    twice (once via stream_events RunItemStreamEvent, once via
+    post-hoc replay). Manifested as back-to-back identical chat
+    bubbles on restart-replay.
+
+    This test simulates the exact scenario: bridge.forward called
+    once for a message item should result in exactly one event
+    being _log'd. The post-hoc loop calling forward AGAIN with the
+    same item would produce the doubling — guard against that by
+    ensuring our adapter never does the post-hoc forward (we just
+    persist messages, no event re-emit).
+    """
+    from app.agent_runtime.event_bridge import EventBridge
+
+    bridge = EventBridge(
+        on_event=lambda _evt: None,
+        tudou_agent=fake_agent,
+    )
+
+    class _Ev:
+        type = "run_item_stream_event"
+        item = _FakeMessageOutputItem("hi from the agent")
+
+    # Simulate stream_events delivering the message item ONCE
+    bridge.forward(_Ev())
+
+    msg_events = [e for e in fake_agent.events if e["kind"] == "message"]
+    assert len(msg_events) == 1, (
+        f"each forward of a message item must _log exactly once. "
+        f"Got {len(msg_events)} message events on agent.events — "
+        f"the post-hoc result.new_items loop is re-forwarding.")
+    assert msg_events[0]["data"]["content"] == "hi from the agent"
+
+
 def test_multimodal_user_message_converts_text_and_image():
     """OpenAI ChatCompletion multimodal format
         [{type:"text",text:...}, {type:"image_url",image_url:{url:...}}]
