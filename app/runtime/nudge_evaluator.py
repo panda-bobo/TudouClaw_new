@@ -71,6 +71,13 @@ def evaluate(
     nudge_count: int,
     max_nudges_per_turn: int,
     stop_reason: str = "",
+    # 2026-05-16: per-kind kill switches (defaults match the env vars
+    # the legacy chat loop checks: TUDOU_NUDGE_WEAK_MODELS /
+    # TUDOU_TOOL_ERROR_NUDGE / TUDOU_VERIFY_NUDGE). Caller supplies
+    # the env-var values; evaluate_nudge stays env-free + pure.
+    enable_narrator: bool = True,
+    enable_tool_error: bool = True,
+    enable_must_verify: bool = True,
 ) -> Optional[Nudge]:
     """Evaluate whether a nudge should fire AFTER the agent emitted
     ``agent_reply`` in iteration ``iteration``.
@@ -78,9 +85,15 @@ def evaluate(
     Returns:
       Nudge if a corrective action is needed, else None.
 
-    Order of checks matters: most specific (must_verify) first, then
-    error-continuation, then the catch-all narrator-stall. First match
-    wins; we never inject more than one nudge per evaluation.
+    Order of checks (matches the legacy A chat loop's ordering for
+    byte-identical behavior on the runtime mode toggle):
+      1. narrator_stall (broadest — catches stall pattern OR
+         essentially-empty reply)
+      2. tool_error_no_continuation (last tool errored + no follow-up)
+      3. must_verify (user asked verify + agent claimed done + no
+         verify call this turn)
+    First match wins; we never inject more than one nudge per
+    evaluation.
 
     Universal gates (apply to ALL nudge kinds):
       - has_tools must be True (no tools = nothing for agent to do)
@@ -88,6 +101,10 @@ def evaluate(
       - nudge_count < max_nudges_per_turn (avoid infinite nudge loops)
       - stop_reason not in {"length", "content_filter"} (those are
         provider-side terminations, not stalls)
+
+    Per-kind kill switches (enable_narrator / enable_tool_error /
+    enable_must_verify) let callers disable specific nudge kinds
+    via env vars without short-circuiting the entire evaluator.
     """
     # Universal gates
     if not has_tools:
@@ -99,80 +116,85 @@ def evaluate(
     if stop_reason in ("length", "content_filter"):
         return None
 
-    # ── 1. Must-verify (most specific) ──────────────────────────────
-    # User asked for verification + agent claimed done + agent didn't
-    # actually run a verify tool this turn → must-verify nudge.
-    try:
-        if (user_asked_for_verification(user_text)
-                and agent_claimed_completion(agent_reply)
-                and not agent_ran_verification_this_turn(messages)):
+    # ── 1. Narrator stall (broadest — checked first to match
+    #       legacy chat loop ordering) ────────────────────────────
+    # "Let me X:" / "让我看一下：" with no tool call → nudge to act.
+    # Also covers "essentially empty" replies (< 20 chars) — most
+    # common DeepSeek stall mode (thinking succeeded but output
+    # dropped).
+    if enable_narrator:
+        is_stall = looks_like_narrator_stall(agent_reply)
+        is_empty = len((agent_reply or "").strip()) < 20
+        if is_stall or is_empty:
             return Nudge(
-                kind="must_verify",
+                kind="narrator_stall",
                 text=(
-                    "[system nudge] 用户要求里包含『验证』动作 "
-                    "(validate / test / 检查 / 确认 / 跑通...), "
-                    "但你这一轮**没真正跑过验证命令**就声明"
-                    "『修复完成』。\n\n"
-                    "不允许只声明完成。下一步必须做下面之一:\n"
-                    "  (a) 立即调验证工具 (bash terraform "
-                    "validate / npm test / pytest / 对应的 "
-                    "lint / verify 命令), 拿到 0 errors 才能"
-                    "声明完成,\n"
-                    "  (b) 或在回复里**明确告诉用户**还有"
-                    "什么没修好、为什么暂时没法跑验证 "
-                    "(具体到模块/文件/行)。\n"
-                    "禁止笼统'修复完成'/'已完成'而不出示"
-                    "验证证据。"
+                    "[system nudge] 你上一条消息以 \"让我…：\" / "
+                    "\"Let me …:\" 结尾，但没有调用任何工具。"
+                    "请立即调用相应工具完成你承诺的动作 —— "
+                    "不要重复宣告意图。Call the tool now; "
+                    "do not re-narrate."
                 ),
-                reason_detail=(
-                    "user asked for verify + agent claimed done + "
-                    "no verify call this turn"
-                ),
+                reason_detail="stall" if is_stall else "empty_reply",
             )
-    except Exception:
-        pass
 
     # ── 2. Tool-error continuation ──────────────────────────────────
     # Last tool result has an error marker AND agent didn't follow up
     # with another tool call → "fix or explain, don't just describe".
-    try:
-        last_err = detect_recent_tool_error(messages)
-    except Exception:
-        last_err = None
+    if enable_tool_error:
+        try:
+            last_err = detect_recent_tool_error(messages)
+        except Exception:
+            last_err = None
 
-    if last_err:
-        return Nudge(
-            kind="tool_error_no_continuation",
-            text=(
-                "[system nudge] 上一个工具结果含错误:\n"
-                f"  {last_err[:200]}\n\n"
-                "你不能在这停下只输出文字描述错误。下一步必须做下面之一:\n"
-                "  (a) 直接调工具修复 — read_file 看具体行 / "
-                "edit_file 改 / bash 重试 / 调对应诊断工具,\n"
-                "  (b) 或在回复里**明确告诉用户**'我无法继续因为 "
-                "X' 并停止 (不是含糊带过)。\n"
-                "禁止只描述错误而不动作。"
-            ),
-            reason_detail=f"last tool errored: {last_err[:80]}",
-        )
+        if last_err:
+            return Nudge(
+                kind="tool_error_no_continuation",
+                text=(
+                    "[system nudge] 上一个工具结果含错误:\n"
+                    f"  {last_err[:200]}\n\n"
+                    "你不能在这停下只输出文字描述错误。下一步必须做下面之一:\n"
+                    "  (a) 直接调工具修复 — read_file 看具体行 / "
+                    "edit_file 改 / bash 重试 / 调对应诊断工具,\n"
+                    "  (b) 或在回复里**明确告诉用户**'我无法继续因为 "
+                    "X' 并停止 (不是含糊带过)。\n"
+                    "禁止只描述错误而不动作。"
+                ),
+                reason_detail=f"last tool errored: {last_err[:80]}",
+            )
 
-    # ── 3. Narrator stall (broadest, last) ──────────────────────────
-    # "Let me X:" / "让我看一下：" with no tool call → nudge to act.
-    # Also covers "essentially empty" replies (< 20 chars) — most
-    # common DeepSeek stall mode (thinking succeeded but output dropped).
-    is_stall = looks_like_narrator_stall(agent_reply)
-    is_empty = len((agent_reply or "").strip()) < 20
-    if is_stall or is_empty:
-        return Nudge(
-            kind="narrator_stall",
-            text=(
-                "[system nudge] 你上一条消息以 \"让我…：\" / "
-                "\"Let me …:\" 结尾，但没有调用任何工具。"
-                "请立即调用相应工具完成你承诺的动作 —— "
-                "不要重复宣告意图。Call the tool now; "
-                "do not re-narrate."
-            ),
-            reason_detail="stall" if is_stall else "empty_reply",
-        )
+    # ── 3. Must-verify ──────────────────────────────────────────────
+    # User asked for verification + agent claimed done + agent didn't
+    # actually run a verify tool this turn → must-verify nudge.
+    if enable_must_verify:
+        try:
+            if (user_asked_for_verification(user_text)
+                    and agent_claimed_completion(agent_reply)
+                    and not agent_ran_verification_this_turn(messages)):
+                return Nudge(
+                    kind="must_verify",
+                    text=(
+                        "[system nudge] 用户要求里包含『验证』动作 "
+                        "(validate / test / 检查 / 确认 / 跑通...), "
+                        "但你这一轮**没真正跑过验证命令**就声明"
+                        "『修复完成』。\n\n"
+                        "不允许只声明完成。下一步必须做下面之一:\n"
+                        "  (a) 立即调验证工具 (bash terraform "
+                        "validate / npm test / pytest / 对应的 "
+                        "lint / verify 命令), 拿到 0 errors 才能"
+                        "声明完成,\n"
+                        "  (b) 或在回复里**明确告诉用户**还有"
+                        "什么没修好、为什么暂时没法跑验证 "
+                        "(具体到模块/文件/行)。\n"
+                        "禁止笼统'修复完成'/'已完成'而不出示"
+                        "验证证据。"
+                    ),
+                    reason_detail=(
+                        "user asked for verify + agent claimed done + "
+                        "no verify call this turn"
+                    ),
+                )
+        except Exception:
+            pass
 
     return None

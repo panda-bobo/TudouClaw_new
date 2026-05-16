@@ -83,13 +83,22 @@ def test_run_raises_clear_error_when_sdk_missing():
 def test_evaluate_nudge_must_verify_path():
     """The nudge evaluator (B) is what the SDK adapter (C) calls in
     its on_llm_end hook. Lock the must-verify path that mimo's most
-    common stall pattern triggers."""
+    common stall pattern triggers.
+
+    Reply text is long enough (>20 chars stripped) that the
+    narrator-stall "essentially empty" guard doesn't preempt the
+    must-verify check. In production agent_reply would normally be
+    a full progress report; this test uses a representative one."""
     from app.runtime import evaluate_nudge
     import json
 
     nudge = evaluate_nudge(
         user_text="继续 terraform validate",
-        agent_reply="修复完成。现在验证所有模块：",
+        agent_reply=(
+            "修复完成。已完成 logging / monitoring / account-factory "
+            "/ security 四个模块的修复。现在验证所有模块以确认"
+            "没有遗留问题。"
+        ),
         messages=[
             {"role": "user", "content": "继续 terraform validate"},
             {"role": "assistant", "tool_calls": [{"function": {
@@ -107,6 +116,26 @@ def test_evaluate_nudge_must_verify_path():
     assert nudge is not None
     assert nudge.kind == "must_verify"
     assert "验证" in nudge.text or "validate" in nudge.text.lower()
+
+
+def test_evaluate_nudge_kill_switches():
+    """Per-kind kill switches let the caller match the legacy A
+    chat loop's TUDOU_NUDGE_WEAK_MODELS / TUDOU_TOOL_ERROR_NUDGE /
+    TUDOU_VERIFY_NUDGE env-var gates."""
+    from app.runtime import evaluate_nudge
+
+    common = dict(
+        user_text="hi",
+        agent_reply="Let me check:",
+        messages=[],
+        has_tools=True,
+        iteration=0, max_iterations=10,
+        nudge_count=0, max_nudges_per_turn=3,
+    )
+    # Default: narrator-stall fires
+    assert evaluate_nudge(**common).kind == "narrator_stall"
+    # Disable narrator → no other nudge applies, returns None
+    assert evaluate_nudge(**common, enable_narrator=False) is None
 
 
 def test_evaluate_nudge_no_op_when_clean():

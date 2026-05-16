@@ -11891,71 +11891,65 @@ Write only the summary body. Do not include any preamble or prefix."""
                     # tool_calls here is already normalised.
 
                     if not tool_calls:
-                        # ── Narrator-stall nudge ──────────────────────────
-                        # The model replied with a promise ("Let me fix it:")
-                        # but didn't call any tool.  If it still has tools
-                        # available AND we haven't nudged yet AND we have
-                        # budget for another iteration, inject a correction
-                        # instead of breaking.
+                        # ── Narrator-stall / tool-error / must-verify nudges ──
+                        # 2026-05-16 (per docs/MIGRATION_OPENAI_AGENTS_SDK.md
+                        # 0b refactor): the 3 inline nudge blocks that used
+                        # to live here have been collapsed into a single
+                        # call to ``app.runtime.evaluate_nudge`` (B module).
+                        # Same source of truth feeds the future SDK adapter
+                        # (C: app/agent_runtime/) so per-agent nudge
+                        # behavior stays identical regardless of runtime
+                        # mode (legacy vs SDK).
                         #
-                        # Gate: skip nudge when stop_reason is "length" —
-                        # that's truncation, not a stall (the model WANTED
-                        # to keep going; injecting "call the tool" would
-                        # just waste tokens on a truncated continuation).
-                        # Nudge condition: tools available, under max nudge cap,
-                        # haven't run out of iterations, not truncated, and EITHER
-                        #   (a) text looks like a narrator stall ("让我先..."), OR
-                        #   (b) content is essentially empty (no concrete output)
-                        #       which is the most common DeepSeek stall mode —
-                        #       "thinking" succeeded but output got dropped.
-                        # The "essentially empty" branch covers what
-                        # `_looks_like_narrator_stall` misses (it requires a
-                        # specific colon-ending pattern).
-                        _content_stripped = (content or "").strip()
-                        _is_empty_response = len(_content_stripped) < 20
-                        _is_stall = _looks_like_narrator_stall(content)
-                        if (_effective_tools
-                                and _nudge_count < _MAX_NUDGES_PER_TURN
-                                and iteration < max_iters - 1
-                                and stop_reason != "length"
-                                and stop_reason != "content_filter"
-                                and os.environ.get(
-                                    "TUDOU_NUDGE_WEAK_MODELS", "1") != "0"
-                                and (_is_stall or _is_empty_response)):
-                            # Persist the stall reply so the next LLM call
-                            # sees its own words — makes the correction feel
-                            # like a direct continuation instead of a reset.
+                        # Order inside evaluator (matches legacy):
+                        #   1. narrator_stall   (broadest — stall pattern OR
+                        #                         < 20-char essentially-empty
+                        #                         reply)
+                        #   2. tool_error_no_continuation
+                        #      (last tool errored + no follow-up)
+                        #   3. must_verify
+                        #      (user asked validate + agent claimed done +
+                        #       no verify call this turn)
+                        # First match wins; never inject more than one
+                        # nudge per evaluation. Plan-pending nudge stays
+                        # SEPARATE (below) because it needs Agent state
+                        # (self._current_plan) that B can't depend on.
+                        from .runtime import evaluate_nudge as _eval_nudge
+                        _nudge = _eval_nudge(
+                            user_text=_user_text or "",
+                            agent_reply=content or "",
+                            messages=self.messages,
+                            has_tools=bool(_effective_tools),
+                            iteration=iteration,
+                            max_iterations=max_iters,
+                            nudge_count=_nudge_count,
+                            max_nudges_per_turn=_MAX_NUDGES_PER_TURN,
+                            stop_reason=stop_reason or "",
+                            enable_narrator=os.environ.get(
+                                "TUDOU_NUDGE_WEAK_MODELS", "1") != "0",
+                            enable_tool_error=os.environ.get(
+                                "TUDOU_TOOL_ERROR_NUDGE", "1") != "0",
+                            enable_must_verify=os.environ.get(
+                                "TUDOU_VERIFY_NUDGE", "1") != "0",
+                        )
+                        if _nudge is not None:
+                            # Persist agent's reply so next LLM call sees
+                            # its own words — makes the nudge feel like a
+                            # continuation, not a reset. (Same as legacy:
+                            # do NOT _log here; MESSAGE emit at line ~11993
+                            # already logged. Doubling causes duplicate
+                            # bubble — see commit 43a1254.)
                             self.messages.append({
                                 "role": "assistant",
-                                "content": content,
+                                "content": content or final_content or "",
                                 "_source": "llm",
                             })
-                            # 2026-05-15: REMOVED redundant _log("message")
-                            # here — the MESSAGE emit at line ~11993 (post-
-                            # stream-end, pre-nudge-check) already logs
-                            # the same content into agent.events. Calling
-                            # _log a second time creates a duplicate event
-                            # → frontend renders the chat bubble twice.
-                            # Inject a user-role correction.  User-role (not
-                            # system) because mid-turn system insertions
-                            # confuse some providers; user-role corrections
-                            # are the pattern OpenAI's Cookbook recommends
-                            # for self-repair loops.
-                            nudge = (
-                                "[system nudge] 你上一条消息以 \"让我…：\" / "
-                                "\"Let me …:\" 结尾，但没有调用任何工具。"
-                                "请立即调用相应工具完成你承诺的动作 —— "
-                                "不要重复宣告意图。Call the tool now; "
-                                "do not re-narrate."
-                            )
                             self.messages.append({
                                 "role": "user",
-                                "content": nudge,
+                                "content": _nudge.text,
                                 "_source": "system_nudge",
                             })
                             _nudge_count += 1
-                            # Rebuild the outbound message list so the next
-                            # iteration picks up the two new messages.
                             _msgs_to_send = _drop_orphan_tool_messages(
                                 _compress_old_tool_results(
                                     _summarize_old_history(
@@ -11965,13 +11959,21 @@ Write only the summary body. Do not include any preamble or prefix."""
                                                     self.messages,
                                                     current_query=_user_text))),
                                         self)))
-                            # Log for observability
                             try:
+                                _emit_data = {
+                                    "reason": _nudge.kind,
+                                    "iteration": iteration,
+                                }
+                                if _nudge.reason_detail:
+                                    _emit_data["detail"] = _nudge.reason_detail[:120]
                                 _emit(AgentEvent(time.time(), "nudge",
-                                                 {"reason": "narrator_stall",
-                                                  "iteration": iteration}))
+                                                 _emit_data))
                             except Exception:
                                 pass
+                            logger.info(
+                                "Agent %s nudge fired (kind=%s iter=%d) "
+                                "via runtime.evaluate_nudge",
+                                self.id[:8], _nudge.kind, iteration)
                             continue
 
                         # ── Plan-pending continuation nudge ────────────
@@ -12074,171 +12076,12 @@ Write only the summary body. Do not include any preamble or prefix."""
                                 iteration)
                             continue
 
-                        # ── Tool-error continuation nudge (2026-05-15) ──
-                        # Catches the "weak planner runs one bash, sees
-                        # error, stops" pattern (mimo, qwen smaller).
-                        # Plan-pending nudge above only fires when an
-                        # active plan exists; mimo often skips
-                        # plan_update entirely, so without this branch
-                        # the agent would emit "I see there's an error"
-                        # text and end the turn — leaving the user
-                        # with an unfixed bug.
-                        #
-                        # Trigger:
-                        #   - Most recent tool result THIS turn has an
-                        #     error marker (Error/Failed/Traceback/❌/
-                        #     Permission denied/non-zero exit code/...)
-                        #   - Agent emitted no further tool_calls
-                        #   - Iteration budget + nudge cap not hit
-                        #
-                        # Nudge text is "fix-or-explain": agent must
-                        # either call a fixing tool OR explicitly tell
-                        # the user it can't proceed. NOT pure prose.
-                        try:
-                            _last_tool_err = _detect_recent_tool_error(
-                                self.messages)
-                        except Exception:
-                            _last_tool_err = None
-
-                        if (_last_tool_err
-                                and _effective_tools
-                                and _nudge_count < _MAX_NUDGES_PER_TURN
-                                and iteration < max_iters - 1
-                                and stop_reason != "length"
-                                and stop_reason != "content_filter"
-                                and os.environ.get(
-                                    "TUDOU_TOOL_ERROR_NUDGE", "1") != "0"):
-                            # Persist the agent's reply so the next
-                            # iteration sees its own words.
-                            self.messages.append({
-                                "role": "assistant",
-                                "content": content or final_content or "",
-                                "_source": "llm",
-                            })
-                            # 2026-05-15: removed redundant _log here —
-                            # MESSAGE emit at line ~11993 already logged.
-                            nudge = (
-                                "[system nudge] 上一个工具结果含错误:\n"
-                                f"  {_last_tool_err[:200]}\n\n"
-                                "你不能在这停下只输出文字描述错误。下一步必须做下面之一:\n"
-                                "  (a) 直接调工具修复 — read_file 看具体行 / "
-                                "edit_file 改 / bash 重试 / 调对应诊断工具,\n"
-                                "  (b) 或在回复里**明确告诉用户**'我无法继续因为 "
-                                "X' 并停止 (不是含糊带过)。\n"
-                                "禁止只描述错误而不动作。"
-                            )
-                            self.messages.append({
-                                "role": "user",
-                                "content": nudge,
-                                "_source": "system_nudge",
-                            })
-                            _nudge_count += 1
-                            _msgs_to_send = _drop_orphan_tool_messages(
-                                _compress_old_tool_results(
-                                    _summarize_old_history(
-                                        _hoist_skill_guides(
-                                            _strip_old_images(
-                                                self._inject_dynamic_context(
-                                                    self.messages,
-                                                    current_query=_user_text))),
-                                        self)))
-                            try:
-                                _emit(AgentEvent(time.time(), "nudge",
-                                                 {"reason": "tool_error_no_continuation",
-                                                  "iteration": iteration,
-                                                  "error_snippet": _last_tool_err[:120]}))
-                            except Exception:
-                                pass
-                            logger.info(
-                                "Agent %s tool-error continuation nudge "
-                                "(iter=%d, err=%r)",
-                                self.id[:8], iteration,
-                                _last_tool_err[:80])
-                            continue
-
-                        # ── Must-verify nudge (2026-05-15) ──────────────
-                        # Catches the "agent claims '修复完成' without
-                        # actually running terraform validate / npm test"
-                        # pattern. Three conditions ALL must hold:
-                        #   1. User's current-turn message implies a
-                        #      verification step is part of the task
-                        #      (validate / test / verify / 验证 / ...)
-                        #   2. Agent's reply contains a completion-claim
-                        #      phrase (修复完成 / done / fixed / ...)
-                        #   3. Agent did NOT actually invoke any
-                        #      verification tool this turn (no bash
-                        #      with "validate" in cmd, no test runner
-                        #      tool call, etc.)
-                        # Conservative: false-negatives (no nudge) are
-                        # fine; false-positives would loop the agent
-                        # on a non-verification task.
-                        try:
-                            _need_verify = (
-                                _user_asked_for_verification(_user_text)
-                                and _agent_claimed_completion(content or "")
-                                and not _agent_ran_verification_this_turn(
-                                    self.messages))
-                        except Exception:
-                            _need_verify = False
-
-                        if (_need_verify
-                                and _effective_tools
-                                and _nudge_count < _MAX_NUDGES_PER_TURN
-                                and iteration < max_iters - 1
-                                and stop_reason != "length"
-                                and stop_reason != "content_filter"
-                                and os.environ.get(
-                                    "TUDOU_VERIFY_NUDGE", "1") != "0"):
-                            self.messages.append({
-                                "role": "assistant",
-                                "content": content or final_content or "",
-                                "_source": "llm",
-                            })
-                            # 2026-05-15: removed redundant _log here —
-                            # MESSAGE emit at line ~11993 already logged.
-                            nudge = (
-                                "[system nudge] 用户要求里包含『验证』动作 "
-                                "(validate / test / 检查 / 确认 / 跑通...), "
-                                "但你这一轮**没真正跑过验证命令**就声明"
-                                "『修复完成』。\n\n"
-                                "不允许只声明完成。下一步必须做下面之一:\n"
-                                "  (a) 立即调验证工具 (bash terraform "
-                                "validate / npm test / pytest / 对应的 "
-                                "lint / verify 命令), 拿到 0 errors 才能"
-                                "声明完成,\n"
-                                "  (b) 或在回复里**明确告诉用户**还有"
-                                "什么没修好、为什么暂时没法跑验证 "
-                                "(具体到模块/文件/行)。\n"
-                                "禁止笼统'修复完成'/'已完成'而不出示"
-                                "验证证据。"
-                            )
-                            self.messages.append({
-                                "role": "user",
-                                "content": nudge,
-                                "_source": "system_nudge",
-                            })
-                            _nudge_count += 1
-                            _msgs_to_send = _drop_orphan_tool_messages(
-                                _compress_old_tool_results(
-                                    _summarize_old_history(
-                                        _hoist_skill_guides(
-                                            _strip_old_images(
-                                                self._inject_dynamic_context(
-                                                    self.messages,
-                                                    current_query=_user_text))),
-                                        self)))
-                            try:
-                                _emit(AgentEvent(time.time(), "nudge",
-                                                 {"reason": "claimed_done_no_verify",
-                                                  "iteration": iteration}))
-                            except Exception:
-                                pass
-                            logger.info(
-                                "Agent %s must-verify nudge "
-                                "(iter=%d, user asked verify + agent "
-                                "claimed done + no verify call this turn)",
-                                self.id[:8], iteration)
-                            continue
+                        # 2026-05-16 (0b refactor): the old inline
+                        # tool-error and must-verify nudge blocks that
+                        # used to live here are now part of the unified
+                        # evaluate_nudge call BEFORE the plan-pending
+                        # block above. ~210 lines collapsed into ~40
+                        # via app.runtime.evaluate_nudge.
 
                         # Final response — ensure we always emit something
                         if not content and final_content:
