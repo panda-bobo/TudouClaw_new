@@ -27833,13 +27833,20 @@ async function _voiceModeStreamingTTSPump() {
     au.crossOrigin = 'anonymous';
     _VoiceMode.activeAudio = au;
     // Hook orb amplitude analyser onto this audio element.
+    // ── 2026-05-16: track src + an so we can disconnect on
+    //   end/error. WITHOUT this, every TTS sentence permanently
+    //   added 2 nodes to the shared ttsAudioCtx graph — after 50
+    //   utterances the graph was processing 100 zombie nodes per
+    //   frame. @user "语音说的越多越卡". Symptoms: orb stutters,
+    //   tab CPU climbs, eventually tab freezes.
+    var srcN = null, anN = null;
     try {
       if (!_VoiceMode.ttsAudioCtx) {
         var ACt = window.AudioContext || window.webkitAudioContext;
         _VoiceMode.ttsAudioCtx = new ACt();
       }
-      var srcN = _VoiceMode.ttsAudioCtx.createMediaElementSource(au);
-      var anN = _VoiceMode.ttsAudioCtx.createAnalyser();
+      srcN = _VoiceMode.ttsAudioCtx.createMediaElementSource(au);
+      anN = _VoiceMode.ttsAudioCtx.createAnalyser();
       anN.fftSize = 1024;
       srcN.connect(anN);
       anN.connect(_VoiceMode.ttsAudioCtx.destination);
@@ -27850,6 +27857,15 @@ async function _voiceModeStreamingTTSPump() {
       ? sentence.slice(0, 30) + '…' : sentence) + ' (synth=' + dt + 's)');
     var advance = function() {
       try { URL.revokeObjectURL(url); } catch(_) {}
+      // Disconnect the per-utterance Web Audio nodes — otherwise
+      // they leak into the shared ttsAudioCtx forever.
+      try { if (srcN) srcN.disconnect(); } catch(_) {}
+      try { if (anN) anN.disconnect(); } catch(_) {}
+      // Clear the global ttsAnalyser pointer if it was ours, so the
+      // orb amp loop doesn't try to read from a stale analyser.
+      if (_VoiceMode && _VoiceMode.ttsAnalyser === anN) {
+        _VoiceMode.ttsAnalyser = null;
+      }
       st.playing = false;
       _voiceModeStreamingTTSPump();
     };
@@ -27912,6 +27928,10 @@ async function _voiceModeSpeak(text) {
       _VoiceMode.activeAudio = au;
       // Pipe TTS audio through Web Audio so the orb can read its
       // actual amplitude (drives the speech-rhythm visualization).
+      // ── 2026-05-16: track src + an so we can disconnect on
+      //   end/error. Same leak as the streaming TTS path above —
+      //   nodes were getting added to ttsAudioCtx forever.
+      var srcNode = null, anNode = null;
       try {
         // Use a fresh AudioContext for TTS so it's independent of the
         // mic context (which we suspended to avoid feedback).
@@ -27919,8 +27939,8 @@ async function _voiceModeSpeak(text) {
           var ACt = window.AudioContext || window.webkitAudioContext;
           _VoiceMode.ttsAudioCtx = new ACt();
         }
-        var srcNode = _VoiceMode.ttsAudioCtx.createMediaElementSource(au);
-        var anNode = _VoiceMode.ttsAudioCtx.createAnalyser();
+        srcNode = _VoiceMode.ttsAudioCtx.createMediaElementSource(au);
+        anNode = _VoiceMode.ttsAudioCtx.createAnalyser();
         anNode.fftSize = 1024;
         srcNode.connect(anNode);
         anNode.connect(_VoiceMode.ttsAudioCtx.destination);
@@ -27928,16 +27948,17 @@ async function _voiceModeSpeak(text) {
       } catch (e) {
         console.warn('TTS analyser hookup failed (orb will use synthetic envelope):', e);
       }
-      au.onended = function() {
-        URL.revokeObjectURL(url);
-        _VoiceMode.ttsAnalyser = null;
+      var cleanupAndResume = function() {
+        try { URL.revokeObjectURL(url); } catch(_) {}
+        try { if (srcNode) srcNode.disconnect(); } catch(_) {}
+        try { if (anNode) anNode.disconnect(); } catch(_) {}
+        if (_VoiceMode && _VoiceMode.ttsAnalyser === anNode) {
+          _VoiceMode.ttsAnalyser = null;
+        }
         resumeListening();
       };
-      au.onerror = function() {
-        URL.revokeObjectURL(url);
-        _VoiceMode.ttsAnalyser = null;
-        resumeListening();
-      };
+      au.onended = cleanupAndResume;
+      au.onerror = cleanupAndResume;
       await au.play();
       return;
     } catch(e) {
