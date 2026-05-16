@@ -290,10 +290,27 @@ class SDKAgentRunner:
         except ImportError:
             MaxTurnsExceeded = None  # older SDK shape
 
-        # Pass the user message as-is — SDK Runner accepts str or
-        # the OpenAI-style multimodal list (we already match shape).
-        run_input = (user_message if isinstance(user_message, str)
-                     else str(user_message))
+        # ── 2026-05-16: pass conversation HISTORY to SDK ────────
+        # Previous bug: ``run_input = user_message`` only passed the
+        # NEW user message, dropping all prior turns. SDK has no
+        # memory of earlier turns across separate Runner.run calls,
+        # so every user message started a blank conversation.
+        #
+        # Fix: convert tudou_agent.messages (which run() already
+        # appended the new user msg to) into the SDK Responses-API
+        # input-items format, and pass the FULL list.
+        #
+        # System messages are excluded — the SDK Agent's instructions=
+        # callable rebuilds them fresh each turn from the live
+        # persona/skill/context state. Including persisted system
+        # messages would double-count and stale-out.
+        run_input = _tudou_messages_to_sdk_items(
+            getattr(self.tudou_agent, "messages", []) or [])
+        if not run_input:
+            # Defensive: if history is empty (first turn on a brand-
+            # new agent), fall back to bare user message.
+            run_input = (user_message if isinstance(user_message, str)
+                         else str(user_message))
 
         # ── max_turns: Claude-style design (2026-05-16) ──────────
         # Agent.max_turns default is 0 = UNLIMITED. Real protection
@@ -486,6 +503,120 @@ class SDKAgentRunner:
             model_name=model_name,
             base_url=base_url,
         )
+
+
+def _tudou_messages_to_sdk_items(messages):
+    """Convert TudouClaw's ChatCompletion-style ``messages`` list
+    into SDK Responses-API input items.
+
+    TudouClaw shape (legacy):
+        {"role": "user"|"assistant"|"system"|"tool",
+         "content": str,
+         "tool_calls": [...] (asst only),
+         "tool_call_id": str (tool only),
+         ...other metadata fields starting with "_" we ignore}
+
+    SDK Responses-API input shape (what Runner.run accepts):
+        - ``EasyInputMessageParam``: {"role", "content", "type": "message"}
+          for user / assistant text messages
+        - ``ResponseFunctionToolCallParam``: {"type": "function_call",
+          "id", "call_id", "name", "arguments"} for each tool_call
+          in an assistant message
+        - ``FunctionCallOutput``: {"type": "function_call_output",
+          "call_id", "output"} for tool-role messages
+
+    System messages are EXCLUDED — the SDK Agent's ``instructions=``
+    callable rebuilds the system prompt fresh each turn from live
+    persona / skill / context state. Including persisted system
+    messages would either double-count or staleout.
+
+    Empty messages are filtered out (some providers / nudge paths
+    leave empty assistant entries that would confuse the SDK).
+    """
+    items = []
+    if not isinstance(messages, list):
+        return items
+
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role")
+        content = m.get("content")
+        # Normalize content to string (multimodal lists become a
+        # string fallback for history — SDK still handles current-turn
+        # multimodal via tudou_model. Phase 3 work: preserve full
+        # multimodal parts in history items too.)
+        if content is not None and not isinstance(content, str):
+            try:
+                content = str(content)
+            except Exception:
+                content = ""
+
+        if role in ("user", "developer"):
+            # Skip blank user msgs — SDK errors on them, and they're
+            # noise from aborted turns / system retries anyway.
+            if content and content.strip():
+                items.append({
+                    "role": "user",
+                    "content": content,
+                    "type": "message",
+                })
+
+        elif role == "assistant":
+            tool_calls = m.get("tool_calls") or []
+            # Asst text part (if any). Some asst messages have ONLY
+            # tool_calls and content="" — skip the text item in that
+            # case, only emit the function_call items.
+            # SDK's converter is STRICT about assistant content shape:
+            # it must be a list of typed parts (NOT a plain string,
+            # unlike user messages which accept strings). This is
+            # because Responses-API distinguishes input vs output
+            # message types — assistant output uses ``output_text``
+            # parts. Pass a plain string here and chatcmpl_converter
+            # blows up with "string indices must be integers".
+            if content and content.strip():
+                items.append({
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": content},
+                    ],
+                    "type": "message",
+                })
+            # Each tool_call → function_call item.
+            for tc in tool_calls:
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function") or {}
+                _id = str(tc.get("id") or "")
+                if not _id:
+                    # Skip malformed tool_call without id — SDK pairs
+                    # function_call to function_call_output by call_id,
+                    # an empty id would orphan both.
+                    continue
+                items.append({
+                    "type": "function_call",
+                    "id": _id,
+                    "call_id": _id,
+                    "name": str(fn.get("name") or ""),
+                    "arguments": str(fn.get("arguments") or ""),
+                })
+
+        elif role == "tool":
+            call_id = str(m.get("tool_call_id") or "")
+            if not call_id:
+                # Orphan tool result — skip to avoid the SDK / provider
+                # rejecting the request with "no matching tool_call_id".
+                continue
+            items.append({
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": str(content or ""),
+            })
+
+        # role == "system" → skipped (instructions= rebuilds it fresh)
+        # Other roles → skipped (unknown to SDK / Responses API)
+
+    return items
 
 
 class _FakeRunItemEvent:
