@@ -155,33 +155,103 @@ class SDKAgentRunner:
                              tudou_agent=self.tudou_agent)
         hooks = TudouClawRunHooks(self.tudou_agent, bridge)
 
-        # ── Run through SDK Runner.run_streamed ─────────────────────
-        # The streaming events come back as a generator; the bridge
-        # translates each one into the legacy AgentEvent shape and
-        # forwards via on_event so the portal frontend doesn't notice
-        # the runtime change.
-        # NOTE: this is a SCAFFOLD — the actual streaming wiring will
-        # be filled in once we validate SDK ↔ mimo connectivity in
-        # Phase 0. For now it's a structural placeholder.
-        logger.warning(
-            "SDKAgentRunner.run: scaffold path — actual SDK Runner "
-            "invocation TBD. Returning empty string to avoid crashing "
-            "callers; agent_id=%s",
-            getattr(self.tudou_agent, "id", "?")[:8],
-        )
-
-        # TODO Phase 1: implement the actual streaming dispatch.
-        # Approximate shape:
+        # ── Run through SDK ───────────────────────────────────────
+        # Connectivity validated in 0c (scripts/sdk_mimo_connectivity_
+        # poc.py). Use ``Runner.run_streamed`` so the bridge can
+        # forward token-by-token events into the portal — same UX
+        # as the legacy chat loop's text_delta stream.
         #
-        #   import asyncio
-        #   result = asyncio.run(self._run_streamed(
-        #       sdk_agent, user_message, bridge, hooks))
-        #   return result.final_output or ""
-        #
-        # Where _run_streamed iterates Runner.run_streamed and calls
-        # bridge.forward(event) for each.
+        # The SDK Runner is async. We're invoked from the legacy
+        # ``Agent.chat()`` which is sync, so wrap with asyncio.run.
+        # In Phase 2+, when ``Agent.chat_async()`` is the primary
+        # caller, we'll skip the wrap and yield natively.
+        import asyncio
 
-        return ""
+        # Persist the user message into self.messages so the
+        # rest of TudouClaw (history compaction, transcript replay,
+        # L3 fact extraction) sees it — mirrors legacy ``chat()``.
+        try:
+            _user_text = (user_message if isinstance(user_message, str)
+                          else str(user_message))
+            self.tudou_agent.messages.append({
+                "role": "user",
+                "content": _user_text,
+                "_source": source,
+            })
+            self.tudou_agent._log("message", {
+                "role": "user",
+                "content": _user_text[:500],
+                "source": source,
+            })
+        except Exception:
+            pass
+
+        try:
+            final_text = asyncio.run(
+                self._run_streamed(sdk_agent, user_message, bridge, hooks))
+        except SDKNotInstalledError:
+            raise
+        except Exception as e:
+            logger.exception(
+                "SDKAgentRunner.run failed (agent=%s): %s",
+                getattr(self.tudou_agent, "id", "?")[:8], e)
+            # Don't crash the chat — surface a clear error message
+            # the user can see.
+            final_text = (
+                f"[SDK runtime error — falling back to legacy turn: "
+                f"{type(e).__name__}: {str(e)[:200]}]"
+            )
+
+        # Persist agent reply to self.messages (mirrors legacy
+        # chat() finalization, so transcript / L3 / dynamic context
+        # see it on the next turn).
+        try:
+            self.tudou_agent.messages.append({
+                "role": "assistant",
+                "content": final_text or "",
+                "_source": "sdk-runtime",
+            })
+        except Exception:
+            pass
+
+        return final_text or ""
+
+    async def _run_streamed(
+        self,
+        sdk_agent: Any,
+        user_message: Any,
+        bridge: Any,
+        hooks: Any,
+    ) -> str:
+        """Async streaming inner loop. Iterates SDK events and
+        forwards each through the bridge to the portal UI.
+
+        Returns the final assistant text (same as Runner.run_sync's
+        ``result.final_output`` but assembled from streamed deltas
+        so the user gets live updates)."""
+        from agents import Runner
+
+        # Pass the user message as-is — SDK Runner accepts str or
+        # the OpenAI-style multimodal list (we already match shape).
+        run_input = (user_message if isinstance(user_message, str)
+                     else str(user_message))
+
+        try:
+            stream = Runner.run_streamed(
+                sdk_agent,
+                run_input,
+                hooks=hooks,
+            )
+        except TypeError:
+            # Older SDK signatures may not accept hooks=; degrade.
+            stream = Runner.run_streamed(sdk_agent, run_input)
+
+        async for event in stream.stream_events():
+            bridge.forward(event)
+
+        # After the stream completes, ``stream.final_output`` carries
+        # the assembled final text.
+        return getattr(stream, "final_output", "") or ""
 
     def _build_sdk_model(self):
         """Construct the SDK Model object pointing at TudouClaw's

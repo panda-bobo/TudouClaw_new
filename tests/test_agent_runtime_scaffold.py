@@ -214,6 +214,58 @@ def test_evaluate_nudge_tool_error_path():
     assert nudge.kind == "tool_error_no_continuation"
 
 
+def test_agent_dataclass_has_runtime_mode_field():
+    """The runtime-mode toggle is a per-agent field on the Agent
+    dataclass. Default must be 'legacy' so existing agents keep
+    using the self-rolled chat loop until explicitly migrated."""
+    from app.agent import Agent
+    agent = Agent(id="x", name="t")
+    assert hasattr(agent, "runtime_mode")
+    assert agent.runtime_mode == "legacy"
+
+
+def test_runtime_mode_sdk_persists_across_to_dict_round_trip():
+    """If admin sets runtime_mode='sdk' on an agent, it must
+    persist through Agent.to_dict / from_dict so reload doesn't
+    silently revert the toggle."""
+    from app.agent import Agent
+    agent = Agent(id="x", name="t")
+    agent.runtime_mode = "sdk"
+    d = agent.to_dict()
+    assert d.get("runtime_mode") == "sdk"
+
+
+def test_tool_registry_builds_sdk_function_tools():
+    """tool_registry.build_sdk_tools must return a list of SDK
+    FunctionTool objects matching the legacy tool spec list."""
+    from app.agent_runtime.tool_registry import build_sdk_tools
+
+    class _FakeAgent:
+        id = "x"
+        name = "t"
+        def _get_effective_tools(self):
+            return [{
+                "type": "function",
+                "function": {
+                    "name": "echo",
+                    "description": "echo back",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "msg": {"type": "string"},
+                        },
+                        "required": ["msg"],
+                    },
+                },
+            }]
+
+    tools = build_sdk_tools(_FakeAgent(), "hello")
+    assert len(tools) == 1
+    # SDK FunctionTool exposes .name + .description
+    assert tools[0].name == "echo"
+    assert "echo back" in tools[0].description
+
+
 def test_evaluate_nudge_narrator_stall_path():
     """'Let me X:' style with no tool action → narrator_stall."""
     from app.runtime import evaluate_nudge

@@ -53,28 +53,107 @@ class EventBridge:
     def forward(self, sdk_event: Any) -> None:
         """Translate one SDK event and forward to ``on_event``.
 
-        TODO Phase 1: actual SDK event → portal event mapping.
-        SDK event types include (per openai-agents 0.14+):
-          - text_delta event → TudouClaw text_delta
-          - tool_call_started → TudouClaw tool_call_start
-          - tool_call_completed → TudouClaw tool_call_end
-          - message_completed → TudouClaw message
-          - run_completed → TudouClaw done
-          - error events → bubble up to caller
+        SDK ``RunStreamEvent`` shapes (openai-agents 0.17+):
+          - RawResponsesStreamEvent: low-level OpenAI Responses
+            stream — includes text deltas as
+            ResponseTextDeltaEvent (.data.delta = chunk)
+          - RunItemStreamEvent: higher-level "an item completed"
+            (message / tool_call / tool_call_output / etc.)
+          - AgentUpdatedStreamEvent: a handoff happened
 
-        For now this is a SCAFFOLD that just logs receipt.
+        We map:
+          - text deltas → TudouClaw text_delta (chunk-level)
+          - tool_call items → tool_call_start
+          - tool_call_output items → tool_call_end
+          - message_output items → MESSAGE event with full assembled
+            text (for final / non-streamed text)
         """
         if self.on_event is None:
             return
         if self.abort_check and self.abort_check():
             return
 
-        # PoC level: log + drop
+        ev_type = getattr(sdk_event, "type", None) or ""
+
         try:
-            ev_type = getattr(sdk_event, "type", None) or "unknown"
-            logger.debug("EventBridge received SDK event type=%s", ev_type)
-        except Exception:
-            pass
+            # ── Raw response events (token-by-token text deltas) ──
+            if ev_type == "raw_response_event":
+                data = getattr(sdk_event, "data", None)
+                if data is None:
+                    return
+                data_type = getattr(data, "type", "") or ""
+                # Text delta
+                if data_type == "response.output_text.delta":
+                    chunk = getattr(data, "delta", "") or ""
+                    if chunk:
+                        self._emit_text_delta(chunk)
+                    return
+                # Tool call args streaming (deferred; expose on completion)
+                # Other raw types: ignore (covered by run_item events)
+                return
+
+            # ── High-level run-item events ─────────────────────────
+            if ev_type == "run_item_stream_event":
+                item = getattr(sdk_event, "item", None)
+                if item is None:
+                    return
+                item_type = getattr(item, "type", "") or ""
+
+                if item_type == "tool_call_item":
+                    # Agent decided to invoke a tool
+                    raw = getattr(item, "raw_item", None)
+                    name = getattr(raw, "name", "") if raw else ""
+                    args_raw = getattr(raw, "arguments", "") if raw else ""
+                    self._emit("tool_call_start", {
+                        "name": name,
+                        "arguments": args_raw,
+                    })
+                    return
+
+                if item_type == "tool_call_output_item":
+                    # Tool returned a result
+                    output = getattr(item, "output", "") or ""
+                    self._emit("tool_call_end", {
+                        "output": str(output)[:1000],
+                    })
+                    return
+
+                if item_type == "message_output_item":
+                    # Final assembled assistant message — for non-
+                    # streamed text. Streamed text already went out
+                    # via raw deltas above; this is harmless dup
+                    # for fully-streamed responses but necessary
+                    # when the SDK delivers a full message at once.
+                    raw = getattr(item, "raw_item", None)
+                    text = ""
+                    try:
+                        for part in getattr(raw, "content", []) or []:
+                            if hasattr(part, "text"):
+                                text += part.text or ""
+                    except Exception:
+                        pass
+                    if text:
+                        self._emit("message", {
+                            "role": "assistant",
+                            "content": text,
+                        })
+                    return
+
+            # ── Agent handoff ──────────────────────────────────────
+            if ev_type == "agent_updated_stream_event":
+                new_agent = getattr(sdk_event, "new_agent", None)
+                self._emit("nudge", {
+                    "reason": "sdk_handoff",
+                    "to": getattr(new_agent, "name", "?"),
+                })
+                return
+
+            # Anything else — drop (debug log)
+            logger.debug("EventBridge: unhandled SDK event type=%s", ev_type)
+        except Exception as e:
+            logger.warning(
+                "EventBridge.forward error on event type=%s: %s",
+                ev_type, e)
 
     def _emit_text_delta(self, chunk: str) -> None:
         """Internal: forward a text_delta chunk WITH XML leak guard."""

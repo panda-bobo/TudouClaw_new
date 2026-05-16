@@ -2889,6 +2889,13 @@ class Agent:
     project_id: str = ""  # Project ID if agent belongs to a project
     project_name: str = ""  # Project name for prompt context
     context_type: str = "solo"  # "solo" | "project" | "meeting"
+    # 2026-05-16: runtime mode toggle (per-agent). "legacy" = the
+    # self-rolled chat loop in this file; "sdk" = OpenAI Agents SDK
+    # via app/agent_runtime/. Default stays legacy until each agent
+    # is opt-in migrated. See docs/MIGRATION_OPENAI_AGENTS_SDK.md.
+    # When "sdk" but openai-agents not installed → falls back to
+    # legacy with a one-time warning.
+    runtime_mode: str = "legacy"  # "legacy" | "sdk"
     # Determines where produced files go:
     #   solo    → agent's private workspace (working_dir)
     #   project → project shared_workspace (no per-file decision)
@@ -3234,6 +3241,7 @@ class Agent:
             "project_id": self.project_id,
             "project_name": self.project_name,
             "context_type": self.context_type,
+            "runtime_mode": self.runtime_mode,
             "parent_id": self.parent_id,
             "priority_level": self.priority_level,
             "role_title": self.role_title,
@@ -3355,6 +3363,7 @@ class Agent:
             project_id=d.get("project_id", ""),
             project_name=d.get("project_name", ""),
             context_type=d.get("context_type", "solo"),
+            runtime_mode=d.get("runtime_mode", "legacy"),
             parent_id=d.get("parent_id", ""),
             priority_level=d.get("priority_level", 3),
             role_title=d.get("role_title", ""),
@@ -3594,6 +3603,7 @@ class Agent:
             "project_id": self.project_id,
             "project_name": self.project_name,
             "context_type": self.context_type,
+            "runtime_mode": self.runtime_mode,
             # --- Evolution goals ---
             "evolution_goals": self.evolution_goals,
         }
@@ -10382,6 +10392,41 @@ Write only the summary body. Do not include any preamble or prefix."""
                     own message history; turns from one context never
                     leak into another's LLM payload.
         """
+        # ── 2026-05-16: Runtime-mode dispatch ────────────────────────
+        # If this agent is opted into the SDK runtime, route the whole
+        # turn through app/agent_runtime/ instead of the legacy chat
+        # loop below. Falls back gracefully to legacy if the SDK isn't
+        # installed (one-time warning, no crash). See
+        # docs/MIGRATION_OPENAI_AGENTS_SDK.md.
+        if getattr(self, "runtime_mode", "legacy") == "sdk":
+            try:
+                from .agent_runtime import (
+                    SDKAgentRunner, is_sdk_available)
+                if is_sdk_available():
+                    runner = SDKAgentRunner(self)
+                    return runner.run(
+                        user_message,
+                        on_event=on_event,
+                        abort_check=abort_check,
+                        source=source,
+                        context_id=context_id,
+                    )
+                else:
+                    # SDK not installed — log once, fall through to
+                    # legacy. Don't crash production.
+                    if not getattr(self, "_sdk_unavailable_warned", False):
+                        logger.warning(
+                            "Agent %s has runtime_mode='sdk' but "
+                            "openai-agents is not installed. Falling "
+                            "back to legacy. Run `pip install "
+                            "openai-agents` to enable.",
+                            self.id[:8])
+                        self._sdk_unavailable_warned = True
+            except Exception as _sdk_err:
+                logger.exception(
+                    "SDK runtime dispatch failed (agent=%s): %s — "
+                    "falling back to legacy",
+                    self.id[:8], _sdk_err)
         # ── Phase 0 (2026-05-10): Expert pipeline routing ────────────────
         # When agent.expert_specialty is set AND module enabled AND a
         # pipeline.answer() exists, route through the expert pipeline.
