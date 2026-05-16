@@ -189,7 +189,28 @@ class EventBridge:
         self._emit("retract_last_assistant", {"reason": reason})
 
     def _emit(self, kind: str, data: dict) -> None:
-        """Translate to legacy AgentEvent shape and forward."""
+        """Translate to legacy AgentEvent shape, persist via _log, and
+        forward to portal via on_event.
+
+        ── Persist to agent.events (2026-05-16) ──
+        Without this, SDK runtime events only went to the live SSE
+        stream — they did NOT land in ``agent.events`` for restart
+        replay. After a backend restart, /api/portal/agent/{id}/events
+        returned an empty list, so the chat UI looked blank even
+        though agent.messages still had the conversation. @user
+        reported this as "history 记录又没了".
+
+        Legacy chat loop does both at every event emission site
+        (agent.py:12620 + 12758): ``self._log(evt.kind, evt.data)`` +
+        ``_emit(evt)``. Mirror that here so SDK runtime achieves
+        the same persistence semantics.
+        """
+        try:
+            if self.tudou_agent is not None and hasattr(self.tudou_agent, "_log"):
+                self.tudou_agent._log(kind, data)
+        except Exception as e:
+            logger.debug("EventBridge _log to agent.events failed: %s", e)
+
         if self.on_event is None:
             return
         try:

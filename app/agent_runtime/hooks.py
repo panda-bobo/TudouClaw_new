@@ -156,6 +156,13 @@ def build_run_hooks(tudou_agent, event_bridge):
             calls, exposing tool_name + tool_arguments + tool_call_id.
             For other tool families it's a plain RunContextWrapper —
             fall back gracefully.
+
+            ── Persist for replay (2026-05-16) ──
+            Legacy at agent.py:12620 does BOTH ``self._log(...)`` (writes
+            to agent.events for post-restart UI replay via /events
+            endpoint) AND ``_emit(evt)`` (live SSE push). SDK runtime
+            previously only did the live emit — restart wiped the UI
+            chat history. Now mirror legacy: _log + _emit.
             """
             tool_name = (
                 getattr(context, "tool_name", None)
@@ -165,6 +172,8 @@ def build_run_hooks(tudou_agent, event_bridge):
                 "SDK on_tool_start: %s (agent=%s)",
                 tool_name,
                 getattr(self.tudou_agent, "id", "?")[:8])
+            # event_bridge._emit also _log's to agent.events for restart
+            # replay (2026-05-16 fix). No need to _log here.
             try:
                 self.event_bridge._emit("tool_call", {
                     "name": tool_name,
@@ -174,7 +183,8 @@ def build_run_hooks(tudou_agent, event_bridge):
                 logger.debug("tool_call emit failed: %s", e)
 
         async def on_tool_end(self, context, agent, tool, result) -> None:
-            """Tool finished — bookkeeping + REAL-TIME portal emit.
+            """Tool finished — bookkeeping + REAL-TIME portal emit
+            + persist to agent.events (for restart replay).
 
             Emits ``tool_result`` (matching legacy agent.py:12755) so the
             portal updates the tool-call card with the result. Event shape
@@ -185,6 +195,8 @@ def build_run_hooks(tudou_agent, event_bridge):
                 getattr(context, "tool_name", None)
                 or getattr(tool, "name", "?"))
             result_str = str(result) if result is not None else ""
+            # event_bridge._emit also _log's to agent.events for restart
+            # replay (2026-05-16 fix). No need to _log here.
             try:
                 self.event_bridge._emit("tool_result", {
                     "name": tool_name,
