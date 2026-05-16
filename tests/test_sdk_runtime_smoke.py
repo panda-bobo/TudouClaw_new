@@ -849,6 +849,205 @@ def test_opt_in_lets_tool_run_when_user_requests_retrieval(monkeypatch):
     assert calls == [("memory_recall", '{"query":"xxx"}')]
 
 
+def test_multimodal_user_message_converts_text_and_image():
+    """OpenAI ChatCompletion multimodal format
+        [{type:"text",text:...}, {type:"image_url",image_url:{url:...}}]
+    must convert to SDK Responses-API format
+        [{type:"input_text",...}, {type:"input_image", image_url:"...",
+         detail:"auto"}]
+    Without this, SDK rejects with "Unhandled item type or structure".
+    """
+    from app.agent_runtime.sdk_adapter import (
+        _convert_multimodal_blocks,
+        _tudou_messages_to_sdk_items,
+    )
+
+    blocks = [
+        {"type": "text", "text": "what's in this image?"},
+        {"type": "image_url",
+         "image_url": {"url": "data:image/png;base64,iVBOR..."}},
+    ]
+    sdk_parts = _convert_multimodal_blocks(blocks)
+    assert len(sdk_parts) == 2
+    assert sdk_parts[0] == {"type": "input_text",
+                            "text": "what's in this image?"}
+    assert sdk_parts[1] == {"type": "input_image",
+                            "image_url": "data:image/png;base64,iVBOR...",
+                            "detail": "auto"}
+
+
+def test_multimodal_user_message_in_history_round_trip():
+    """A user message with multimodal content in agent.messages
+    converts properly to SDK input items with parts preserved.
+    Verifies the integration of _tudou_messages_to_sdk_items + the
+    multimodal converter."""
+    from app.agent_runtime.sdk_adapter import _tudou_messages_to_sdk_items
+
+    msgs = [
+        {"role": "user", "content": [
+            {"type": "text", "text": "describe this"},
+            {"type": "image_url",
+             "image_url": {"url": "http://example.com/img.png"}},
+        ]},
+    ]
+    items = _tudou_messages_to_sdk_items(msgs)
+    assert len(items) == 1
+    item = items[0]
+    assert item["role"] == "user"
+    assert item["type"] == "message"
+    assert isinstance(item["content"], list), (
+        "multimodal user content must stay as structured parts list, "
+        "NOT get str()'d into a Python repr — that's what made images "
+        "invisible to the LLM before this fix")
+    assert len(item["content"]) == 2
+    assert item["content"][0]["type"] == "input_text"
+    assert item["content"][1]["type"] == "input_image"
+    assert item["content"][1]["image_url"] == "http://example.com/img.png"
+
+
+def test_extract_text_for_preview_handles_multimodal():
+    """Chat-UI _log preview + nudge_evaluator need a STRING. When
+    user_message is a multimodal list, extract text parts only and
+    mark image positions so the preview doesn't dump base64 blobs."""
+    from app.agent_runtime.sdk_adapter import _extract_text_for_preview
+
+    # Plain text passes through
+    assert _extract_text_for_preview("hi") == "hi"
+
+    # Multimodal: extract text + mark image
+    blocks = [
+        {"type": "text", "text": "compare these"},
+        {"type": "image_url",
+         "image_url": {"url": "data:image/png;base64," + ("A" * 5000)}},
+        {"type": "text", "text": "which is better?"},
+    ]
+    preview = _extract_text_for_preview(blocks)
+    assert "compare these" in preview
+    assert "which is better?" in preview
+    assert "[image]" in preview
+    # Crucially: should NOT contain the base64 blob
+    assert "AAAA" not in preview, (
+        "preview must NOT include raw image data — chat UI displays "
+        "it inline and base64 blobs are noise")
+
+
+def test_nudge_injection_loops_when_nudge_fires(monkeypatch):
+    """SDKAgentRunner._run_with_nudges must:
+      1. Run Runner.run_streamed once → get final_text
+      2. Call evaluate_nudge
+      3. If a nudge fires → append nudge.text as user msg, emit
+         nudge event, loop and re-run
+      4. Cap at MAX_NUDGES_PER_TURN=3 to prevent infinite loops
+
+    This is what makes SDK runtime achieve self-correction parity
+    with legacy chat loop. Without it, empty replies / tool errors
+    just dead-end without re-prompting.
+    """
+    import asyncio
+    from app.agent_runtime.sdk_adapter import SDKAgentRunner
+    from app.runtime.nudge_evaluator import Nudge
+
+    agent = _FakeAgent()
+    runner = SDKAgentRunner(agent)
+
+    # Track _run_streamed calls
+    call_count = [0]
+    captured_events = []
+
+    class _FakeBridge:
+        def _emit(self, kind, data):
+            captured_events.append({"kind": kind, "data": data})
+
+    async def _fake_run_streamed(sdk_agent, user_message, bridge, hooks):
+        call_count[0] += 1
+        # First call returns empty (triggers narrator_stall nudge)
+        # Second call returns real reply (no more nudge)
+        return "" if call_count[0] == 1 else "real reply here"
+
+    monkeypatch.setattr(runner, "_run_streamed", _fake_run_streamed)
+
+    # Mock evaluate_nudge: fires once on empty reply, then None
+    nudge_count_holder = [0]
+
+    def _fake_evaluate(**kwargs):
+        # If the agent_reply is empty → fire narrator_stall
+        if not kwargs.get("agent_reply"):
+            nudge_count_holder[0] += 1
+            return Nudge(
+                kind="narrator_stall",
+                text="[system nudge] please actually do something",
+                reason_detail="empty_reply",
+            )
+        return None
+
+    monkeypatch.setattr("app.runtime.evaluate_nudge", _fake_evaluate)
+
+    final = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+        runner._run_with_nudges(
+            sdk_agent=object(),
+            user_message="hi",
+            bridge=_FakeBridge(),
+            hooks=None,
+        ))
+
+    # Two iterations: first returned empty + fired nudge, second
+    # returned "real reply here" + no nudge → exit
+    assert call_count[0] == 2, (
+        f"expected 2 _run_streamed calls (1 empty + 1 retry), got "
+        f"{call_count[0]}")
+    assert final == "real reply here"
+
+    # Nudge.text was appended to agent.messages as role=user
+    nudge_msgs = [m for m in agent.messages
+                  if m.get("_source") == "system_nudge"]
+    assert len(nudge_msgs) == 1
+    assert nudge_msgs[0]["role"] == "user"
+    assert "actually do something" in nudge_msgs[0]["content"]
+
+    # ``nudge`` event emitted to bridge with phase=injected
+    nudge_events = [e for e in captured_events if e["kind"] == "nudge"]
+    assert len(nudge_events) == 1
+    assert nudge_events[0]["data"]["reason"] == "narrator_stall"
+    assert nudge_events[0]["data"]["phase"] == "injected"
+
+
+def test_nudge_injection_caps_at_max_per_turn(monkeypatch):
+    """If nudge keeps firing every iteration (LLM stuck in stall),
+    MUST cap at MAX_NUDGES_PER_TURN=3 — otherwise infinite loop +
+    runaway tokens / cost."""
+    import asyncio
+    from app.agent_runtime.sdk_adapter import SDKAgentRunner
+    from app.runtime.nudge_evaluator import Nudge
+
+    agent = _FakeAgent()
+    runner = SDKAgentRunner(agent)
+    call_count = [0]
+
+    class _FakeBridge:
+        def _emit(self, kind, data):
+            pass
+
+    async def _always_empty(sdk_agent, user_message, bridge, hooks):
+        call_count[0] += 1
+        return ""
+
+    monkeypatch.setattr(runner, "_run_streamed", _always_empty)
+    monkeypatch.setattr(
+        "app.runtime.evaluate_nudge",
+        lambda **kw: Nudge(kind="narrator_stall", text="try again",
+                            reason_detail="still empty"))
+
+    asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+        runner._run_with_nudges(
+            sdk_agent=object(), user_message="hi",
+            bridge=_FakeBridge(), hooks=None))
+
+    # 1 initial + 3 nudge retries = 4 total run_streamed calls,
+    # then cap kicks in.
+    assert call_count[0] == 4, (
+        f"expected 4 runs (1 initial + 3 nudges), got {call_count[0]}")
+
+
 def test_stream_response_yields_text_deltas(monkeypatch):
     """Voice-mode sentence-level TTS needs text_delta events to flow
     as tokens arrive. Stream_response must yield ResponseTextDeltaEvent

@@ -76,70 +76,16 @@ def build_run_hooks(tudou_agent, event_bridge):
                 pass
 
         async def on_llm_end(self, context, agent, response) -> None:
-            """Run B's nudge evaluator. Currently fires-and-logs;
-            actual injection (re-prompting the LLM) requires the SDK
-            to expose mid-run input mutation, which 0.17 does only
-            via the Runner's input_items parameter on the NEXT call.
-            For now we log so admins can see the would-be nudge in
-            traces; injection wiring deferred to Phase 3."""
-            try:
-                from app.runtime import evaluate_nudge
-                import os
+            """No-op now. Nudge evaluation + injection lives in
+            ``SDKAgentRunner._run_with_nudges`` (outer loop wrapping
+            Runner.run_streamed). Was a "would_fire pending Phase 3"
+            log here, but with the outer loop wired (2026-05-16)
+            doing this here too would double-evaluate per intra-run
+            LLM call AND emit duplicate nudge events to UI.
 
-                # Extract LLM text reply
-                agent_reply = ""
-                try:
-                    # ModelResponse has .output (list of items) and
-                    # .output_text helper on newer SDK
-                    output_text = getattr(response, "output_text", "")
-                    if output_text:
-                        agent_reply = str(output_text)
-                except Exception:
-                    pass
-
-                msgs = getattr(self.tudou_agent, "messages", []) or []
-                has_tools = bool(getattr(agent, "tools", None) or [])
-
-                nudge = evaluate_nudge(
-                    user_text=self._user_text,
-                    agent_reply=agent_reply,
-                    messages=msgs,
-                    has_tools=has_tools,
-                    iteration=0,         # SDK doesn't expose iter
-                                          # count cleanly; treat as 0
-                                          # (cap is enforced via
-                                          # _nudge_count below)
-                    max_iterations=10,
-                    nudge_count=self._nudge_count,
-                    max_nudges_per_turn=self._max_nudges_per_turn,
-                    stop_reason="",
-                    enable_narrator=os.environ.get(
-                        "TUDOU_NUDGE_WEAK_MODELS", "1") != "0",
-                    enable_tool_error=os.environ.get(
-                        "TUDOU_TOOL_ERROR_NUDGE", "1") != "0",
-                    enable_must_verify=os.environ.get(
-                        "TUDOU_VERIFY_NUDGE", "1") != "0",
-                )
-                if nudge is not None:
-                    self._nudge_count += 1
-                    logger.info(
-                        "SDK runtime nudge would fire: kind=%s "
-                        "reason=%r agent=%s (Phase 3 will wire the "
-                        "actual injection)",
-                        nudge.kind, nudge.reason_detail,
-                        getattr(self.tudou_agent, "id", "?")[:8])
-                    # Surface to portal so admins see when nudges
-                    # WOULD have fired even before injection works.
-                    try:
-                        self.event_bridge._emit("nudge", {
-                            "reason": nudge.kind,
-                            "detail": nudge.reason_detail[:120],
-                            "phase": "would_fire_pending_injection",
-                        })
-                    except Exception:
-                        pass
-            except Exception as e:
-                logger.debug("on_llm_end nudge eval skipped: %s", e)
+            Kept as a hook stub for symmetry / future per-call
+            telemetry (token usage, response timing) if needed."""
+            pass
 
         async def on_tool_start(self, context, agent, tool) -> None:
             """Tool dispatch start — emit ``tool_call`` event to the

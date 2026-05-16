@@ -170,17 +170,25 @@ class SDKAgentRunner:
         # Persist the user message into self.messages so the
         # rest of TudouClaw (history compaction, transcript replay,
         # L3 fact extraction) sees it — mirrors legacy ``chat()``.
+        #
+        # ── 2026-05-16: preserve MULTIMODAL content as-is ──
+        # Previously stringified everything with ``str(user_message)``;
+        # for {role:user, content:[{type:"text",...},{type:"image_url",...}]}
+        # this turned the image into a Python repr string — useless to
+        # the LLM. Now keep the original shape; downstream
+        # _tudou_messages_to_sdk_items + sanitize handle conversion.
         try:
-            _user_text = (user_message if isinstance(user_message, str)
-                          else str(user_message))
             self.tudou_agent.messages.append({
                 "role": "user",
-                "content": _user_text,
+                "content": user_message,   # keep list / dict as-is
                 "_source": source,
             })
+            # For the _log preview (chat UI only needs text), extract
+            # the text portion if it's multimodal.
+            _preview_text = _extract_text_for_preview(user_message)
             self.tudou_agent._log("message", {
                 "role": "user",
-                "content": _user_text[:500],
+                "content": _preview_text[:500],
                 "source": source,
             })
         except Exception:
@@ -188,7 +196,8 @@ class SDKAgentRunner:
 
         try:
             final_text = asyncio.run(
-                self._run_streamed(sdk_agent, user_message, bridge, hooks))
+                self._run_with_nudges(
+                    sdk_agent, user_message, bridge, hooks))
         except SDKNotInstalledError:
             raise
         except Exception as e:
@@ -278,6 +287,143 @@ class SDKAgentRunner:
             logger.debug("SDK runtime _maybe_persist failed: %s", e)
 
         return final_text or ""
+
+    async def _run_with_nudges(
+        self,
+        sdk_agent: Any,
+        user_message: Any,
+        bridge: Any,
+        hooks: Any,
+    ) -> str:
+        """Outer loop: runs one Runner.run_streamed, evaluates a
+        nudge against the result, and re-runs if a nudge fires —
+        injecting the nudge text as a user message in between.
+
+        Why this exists:
+          Legacy chat loop runs the LLM inside its own iteration
+          loop (agent.py:11400ish). Between iterations it checks
+          ``evaluate_nudge`` and, if one fires, appends the nudge
+          as a user msg + continues looping. SDK's Runner.run_streamed
+          owns its own iteration internally — once it completes, the
+          run is "done" from SDK's perspective. To match legacy's
+          self-correction behavior under SDK runtime, we wrap
+          Runner.run_streamed with an outer loop that does the
+          legacy nudge dance manually.
+
+        Lifecycle of one user turn under this outer loop:
+            1. Runner.run_streamed → returns final_text
+            2. evaluate_nudge(final_text, messages, ...) → Nudge | None
+            3. None → return final_text (turn done)
+            4. Some → append final_text + nudge.text to messages,
+                      emit ``kind=nudge`` event for UI, loop
+            5. Cap at MAX_NUDGES_PER_TURN=3 (same as legacy +
+               hooks._max_nudges_per_turn)
+
+        Nudge kinds covered (per app.runtime.nudge_evaluator):
+          - narrator_stall   — empty / "Let me X:" with no tool call
+          - tool_error_no_continuation — last tool errored + asst
+                                          didn't follow up
+          - must_verify       — asst claimed "done" without verifying
+
+        Nudge.text is injected as ``role=user`` (matches legacy at
+        agent.py:12024 — system role tends to get ignored mid-
+        conversation by some models; user role is the reliable hammer).
+        """
+        from app.runtime import evaluate_nudge
+        import os
+
+        MAX_NUDGES_PER_TURN = 3
+        nudge_count = 0
+        # Snapshot the user message text for evaluator (don't change
+        # this across nudge loops — nudges are SYNTHETIC, the "real"
+        # user text is what came in at run() entry)
+        _user_text = (user_message if isinstance(user_message, str)
+                      else str(user_message))
+
+        final_text = ""
+        while True:
+            final_text = await self._run_streamed(
+                sdk_agent, user_message, bridge, hooks)
+
+            # Evaluate after the full Runner.run_streamed completes.
+            # This catches turn-final issues (empty reply, stall, etc.)
+            # — NOT mid-tool-loop issues which would need hook-level
+            # injection (deferred; SDK doesn't expose mid-Runner.run
+            # input mutation cleanly).
+            try:
+                msgs = getattr(self.tudou_agent, "messages", []) or []
+                has_tools = bool(getattr(sdk_agent, "tools", None) or [])
+                nudge = evaluate_nudge(
+                    user_text=_user_text,
+                    agent_reply=final_text or "",
+                    messages=msgs,
+                    has_tools=has_tools,
+                    iteration=nudge_count,
+                    max_iterations=MAX_NUDGES_PER_TURN,
+                    nudge_count=nudge_count,
+                    max_nudges_per_turn=MAX_NUDGES_PER_TURN,
+                    stop_reason="",
+                    enable_narrator=os.environ.get(
+                        "TUDOU_NUDGE_WEAK_MODELS", "1") != "0",
+                    enable_tool_error=os.environ.get(
+                        "TUDOU_TOOL_ERROR_NUDGE", "1") != "0",
+                    enable_must_verify=os.environ.get(
+                        "TUDOU_VERIFY_NUDGE", "1") != "0",
+                )
+            except Exception as e:
+                logger.debug("nudge evaluation skipped: %s", e)
+                nudge = None
+
+            if nudge is None:
+                return final_text or ""
+
+            if nudge_count >= MAX_NUDGES_PER_TURN:
+                logger.info(
+                    "SDK runtime: nudge would fire (kind=%s) but cap "
+                    "%d reached — returning current reply as-is "
+                    "(agent=%s)",
+                    nudge.kind, MAX_NUDGES_PER_TURN,
+                    getattr(self.tudou_agent, "id", "?")[:8])
+                return final_text or ""
+
+            # ── Inject the nudge + loop ────────────────────────────
+            # Match legacy at agent.py:12024: nudge goes in as
+            # role=user (NOT system — system gets ignored by some
+            # models mid-conversation). _source marker lets future
+            # transcript filtering distinguish synthetic from real.
+            logger.info(
+                "SDK runtime: nudge FIRED kind=%s reason=%r agent=%s "
+                "(injection %d/%d)",
+                nudge.kind, nudge.reason_detail,
+                getattr(self.tudou_agent, "id", "?")[:8],
+                nudge_count + 1, MAX_NUDGES_PER_TURN)
+            try:
+                self.tudou_agent.messages.append({
+                    "role": "user",
+                    "content": nudge.text,
+                    "_source": "system_nudge",
+                })
+            except Exception:
+                pass
+            # Emit a UI event so the user sees we re-prompted
+            try:
+                bridge._emit("nudge", {
+                    "reason": nudge.kind,
+                    "detail": (nudge.reason_detail or "")[:120],
+                    "phase": "injected",
+                })
+            except Exception:
+                pass
+
+            nudge_count += 1
+            # Next iteration: Runner.run_streamed re-runs with the
+            # appended nudge user msg in agent.messages (which
+            # _tudou_messages_to_sdk_items will pick up at the top of
+            # _run_streamed). The new "user" input to Runner.run is
+            # the nudge text — though it's also in the history; the
+            # SDK will see it twice but that's fine, makes the nudge
+            # the most prominent recent input.
+            user_message = nudge.text
 
     async def _run_streamed(
         self,
@@ -817,6 +963,97 @@ def _persist_sdk_items_to_messages(tudou_agent, new_items):
         "tudou_agent.messages", appended_count)
 
 
+def _extract_text_for_preview(user_message):
+    """Pull a string-only preview out of a (possibly multimodal)
+    user message. Used for chat-UI log + nudge evaluator (both want
+    plain text). Mirrors agent.py's _ensure_str_content but locally
+    scoped so sdk_adapter doesn't depend on it."""
+    if user_message is None:
+        return ""
+    if isinstance(user_message, str):
+        return user_message
+    if isinstance(user_message, list):
+        parts = []
+        for block in user_message:
+            if isinstance(block, dict):
+                t = block.get("type")
+                if t == "text" or t == "input_text":
+                    parts.append(str(block.get("text") or ""))
+                elif t in ("image_url", "image", "input_image"):
+                    parts.append("[image]")
+                else:
+                    parts.append("[" + str(t or "block") + "]")
+            elif isinstance(block, str):
+                parts.append(block)
+        return " ".join(p for p in parts if p)
+    if isinstance(user_message, dict):
+        # Single block dict
+        return _extract_text_for_preview([user_message])
+    return str(user_message)
+
+
+def _convert_multimodal_blocks(blocks):
+    """Convert OpenAI ChatCompletion-style multimodal content blocks
+    (``[{type:"text",text:...}, {type:"image_url", image_url:{url:...}}]``)
+    into SDK Responses-API input content parts
+    (``[{type:"input_text", text:...}, {type:"input_image", image_url:str, detail:"auto"}]``).
+
+    OpenAI ChatCompletion + SDK Responses-API use DIFFERENT type
+    strings for the same content:
+      text:        ``text`` ↔ ``input_text``
+      image:       ``image_url`` ↔ ``input_image``
+                   field:  ``image_url: {url: ...}`` ↔ ``image_url: str``
+    Without this mapping, the SDK rejects the message with
+    ``Unhandled item type or structure`` (same family of errors as
+    when we tried to pass tool_call dicts directly back in commit
+    e84f571).
+
+    Audio / video / other block types not yet wired — strip with a
+    text placeholder so the rest of the message still flows.
+    """
+    if not isinstance(blocks, list):
+        return []
+    out = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            if isinstance(block, str) and block.strip():
+                out.append({"type": "input_text", "text": block})
+            continue
+        block_type = block.get("type", "")
+        if block_type == "text":
+            text = str(block.get("text") or "")
+            if text:
+                out.append({"type": "input_text", "text": text})
+        elif block_type == "input_text":
+            # Already in SDK format — pass through
+            out.append(block)
+        elif block_type in ("image_url", "image"):
+            # OpenAI ChatCompletion format. Extract url.
+            iu = block.get("image_url")
+            url = ""
+            if isinstance(iu, dict):
+                url = iu.get("url", "")
+            elif isinstance(iu, str):
+                url = iu
+            if url:
+                out.append({
+                    "type": "input_image",
+                    "image_url": url,
+                    "detail": "auto",
+                })
+        elif block_type == "input_image":
+            # Already in SDK format
+            out.append(block)
+        else:
+            # Unknown block type — drop with a text marker so the
+            # LLM at least knows something was here.
+            out.append({
+                "type": "input_text",
+                "text": f"[unsupported content type: {block_type}]",
+            })
+    return out
+
+
 def _tudou_messages_to_sdk_items(messages):
     """Convert TudouClaw's ChatCompletion-style ``messages`` list
     into SDK Responses-API input items.
@@ -865,8 +1102,25 @@ def _tudou_messages_to_sdk_items(messages):
                 content = ""
 
         if role in ("user", "developer"):
-            # Skip blank user msgs — SDK errors on them, and they're
-            # noise from aborted turns / system retries anyway.
+            # ── Multimodal pass-through (2026-05-16) ──
+            # If the original content was a list (OpenAI ChatCompletion
+            # multimodal format with text + image_url parts), convert
+            # to SDK Responses-API parts. Otherwise keep the plain
+            # string path (already handled by content normalization
+            # above, which str()'d the list — but we re-fetch raw to
+            # detect images).
+            raw_content = m.get("content")
+            if isinstance(raw_content, list) and raw_content:
+                sdk_parts = _convert_multimodal_blocks(raw_content)
+                if sdk_parts:
+                    items.append({
+                        "role": "user",
+                        "content": sdk_parts,
+                        "type": "message",
+                    })
+                    continue
+            # Plain text path (or fall-through if multimodal stripped
+            # to nothing useful).
             if content and content.strip():
                 items.append({
                     "role": "user",
