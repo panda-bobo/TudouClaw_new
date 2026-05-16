@@ -394,6 +394,16 @@ class SDKAgentRunner:
 
         # 3. Build the SDK Model.
         client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+
+        # 3a. Wrap chat.completions.create so every payload the SDK
+        # sends gets sanitized via TudouClaw's existing provider-quirk
+        # layer. Reuses the SAME logic legacy uses — no reimplementation.
+        # This is what fixes (mimo) "reasoning_content must be passed
+        # back" 400s, GLM/Qwen "content+tool_calls" rejection, image
+        # downgrades for text-only providers, system-message merging
+        # for local servers, etc.
+        _wrap_client_with_tudou_sanitizer(client, base_url, model_name)
+
         logger.info(
             "SDK model: agent=%s provider=%s base_url=%s model=%s",
             getattr(self.tudou_agent, "id", "?")[:8],
@@ -402,6 +412,55 @@ class SDKAgentRunner:
             model=model_name,
             openai_client=client,
         )
+
+
+def _wrap_client_with_tudou_sanitizer(client, base_url: str, model_name: str):
+    """Patch ``client.chat.completions.create`` so every outbound
+    payload runs through TudouClaw's ``_sanitize_messages_for_openai``.
+
+    Why monkey-patch instead of subclass: ``OpenAIChatCompletionsModel``
+    builds the payload internally and calls ``self._get_client().chat.
+    completions.create(**create_kwargs)`` — to sanitize we'd have to
+    rewrite the entire ``_fetch_response`` method. Wrapping the client's
+    bound method instead keeps SDK internals untouched and survives
+    SDK upgrades (we only depend on the public ``client.chat.
+    completions.create`` shape, which is stable across openai>=1.0).
+
+    The sanitizer is the SAME function legacy ``app.llm._chat_complete``
+    calls. Whatever provider quirks legacy already handles, SDK now
+    automatically inherits — including the recently-added (2026-05-13)
+    reasoning_content backfill for thinking-mode models like mimo /
+    deepseek-r / o1 / qwq.
+    """
+    try:
+        from app.llm import _sanitize_messages_for_openai
+    except Exception as e:
+        logger.warning(
+            "could not import _sanitize_messages_for_openai (%s) — SDK "
+            "will send raw payloads, may 400 on thinking-mode providers", e)
+        return
+
+    _original_create = client.chat.completions.create
+
+    async def _sanitized_create(**kwargs):
+        msgs = kwargs.get("messages")
+        if isinstance(msgs, list) and msgs:
+            try:
+                kwargs["messages"] = _sanitize_messages_for_openai(
+                    msgs, base_url, model_name)
+            except Exception as e:
+                # Don't block the request on sanitizer error — log
+                # and let the original payload through (better to
+                # try-and-400 with provider's exact error than to
+                # crash before sending).
+                logger.warning(
+                    "sdk-adapter: sanitize failed (%s) — sending "
+                    "untouched messages", e)
+        return await _original_create(**kwargs)
+
+    # Monkey-patch the bound method on this client instance only;
+    # other AsyncOpenAI clients elsewhere are unaffected.
+    client.chat.completions.create = _sanitized_create
 
 
 class _FakeRunItemEvent:
