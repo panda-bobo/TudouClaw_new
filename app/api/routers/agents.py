@@ -2847,6 +2847,70 @@ async def compact_memory(
     return {"ok": ok}
 
 
+@router.post("/agent/{agent_id}/runtime-mode")
+async def set_runtime_mode(
+    agent_id: str,
+    body: dict = Body(default={}),
+    hub=Depends(get_hub),
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Toggle agent.runtime_mode between 'legacy' and 'sdk'.
+
+    Per docs/MIGRATION_OPENAI_AGENTS_SDK.md and
+    docs/RUNTIME_MODE_GUIDE.md — admin can flip any agent to the
+    new SDK runtime, and flip back at any time. SDK adapter falls
+    back to legacy if openai-agents isn't installed (one-time
+    warning, no crash).
+
+    Body: {"mode": "legacy" | "sdk"}
+    Returns: {ok, agent_id, previous, current, sdk_available, warning}
+    """
+    agent = _get_agent_or_404(hub, agent_id)
+
+    new_mode = (body.get("mode") or "").strip().lower()
+    if new_mode not in ("legacy", "sdk"):
+        raise HTTPException(
+            400,
+            f"invalid mode {new_mode!r}, must be 'legacy' or 'sdk'",
+        )
+
+    previous = getattr(agent, "runtime_mode", "legacy")
+    agent.runtime_mode = new_mode
+
+    # Probe SDK availability so admin sees whether the toggle will
+    # actually engage.
+    sdk_available = False
+    warning = ""
+    try:
+        from ...agent_runtime import is_sdk_available
+        sdk_available = is_sdk_available()
+        if new_mode == "sdk" and not sdk_available:
+            warning = (
+                "openai-agents not installed — agent will fall back "
+                "to legacy until you `pip install openai-agents` "
+                "and restart"
+            )
+    except Exception as e:
+        warning = f"SDK probe failed: {e}"
+
+    # Persist immediately so the toggle survives backend restart.
+    try:
+        hub._save_agents()
+    except Exception as e:
+        raise HTTPException(
+            500, f"persist failed: {e} (mode in-memory: {agent.runtime_mode})"
+        )
+
+    return {
+        "ok": True,
+        "agent_id": agent_id,
+        "previous": previous,
+        "current": new_mode,
+        "sdk_available": sdk_available,
+        "warning": warning,
+    }
+
+
 # ---------------------------------------------------------------------------
 # L3 long-term memory — delete operations (single / bulk / clear-all)
 # ---------------------------------------------------------------------------
