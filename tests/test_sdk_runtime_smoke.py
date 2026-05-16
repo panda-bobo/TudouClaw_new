@@ -620,13 +620,15 @@ def test_opt_in_denied_tool_registered_but_soft_denied(monkeypatch):
         "calls an unregistered tool")
 
     # When the LLM actually calls it, _invoke should return a
-    # skip-hint string (NOT dispatch the real handler).
+    # clean error string (NOT dispatch the real handler).
     tool = next(t for t in sdk_tools if getattr(t, "name", "") == "memory_recall")
     result = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
         tool.on_invoke_tool(None, '{"query":"anything"}'))
     assert isinstance(result, str)
-    assert "not invoked" in result or "skip" in result.lower(), (
-        f"soft-deny should return a skip hint; got: {result!r}")
+    assert result.startswith("Error:"), (
+        f"soft-deny should return 'Error:' prefix string (mirrors "
+        f"legacy unauthorized-tool shape); got: {result!r}")
+    assert "not authorized" in result or "not_authorized" in result
 
 
 def test_opt_in_lets_tool_run_when_user_requests_retrieval(monkeypatch):

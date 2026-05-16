@@ -115,21 +115,28 @@ def build_sdk_tools(tudou_agent, user_message: Any) -> List[Any]:
                           _deny=opt_in_deny):
             import asyncio as _asyncio
             # ── Soft-deny intercept (2026-05-16) ─────────────────
-            # If intent gate denied this tool, return a hint instead
-            # of running the real handler. Saves cost (no retrieval)
-            # and gives the LLM a useful message to course-correct.
+            # If intent gate denied this tool, return a CLEAN ERROR
+            # string (same shape legacy uses for unauthorized tools).
+            # SDK still gets a tool result so the run continues; LLM
+            # sees the error and self-corrects on the next turn.
+            #
+            # Note: LLM may keep calling denied tools because the
+            # SYSTEM PROMPT itself mentions them by name (see
+            # app/agent_llm.py:850,853,934,937 + experience_library.py:
+            # 1302). Filtering tool list ≠ filtering tool names from
+            # prompts. The proper fix is either (a) remove the opt-in
+            # filter entirely (treat denied tools as just always-
+            # available — cost is negligible), or (b) scrub the system
+            # prompt to not mention denied tools. This soft-deny is
+            # the holding pattern until that's decided.
             if _name in _deny:
                 logger.info(
-                    "SDK tool soft-denied (intent gate): %s — "
-                    "user message lacked retrieval keywords; returning "
-                    "skip hint instead of dispatching", _name)
+                    "SDK tool denied (intent gate): %s — user "
+                    "message lacked retrieval keywords", _name)
                 return (
-                    f"(tool '{_name}' was not invoked — the user's "
-                    f"message did not explicitly mention past "
-                    f"conversations / knowledge lookup. Only call this "
-                    f"tool when the user says things like '上次', "
-                    f"'记得', '之前你说过', '搜一下知识库', etc. "
-                    f"For this turn, answer from current context.)"
+                    f"Error: tool '{_name}' is not authorized for "
+                    f"this turn (the user's message did not request "
+                    f"retrieval / past-conversation lookup)."
                 )
             try:
                 logger.info(
