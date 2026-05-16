@@ -257,41 +257,81 @@ class SDKAgentRunner:
         """Construct the SDK Model object pointing at TudouClaw's
         currently-resolved provider/model.
 
-        Uses ``OpenAIChatCompletionsModel`` with a custom
-        ``AsyncOpenAI`` client whose base_url + api_key come from
-        TudouClaw's provider registry. This lets the SDK talk to
-        local mimo / qwen / deepseek (any OpenAI-compat endpoint)
-        without changing API costs.
+        Resolution order (matches what legacy chat() does, so the
+        SDK runtime hits the SAME endpoint a legacy turn would):
 
-        Falls back to SDK's default OpenAI Responses model if
-        TudouClaw can't resolve a provider — should never happen in
-        production (Agent always has a configured provider) but
-        defends against test scenarios.
+          1. Agent.\\_resolve_effective_provider_model() returns
+             (provider_id, model_name) — already accounts for
+             multimodal routing, learning model overrides, etc.
+          2. llm.get_registry().get(provider_id) returns the
+             ProviderEntry with base_url + api_key
+          3. Build AsyncOpenAI(base_url=..., api_key=...) +
+             OpenAIChatCompletionsModel(model=model_name, ...)
+
+        If anything in the chain fails, raises a clear error rather
+        than falling back to OpenAI's public endpoint with a "dummy"
+        key (the previous behavior that produced 401 errors). The
+        caller's try/except in run() turns this into a chat-visible
+        "[SDK runtime error...]" reply so the user sees what's wrong
+        instead of a silent crash.
         """
+        from openai import AsyncOpenAI
+        from agents import OpenAIChatCompletionsModel
+        from app import llm as _llm
+
+        # 1. Resolve (provider_id, model_name) the same way legacy
+        #    chat() does at agent.py:11008-ish.
         try:
-            from openai import AsyncOpenAI
-            from agents import OpenAIChatCompletionsModel
-
-            provider, model = (
+            provider_id, model_name = (
                 self.tudou_agent._resolve_effective_provider_model())
-
-            # Look up the provider config from the TudouClaw provider
-            # registry (base_url, api_key) and build an AsyncOpenAI
-            # client targeting it.
-            from app import llm as _llm
-            cfg = _llm.get_config() or {}
-            # NOTE: this is a SIMPLIFIED resolution; production
-            # would consult the full provider registry. PoC level.
-            base_url = (cfg.get("openai_base_url") or
-                        "http://localhost:11434/v1")
-            api_key = cfg.get("openai_api_key") or "dummy"
-
-            client = AsyncOpenAI(base_url=base_url, api_key=api_key)
-            return OpenAIChatCompletionsModel(
-                model=model or "mimo-v2.5-pro",
-                openai_client=client,
-            )
         except Exception as e:
-            logger.warning(
-                "SDK model build fell back to default: %s", e)
-            return None  # SDK uses its default OpenAI client
+            raise RuntimeError(
+                "SDK runtime: could not resolve provider/model from "
+                f"agent (id={getattr(self.tudou_agent, 'id', '?')[:8]}): {e}"
+            ) from e
+
+        if not provider_id or not model_name:
+            raise RuntimeError(
+                "SDK runtime: agent has no provider/model configured "
+                f"(provider={provider_id!r}, model={model_name!r}). "
+                "Set them in the agent edit modal first."
+            )
+
+        # 2. Pull base_url + api_key from the provider registry.
+        try:
+            registry = _llm.get_registry()
+            entry = registry.get(provider_id)
+        except Exception as e:
+            raise RuntimeError(
+                f"SDK runtime: provider registry lookup failed: {e}"
+            ) from e
+
+        if entry is None:
+            raise RuntimeError(
+                f"SDK runtime: provider {provider_id!r} not in registry. "
+                "Configure it in Settings → Providers."
+            )
+
+        base_url = (entry.base_url or "").strip()
+        api_key = (entry.api_key or "").strip()
+        if not base_url:
+            raise RuntimeError(
+                f"SDK runtime: provider {provider_id!r} has no base_url. "
+                "Edit the provider in Settings → Providers."
+            )
+        if not api_key:
+            raise RuntimeError(
+                f"SDK runtime: provider {provider_id!r} has no api_key. "
+                "Edit the provider in Settings → Providers."
+            )
+
+        # 3. Build the SDK Model.
+        client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+        logger.info(
+            "SDK model: agent=%s provider=%s base_url=%s model=%s",
+            getattr(self.tudou_agent, "id", "?")[:8],
+            provider_id, base_url, model_name)
+        return OpenAIChatCompletionsModel(
+            model=model_name,
+            openai_client=client,
+        )
