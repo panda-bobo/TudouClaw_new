@@ -26840,6 +26840,15 @@ function _voiceModeCheckTTS() {
     _VoiceMode.ttsVoice = 'zh-CN-XiaoxiaoNeural';
     _VoiceMode.ttsModel = '';
   }
+  // Diagnostic — surfaces in browser console so we can see what's
+  // configured when @user reports unexpected voice. Without this it's
+  // black-box; with it one F12 → Console shows immediately.
+  try {
+    console.log('[voice-mode] TTS resolved:',
+      'provider=' + _VoiceMode.ttsProviderId,
+      'voice=' + _VoiceMode.ttsVoice,
+      'agent=' + (ag && ag.name) + ' (' + aid.slice(0, 8) + ')');
+  } catch(_) {}
 }
 
 async function _voiceModeStartMic() {
@@ -27876,10 +27885,28 @@ async function _voiceModeSpeak(text) {
       await au.play();
       return;
     } catch(e) {
-      console.warn('server TTS failed, fallback to browser:', e);
+      // 2026-05-16: was silently falling back to browser speechSynthesis
+      // here — that's how 小土 ended up sounding like a 1990s GPS robot
+      // even though tts_provider_id was set to __edge_tts__.
+      // Now: log LOUDLY (console.error so it stands out in DevTools)
+      // and surface to the orb status. Don't auto-fall to browser TTS;
+      // a real Edge TTS failure deserves visibility.
+      console.error('[voice-mode] server TTS FAILED — NOT falling back '
+                  + 'to browser speechSynthesis (would sound robotic). '
+                  + 'Check Network tab + backend log for the /tts/'
+                  + 'synthesize POST. Error:', e);
+      try { _voiceModeSetState('error'); } catch(_) {}
+      resumeListening();
+      return;
     }
   }
-  // Browser fallback
+  // No server TTS configured → genuine browser fallback (only
+  // reachable if _voiceModeCheckTTS didn't set ttsProviderId, which
+  // post-2026-05-16 fix shouldn't happen — it always defaults to
+  // __edge_tts__).
+  console.warn('[voice-mode] no ttsProviderId set — using browser '
+             + 'speechSynthesis (will sound robotic). This is a bug; '
+             + '_voiceModeCheckTTS should have set __edge_tts__ default.');
   if (!window.speechSynthesis) { resumeListening(); return; }
   speechSynthesis.cancel();
   var utt = new SpeechSynthesisUtterance(text);
