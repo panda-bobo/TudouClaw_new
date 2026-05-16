@@ -83,3 +83,7 @@ data/skill_catalog/*/*/.skill_id
 data/skill_catalog/imported/*/.skill_id
 app/static/robots/*/_backup_pre_*/
 .tudou_claw/_sanitizer_dumps/
+
+# Agent test artifacts that accidentally land in repo root
+demo_*.mp4
+snake-game.html
