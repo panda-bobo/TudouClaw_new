@@ -223,6 +223,165 @@ class SandboxPolicy:
 
     _CD_PATTERN = re.compile(r'\bcd\s+([^\s;&|]+)')
 
+    # System paths that bash NEEDS to execute (binaries, libs, common
+    # dev tools). Reading these is OK; we only block reads outside
+    # this set + the agent's jail. Curated CONSERVATIVELY — when in
+    # doubt, leave it out and let the agent surface a sandbox error
+    # asking the admin to add the path.
+    #
+    # Explicitly NOT included:
+    #   /etc          — has /etc/passwd, /etc/shadow, /etc/sudoers
+    #                   etc. that should never leak to an agent.
+    #                   Tools that need DNS (/etc/hosts) usually go
+    #                   through libc, not user-mode reads.
+    #   /Users        — anything outside agent's workspace is private
+    #                   user data; explicit allowed_dirs adds back per
+    #                   agent
+    #   /proc, /sys   — kernel info / other processes' info
+    #   ~/Library     — user app preferences, cookies, keychain refs
+    _SYSTEM_READ_ALLOW = frozenset({
+        "/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/local/bin",
+        "/usr/local/sbin", "/opt/homebrew/bin", "/opt/homebrew/sbin",
+        "/usr/lib", "/usr/local/lib", "/opt/homebrew/lib",
+        "/usr/share", "/usr/local/share", "/opt/homebrew/share",
+        "/Library/Frameworks", "/System/Library",
+        "/dev/null", "/dev/random", "/dev/urandom", "/dev/stdin",
+        "/dev/stdout", "/dev/stderr", "/dev/tty",
+        "/tmp", "/private/tmp", "/var/folders",  # tmpfs
+    })
+
+    # Commands that take a file path as their (typically) FIRST positional
+    # arg and READ it. Used by _check_path_args_against_jail to find paths
+    # worth validating. Bash one-liners like ``cat`` / ``ls`` / ``find``
+    # are the 95% case for honest agents accidentally escaping the jail
+    # (e.g. ``ls /Users/pangwanchun/...`` to "see what's around").
+    _FS_READ_COMMANDS = frozenset({
+        "cat", "head", "tail", "less", "more", "wc", "od", "xxd",
+        "hexdump", "strings", "file", "stat",
+        "ls", "ll", "tree", "find", "fd",
+        "grep", "rg", "ag", "ack", "egrep", "fgrep",
+        "cp", "mv", "rsync", "scp",  # also write but source is read
+        "diff", "cmp", "patch",
+        "tar", "zip", "unzip", "gzip", "gunzip", "7z",
+        "open",  # macOS open command
+        "vim", "vi", "nano", "nvim", "emacs",  # editors
+    })
+
+    # Commands that execute a script — first arg is the script path.
+    _SCRIPT_EXEC_COMMANDS = frozenset({
+        "python", "python3", "python2", "py",
+        "bash", "sh", "zsh", "fish",
+        "ruby", "perl", "node", "deno", "lua",
+        "java", "groovy", "scala",
+    })
+
+    @staticmethod
+    def _strip_quotes(token: str) -> str:
+        """Remove outer matching quotes from a shell token."""
+        if len(token) >= 2 and token[0] == token[-1] and token[0] in "'\"":
+            return token[1:-1]
+        return token
+
+    def _is_path_inside_jail(self, path_str: str) -> bool:
+        """Return True if the absolute path is inside the agent's
+        workspace OR any of allowed_dirs / readonly_dirs / system
+        allow-list. Resolves symlinks defensively (best-effort)."""
+        try:
+            resolved = str(Path(path_str).expanduser().resolve(strict=False))
+        except Exception:
+            resolved = path_str
+        root_str = str(self.root)
+        if resolved == root_str or resolved.startswith(root_str + os.sep):
+            return True
+        for allowed in self.allowed_dirs:
+            if resolved == allowed or resolved.startswith(allowed + os.sep):
+                return True
+        for ro in self.readonly_dirs:
+            if resolved == ro or resolved.startswith(ro + os.sep):
+                return True
+        for sys_path in self._SYSTEM_READ_ALLOW:
+            if resolved == sys_path or resolved.startswith(sys_path + os.sep):
+                return True
+        # Home directory's own dotfile dirs (e.g. ~/.tudou_claw) get
+        # implicit read because agents pull config from here. But NOT
+        # the rest of $HOME.
+        home = str(Path.home())
+        if resolved.startswith(home + "/.tudou_claw"):
+            return True
+        return False
+
+    def _check_path_args_against_jail(self, command: str) -> tuple[bool, str]:
+        """Scan the command for absolute paths used as args to known
+        file-reading / file-writing commands. Reject if any escape
+        the jail.
+
+        This is a defense-in-depth check on top of cwd jailing — agents
+        with restricted mode shouldn't be able to ``cat /etc/passwd`` or
+        ``ls /Users/...`` even though those paths are absolute and bypass
+        the cwd-relative resolution.
+
+        Best-effort parsing — bash quoting is hard; we tokenize on
+        whitespace + handle simple quoted strings. Edge cases (heredoc,
+        process substitution, eval $(echo /etc/passwd)) are NOT caught.
+        For those, the macOS sandbox-exec wrapper (Layer 2, planned)
+        provides kernel-level protection.
+
+        Returns (ok, error_msg). ok=True passes through.
+        """
+        # Split on shell separators that introduce new commands
+        # (semicolon, pipe, &&, ||). Check each segment as if it were
+        # a fresh command.
+        for segment in re.split(r"\s*[;|&]+\s*", command):
+            segment = segment.strip()
+            if not segment:
+                continue
+            tokens = segment.split()
+            if not tokens:
+                continue
+            cmd0 = os.path.basename(self._strip_quotes(tokens[0]))
+
+            # Check redirect targets: > /path  >> /path  < /path  2> /path
+            for m in re.finditer(
+                    r"(?:^|\s)(?:\d?>>?|<)\s*([^\s;|&]+)", segment):
+                tgt = self._strip_quotes(m.group(1))
+                if tgt.startswith("/") and not self._is_path_inside_jail(tgt):
+                    return (False,
+                            f"Sandbox blocked: command redirects to "
+                            f"'{tgt}' which is outside agent's "
+                            f"workspace '{self.root}'. Use relative "
+                            f"paths or write inside your workspace.")
+
+            # Check command-specific path args
+            check_args = False
+            if cmd0 in self._FS_READ_COMMANDS:
+                check_args = True
+            elif cmd0 in self._SCRIPT_EXEC_COMMANDS:
+                check_args = True
+
+            if check_args:
+                for tok in tokens[1:]:
+                    raw = self._strip_quotes(tok)
+                    # Only check absolute paths (relative ones land in
+                    # workspace due to cwd already).
+                    if not raw.startswith("/"):
+                        continue
+                    # Skip flag values like --output=/path/foo (we'd
+                    # need to parse arg form — skip for now to reduce
+                    # false positives). Bare -X /path style we still
+                    # check (it's the arg form most commonly used to
+                    # read files: `head -5 /path/foo`).
+                    if raw.startswith("-"):
+                        continue
+                    if not self._is_path_inside_jail(raw):
+                        return (False,
+                                f"Sandbox blocked: '{cmd0}' tried to "
+                                f"access '{raw}' which is outside "
+                                f"agent's workspace '{self.root}'. "
+                                f"Agents may only read/write inside "
+                                f"their working directory + standard "
+                                f"system paths (/usr, /bin, etc.).")
+        return (True, "")
+
     def check_command(self, command: str) -> tuple[bool, str]:
         """Return (ok, error_message). ok=True if command is safe to run."""
         if self.mode == "off":
@@ -269,6 +428,20 @@ class SandboxPolicy:
                             f"Sandbox blocked: 'cd {cd_target}' escapes "
                             f"workspace root '{self.root}'. "
                             f"Agents must stay inside their working directory.")
+
+        # ── Path-escape check (2026-05-17) ─────────────────────────
+        # Even in restricted mode, the OLD code only blocked `cd /xxx`
+        # outside workspace — agent could still ``cat /etc/passwd`` or
+        # ``ls /Users/...`` using absolute paths. Now scan ALL paths
+        # that look like file args to known read/write commands and
+        # reject if any escape the jail.
+        # See _check_path_args_against_jail docstring for limits +
+        # planned Layer 2 (macOS sandbox-exec) for kernel-enforced
+        # protection against more sophisticated bypasses.
+        if self.mode in ("restricted", "strict"):
+            ok, err = self._check_path_args_against_jail(command)
+            if not ok:
+                return (False, err)
 
         if self.mode == "strict" and self.allow_list:
             # In strict mode, first token of the command must be in allow_list
