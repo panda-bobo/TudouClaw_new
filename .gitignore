@@ -87,3 +87,12 @@ app/static/robots/*/_backup_pre_*/
 # Agent test artifacts that accidentally land in repo root
 demo_*.mp4
 snake-game.html
+
+# Agent test artifacts that accidentally land in repo root
+# (agent writes via bash with relative path → backend cwd = repo root)
+AI*.md
+*.mp4
+*.html
+!app/**/*.html
+!app/**/*.mp4
+!docs/**/*.html
