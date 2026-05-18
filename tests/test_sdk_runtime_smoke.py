@@ -761,6 +761,68 @@ def test_opt_in_denied_tool_registered_but_soft_denied(monkeypatch):
     assert "not authorized" in result or "not_authorized" in result
 
 
+def test_tool_dispatch_pushes_sandbox_into_worker_thread(monkeypatch):
+    """Sandbox policy is thread-local (app/sandbox.py:_tls). SDK
+    runtime uses asyncio.to_thread to run sync tools off the event
+    loop — that creates a FRESH worker thread that has no policy
+    pushed. Without _sandbox_scope() inside the thread, bash etc.
+    fall back to default policy with root=os.getcwd() (= backend
+    process cwd = REPO ROOT when launched as `python -m app portal`).
+
+    Manifested as: agent ran ``bash("echo ... > foo.md")``, file
+    landed in TudouClaw repo root, got swept into git commit on
+    next ``git add -A``. @user found AI信息流情报方案.md leaked.
+
+    Lock the contract: _invoke MUST push tudou_agent._sandbox_scope()
+    inside the to_thread function so the worker thread's TLS gets
+    the agent's policy.
+    """
+    import asyncio
+    from app.agent_runtime.tool_registry import build_sdk_tools
+
+    # Track whether _sandbox_scope was entered
+    entered = []
+
+    class _FakeSandboxContext:
+        def __enter__(self):
+            entered.append(True)
+            return self
+        def __exit__(self, *a):
+            return False
+
+    class _Tudou:
+        id = "agent-abc"
+        name = "test"
+        def _get_effective_tools(self):
+            return [{
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "description": "shell",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }]
+        def _sandbox_scope(self):
+            return _FakeSandboxContext()
+
+    # Stub the dispatcher so we don't need real bash
+    def _fake_dispatch(agent, name, args_json):
+        return "ok"
+    monkeypatch.setattr(
+        "app.agent_runtime.tool_registry._dispatch_tudou_tool",
+        _fake_dispatch)
+
+    sdk_tools = build_sdk_tools(_Tudou(), "test")
+    bash_tool = next(t for t in sdk_tools if getattr(t, "name", "") == "bash")
+    asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+        bash_tool.on_invoke_tool(None, '{"command":"ls"}'))
+
+    assert entered == [True], (
+        "agent's _sandbox_scope must be entered inside the to_thread "
+        "worker function — otherwise bash gets the default policy "
+        "with root=os.getcwd() and writes leak into repo root")
+
+
 def test_unauthorized_infra_tools_get_stub_registered(monkeypatch):
     """Tools mentioned in system prompts (mcp_call, save_experience,
     etc.) but NOT granted to a specific agent's role MUST still be

@@ -198,9 +198,35 @@ def build_sdk_tools(tudou_agent, user_message: Any) -> List[Any]:
                 logger.info(
                     "SDK tool call: %s args=%s",
                     _name, (args_json or "")[:100])
-                result = await _asyncio.to_thread(
-                    _dispatch_tudou_tool,
-                    tudou_agent, _name, args_json)
+                # ── 2026-05-16 evening: push sandbox onto worker thread ──
+                # asyncio.to_thread dispatches the sync tool on a fresh
+                # worker thread. Sandbox policy is thread-local
+                # (app/sandbox.py:320 _tls). Without pushing here, the
+                # worker thread sees no policy → fallback creates
+                # SandboxPolicy(root=os.getcwd(), mode="command_only")
+                # → bash with relative path resolves to backend cwd
+                # (= TudouClaw repo root, since portal launches from
+                # there) instead of the agent's workspace. @user found
+                # this when "AI信息流情报方案.md" leaked into the repo:
+                # agent ran bash("echo X > AI信息流情报方案.md") → file
+                # landed in repo root → git add -A swept it into the
+                # commit.
+                #
+                # Push the agent's sandbox INSIDE the thread function
+                # so the TLS lookup in _tool_bash / _tool_write_file
+                # finds the right root.
+                def _sync_with_sandbox():
+                    try:
+                        with tudou_agent._sandbox_scope():
+                            return _dispatch_tudou_tool(
+                                tudou_agent, _name, args_json)
+                    except AttributeError:
+                        # Defensive: older Agent versions might not have
+                        # _sandbox_scope. Fall back to no-jail dispatch.
+                        return _dispatch_tudou_tool(
+                            tudou_agent, _name, args_json)
+
+                result = await _asyncio.to_thread(_sync_with_sandbox)
                 logger.info(
                     "SDK tool result: %s len=%d preview=%s",
                     _name, len(result or ""), (result or "")[:100])
