@@ -125,6 +125,56 @@ class SDKAgentRunner:
         if not is_sdk_available():
             raise SDKNotInstalledError()
 
+        # ── 2026-06-01: flip status to BUSY for the duration of the
+        # run (mirrors legacy chat() — agent.py:10532 BUSY entry,
+        # agent_execution.py:2036 IDLE exit). @user: "agent 在后台
+        # 干活,前端还是显示 idle." Root cause: the SDK runtime path
+        # never touched self.status at all — grep returned 0 hits in
+        # sdk_adapter.py. So status stayed at whatever it was before
+        # the run (typically IDLE from the last finalization), the UI
+        # polled /api/portal/agents and saw the stale value, and the
+        # busy-only polling gates in the dashboard (e.g. plan-steps
+        # 3s poll checks `if status !== busy && status !== running:
+        # return`) bailed out, hiding live progress. Set BUSY here
+        # and reset in `finally` further down so it flips back even
+        # on exception / SDK error.
+        try:
+            from app.agent_types import AgentStatus
+            self.tudou_agent.status = AgentStatus.BUSY
+        except Exception as _se:
+            logger.debug("SDK runtime: status→BUSY failed: %s", _se)
+
+        try:  # ── outer try guarantees status→IDLE in `finally` ──
+            return self._run_inner(
+                user_message, context_id, on_event, abort_check)
+        finally:
+            # Always flip back to IDLE — even if _build_sdk_model
+            # raises (no provider configured), even if asyncio.run
+            # raises an uncaught exception, even on SDKNotInstalledError
+            # reraise from the inner block. Without this finally, any
+            # exception between status=BUSY and the finalization block
+            # leaked BUSY forever, leaving the UI showing the agent as
+            # busy with no actual work happening.
+            try:
+                from app.agent_types import AgentStatus
+                self.tudou_agent.status = AgentStatus.IDLE
+            except Exception as _se:
+                logger.debug("SDK runtime: status→IDLE failed: %s", _se)
+
+    def _run_inner(
+        self,
+        user_message: Any,
+        context_id: str,
+        on_event: Optional[Callable] = None,
+        abort_check: Optional[Callable[[], bool]] = None,
+    ) -> str:
+        """Inner body of run() — split out so the outer `run()` can
+        wrap the entire BUSY→IDLE lifetime in a try/finally. Any
+        exception raised in here still propagates, but status is
+        guaranteed reset on the way out."""
+        # Lazy SDK import (was at top of run() before refactor).
+        from agents import Agent as SDKAgent, Runner
+
         # ── 2026-06-01: bind to the right per-context message bucket ──
         # CRITICAL bug @user found ("我今天用的一直都是 solo 页"):
         # legacy chat() calls _switch_context(context_id) before any
@@ -158,8 +208,7 @@ class SDKAgentRunner:
                 "messages may land in the wrong bucket",
                 context_id, _ctx_err)
 
-        # Lazy SDK import — only happens when SDK is actually needed
-        from agents import Agent as SDKAgent, Runner
+        # (SDK import already done at top of _run_inner)
 
         # Build the SDK Agent each turn (cheap — just a dataclass).
         # instructions is a callable so persona/dynamic context get
@@ -238,6 +287,7 @@ class SDKAgentRunner:
                 self._run_with_nudges(
                     sdk_agent, user_message, bridge, hooks))
         except SDKNotInstalledError:
+            # Re-raise — outer run()'s finally handles status reset.
             raise
         except Exception as e:
             logger.exception(
@@ -324,6 +374,9 @@ class SDKAgentRunner:
             self.tudou_agent._maybe_persist(force=True)
         except Exception as e:
             logger.debug("SDK runtime _maybe_persist failed: %s", e)
+
+        # (status→IDLE handled by outer run()'s finally block — covers
+        # this success path AND any uncaught exception path.)
 
         return final_text or ""
 

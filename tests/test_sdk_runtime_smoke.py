@@ -984,6 +984,68 @@ def test_opt_in_lets_tool_run_when_user_requests_retrieval(monkeypatch):
     assert calls == [("memory_recall", '{"query":"xxx"}')]
 
 
+def test_run_flips_status_busy_then_idle():
+    """SDK runtime must mirror legacy chat()'s status lifecycle:
+    BUSY on entry, IDLE on exit. @user 2026-06-01 'agent 在后台干活,
+    前端还是显示 idle' — the SDK runtime never touched self.status, so
+    the UI's /api/portal/agents poll saw a stale IDLE the whole time
+    and busy-gated panels (plan-steps poll, etc.) bailed out instead
+    of showing live progress.
+
+    This test asserts run() touches status — BUSY observed during the
+    run, IDLE observed after — so a future refactor can't silently
+    re-introduce the bug.
+    """
+    import threading
+    from app.agent_types import AgentStatus
+
+    observed = []
+
+    class _Agent:
+        id = "status-test-agent"
+        name = "T"
+        _lock = threading.Lock()
+        messages = []
+        _last_persist_at = 0
+
+        def __init__(self):
+            self._status_val = AgentStatus.IDLE
+
+        @property
+        def status(self):
+            return self._status_val
+
+        @status.setter
+        def status(self, v):
+            self._status_val = v
+            observed.append(v)
+
+        def _switch_context(self, cid): pass
+        def _build_static_system_prompt(self): return ""
+        def _resolve_effective_provider_model(self):
+            # Force run() to bail AFTER status→BUSY is set but before
+            # any real SDK work. We just want to confirm the entry
+            # transition happened and the exit transition cleans up.
+            return ("", "")
+        def _log(self, *a, **k): pass
+        def _maybe_persist(self, **k): pass
+
+    from app.agent_runtime.sdk_adapter import SDKAgentRunner
+    runner = SDKAgentRunner(_Agent())
+    try:
+        runner.run("hello", context_id="solo")
+    except Exception:
+        pass
+
+    # BUSY must appear at SOME point during the run
+    assert AgentStatus.BUSY in observed, (
+        f"run() must flip status to BUSY; observed={observed}")
+    # AND IDLE must be the LAST observed value (so the UI sees idle
+    # after the run finishes, not stuck on busy).
+    assert observed[-1] == AgentStatus.IDLE, (
+        f"run() must end with status=IDLE; observed={observed}")
+
+
 def test_run_switches_to_correct_context_bucket():
     """SDK runtime run() MUST call _switch_context(context_id) before
     appending the user message — otherwise solo-page chats land in
