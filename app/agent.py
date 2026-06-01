@@ -3295,6 +3295,14 @@ class Agent:
             # The UI replays these on load so the conversation history is
             # preserved across app restarts. Keep last 500 to bound file size.
             "events": [e.to_dict() for e in self.events[-500:]],
+            # ── Tasks (2026-05-28 fix) ──
+            # Was NEVER persisted before — every restart wiped agent.tasks
+            # to []. Manifested as "执行任务存在中断" for 小新: LLM called
+            # task_update(create), task got added to in-memory self.tasks,
+            # restart killed everything → on next chat LLM thinks it has
+            # nothing in progress and re-starts from scratch (often with
+            # different decomposition). Last 200 to bound file size.
+            "tasks": [t.to_dict() for t in (self.tasks or [])[-200:]],
             "total_input_tokens": self.total_input_tokens,
             "total_output_tokens": self.total_output_tokens,
             "cost_events": self.cost_tracker.events[-200:],
@@ -3442,6 +3450,21 @@ class Agent:
                 ))
             except Exception as e:
                 logger.debug("Failed to restore event: %s", e)
+        # ── Restore tasks (2026-05-28 fix) ──
+        # Was missing — agent.tasks always defaulted to []. Every
+        # restart wiped in-progress tasks. @user reported as 小新
+        # "执行任务存在中断": LLM created tasks via task_update, did
+        # partial work, then on restart had no memory of what was
+        # in-progress → started over with a fresh decomposition.
+        # Fail-safe: if a stored task has a corrupt status enum etc.,
+        # skip just that one rather than aborting the load.
+        for td in (d.get("tasks") or []):
+            try:
+                agent.tasks.append(AgentTask.from_dict(td))
+            except Exception as e:
+                logger.debug(
+                    "Failed to restore task %s: %s",
+                    td.get("id", "?"), e)
         # Restore enhancement module
         if d.get("enhancer"):
             agent.enhancer = AgentEnhancer.from_dict(d["enhancer"])
