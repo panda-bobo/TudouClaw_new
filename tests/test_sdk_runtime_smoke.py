@@ -873,6 +873,50 @@ def test_unauthorized_infra_tools_get_stub_registered(monkeypatch):
     assert "not authorized" in result
 
 
+def test_task_tracking_tools_stubbed_when_ungranted():
+    """Continuity guidance (skill + PENDING-TASKS reminder) tells agents
+    to use plan_update / task_update / agent_todo for multi-step work.
+    But not every role grants all of them — coder has task_update +
+    agent_todo but NOT plan_update. Without stubs, an agent following
+    the guidance calls plan_update → SDK ModelBehaviorError → whole run
+    aborts (@user 2026-06-01 'Tool plan_update not found in agent 小新').
+
+    Stub the ungranted ones so the model gets a soft-deny and falls
+    back to the tools it has, instead of crashing.
+    """
+    import asyncio
+    from app.agent_runtime.tool_registry import build_sdk_tools
+
+    class _Tudou:
+        id = "coder-x"
+        name = "小新"
+        def _get_effective_tools(self):
+            # coder-like: has task_update + agent_todo, NOT plan_update
+            return [
+                {"type": "function", "function": {
+                    "name": n, "description": n,
+                    "parameters": {"type": "object", "properties": {}}}}
+                for n in ("bash", "task_update", "agent_todo",
+                          "finalize_step")
+            ]
+
+    sdk_tools = build_sdk_tools(_Tudou(), "do a multi-step task")
+    names = [getattr(t, "name", "") for t in sdk_tools]
+    # plan_update MUST be present (as stub) even though ungranted
+    assert "plan_update" in names, (
+        "plan_update must be stubbed when ungranted — otherwise the "
+        "model following continuity guidance crashes the SDK run")
+    # task_update stays real (granted)
+    assert "task_update" in names
+
+    # Calling the stub returns an Error string, not a crash
+    stub = next(t for t in sdk_tools if getattr(t, "name", "") == "plan_update")
+    result = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+        stub.on_invoke_tool(None, '{"action":"create_plan"}'))
+    assert isinstance(result, str)
+    assert result.startswith("Error:")
+
+
 def test_opt_in_lets_tool_run_when_user_requests_retrieval(monkeypatch):
     """Same tool, but user message contains '记得' / '上次' / etc. —
     the intent gate allows the tool, _invoke dispatches normally."""

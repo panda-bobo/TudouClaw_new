@@ -102,6 +102,21 @@ def build_sdk_tools(tudou_agent, user_message: Any) -> List[Any]:
         "save_experience":  "Save learning to experience library",
         "web_fetch":        "Fetch a URL",
         "web_search":       "Search the web",
+        # ── Task-tracking tools (2026-06-01) ──
+        # The continuity skill + the PENDING-TASKS context reminder
+        # tell agents to use these for multi-step work. But not every
+        # role grants all of them (e.g. coder has task_update + agent_todo
+        # + finalize_step but NOT plan_update). Without stubs, an agent
+        # following the continuity guidance calls plan_update → SDK
+        # ModelBehaviorError "Tool plan_update not found" → whole run
+        # aborts (@user 2026-06-01). Stub the ones an agent lacks so the
+        # model gets a soft-deny + falls back to the tools it DOES have,
+        # instead of crashing. Agents that DO grant these get the real
+        # handler (stub only applies when not in _granted_names).
+        "plan_update":      "Plan / step tracking",
+        "task_update":      "Task list management",
+        "agent_todo":       "Scratch todo list",
+        "finalize_step":    "Finalize a plan step",
     }
     _granted_names = {
         (s.get("function") or {}).get("name", "")

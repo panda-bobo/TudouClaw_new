@@ -52,38 +52,48 @@ pushing you to continue. Don't make it nudge you — self-drive.
 
 ### 1. Decompose + register the plan ONCE
 
-At the start, if the task has 3+ steps, call `plan_update`:
+At the start, if the task has 3+ steps, register a checklist using
+**whichever task-tracking tool is in YOUR tool list** (check before
+calling — not every role grants every one):
 
-```
-plan_update(action="create_plan",
-            task_summary="<one line: what the whole task delivers>",
-            steps=[
-              {title="数据库设计", acceptance="docs/db-design.md 含11张表+DDL"},
-              {title="API文档",    acceptance="docs/api-spec.md 含6模块+示例"},
-              {title="HTML原型",   acceptance="prototype/*.html 4个页面可打开"},
-            ])
-```
+- **`agent_todo`** (most agents have this) — lightweight scratch list:
+  ```
+  agent_todo(action="set", todos=[
+    {content="数据库设计", status="in_progress", activeForm="设计数据库"},
+    {content="API文档",    status="pending",     activeForm="写API文档"},
+    {content="HTML原型",   status="pending",     activeForm="做HTML原型"},
+  ])
+  ```
+  At most ONE item `in_progress` at a time. As you finish each, call
+  `agent_todo(action="update_one", ...)`.
 
-- `acceptance` is REQUIRED and must be a concrete artifact/state
-  ("file X exists with Y"), not vague prose ("做好设计"). Vague
-  acceptance gets rejected.
-- For lighter scratch tracking (not a formal plan), `agent_todo(
-  action="set", todos=[{content, status, activeForm}])` works too —
-  at most ONE item `in_progress` at a time.
+- **`task_update`** (project/coder agents) — for trackable tasks:
+  `task_update(action="create", title=..., ...)` then
+  `task_update(action="complete", task_id=..., result=...)`.
 
-### 2. Drive each step — start → do → verify → complete
+- **`plan_update`** (only if granted) — formal plan with per-step
+  `acceptance`: `plan_update(action="create_plan", task_summary=...,
+  steps=[{title, acceptance}])`, then `start_step` / `complete_step`.
+  `acceptance` must be a concrete artifact/state ("docs/db-design.md
+  含11张表"), not vague prose.
+
+**Don't call a tool you don't have** — if `plan_update` isn't in your
+tool list, use `agent_todo` or `task_update` instead. Calling a
+missing tool wastes a turn.
+
+### 2. Drive each step — mark → do → verify → mark done
 
 For each step, in the SAME turn, chained, no stopping between them:
 
 ```
-plan_update(action="start_step", step_id="<id>")
+<mark step in_progress: agent_todo update_one / plan_update start_step>
   → <call the real tools that do the work: write_file / bash / edit_file / ...>
   → <VERIFY: read the file back / run the build / run tests — don't claim from memory>
-plan_update(action="complete_step", step_id="<id>",
-            result_summary="<cite the acceptance: 'db-design.md written, 11 tables, DDL verified by re-read'>")
+<mark step done: agent_todo update_one status=completed /
+                 task_update complete / plan_update complete_step>
 ```
 
-Then **immediately** `start_step` the next one. Do NOT end your turn
+Then **immediately** start the next step. Do NOT end your turn
 between steps. Do NOT wait for the user to say "继续".
 
 ### 3. Finish only when ALL steps are complete
@@ -110,8 +120,8 @@ start the next step.
 
 | ❌ Wrong | ✅ Right |
 |---------|---------|
-| "✓ 任务1完成。开始任务2：" *(end turn)* | `complete_step(1)` `start_step(2)` `[write_file ...]` — chained, no stop |
-| "下一步我会写 API 文档" *(end turn)* | `start_step` + `write_file` NOW, in this turn |
+| "✓ 任务1完成。开始任务2：" *(end turn)* | mark step1 done + mark step2 in_progress + `[write_file ...]` — chained, no stop |
+| "下一步我会写 API 文档" *(end turn)* | mark next step in_progress + `write_file` NOW, in this turn |
 | "全部完成！" *(but never ran a test/re-read)* | verify each deliverable with a tool, THEN claim done |
 | stopping after every step waiting for "继续" | drive all steps in one continuous run |
 | "我遇到点问题" *(vague, then stop)* | "缺少 X 依赖，pip install 被沙箱拒绝，需要你授权 / 或确认换 Y 方案" |
