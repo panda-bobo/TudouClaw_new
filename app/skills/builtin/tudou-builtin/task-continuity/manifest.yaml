@@ -1,0 +1,32 @@
+name: task-continuity
+version: 1.0.0
+description:
+  zh-CN: 多步任务一口气做完——完成一步立即续下一步，不做一步就停。用 plan_update / task_update / agent_todo 驱动。
+  en: drive a multi-step task to completion — finish one step, immediately start the next, don't stop after each sub-task. Uses TudouClaw's native plan_update / task_update / agent_todo.
+author: tudou-builtin
+runtime: markdown
+entry: SKILL.md
+tags:
+  - behavior
+  - core
+  - execution-discipline
+source: official
+applicable_roles:
+  - coder
+  - general-agent
+  - researcher
+metadata:
+  emoji: "🔁"
+  display_name_zh: "持续执行"
+  display_name_en: "task continuity"
+  bundle_type: behavior
+  # Pairs with action-first: action-first kills the within-step stall,
+  # task-continuity kills the between-step stall. The runtime
+  # task_continuation nudge (app/runtime/nudge_evaluator.py) is the
+  # hard-enforcement layer; this skill is the soft methodology layer.
+  pairs_with:
+    - action-first
+  tools:
+    - plan_update
+    - task_update
+    - agent_todo
