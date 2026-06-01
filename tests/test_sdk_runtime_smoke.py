@@ -911,6 +911,61 @@ def test_opt_in_lets_tool_run_when_user_requests_retrieval(monkeypatch):
     assert calls == [("memory_recall", '{"query":"xxx"}')]
 
 
+def test_run_switches_to_correct_context_bucket():
+    """SDK runtime run() MUST call _switch_context(context_id) before
+    appending the user message — otherwise solo-page chats land in
+    whatever bucket was last active (often a project bucket from prior
+    project work), the solo bucket never gets created, and the solo
+    chat view shows nothing.
+
+    @user 2026-06-01: "我今天用的一直都是 solo 页" but solo history was
+    empty because the SDK runtime ignored context_id for bucket
+    binding (only passed it to the instructions builder).
+    """
+    import threading
+
+    switch_calls = []
+
+    class _Agent:
+        id = "ctx-test-agent"
+        name = "T"
+        _lock = threading.Lock()
+        messages = []
+
+        def _switch_context(self, cid):
+            switch_calls.append(cid)
+
+        def _build_static_system_prompt(self):
+            return ""
+
+        def _resolve_effective_provider_model(self):
+            # Force run() to bail AFTER _switch_context but before any
+            # real LLM work (no provider configured → RuntimeError in
+            # _build_sdk_model, which run() turns into an error reply).
+            return ("", "")
+
+        def _log(self, *a, **k):
+            pass
+
+        def _maybe_persist(self, **k):
+            pass
+
+    from app.agent_runtime.sdk_adapter import SDKAgentRunner
+    runner = SDKAgentRunner(_Agent())
+    # run() will fail at model build (no provider) but that's AFTER
+    # the context switch — which is what we're asserting.
+    try:
+        runner.run("hello", context_id="solo")
+    except Exception:
+        pass
+
+    assert switch_calls, (
+        "run() must call _switch_context before appending the user "
+        "message — otherwise solo chats land in the wrong bucket")
+    assert switch_calls[0] == "solo", (
+        f"expected _switch_context('solo'), got {switch_calls[0]!r}")
+
+
 def test_event_emit_triggers_maybe_persist(fake_agent):
     """Every semantic event emit must trigger ``_maybe_persist()`` —
     so mid-run crashes / aborts don't lose data. Throttle (default 1s)

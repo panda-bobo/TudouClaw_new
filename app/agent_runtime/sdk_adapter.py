@@ -125,6 +125,39 @@ class SDKAgentRunner:
         if not is_sdk_available():
             raise SDKNotInstalledError()
 
+        # ── 2026-06-01: bind to the right per-context message bucket ──
+        # CRITICAL bug @user found ("我今天用的一直都是 solo 页"):
+        # legacy chat() calls _switch_context(context_id) before any
+        # message append (agent.py:10515), so self.messages points at
+        # the correct bucket (solo / project:X / meeting:Y). The SDK
+        # runtime NEVER did this — it only passed context_id to the
+        # instructions builder. So self.messages stayed bound to
+        # whatever context was last active (often a project bucket from
+        # prior project work). Result: solo-page chats got appended to
+        # a PROJECT bucket, the solo bucket was never created, and the
+        # solo chat view (which reads the solo bucket / agent.events)
+        # showed nothing. Mirror legacy: switch context FIRST.
+        try:
+            if hasattr(self.tudou_agent, "_switch_context"):
+                # _switch_context requires the caller to hold _lock
+                # (agent.py:3160). _lock is a non-reentrant
+                # threading.Lock, and _switch_context itself doesn't
+                # re-acquire it, so holding it JUST for this call (then
+                # releasing immediately) is safe — no downstream code
+                # runs while we hold it, so no deadlock with
+                # _maybe_persist / tools that also grab _lock.
+                _lk = getattr(self.tudou_agent, "_lock", None)
+                if _lk is not None:
+                    with _lk:
+                        self.tudou_agent._switch_context(context_id or "solo")
+                else:
+                    self.tudou_agent._switch_context(context_id or "solo")
+        except Exception as _ctx_err:
+            logger.warning(
+                "SDK runtime: _switch_context(%r) failed: %s — "
+                "messages may land in the wrong bucket",
+                context_id, _ctx_err)
+
         # Lazy SDK import — only happens when SDK is actually needed
         from agents import Agent as SDKAgent, Runner
 
