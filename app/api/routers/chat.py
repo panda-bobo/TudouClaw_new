@@ -150,11 +150,19 @@ async def stream_task_events(
                 last_event_time = time.time()
 
             # Send status heartbeat
+            # 2026-06-01: include the current cursor so the client can
+            # advance it. Was missing → client kept reconnecting with
+            # cursor=0, server replayed the WHOLE event log every
+            # retry (payload grew to 140KB+ for busy tasks). With the
+            # cursor in each status heartbeat, the client snapshots it
+            # and reconnects from the right position — payload stays
+            # tiny (just new events since last seen).
             status_evt = {
                 "type": "status",
                 "status": task.status.value,
                 "progress": task.progress,
                 "phase": task.phase,
+                "cursor": cursor,
             }
             yield f"data: {json.dumps(status_evt, ensure_ascii=False)}\n\n"
 

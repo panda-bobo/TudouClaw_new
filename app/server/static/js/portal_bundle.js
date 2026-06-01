@@ -12124,7 +12124,20 @@ async function _streamTaskEvents(agentId, taskId, thinkDiv, progressBar) {
             var evt = JSON.parse(d);
             if(evt.type==='status') {
               _updateProgress(agentId, evt.progress||0, evt.phase||'');
-              cursor = cursor;  // cursor updated by events
+              // 2026-06-01 perf: advance the SSE cursor from the
+              // server's status heartbeat. Was `cursor = cursor` (a
+              // noop — the comment "cursor updated by events" lied)
+              // so the cursor stayed at 0 forever. Every reconnect
+              // refetched the WHOLE event log from 0 → @user F12:
+              // /stream?cursor=0 payload growing past 140 KB on busy
+              // tasks. Server now includes the cursor in each status
+              // event; read it here so reconnects start from the
+              // right position. Numeric-only — old backend that
+              // doesn't include it leaves cursor unchanged (no
+              // regression vs the old buggy behaviour).
+              if (typeof evt.cursor === 'number' && evt.cursor > cursor) {
+                cursor = evt.cursor;
+              }
             } else if(evt.type==='reasoning_delta') {
               // Live reasoning stream from the LLM. Only render if the
               // user opted in via the per-agent Thinking toggle —
