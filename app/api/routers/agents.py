@@ -506,11 +506,56 @@ async def refresh_agent_prompt_cache(
 @router.get("/agent/{agent_id}/events")
 async def get_agent_events(
     agent_id: str,
+    since: float = 0.0,
+    limit: int = 150,
     hub=Depends(get_hub),
     user: CurrentUser = Depends(get_current_user),
 ):
+    """Agent event log — supports CURSOR-BASED incremental fetch.
+
+    2026-06-01: the old endpoint always returned the last 500 events
+    (~99 KB for a busy agent). The frontend polls every 2s while the
+    agent works; transferring + re-rendering 500 events per poll froze
+    the page. Now:
+
+      - ``?since=<timestamp>`` → return ONLY events strictly newer than
+        that cursor (usually 0-few during a poll), so the client can
+        append incrementally instead of rebuilding the whole list.
+      - No ``since`` (initial load) → return the last ``limit`` (150)
+        events, down from 500 — the UI renders ~50, so 150 is plenty
+        of scrollback.
+      - ``cursor`` in the response = the newest event's timestamp; the
+        client sends it back as ``since`` on the next poll.
+
+    Idle polls (no new events) return ``{"events": [], "cursor": <same>}``
+    — near-zero payload + zero client render work.
+    """
     agent = _get_agent_or_404(hub, agent_id)
-    return {"events": [e.to_dict() for e in agent.events[-500:]]}
+    all_events = agent.events or []
+
+    if since and since > 0:
+        # Incremental: only events strictly newer than the cursor.
+        new_events = [e for e in all_events
+                      if (getattr(e, "timestamp", 0) or 0) > since]
+        # Safety cap so a long gap (client offline for a while) doesn't
+        # transfer thousands at once.
+        new_events = new_events[-max(1, int(limit)):]
+    else:
+        # Initial load: last `limit` events (was hardcoded 500).
+        new_events = all_events[-max(1, int(limit)):]
+
+    # New cursor = newest timestamp we know about (so the next poll
+    # asks for events after it). Fall back to the request's `since` so
+    # the cursor never goes backwards on an empty result.
+    cursor = since or 0.0
+    if all_events:
+        cursor = max(cursor,
+                     float(getattr(all_events[-1], "timestamp", 0) or 0))
+
+    return {
+        "events": [e.to_dict() for e in new_events],
+        "cursor": cursor,
+    }
 
 
 @router.get("/agent/{agent_id}/tasks")

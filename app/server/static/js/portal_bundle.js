@@ -8031,52 +8031,111 @@ function _formatEventLogEntry(e) {
   );
 }
 
-var _eventLogRenderSig = {};  // agentId → "count:lastTs:preset" of last render
+// ── Incremental event-log renderer (2026-06-01 root-cause fix) ──────
+// Was: innerHTML-rebuild of 50 entries on every 2s heartbeat, fetching
+// the full 500-event/99 KB payload each time. That rebuilt the entire
+// DOM subtree (+ re-stringified big tool_call args) even when 0 events
+// changed → page froze while 小新 worked continuously.
+//
+// Now: cursor-based incremental.
+//   - Initial render (no cursor / filter changed): one innerHTML build
+//     of the last ~50 entries, then remember the cursor.
+//   - Polls: fetch ONLY events newer than the cursor (?since=), and
+//     insertAdjacentHTML('afterbegin') each NEW entry — the browser
+//     parses just that one small entry and prepends it; existing nodes
+//     are untouched (no reflow of the whole list). Trim to 50 nodes.
+//   - Idle polls return [] → zero DOM work, zero render.
+var _eventLogCursor = {};   // agentId → last-seen event timestamp
+var _eventLogPreset = {};   // agentId → filter preset at last render
+var _EVENT_LOG_MAX_NODES = 50;
+
 async function loadAgentEventLog(agentId) {
   try {
-    var data = await api('GET', '/api/portal/agent/' + agentId + '/events');
-    if (!data) return;
     var el = document.getElementById('agent-event-log-' + agentId);
     if (!el) return;
-
     var preset = _getEventLogFilter(agentId);
     var allowed = _EVENT_LOG_PRESETS[preset];
-    var all = data.events || [];
-    // 2026-06-01 perf: skip the (heavy) re-render when nothing changed.
-    // The 2s dashboard heartbeat calls this while 小新 works
-    // continuously; most calls have the SAME events as the last render
-    // (no new event in that 2s window). Rendering 50 entries —
-    // including big tool_call args — every 2s froze the page. Signature
-    // = total count + last event timestamp + active filter preset.
-    var _lastTs = all.length ? (all[all.length - 1].timestamp || 0) : 0;
-    var _sig = all.length + ':' + _lastTs + ':' + preset;
-    if (_eventLogRenderSig[agentId] === _sig) {
-      return;  // identical to last render — skip the DOM work
+
+    // Filter change → full reset (cursor cleared so we re-render fresh).
+    if (_eventLogPreset[agentId] !== preset) {
+      _eventLogCursor[agentId] = 0;
+      _eventLogPreset[agentId] = preset;
     }
-    _eventLogRenderSig[agentId] = _sig;
-    // Apply filter FIRST so the 30-line budget goes to relevant events
-    // rather than being swallowed by meeting prompt noise.
-    var filtered = allowed ? all.filter(function(e) { return allowed.has(e.kind); }) : all;
-    var shown = filtered.slice(-50).reverse();
+    var cursor = _eventLogCursor[agentId] || 0;
+    var bodyId = 'event-log-body-' + agentId;
+    var body = document.getElementById(bodyId);
+    // Incremental ONLY when we have a cursor AND the body node still
+    // exists (panel not re-created). If the body is gone, fall back to
+    // a full fetch so we rebuild the whole list, not just the deltas.
+    var incremental = cursor > 0 && !!body;
 
-    var summary = '<div style="font-size:10px;color:var(--text3);margin-bottom:4px">' +
-                  'showing ' + shown.length + ' of ' + filtered.length + ' filtered · ' +
-                  all.length + ' total</div>';
-
-    el.innerHTML = _renderEventLogFilterChips(agentId) +
-                   summary +
-                   shown.map(_formatEventLogEntry).join('');
-
-    // Update task count (unchanged)
-    var countEl = document.getElementById('agent-task-count-' + agentId);
-    if (countEl) {
-      var taskData = await api('GET', '/api/portal/agent/' + agentId + '/tasks');
-      if (taskData) countEl.textContent = (taskData.tasks||[]).length;
+    // Cursor fetch — only events newer than `cursor` on polls; the
+    // ?since query string also bypasses the /events URL coalesce (which
+    // is fine, these payloads are tiny).
+    var url = '/api/portal/agent/' + agentId + '/events'
+            + (incremental ? ('?since=' + encodeURIComponent(cursor)) : '');
+    var data = await api('GET', url);
+    if (!data) return;
+    var events = data.events || [];
+    // Backward-compat guard: the incremental path REQUIRES the
+    // cursor-aware backend. If the response has no `cursor` field, the
+    // backend is old (ignored ?since, returned the full list) — fall
+    // back to a full render so we don't prepend the entire list as
+    // "new" (which would duplicate everything). New backend always
+    // returns a numeric cursor.
+    var serverSupportsCursor = (typeof data.cursor === 'number');
+    if (serverSupportsCursor && data.cursor > 0) {
+      _eventLogCursor[agentId] = data.cursor;
     }
-    // Refresh the artifact preview panel — picks up any new write_file
-    // calls visible in the events we just fetched. Cheap when no new
-    // artifacts (path list dedup is O(events)).
-    try { _ltArtifactRefresh('agent', agentId); } catch(_) {}
+    if (incremental && !serverSupportsCursor) {
+      incremental = false;  // old backend → full rebuild
+    }
+
+    if (!incremental) {
+      // ── Full (initial / reset) render: one innerHTML build ──
+      var filtered = allowed
+        ? events.filter(function(e) { return allowed.has(e.kind); })
+        : events;
+      var shown = filtered.slice(-_EVENT_LOG_MAX_NODES).reverse();
+      el.innerHTML =
+        _renderEventLogFilterChips(agentId) +
+        '<div id="' + bodyId + '">' +
+          shown.map(_formatEventLogEntry).join('') +
+        '</div>';
+      // First time we have data: set cursor to the newest we rendered
+      // so the next poll goes incremental.
+      if (!_eventLogCursor[agentId] && events.length) {
+        _eventLogCursor[agentId] =
+          events[events.length - 1].timestamp || 0;
+      }
+    } else if (events.length) {
+      // ── Incremental: prepend ONLY the new entries ──
+      // events arrive oldest→newest; prepend each so the newest lands
+      // on top. insertAdjacentHTML parses just the one small entry.
+      var newOnes = allowed
+        ? events.filter(function(e) { return allowed.has(e.kind); })
+        : events;
+      for (var i = 0; i < newOnes.length; i++) {
+        body.insertAdjacentHTML('afterbegin',
+          _formatEventLogEntry(newOnes[i]));
+      }
+      // Trim to the cap — remove oldest (trailing) nodes beyond 50.
+      while (body.children.length > _EVENT_LOG_MAX_NODES) {
+        body.removeChild(body.lastChild);
+      }
+    }
+    // If incremental returned 0 events → nothing changed, no DOM work.
+
+    // Task count + artifact refresh: only when NEW events arrived
+    // (skip on idle polls — these were firing /tasks every 2s).
+    if (events.length) {
+      var countEl = document.getElementById('agent-task-count-' + agentId);
+      if (countEl) {
+        var taskData = await api('GET', '/api/portal/agent/' + agentId + '/tasks');
+        if (taskData) countEl.textContent = (taskData.tasks || []).length;
+      }
+      try { _ltArtifactRefresh('agent', agentId); } catch(_) {}
+    }
   } catch(e) {}
 }
 
