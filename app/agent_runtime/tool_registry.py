@@ -102,21 +102,44 @@ def build_sdk_tools(tudou_agent, user_message: Any) -> List[Any]:
         "save_experience":  "Save learning to experience library",
         "web_fetch":        "Fetch a URL",
         "web_search":       "Search the web",
-        # ── Task-tracking tools (2026-06-01) ──
-        # The continuity skill + the PENDING-TASKS context reminder
-        # tell agents to use these for multi-step work. But not every
-        # role grants all of them (e.g. coder has task_update + agent_todo
-        # + finalize_step but NOT plan_update). Without stubs, an agent
-        # following the continuity guidance calls plan_update → SDK
-        # ModelBehaviorError "Tool plan_update not found" → whole run
-        # aborts (@user 2026-06-01). Stub the ones an agent lacks so the
-        # model gets a soft-deny + falls back to the tools it DOES have,
-        # instead of crashing. Agents that DO grant these get the real
-        # handler (stub only applies when not in _granted_names).
-        "plan_update":      "Plan / step tracking",
+        # Task-tracking tools the continuity skill / PENDING-TASKS
+        # reminder mention. task_update / agent_todo / finalize_step
+        # are real dispatcher tools; an agent that lacks them gets a
+        # soft-deny stub (so the model falls back to what it has).
         "task_update":      "Task list management",
         "agent_todo":       "Scratch todo list",
         "finalize_step":    "Finalize a plan step",
+    }
+    # ── Method-handled CORE tools (2026-06-01) ──
+    # plan_update is NOT a dispatcher tool — legacy special-cases it to
+    # Agent._handle_plan_update (agent_execution.py:1834). It's CORE
+    # (drives the TODOs panel + watchdog continuity), referenced by the
+    # global prompt for ALL agents. In SDK runtime it must be a REAL
+    # tool (not a soft-deny stub) routed via _dispatch_tudou_tool's
+    # _METHOD_HANDLED interception. Register it with its actual schema
+    # so the model can call it and it actually works.
+    _METHOD_HANDLED_TOOLS = {
+        "plan_update": {
+            "description": (
+                "Live execution checklist for 3+ step tasks. "
+                "action: create_plan | start_step | complete_step | "
+                "add_step | fail_step | replan. Each step needs a "
+                "concrete acceptance."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string"},
+                    "task_summary": {"type": "string"},
+                    "steps": {"type": "array"},
+                    "step_id": {"type": "string"},
+                    "acceptance": {"type": "string"},
+                    "result_summary": {"type": "string"},
+                },
+                "required": ["action"],
+                "additionalProperties": True,
+            },
+        },
     }
     _granted_names = {
         (s.get("function") or {}).get("name", "")
@@ -138,6 +161,24 @@ def build_sdk_tools(tudou_agent, user_message: Any) -> List[Any]:
                 },
                 "_is_unauthorized_stub": True,
             })
+    # Method-handled tools: register as REAL (not soft-denied) when the
+    # agent has the handler method, so they actually dispatch.
+    _method_tool_specs = []
+    for _name, _schema in _METHOD_HANDLED_TOOLS.items():
+        if _name in _granted_names:
+            continue  # already in the real tool list
+        # Only register if the agent actually has the handler.
+        _mh = getattr(tudou_agent, "_handle_plan_update", None) \
+            if _name == "plan_update" else None
+        if callable(_mh):
+            _method_tool_specs.append({
+                "type": "function",
+                "function": {
+                    "name": _name,
+                    "description": _schema["description"],
+                    "parameters": _schema["parameters"],
+                },
+            })
     if _prompt_only_stubs:
         legacy_specs = list(legacy_specs) + _prompt_only_stubs
         # Also mark these as soft-denied so _invoke returns error
@@ -145,6 +186,15 @@ def build_sdk_tools(tudou_agent, user_message: Any) -> List[Any]:
         # for this agent's grant).
         for s in _prompt_only_stubs:
             opt_in_deny.add(s["function"]["name"])
+    if _method_tool_specs:
+        # NOT added to opt_in_deny — these route to the agent method
+        # via _dispatch_tudou_tool's _METHOD_HANDLED interception.
+        legacy_specs = list(legacy_specs) + _method_tool_specs
+        logger.debug(
+            "tool_registry: registered %d method-handled tool(s) "
+            "(plan_update etc.) for agent=%s",
+            len(_method_tool_specs),
+            getattr(tudou_agent, "id", "?")[:8])
         logger.debug(
             "tool_registry: registered %d unauthorized-stub(s) so "
             "SDK doesn't ModelBehaviorError on prompt-mentioned-but-"
@@ -308,6 +358,38 @@ def _dispatch_tudou_tool(tudou_agent, tool_name: str, args_json: str) -> str:
     # the right agent context.
     args.setdefault("_caller_agent_id",
                     getattr(tudou_agent, "id", ""))
+
+    # ── Agent-method-handled tools (2026-06-01) ──────────────────────
+    # Some tools aren't registered in tools.tool_registry — they're
+    # special-cased in the LEGACY chat loop and routed to an Agent
+    # METHOD instead (agent_execution.py:1834 does
+    # `if name == "plan_update": return self._handle_plan_update(...)`).
+    # The SDK runtime dispatches via tool_registry.dispatch, which has
+    # NO such interception → "Tool plan_update not found" →
+    # ModelBehaviorError aborts the run (@user 2026-06-01). plan_update
+    # is CORE (drives the TODOs panel + the watchdog continuity via
+    # _current_plan), so the fix is to PORT the interception here:
+    # route these method-handled tools to the agent method so they
+    # actually work in SDK runtime, matching legacy.
+    _METHOD_HANDLED = {
+        "plan_update": "_handle_plan_update",
+    }
+    if tool_name in _METHOD_HANDLED:
+        method_name = _METHOD_HANDLED[tool_name]
+        method = getattr(tudou_agent, method_name, None)
+        if callable(method):
+            try:
+                result = method(args)
+                if not isinstance(result, str):
+                    result = json.dumps(result, ensure_ascii=False, default=str)
+                return result
+            except Exception as e:
+                logger.warning(
+                    "method-handled tool %s (%s) failed: %s",
+                    tool_name, method_name, e)
+                return f"Error executing {tool_name}: {e}"
+        # No method → fall through to registry (will likely error,
+        # but the FunctionTool wrapper catches it as a string).
 
     try:
         from app import tools as _tools

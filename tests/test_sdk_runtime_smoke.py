@@ -873,19 +873,22 @@ def test_unauthorized_infra_tools_get_stub_registered(monkeypatch):
     assert "not authorized" in result
 
 
-def test_task_tracking_tools_stubbed_when_ungranted():
-    """Continuity guidance (skill + PENDING-TASKS reminder) tells agents
-    to use plan_update / task_update / agent_todo for multi-step work.
-    But not every role grants all of them — coder has task_update +
-    agent_todo but NOT plan_update. Without stubs, an agent following
-    the guidance calls plan_update → SDK ModelBehaviorError → whole run
-    aborts (@user 2026-06-01 'Tool plan_update not found in agent 小新').
+def test_plan_update_routes_to_agent_method_in_sdk():
+    """plan_update is NOT a dispatcher tool — legacy special-cases it
+    to Agent._handle_plan_update (agent_execution.py:1834). In SDK
+    runtime it must be a REAL tool routed to that method, not a phantom
+    (@user 2026-06-01: 'plan_update 是一个不存在的' — it had a spec +
+    permission + CORE listing but no dispatcher handler, so the SDK
+    aborted with ModelBehaviorError).
 
-    Stub the ungranted ones so the model gets a soft-deny and falls
-    back to the tools it has, instead of crashing.
+    Fix: register plan_update as a real SDK tool (with schema) whose
+    dispatch routes to _handle_plan_update. The model can call it and
+    it actually works (drives the TODOs panel + watchdog continuity).
     """
     import asyncio
     from app.agent_runtime.tool_registry import build_sdk_tools
+
+    handle_calls = []
 
     class _Tudou:
         id = "coder-x"
@@ -896,24 +899,50 @@ def test_task_tracking_tools_stubbed_when_ungranted():
                 {"type": "function", "function": {
                     "name": n, "description": n,
                     "parameters": {"type": "object", "properties": {}}}}
-                for n in ("bash", "task_update", "agent_todo",
-                          "finalize_step")
+                for n in ("bash", "task_update", "agent_todo")
             ]
+        def _handle_plan_update(self, args):
+            handle_calls.append(args)
+            return f"Plan updated: {args.get('action')}"
 
     sdk_tools = build_sdk_tools(_Tudou(), "do a multi-step task")
     names = [getattr(t, "name", "") for t in sdk_tools]
-    # plan_update MUST be present (as stub) even though ungranted
-    assert "plan_update" in names, (
-        "plan_update must be stubbed when ungranted — otherwise the "
-        "model following continuity guidance crashes the SDK run")
-    # task_update stays real (granted)
-    assert "task_update" in names
+    # plan_update present as a REAL tool (agent has the handler method)
+    assert "plan_update" in names
+    assert "task_update" in names  # granted, real
 
-    # Calling the stub returns an Error string, not a crash
-    stub = next(t for t in sdk_tools if getattr(t, "name", "") == "plan_update")
+    # Calling plan_update routes to _handle_plan_update — NOT a soft-deny
+    pu = next(t for t in sdk_tools if getattr(t, "name", "") == "plan_update")
     result = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
-        stub.on_invoke_tool(None, '{"action":"create_plan"}'))
+        pu.on_invoke_tool(None, '{"action":"create_plan","task_summary":"x"}'))
     assert isinstance(result, str)
+    assert "Plan updated" in result, (
+        "plan_update must route to _handle_plan_update, not soft-deny")
+    assert len(handle_calls) == 1
+    assert handle_calls[0]["action"] == "create_plan"
+
+
+def test_ungranted_infra_tool_without_handler_soft_denies():
+    """Infra tools that have NO agent-method handler (mcp_call etc.)
+    still soft-deny when ungranted — preventing the ModelBehaviorError
+    crash without pretending the tool works."""
+    import asyncio
+    from app.agent_runtime.tool_registry import build_sdk_tools
+
+    class _Tudou:
+        id = "coder-x"
+        name = "小新"
+        def _get_effective_tools(self):
+            return [{"type": "function", "function": {
+                "name": "bash", "description": "shell",
+                "parameters": {"type": "object", "properties": {}}}}]
+
+    sdk_tools = build_sdk_tools(_Tudou(), "task")
+    names = [getattr(t, "name", "") for t in sdk_tools]
+    assert "mcp_call" in names  # stubbed
+    stub = next(t for t in sdk_tools if getattr(t, "name", "") == "mcp_call")
+    result = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+        stub.on_invoke_tool(None, '{}'))
     assert result.startswith("Error:")
 
 
