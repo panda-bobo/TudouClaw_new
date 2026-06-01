@@ -548,7 +548,35 @@ window._ui = (function() {
 })();
 
 // ============ API helper ============
-async function api(method, url, body) {
+// URL patterns that get AUTOMATIC short-window coalesce — multiple
+// near-simultaneous fetches to the same URL share one promise +
+// cached body. Set per-pattern TTL based on staleness tolerance.
+//
+// @user 2026-05-28: events endpoint was hit 4× in <1s when entering
+// an agent view (showAgentView + attachHistoricalFileCards + voice
+// mode load + heartbeat all racing). Each fetch is 16-300 KB for
+// long-history agents and triggers a full re-render. UI froze.
+// 5s TTL: events change semantically slowly (live SSE handles deltas
+// in real time); polling is for catch-up only — stale-by-5s is fine.
+const _API_AUTO_COALESCE = [
+  { pattern: /\/api\/portal\/agent\/[^\/]+\/events$/, ttl: 5000 },
+];
+
+async function api(method, url, body, _skipCoalesce) {
+  // ── Auto-coalesce for GETs matching the table above ──
+  // Done at the api() entry so EVERY caller (legacy heartbeat,
+  // attachHistoricalFileCards, voice mode load, etc.) shares one
+  // in-flight promise + cached body within the TTL window.
+  // _skipCoalesce=true marks calls coming from _apiShortGet itself
+  // (which would otherwise recurse infinitely).
+  if (!_skipCoalesce && method === 'GET' && !body) {
+    for (var ci = 0; ci < _API_AUTO_COALESCE.length; ci++) {
+      var entry = _API_AUTO_COALESCE[ci];
+      if (entry.pattern.test(url)) {
+        return _apiShortGet(url, entry.ttl);
+      }
+    }
+  }
   const opts = {method, credentials: 'same-origin', headers: {}};
   if (body) {
     opts.headers['Content-Type'] = 'application/json';
@@ -607,7 +635,9 @@ function _apiShortGet(url, ttlMs) {
   const now = Date.now();
   const hit = _apiShortCache.get(url);
   if (hit && (now - hit.ts) < ttlMs) return hit.promise;
-  const p = api('GET', url);
+  // Pass _skipCoalesce=true so api() doesn't recurse back into us
+  // for URLs in _API_AUTO_COALESCE (added 2026-05-28).
+  const p = api('GET', url, undefined, true);
   _apiShortCache.set(url, {ts: now, promise: p});
   p.then(function(data){
     if (!data || (typeof data === 'object' && data.error)) {
