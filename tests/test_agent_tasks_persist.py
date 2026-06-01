@@ -137,6 +137,63 @@ def test_pending_tasks_summary_injects_continuity_reminder():
     assert "get_skill_guide" in s         # points to full skill
 
 
+def test_solo_isolation_strips_cross_agent_tools():
+    """Solo context must NOT expose cross-agent communication tools
+    (send_message / dispatch_task / sc_handoff / reply_message).
+
+    @user 2026-06-01 "我没给小明安排工作,一直都是 solo 和小新." But the
+    logs showed an echo loop: 小新 → send_message → 小明 → reply →
+    cascade. hub auto-triggers receiver.chat on send_message
+    (hub/_core.py:3758), so a single cross-agent call in solo silently
+    wakes peer agents. Solo's whole point is one-on-one with the user.
+    Strip the tools at schema-build time so the model can't fire it.
+    """
+    from app.agent import Agent
+    from app.agent_types import AgentProfile
+
+    # Build a coder-like agent with the cross-agent tools allowed
+    # (mirrors 小新's real profile, which inherits coder role preset).
+    ag = Agent(id="solo-iso-test", name="T", role="coder")
+    ag.profile = AgentProfile(allowed_tools=[
+        "bash", "read_file", "write_file",
+        "send_message", "dispatch_task", "sc_handoff", "reply_message",
+    ])
+
+    # Force solo context — no project/meeting bound.
+    # get_context_mode() returns "solo" when neither project_id nor
+    # meeting_id is stamped on the agent.
+    assert ag.get_context_mode() == "solo"
+
+    tool_names = {t["function"]["name"] for t in ag._get_effective_tools()}
+    # Cross-agent comm tools MUST be stripped in solo
+    for forbidden in ("send_message", "dispatch_task",
+                      "sc_handoff", "reply_message"):
+        assert forbidden not in tool_names, (
+            f"{forbidden} must be filtered out of solo agents — "
+            f"got tool list: {sorted(tool_names)}")
+    # Normal tools survive
+    assert "bash" in tool_names
+    assert "read_file" in tool_names
+
+
+def test_history_summary_keep_last_default_is_generous():
+    """Default for TUDOU_HISTORY_SUMMARY_KEEP_LAST should be generous
+    enough that an agent in continuous work doesn't go amnesiac after
+    each compression pass.
+
+    @user 2026-06-01: logs showed 50 msgs → 4108 chars (18%) and
+    'would have left 0 user/assistant msgs' — recent verbatim was
+    being squashed into narrative because KEEP_LAST=6 only retained
+    ~1.5 tool rounds (4 msgs per round). Raised to 20 — ~5 tool
+    rounds verbatim, ~2-3K extra tokens, far cheaper than the wasted
+    work from a forgetful agent.
+    """
+    from app import agent as _agent_mod
+    assert _agent_mod._HISTORY_SUMMARY_KEEP_LAST >= 12, (
+        f"KEEP_LAST is {_agent_mod._HISTORY_SUMMARY_KEEP_LAST}; "
+        f"anything below ~12 leaves continuously-working agents amnesiac")
+
+
 def test_task_cap_200_bounds_file_size():
     """Persistence caps at 200 tasks (oldest dropped) to keep
     agents.json from ballooning if an agent leaks task creates."""

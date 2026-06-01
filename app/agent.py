@@ -406,7 +406,7 @@ def _compress_old_write_tool_calls(messages: list[dict],
 _HISTORY_SUMMARY_CHARS = int(
     os.environ.get("TUDOU_HISTORY_SUMMARY_CHARS", "25000"))
 _HISTORY_SUMMARY_KEEP_LAST = int(
-    os.environ.get("TUDOU_HISTORY_SUMMARY_KEEP_LAST", "6"))
+    os.environ.get("TUDOU_HISTORY_SUMMARY_KEEP_LAST", "20"))
 _HISTORY_SUMMARY_MAX_TOOLS = int(
     os.environ.get("TUDOU_HISTORY_SUMMARY_MAX_TOOLS", "6"))
 # Old slice 必须至少这么大才值得摘要 (LLM call 本身 ~2k tokens,
@@ -8788,6 +8788,34 @@ Write only the summary body. Do not include any preamble or prefix."""
         allowed_set = set(allowed) | _INFRA_TOOLS_SCHEMA
         all_tools = [t for t in all_tools
                      if t["function"]["name"] in allowed_set]
+
+        # ── Solo strict isolation (2026-06-01) ─────────────────────────
+        # @user "我没给小明安排工作,一直都是 solo 和小新." But the logs
+        # showed an echo loop: 小新 → send_message → 小明 → reply →
+        # 小新 → ... — hub auto-triggers the receiver's chat
+        # (hub/_core.py:3758 supervisor.delegate on inbox arrival), so a
+        # single send_message in solo mode wakes up a peer agent and
+        # cascades. solo's whole point is one-on-one with the user — no
+        # peer agents should be touched. Strip the cross-agent comm tools
+        # in solo so the model can't fire the cascade in the first place.
+        # The peer agents' inboxes / delegate-to-self (delegate_task)
+        # still work in project/meeting modes where they're appropriate.
+        if _ctx_mode == "solo":
+            _SOLO_DENIED_CROSS_AGENT = {
+                "send_message",     # main offender — auto-triggers peer.chat
+                "dispatch_task",    # PM-style task hand-off
+                "sc_handoff",       # structured cross-agent handoff
+                "reply_message",    # paired with send_message
+            }
+            before_cnt = len(all_tools)
+            all_tools = [t for t in all_tools
+                         if t["function"]["name"] not in _SOLO_DENIED_CROSS_AGENT]
+            stripped = before_cnt - len(all_tools)
+            if stripped:
+                logger.debug(
+                    "solo isolation: stripped %d cross-agent tool(s) for "
+                    "agent=%s", stripped, self.id[:8])
+
         # NOTE: profile.denied_tools no longer consulted (user 2026-05-06).
         # Field stays on AgentProfile for back-compat; admin should now
         # express "don't let X use this tool" by REMOVING it from
