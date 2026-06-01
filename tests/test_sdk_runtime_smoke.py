@@ -873,6 +873,69 @@ def test_unauthorized_infra_tools_get_stub_registered(monkeypatch):
     assert "not authorized" in result
 
 
+def test_llm_hallucinated_tool_names_return_redirects():
+    """Weak models hallucinate unix CLI names (grep, find, cat) and
+    Claude Code tool names (TodoWrite, Bash, Edit) that don't exist in
+    TudouClaw. Without stubs, the SDK raises ModelBehaviorError on the
+    unknown tool and kills the whole run. We can't hook the SDK's
+    tool-resolution path, so we pre-register stubs that return a
+    REDIRECT string pointing to the right TudouClaw tool. The LLM sees
+    the redirect, retries with the correct name, and the run survives.
+
+    @user 2026-06-01 (3rd occurrence): "Tool grep not found in agent
+    小新." Each occurrence = whole turn lost. This locks the contract:
+    every hallucinated name in the table returns a string starting
+    with 'Error:' and mentioning the correct TudouClaw replacement.
+    """
+    import asyncio
+    from app.agent_runtime.tool_registry import build_sdk_tools
+
+    class _Tudou:
+        id = "hallu-test"
+        name = "小新"
+        def _get_effective_tools(self):
+            return [{"type": "function", "function": {
+                "name": n, "description": n,
+                "parameters": {"type": "object", "properties": {}}}}
+                for n in ("bash", "read_file", "write_file",
+                          "search_files", "glob_files", "agent_todo")]
+        def _handle_plan_update(self, args): return "ok"
+
+    sdk_tools = build_sdk_tools(_Tudou(), "task")
+    names = {getattr(t, "name", "") for t in sdk_tools}
+
+    # Sample of names that previously crashed runs
+    must_be_stubbed = ["grep", "find", "cat", "ls", "TodoWrite",
+                       "Bash", "Read", "Write", "Edit", "Grep"]
+    for hallu in must_be_stubbed:
+        assert hallu in names, (
+            f"{hallu!r} must be pre-stubbed — otherwise a model that "
+            f"calls it by mistake crashes the SDK run")
+
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+
+    # Each stub returns a redirect mentioning the right TudouClaw tool
+    redirect_checks = [
+        ("grep",      "search_files"),
+        ("find",      "glob_files"),
+        ("cat",       "read_file"),
+        ("ls",        "glob_files"),
+        ("TodoWrite", "agent_todo"),
+        ("Read",      "read_file"),
+        ("Write",     "write_file"),
+        ("Edit",      "edit_file"),
+        ("Grep",      "search_files"),
+    ]
+    for hallu, expected_redirect in redirect_checks:
+        stub = next(t for t in sdk_tools if getattr(t, "name", "") == hallu)
+        result = loop.run_until_complete(stub.on_invoke_tool(None, '{}'))
+        assert isinstance(result, str)
+        assert result.startswith("Error:"), (
+            f"{hallu} stub must return Error-prefixed string; got: {result[:80]!r}")
+        assert expected_redirect in result, (
+            f"{hallu} stub must redirect to {expected_redirect}; got: {result[:120]!r}")
+
+
 def test_plan_update_routes_to_agent_method_in_sdk():
     """plan_update is NOT a dispatcher tool — legacy special-cases it
     to Agent._handle_plan_update (agent_execution.py:1834). In SDK

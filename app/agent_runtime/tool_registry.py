@@ -110,6 +110,48 @@ def build_sdk_tools(tudou_agent, user_message: Any) -> List[Any]:
         "agent_todo":       "Scratch todo list",
         "finalize_step":    "Finalize a plan step",
     }
+    # ── LLM-hallucinated tool names (2026-06-01) ────────────────────
+    # Weak models (esp. mimo / deepseek that were trained on Claude
+    # Code + standard-CLI traces) regularly hallucinate tool names
+    # that don't exist in TudouClaw — `grep`, `find`, `cat`, `ls`,
+    # `TodoWrite`, etc. The SDK raises ModelBehaviorError on unknown
+    # tools (turn_resolution.py:1879) — which kills the entire run.
+    # We can't hook the SDK's tool-resolution path, so the only fix
+    # is to PRE-REGISTER stubs for the names the model is statistically
+    # most likely to call by mistake. Each stub returns an error string
+    # that REDIRECTS to the real TudouClaw tool, so the model sees
+    # "Tool not authorized — use search_files instead" and tries again
+    # with the right name on the next turn (instead of the run dying).
+    # If an agent legitimately has one of these names granted (rare —
+    # only `bash` is real), the real tool wins via _granted_names check
+    # below.
+    _LLM_HALLUCINATED_TOOLS = {
+        # unix CLI names — model thinks it has shell tools by name
+        "grep":         "Not a TudouClaw tool. Use `search_files` (regex/text search across files) or `bash` with `command='grep ...'`.",
+        "find":         "Not a TudouClaw tool. Use `glob_files` (pattern match) or `bash` with `command='find ...'`.",
+        "cat":          "Not a TudouClaw tool. Use `read_file` to read file contents.",
+        "ls":           "Not a TudouClaw tool. Use `glob_files` (with pattern like '*' or '**/*') or `bash` with `command='ls ...'`.",
+        "head":         "Not a TudouClaw tool. Use `read_file` (reads from the top by default).",
+        "tail":         "Not a TudouClaw tool. Use `read_file` with offset, or `bash` with `command='tail ...'`.",
+        "sed":          "Not a TudouClaw tool. Use `edit_file` for in-place replacements, or `bash` with `command='sed ...'`.",
+        "awk":          "Not a TudouClaw tool. Use `bash` with `command='awk ...'` if you need it.",
+        "wc":           "Not a TudouClaw tool. Use `bash` with `command='wc ...'`.",
+        # Claude Code tool names — model fluency leak from training data
+        "TodoWrite":    "Not a TudouClaw tool. Use `agent_todo(action='set', todos=[...])` to manage a scratch todo list.",
+        "Task":         "Not a TudouClaw tool. Use `delegate_task` to spawn a child sub-agent for parallel work.",
+        "Bash":         "Not a TudouClaw tool — lowercase `bash` is correct (TudouClaw uses snake_case).",
+        "Read":         "Not a TudouClaw tool — use `read_file` (snake_case).",
+        "Write":        "Not a TudouClaw tool — use `write_file`.",
+        "Edit":         "Not a TudouClaw tool — use `edit_file`.",
+        "Glob":         "Not a TudouClaw tool — use `glob_files`.",
+        "Grep":         "Not a TudouClaw tool — use `search_files`.",
+        "WebFetch":     "Not a TudouClaw tool — use `web_fetch`.",
+        "WebSearch":    "Not a TudouClaw tool — use `web_search`.",
+        # Generic helpers some models invent
+        "view":         "Not a TudouClaw tool. Use `read_file` to view a file.",
+        "list_files":   "Not a TudouClaw tool. Use `glob_files`.",
+        "search":       "Not a TudouClaw tool. Use `search_files` (in-repo) or `web_search` (web).",
+    }
     # ── Method-handled CORE tools (2026-06-01) ──
     # plan_update is NOT a dispatcher tool — legacy special-cases it to
     # Agent._handle_plan_update (agent_execution.py:1834). It's CORE
@@ -153,6 +195,27 @@ def build_sdk_tools(tudou_agent, user_message: Any) -> List[Any]:
                 "function": {
                     "name": _name,
                     "description": _desc + " (NOT AUTHORIZED for this agent — calling returns error)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": True,
+                    },
+                },
+                "_is_unauthorized_stub": True,
+            })
+    # LLM-hallucinated names: pre-register stubs so an unknown-tool call
+    # returns a redirect string instead of crashing the SDK run with
+    # ModelBehaviorError. Skip names the agent legitimately has granted.
+    for _name, _redirect in _LLM_HALLUCINATED_TOOLS.items():
+        if _name and _name not in _granted_names:
+            _prompt_only_stubs.append({
+                "type": "function",
+                "function": {
+                    "name": _name,
+                    # Make the description itself a redirect, so even
+                    # if the model reads the schema before calling, it
+                    # sees what to use instead.
+                    "description": _redirect,
                     "parameters": {
                         "type": "object",
                         "properties": {},
@@ -233,24 +296,36 @@ def build_sdk_tools(tudou_agent, user_message: Any) -> List[Any]:
         # via asyncio.to_thread so the sync tool runs without
         # blocking the loop.
         async def _invoke(ctx: Any, args_json: str, _name=name,
-                          _deny=opt_in_deny):
+                          _deny=opt_in_deny,
+                          _hallucinated=_LLM_HALLUCINATED_TOOLS):
             import asyncio as _asyncio
             # ── Soft-deny intercept (2026-05-16) ─────────────────
             # If denied (intent gate OR unauthorized-stub), return
             # CLEAN ERROR string. SDK still gets a tool result so
             # the run continues; LLM sees the error and self-corrects.
             #
-            # Two paths land here:
+            # Three paths land here:
             #   1. Intent-gated: memory_recall/knowledge_lookup/wiki_ingest
             #      stripped because user message lacked trigger phrases
             #   2. Unauthorized-stub: tool mentioned in system prompt
             #      but not in agent's effective tool grants (e.g. coder
             #      role doesn't get mcp_call but prompt talks about it)
+            #   3. LLM-hallucinated name (grep, find, TodoWrite, etc.)
+            #      — return a REDIRECT to the right TudouClaw tool so
+            #      the model self-corrects on the next turn instead of
+            #      crashing the run (ModelBehaviorError).
             #
             # Without this stub, SDK aborts with ModelBehaviorError on
-            # case 2 — fatal. With it, LLM just sees a polite error
+            # case 2/3 — fatal. With it, LLM just sees a polite error
             # and tries a different approach.
             if _name in _deny:
+                # Case 3: hallucinated name → return the specific
+                # redirect so the LLM learns which real tool to use.
+                if _name in _hallucinated:
+                    logger.info(
+                        "SDK tool denied (hallucinated): %s — "
+                        "returning redirect to real tool", _name)
+                    return f"Error: {_hallucinated[_name]}"
                 logger.info(
                     "SDK tool denied: %s — returning Error string "
                     "(LLM will see + self-correct)", _name)
