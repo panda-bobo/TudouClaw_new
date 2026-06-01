@@ -16277,6 +16277,21 @@ Write only the summary body. Do not include any preamble or prefix."""
             overdue = " ⚠️OVERDUE" if t.is_overdue else ""
             pri = {0: "", 1: " [HIGH]", 2: " [URGENT]"}.get(t.priority, "")
             lines.append(f"  - [{t.status.value}]{pri} {t.title}{dl}{overdue}")
+        # ── Task-continuity reminder (2026-06-01, continuity fix a) ──
+        # Auto-inject a CONCISE continuity directive whenever there's
+        # open multi-step work. This is the "right dose at the right
+        # time" — the task-continuity skill's full SKILL.md is on-demand
+        # (progressive disclosure), but weak models rarely load it. By
+        # surfacing the core rule HERE (only when pending tasks exist),
+        # the model gets the "keep going" discipline exactly when it
+        # matters, without paying tokens on simple Q&A turns. Full
+        # methodology via get_skill_guide('task-continuity').
+        lines.append(
+            "↳ 这些是未完成的多步工作。完成一步**立即开始下一步**,"
+            "不要停下来等用户说\"继续\"。只在以下情况停: 全部完成 / "
+            "真的卡住(明确说出缺什么) / 需要用户做决策。"
+            "细则: get_skill_guide('task-continuity')。"
+        )
         return "\n".join(lines)
 
     # ── Self-growth closed loop ───────────────────────────────────────────

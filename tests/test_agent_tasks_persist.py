@@ -107,6 +107,36 @@ def test_corrupt_task_skipped_others_survive():
     assert "bad" not in ids
 
 
+def test_pending_tasks_summary_injects_continuity_reminder():
+    """Continuity fix (a) 2026-06-01: when there's open multi-step
+    work, the pending-tasks dynamic-context block must include a
+    concise continuity directive (finish one → start next, don't wait
+    for '继续') pointing to the task-continuity skill. This is what
+    makes the skill's discipline reach the model at the right moment
+    without depending on the model proactively loading it (progressive
+    disclosure)."""
+    from app.agent import Agent, AgentTask, TaskStatus
+
+    ag = Agent(id="cont-reminder-test", name="T")
+    # No tasks → no block at all
+    assert ag.get_pending_tasks_summary() == ""
+
+    # Open multi-step work → block + continuity reminder
+    ag.tasks.append(AgentTask(id="1", title="数据库设计",
+                               status=TaskStatus.IN_PROGRESS))
+    ag.tasks.append(AgentTask(id="2", title="API文档",
+                               status=TaskStatus.TODO))
+    ag.tasks.append(AgentTask(id="3", title="已完成项",
+                               status=TaskStatus.DONE))
+    s = ag.get_pending_tasks_summary()
+    assert "PENDING TASKS" in s
+    assert "数据库设计" in s
+    assert "API文档" in s
+    assert "已完成项" not in s            # DONE excluded
+    assert "立即开始下一步" in s          # continuity directive present
+    assert "get_skill_guide" in s         # points to full skill
+
+
 def test_task_cap_200_bounds_file_size():
     """Persistence caps at 200 tasks (oldest dropped) to keep
     agents.json from ballooning if an agent leaks task creates."""
