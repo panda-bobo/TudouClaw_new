@@ -7973,7 +7973,30 @@ function _formatEventLogEntry(e) {
   var d = e.data || {};
   if (e.kind === 'tool_call') {
     // "▸ tool_name  primary_arg"
-    var argsStr = JSON.stringify(d.arguments || d.args || {});
+    // 2026-06-01 perf: some tool_call args are 7.9 KB (big write_file
+    // content etc.). JSON.stringify-ing the WHOLE object just to slice
+    // 80 chars, ×50 entries ×every-2s-heartbeat, froze the page while
+    // 小新 worked continuously. If args is already a string or a big
+    // object, avoid the full stringify — peek cheaply instead.
+    var _a = d.arguments || d.args || {};
+    var argsStr;
+    if (typeof _a === 'string') {
+      argsStr = _a.slice(0, 200);
+    } else {
+      try {
+        // Stringify only a shallow, value-truncated view so a 7.9 KB
+        // arg doesn't cost a full serialize every render.
+        var _shallow = {};
+        var _keys = Object.keys(_a).slice(0, 6);
+        for (var _ki = 0; _ki < _keys.length; _ki++) {
+          var _v = _a[_keys[_ki]];
+          _shallow[_keys[_ki]] = (typeof _v === 'string')
+            ? _v.slice(0, 60)
+            : (typeof _v === 'object' ? '…' : _v);
+        }
+        argsStr = JSON.stringify(_shallow);
+      } catch (_se) { argsStr = ''; }
+    }
     var primary = (typeof _extractPrimaryArg === 'function')
                     ? _extractPrimaryArg(argsStr) : '';
     content = '▸ <b>' + esc(d.name || '') + '</b>  '
@@ -8008,6 +8031,7 @@ function _formatEventLogEntry(e) {
   );
 }
 
+var _eventLogRenderSig = {};  // agentId → "count:lastTs:preset" of last render
 async function loadAgentEventLog(agentId) {
   try {
     var data = await api('GET', '/api/portal/agent/' + agentId + '/events');
@@ -8018,6 +8042,18 @@ async function loadAgentEventLog(agentId) {
     var preset = _getEventLogFilter(agentId);
     var allowed = _EVENT_LOG_PRESETS[preset];
     var all = data.events || [];
+    // 2026-06-01 perf: skip the (heavy) re-render when nothing changed.
+    // The 2s dashboard heartbeat calls this while 小新 works
+    // continuously; most calls have the SAME events as the last render
+    // (no new event in that 2s window). Rendering 50 entries —
+    // including big tool_call args — every 2s froze the page. Signature
+    // = total count + last event timestamp + active filter preset.
+    var _lastTs = all.length ? (all[all.length - 1].timestamp || 0) : 0;
+    var _sig = all.length + ':' + _lastTs + ':' + preset;
+    if (_eventLogRenderSig[agentId] === _sig) {
+      return;  // identical to last render — skip the DOM work
+    }
+    _eventLogRenderSig[agentId] = _sig;
     // Apply filter FIRST so the 30-line budget goes to relevant events
     // rather than being swallowed by meeting prompt noise.
     var filtered = allowed ? all.filter(function(e) { return allowed.has(e.kind); }) : all;
