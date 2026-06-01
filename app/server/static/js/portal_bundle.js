@@ -8358,9 +8358,30 @@ async function loadExecutionSteps(agentId) {
   }, 3000);
 }
 
+var _planRenderSig = {};   // agentId → signature of last rendered plan
 function renderExecutionSteps(agentId, plan) {
   var el = document.getElementById('execution-steps-' + agentId);
   if (!el) return;
+  // 2026-06-01 perf: skip identical re-renders. Streaming plan_update
+  // events + the 3s /plans poll both call this; without dedup, every
+  // start_step / complete_step rebuilt the WHOLE steps panel (innerHTML
+  // assign + reflow) even when nothing visible changed. Signature =
+  // status + per-step (id, status). Changes when any step transitions.
+  try {
+    var _sig;
+    if (!plan || !plan.steps || !plan.steps.length) {
+      _sig = 'empty';
+    } else {
+      var _parts = [plan.status || ''];
+      for (var _si = 0; _si < plan.steps.length; _si++) {
+        var _s = plan.steps[_si];
+        _parts.push((_s.id || _si) + ':' + (_s.status || ''));
+      }
+      _sig = _parts.join('|');
+    }
+    if (_planRenderSig[agentId] === _sig) return;  // nothing changed
+    _planRenderSig[agentId] = _sig;
+  } catch (_pe) { /* ignore — fall through to render */ }
   if (!plan || !plan.steps || plan.steps.length === 0) {
     el.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:8px 0;display:flex;align-items:center;gap:6px"><span class="material-symbols-outlined" style="font-size:16px">hourglass_empty</span>Waiting for agent to start a task...</div>';
     return;
@@ -12140,7 +12161,19 @@ async function _streamTaskEvents(agentId, taskId, thinkDiv, progressBar) {
               fullText += evt.content;
               // Track the latest timestamp from streaming deltas
               if (evt.timestamp) msgDiv._timestamp = evt.timestamp;
-              msgDiv.textContent = fullText;  // Plain text during streaming for speed
+              // 2026-06-01 perf: rAF-throttle the DOM write. High-token-
+              // rate models flooded the main thread with sync textContent
+              // assigns (one per token); coalesce into ~60Hz frames so
+              // the browser actually paints between updates and the page
+              // stays interactive during long replies.
+              if (!msgDiv._rafPending) {
+                msgDiv._rafPending = true;
+                var _md = msgDiv;
+                requestAnimationFrame(function() {
+                  try { _md.textContent = fullText; } catch (_te) {}
+                  _md._rafPending = false;
+                });
+              }
               // ── Voice mode: stream TTS sentence-by-sentence ──
               // 2026-05-09: don't wait for full reply before TTS — feed
               // each sentence to the synth pipeline as soon as a
