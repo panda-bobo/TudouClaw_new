@@ -338,8 +338,19 @@ class SDKAgentRunner:
         from app.runtime import evaluate_nudge
         import os
 
-        MAX_NUDGES_PER_TURN = 3
-        nudge_count = 0
+        # Two separate budgets (2026-05-28, continuity fix A):
+        #   - corrective nudges (stall / tool_error / must_verify):
+        #     "you went wrong, retry" — cap low (3) so a genuinely
+        #     stuck model doesn't burn tokens.
+        #   - task_continuation: "keep working through the task" —
+        #     cap high (25) so a multi-step task (DB → API → HTML → …)
+        #     chains to completion in ONE turn like Claude Code, instead
+        #     of stopping after each sub-task.
+        MAX_CORRECTIVE_NUDGES = 3
+        MAX_CONTINUATIONS = int(
+            os.environ.get("TUDOU_MAX_TASK_CONTINUATIONS", "25") or 25)
+        corrective_count = 0
+        continuation_count = 0
         # Snapshot the user message text for evaluator (don't change
         # this across nudge loops — nudges are SYNTHETIC, the "real"
         # user text is what came in at run() entry)
@@ -352,22 +363,21 @@ class SDKAgentRunner:
                 sdk_agent, user_message, bridge, hooks)
 
             # Evaluate after the full Runner.run_streamed completes.
-            # This catches turn-final issues (empty reply, stall, etc.)
-            # — NOT mid-tool-loop issues which would need hook-level
-            # injection (deferred; SDK doesn't expose mid-Runner.run
-            # input mutation cleanly).
+            # This catches turn-final issues (empty reply, stall, AND
+            # "finished one sub-task but more work remains").
             try:
                 msgs = getattr(self.tudou_agent, "messages", []) or []
                 has_tools = bool(getattr(sdk_agent, "tools", None) or [])
+                open_work = _compute_open_work_summary(self.tudou_agent)
                 nudge = evaluate_nudge(
                     user_text=_user_text,
                     agent_reply=final_text or "",
                     messages=msgs,
                     has_tools=has_tools,
-                    iteration=nudge_count,
-                    max_iterations=MAX_NUDGES_PER_TURN,
-                    nudge_count=nudge_count,
-                    max_nudges_per_turn=MAX_NUDGES_PER_TURN,
+                    iteration=corrective_count,
+                    max_iterations=MAX_CORRECTIVE_NUDGES,
+                    nudge_count=corrective_count,
+                    max_nudges_per_turn=MAX_CORRECTIVE_NUDGES,
                     stop_reason="",
                     enable_narrator=os.environ.get(
                         "TUDOU_NUDGE_WEAK_MODELS", "1") != "0",
@@ -375,6 +385,11 @@ class SDKAgentRunner:
                         "TUDOU_TOOL_ERROR_NUDGE", "1") != "0",
                     enable_must_verify=os.environ.get(
                         "TUDOU_VERIFY_NUDGE", "1") != "0",
+                    open_work_summary=open_work,
+                    enable_task_continuation=os.environ.get(
+                        "TUDOU_TASK_CONTINUATION_NUDGE", "1") != "0",
+                    continuation_count=continuation_count,
+                    max_continuations=MAX_CONTINUATIONS,
                 )
             except Exception as e:
                 logger.debug("nudge evaluation skipped: %s", e)
@@ -383,26 +398,22 @@ class SDKAgentRunner:
             if nudge is None:
                 return final_text or ""
 
-            if nudge_count >= MAX_NUDGES_PER_TURN:
-                logger.info(
-                    "SDK runtime: nudge would fire (kind=%s) but cap "
-                    "%d reached — returning current reply as-is "
-                    "(agent=%s)",
-                    nudge.kind, MAX_NUDGES_PER_TURN,
-                    getattr(self.tudou_agent, "id", "?")[:8])
-                return final_text or ""
-
             # ── Inject the nudge + loop ────────────────────────────
             # Match legacy at agent.py:12024: nudge goes in as
             # role=user (NOT system — system gets ignored by some
             # models mid-conversation). _source marker lets future
             # transcript filtering distinguish synthetic from real.
+            _is_continuation = (nudge.kind == "task_continuation")
+            _which_count = (continuation_count if _is_continuation
+                            else corrective_count)
+            _which_cap = (MAX_CONTINUATIONS if _is_continuation
+                          else MAX_CORRECTIVE_NUDGES)
             logger.info(
                 "SDK runtime: nudge FIRED kind=%s reason=%r agent=%s "
                 "(injection %d/%d)",
                 nudge.kind, nudge.reason_detail,
                 getattr(self.tudou_agent, "id", "?")[:8],
-                nudge_count + 1, MAX_NUDGES_PER_TURN)
+                _which_count + 1, _which_cap)
             try:
                 self.tudou_agent.messages.append({
                     "role": "user",
@@ -421,7 +432,12 @@ class SDKAgentRunner:
             except Exception:
                 pass
 
-            nudge_count += 1
+            # Bump the right counter so each budget is tracked
+            # independently (corrective cap=3, continuation cap=25).
+            if _is_continuation:
+                continuation_count += 1
+            else:
+                corrective_count += 1
             # Next iteration: Runner.run_streamed re-runs with the
             # appended nudge user msg in agent.messages (which
             # _tudou_messages_to_sdk_items will pick up at the top of
@@ -728,6 +744,61 @@ class SDKAgentRunner:
             model_name=model_name,
             base_url=base_url,
         )
+
+
+def _compute_open_work_summary(tudou_agent) -> str:
+    """Return a one-line-ish summary of work that's still open for
+    this agent — used by the task_continuation nudge (continuity fix
+    A, 2026-05-28) to decide whether to re-prompt the agent to keep
+    going.
+
+    Sources (both checked):
+      - ``agent.tasks`` with status TODO / IN_PROGRESS (the
+        task_update tool list — what 小新 uses)
+      - ``agent._current_plan`` open steps (the plan_update list —
+        what plan-based agents use)
+
+    Returns "" when nothing is open (→ task_continuation won't fire).
+    Caps the list so a leaky agent with 50 open tasks doesn't bloat
+    the nudge text.
+    """
+    lines = []
+    # ── agent.tasks (task_update) ──
+    try:
+        from app.agent import TaskStatus
+        open_statuses = {TaskStatus.TODO, TaskStatus.IN_PROGRESS}
+        for t in (getattr(tudou_agent, "tasks", None) or []):
+            st = getattr(t, "status", None)
+            if st in open_statuses:
+                title = getattr(t, "title", "") or "(untitled task)"
+                lines.append(f"  • [{st.value}] {title[:60]}")
+    except Exception as e:
+        logger.debug("open-task scan failed: %s", e)
+
+    # ── _current_plan steps (plan_update) ──
+    try:
+        plan = getattr(tudou_agent, "_current_plan", None)
+        if plan is not None and getattr(plan, "status", "") == "active":
+            for s in (getattr(plan, "steps", None) or []):
+                sst = getattr(s, "status", None)
+                # StepStatus.PENDING / IN_PROGRESS — string-compare to
+                # avoid importing the enum (it lives in a different mod)
+                sval = getattr(sst, "value", str(sst or ""))
+                if sval in ("pending", "in_progress"):
+                    title = getattr(s, "title", "") or "(untitled step)"
+                    lines.append(f"  • [step:{sval}] {title[:60]}")
+    except Exception as e:
+        logger.debug("open-plan scan failed: %s", e)
+
+    if not lines:
+        return ""
+    # Cap to 8 items so the nudge stays small.
+    capped = lines[:8]
+    extra = len(lines) - len(capped)
+    summary = "\n".join(capped)
+    if extra > 0:
+        summary += f"\n  • …还有 {extra} 项"
+    return summary
 
 
 def _compact_history_if_needed(tudou_agent):

@@ -1067,6 +1067,130 @@ def test_extract_text_for_preview_handles_multimodal():
         "it inline and base64 blobs are noise")
 
 
+def test_task_continuation_nudge_fires_on_open_work():
+    """Continuity fix A (2026-05-28): when the agent gives a clean
+    completion reply BUT there's still open work (tasks/plan steps),
+    evaluate() must fire a task_continuation nudge so the agent keeps
+    going in the same turn instead of stopping after one sub-task.
+
+    This is what narrows the gap with Claude Code's autonomous task
+    drive for weak models (mimo/deepseek) that narrate-and-stop.
+    """
+    from app.runtime.nudge_evaluator import evaluate
+
+    n = evaluate(
+        user_text="做三个任务",
+        agent_reply="✓ 任务1完成：数据库设计文档。开始任务2：API接口文档。",
+        messages=[], has_tools=True,
+        iteration=0, max_iterations=3,
+        nudge_count=0, max_nudges_per_turn=3,
+        open_work_summary="  • [todo] API接口文档\n  • [todo] HTML原型",
+        continuation_count=0, max_continuations=25,
+    )
+    assert n is not None
+    assert n.kind == "task_continuation"
+    assert "继续" in n.text
+
+
+def test_task_continuation_skips_when_agent_asks_user():
+    """If the agent legitimately asks the user a question, it's
+    correctly waiting for input — task_continuation must NOT fire
+    (otherwise we'd talk over the user's needed decision)."""
+    from app.runtime.nudge_evaluator import evaluate
+
+    n = evaluate(
+        user_text="做任务",
+        agent_reply="我完成了任务1。请问任务2的API文档需要包含认证模块吗？",
+        messages=[], has_tools=True,
+        iteration=0, max_iterations=3,
+        nudge_count=0, max_nudges_per_turn=3,
+        open_work_summary="  • [todo] API接口文档",
+        continuation_count=0, max_continuations=25,
+    )
+    assert n is None, (
+        "agent asking the user a question must NOT trigger "
+        "task_continuation — it's correctly waiting for input")
+
+
+def test_task_continuation_independent_of_corrective_budget():
+    """The corrective-nudge budget (stall/error/verify, cap 3) and the
+    continuation budget (cap 25) are SEPARATE. A multi-step task that
+    has already used the corrective budget can still continue."""
+    from app.runtime.nudge_evaluator import evaluate
+
+    n = evaluate(
+        user_text="做任务",
+        agent_reply="✓ 数据库设计文档已完成，包含11张表和DDL。",
+        messages=[], has_tools=True,
+        iteration=3, max_iterations=3,        # corrective exhausted
+        nudge_count=3, max_nudges_per_turn=3,
+        open_work_summary="  • [todo] 下一步",
+        continuation_count=5, max_continuations=25,  # continuation OK
+    )
+    assert n is not None
+    assert n.kind == "task_continuation", (
+        "continuation budget is independent of the corrective cap; "
+        "a multi-step task shouldn't be capped at 3 just because the "
+        "corrective nudges were used")
+
+
+def test_task_continuation_respects_its_own_budget():
+    """Continuation must stop at max_continuations (prevents an
+    infinite loop if the agent NEVER actually makes progress)."""
+    from app.runtime.nudge_evaluator import evaluate
+
+    n = evaluate(
+        user_text="做任务",
+        agent_reply="✓ 数据库设计文档已经完成，包含11张表、DDL、触发器和索引策略。",
+        messages=[], has_tools=True,
+        iteration=0, max_iterations=3,
+        nudge_count=0, max_nudges_per_turn=3,
+        open_work_summary="  • [todo] 下一步",
+        continuation_count=25, max_continuations=25,  # exhausted
+    )
+    assert n is None
+
+
+def test_narrator_stall_has_priority_over_continuation():
+    """When BOTH a stall pattern AND open work are present, the more
+    specific narrator_stall fires first (it's an actionable 'you said
+    让我X but didn't call the tool' correction)."""
+    from app.runtime.nudge_evaluator import evaluate
+
+    n = evaluate(
+        user_text="做任务",
+        agent_reply="让我先看一下数据库结构：",
+        messages=[], has_tools=True,
+        iteration=0, max_iterations=3,
+        nudge_count=0, max_nudges_per_turn=3,
+        open_work_summary="  • [todo] 下一步",
+        continuation_count=0, max_continuations=25,
+    )
+    assert n is not None
+    assert n.kind == "narrator_stall"
+
+
+def test_open_work_summary_helper():
+    """_compute_open_work_summary lists TODO/IN_PROGRESS tasks,
+    excludes DONE, returns '' when nothing open."""
+    from app.agent_runtime.sdk_adapter import _compute_open_work_summary
+    from app.agent import Agent, AgentTask, TaskStatus
+
+    ag = Agent(id="test-open-work", name="T")
+    assert _compute_open_work_summary(ag) == ""
+
+    ag.tasks.append(AgentTask(id="t1", title="数据库设计",
+                               status=TaskStatus.DONE))
+    ag.tasks.append(AgentTask(id="t2", title="API文档",
+                               status=TaskStatus.TODO))
+    ag.tasks.append(AgentTask(id="t3", title="HTML原型",
+                               status=TaskStatus.IN_PROGRESS))
+    summary = _compute_open_work_summary(ag)
+    assert "API文档" in summary
+    assert "HTML原型" in summary
+    assert "数据库设计" not in summary  # DONE excluded
+
+
 def test_nudge_injection_loops_when_nudge_fires(monkeypatch):
     """SDKAgentRunner._run_with_nudges must:
       1. Run Runner.run_streamed once → get final_text

@@ -46,7 +46,33 @@ NudgeKind = Literal[
     "narrator_stall",
     "tool_error_no_continuation",
     "must_verify",
+    "task_continuation",
 ]
+
+
+# Phrases that signal the agent is LEGITIMATELY asking the user for
+# input — in which case task_continuation must NOT fire (the agent is
+# correctly stopping to wait, not narrate-and-stopping). Checked
+# against the tail of the reply (questions usually come at the end).
+_USER_QUESTION_MARKERS = (
+    "请问", "需要你", "你想", "要不要", "是否需要", "请确认",
+    "请提供", "请告诉我", "等你", "你希望", "你倾向", "请选择",
+    "需要我", "你看", "可以吗", "好吗", "如何", "怎么处理",
+    "which would you", "do you want", "should i", "would you like",
+    "please confirm", "please provide", "let me know", "?",
+    "？",
+)
+
+
+def _reply_asks_user_question(reply: str) -> bool:
+    """Heuristic: does the reply end by asking the user something?
+    If so, the agent is correctly waiting for input — don't fire
+    task_continuation. Look at the last ~200 chars (questions land
+    at the end of a reply)."""
+    if not reply:
+        return False
+    tail = reply.strip()[-200:].lower()
+    return any(m.lower() in tail for m in _USER_QUESTION_MARKERS)
 
 
 @dataclass(frozen=True)
@@ -78,6 +104,18 @@ def evaluate(
     enable_narrator: bool = True,
     enable_tool_error: bool = True,
     enable_must_verify: bool = True,
+    # ── Task-continuation (2026-05-28, continuity fix A) ──
+    # The caller computes how much work is still open (open plan
+    # steps + open agent.tasks) and passes a one-line summary. When
+    # non-empty AND the agent's reply isn't a question to the user,
+    # we fire a task_continuation nudge so the agent keeps working
+    # through the whole task in the same turn (Claude-Code-style)
+    # instead of stopping after one sub-task. evaluate() stays pure —
+    # caller owns the agent-state lookup.
+    open_work_summary: str = "",
+    enable_task_continuation: bool = True,
+    continuation_count: int = 0,
+    max_continuations: int = 25,
 ) -> Optional[Nudge]:
     """Evaluate whether a nudge should fire AFTER the agent emitted
     ``agent_reply`` in iteration ``iteration``.
@@ -106,15 +144,20 @@ def evaluate(
     enable_must_verify) let callers disable specific nudge kinds
     via env vars without short-circuiting the entire evaluator.
     """
-    # Universal gates
+    # Universal gates (apply to ALL nudge kinds)
     if not has_tools:
-        return None
-    if iteration >= max_iterations - 1:
-        return None
-    if nudge_count >= max_nudges_per_turn:
         return None
     if stop_reason in ("length", "content_filter"):
         return None
+
+    # Corrective-nudge budget gate (narrator / tool_error / must_verify).
+    # task_continuation has its OWN budget (max_continuations) checked
+    # below — it's a different concern ("keep working" vs "you went
+    # wrong, retry"), so a multi-step task isn't capped at 3.
+    _corrective_ok = (
+        iteration < max_iterations - 1
+        and nudge_count < max_nudges_per_turn
+    )
 
     # ── 1. Narrator stall (broadest — checked first to match
     #       legacy chat loop ordering) ────────────────────────────
@@ -122,7 +165,7 @@ def evaluate(
     # Also covers "essentially empty" replies (< 20 chars) — most
     # common DeepSeek stall mode (thinking succeeded but output
     # dropped).
-    if enable_narrator:
+    if enable_narrator and _corrective_ok:
         is_stall = looks_like_narrator_stall(agent_reply)
         is_empty = len((agent_reply or "").strip()) < 20
         if is_stall or is_empty:
@@ -141,7 +184,7 @@ def evaluate(
     # ── 2. Tool-error continuation ──────────────────────────────────
     # Last tool result has an error marker AND agent didn't follow up
     # with another tool call → "fix or explain, don't just describe".
-    if enable_tool_error:
+    if enable_tool_error and _corrective_ok:
         try:
             last_err = detect_recent_tool_error(messages)
         except Exception:
@@ -166,7 +209,7 @@ def evaluate(
     # ── 3. Must-verify ──────────────────────────────────────────────
     # User asked for verification + agent claimed done + agent didn't
     # actually run a verify tool this turn → must-verify nudge.
-    if enable_must_verify:
+    if enable_must_verify and _corrective_ok:
         try:
             if (user_asked_for_verification(user_text)
                     and agent_claimed_completion(agent_reply)
@@ -196,5 +239,34 @@ def evaluate(
                 )
         except Exception:
             pass
+
+    # ── 4. Task continuation (2026-05-28, continuity fix A) ─────────
+    # Lowest priority — only fires when nothing more specific matched.
+    # The agent produced a clean-looking reply (no stall pattern, no
+    # tool error, no unverified claim), BUT there's still open work
+    # (plan steps / tasks). Weak models (mimo/deepseek) tend to finish
+    # ONE sub-task with a tidy "✓ done, starting next" message then
+    # STOP — this catches that and re-prompts to keep going in the
+    # SAME turn, approximating Claude Code's autonomous task drive.
+    #
+    # Guard: don't fire if the agent is legitimately asking the user
+    # a question (then it's correctly waiting for input, not stalling).
+    if (enable_task_continuation and open_work_summary
+            and continuation_count < max_continuations):
+        if not _reply_asks_user_question(agent_reply):
+            return Nudge(
+                kind="task_continuation",
+                text=(
+                    "[system nudge] 你完成了一步,但任务还没全做完。"
+                    "当前还有未完成的工作:\n"
+                    f"{open_work_summary}\n\n"
+                    "请**立即继续执行下一个未完成的步骤/任务**,"
+                    "不要停下来等用户确认 —— 直接调用相应工具开始下一步。"
+                    "只有在以下情况才停: (1) 所有步骤/任务全部完成, "
+                    "(2) 你确实需要用户提供信息/做决策才能继续(这时"
+                    "明确说出你需要什么)。现在请继续。"
+                ),
+                reason_detail=f"open work remains: {open_work_summary[:120]}",
+            )
 
     return None
