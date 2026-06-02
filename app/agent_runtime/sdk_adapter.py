@@ -208,6 +208,35 @@ class SDKAgentRunner:
                 "messages may land in the wrong bucket",
                 context_id, _ctx_err)
 
+        # ── 2026-06-02: resume any interrupted plan ───────────────
+        # When the backend restarts mid-run, from_persist_dict flips
+        # an active _current_plan to status="interrupted" (guard
+        # against ghost work). Legacy chat() flips it BACK to
+        # "active" when the user sends another message — implicit
+        # consent to resume (agent.py:10571). SDK runtime never
+        # mirrored this, so:
+        #   - plan stays at "interrupted" forever
+        #   - the watchdog "此步骤已 N 无活动" warning shows up but
+        #     is purely advisory (no auto-action)
+        #   - the UI banner says "重新发消息让 agent 接着做" but
+        #     sending a new message doesn't actually resume — agent
+        #     sees plan=interrupted and ignores it
+        # @user 2026-06-02 screenshot: 16h stale step never resumed
+        # despite multiple new messages. Mirror legacy here.
+        try:
+            _cp = getattr(self.tudou_agent, "_current_plan", None)
+            if _cp and getattr(_cp, "status", "") == "interrupted":
+                _cp.status = "active"
+                logger.info(
+                    "SDK runtime: flipped interrupted plan back to "
+                    "active on resume (agent=%s plan_id=%s)",
+                    getattr(self.tudou_agent, "id", "?")[:8],
+                    getattr(_cp, "id", "?"))
+        except Exception as _flip_err:
+            logger.debug(
+                "SDK runtime: interrupted-plan flip failed: %s",
+                _flip_err)
+
         # (SDK import already done at top of _run_inner)
 
         # Build the SDK Agent each turn (cheap — just a dataclass).

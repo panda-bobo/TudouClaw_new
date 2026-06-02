@@ -1047,6 +1047,54 @@ def test_opt_in_lets_tool_run_when_user_requests_retrieval(monkeypatch):
     assert calls == [("memory_recall", '{"query":"xxx"}')]
 
 
+def test_run_flips_interrupted_plan_back_to_active():
+    """SDK runtime must mirror legacy chat()'s interrupted→active flip.
+    When backend restarts mid-run, from_persist_dict flips the active
+    _current_plan to status='interrupted' (guard against ghost work).
+    Legacy chat() flips it back to 'active' when the user sends a new
+    message (agent.py:10571) — implicit consent to resume.
+
+    @user 2026-06-02 screenshot: a step had been 'in_progress' with
+    no activity for 16h (1012m8s); the UI banner said "重新发消息让
+    agent 接着做" but new messages didn't resume the plan — because
+    the SDK runtime never ported the flip. The agent kept seeing
+    plan=interrupted and ignored it.
+    """
+    import threading
+
+    class _Plan:
+        id = "plan-resume-test"
+        status = "interrupted"
+
+    class _Agent:
+        id = "resume-test-agent"
+        name = "T"
+        _lock = threading.Lock()
+        messages = []
+        _last_persist_at = 0
+        _current_plan = _Plan()
+        status = None
+        def _switch_context(self, cid): pass
+        def _build_static_system_prompt(self): return ""
+        def _resolve_effective_provider_model(self): return ("", "")
+        def _log(self, *a, **k): pass
+        def _maybe_persist(self, **k): pass
+
+    ag = _Agent()
+    assert ag._current_plan.status == "interrupted"
+
+    from app.agent_runtime.sdk_adapter import SDKAgentRunner
+    runner = SDKAgentRunner(ag)
+    try:
+        runner.run("continue", context_id="solo")
+    except Exception:
+        pass
+
+    assert ag._current_plan.status == "active", (
+        "run() must flip interrupted plan back to active so the agent "
+        "resumes the work, mirroring legacy chat() behavior")
+
+
 def test_run_flips_status_busy_then_idle():
     """SDK runtime must mirror legacy chat()'s status lifecycle:
     BUSY on entry, IDLE on exit. @user 2026-06-01 'agent 在后台干活,
