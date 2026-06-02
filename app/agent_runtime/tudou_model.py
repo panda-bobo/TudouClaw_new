@@ -200,7 +200,29 @@ def _build_real_tudou_model_class():
             _content = str(msg_dict.get("content") or "").strip()
             if not _content:
                 _reasoning = str(msg_dict.get("reasoning_content") or "").strip()
-                if _reasoning and not (msg_dict.get("tool_calls") or []):
+                # 2026-06-02: don't surface the sanitize-injected
+                # placeholder as visible chat content. llm.py:1009
+                # injects a fixed placeholder into reasoning_content
+                # when mimo/deepseek tool-routing skips chain-of-thought
+                # (to satisfy the thinking-mode API contract). This
+                # fallback used to copy it into `content`, so the UI
+                # showed "(no chain-of-thought captured for this
+                # tool-routing decision; placeholder injected...)"
+                # repeatedly. @user 2026-06-02: "昨天 3:51 以后的记录
+                # 没有了" — chat appeared frozen at 15:51 because every
+                # subsequent assistant message was the same placeholder
+                # and the UI dedup-collapsed them. Treat known marker
+                # phrases as "no real content" so the fallback skips.
+                _SANITIZER_PLACEHOLDER_MARKERS = (
+                    "no chain-of-thought captured for this tool-routing",
+                    "placeholder injected to satisfy thinking-mode",
+                )
+                _reasoning_is_placeholder = any(
+                    _m in _reasoning for _m in _SANITIZER_PLACEHOLDER_MARKERS
+                )
+                if (_reasoning
+                        and not _reasoning_is_placeholder
+                        and not (msg_dict.get("tool_calls") or [])):
                     # Only surface reasoning AS content when there are
                     # no tool_calls (if there ARE tool_calls, the model
                     # is in mid-thought routing to a tool — let the
@@ -214,6 +236,11 @@ def _build_real_tudou_model_class():
                     # original reasoning_content for sanitize roundtrip.
                     msg_dict = dict(msg_dict)
                     msg_dict["content"] = _reasoning
+                elif _reasoning_is_placeholder:
+                    logger.debug(
+                        "tudou_model: skipped placeholder reasoning_"
+                        "content as fallback (would have leaked sanitize "
+                        "marker into chat)")
 
             # Legacy may keep ``reasoning_content`` on the assistant
             # message — that's fine, it gets sent back on the next
