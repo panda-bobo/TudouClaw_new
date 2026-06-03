@@ -30,6 +30,48 @@ _BASH_TIMEOUT_MIN_S = 1
 _BASH_TIMEOUT_MAX_S = 600
 _BASH_TIMEOUT_DEFAULT_S = 30
 
+# 2026-06-03: cap stdout/stderr per bash call so a single command like
+# `find . -type f` (which can dump 800 KB+ of paths) doesn't get
+# verbatim-inlined into chat history. @user 2026-06-03: one bash call
+# produced len=800255 → next turn's payload total=883150 chars (~248K
+# tokens, near mimo's window limit). The 9-section history
+# compaction CAN'T fix this because the bloated tool result is in the
+# `keep_last` recent window and never gets summarized away.
+# Default 20 KB matches roughly 200 lines of code / 4-5K tokens —
+# enough for any reasonable inspection, anything more is the model
+# doing a kitchen-sink dump and should pipe through head/grep/wc.
+# Configurable via TUDOU_BASH_MAX_OUTPUT_CHARS for power users.
+_BASH_MAX_OUTPUT_CHARS = int(
+    os.environ.get("TUDOU_BASH_MAX_OUTPUT_CHARS", "20000"))
+
+
+def _cap_bash_output(text: str, stream_name: str = "output") -> str:
+    """Truncate a bash stdout/stderr block to _BASH_MAX_OUTPUT_CHARS,
+    keeping the first 70% and last 20% (the middle is usually the
+    bulk noise; the head shows what command actually started doing
+    and the tail shows the final state / error). When truncated,
+    inject a clear marker AND a tip about how to scope the next call.
+    """
+    if not text:
+        return text
+    total = len(text)
+    if total <= _BASH_MAX_OUTPUT_CHARS:
+        return text
+    head_n = int(_BASH_MAX_OUTPUT_CHARS * 0.7)
+    tail_n = _BASH_MAX_OUTPUT_CHARS - head_n - 200  # leave room for marker
+    if tail_n < 100:
+        tail_n = 100
+    dropped = total - head_n - tail_n
+    marker = (
+        f"\n\n⚠️ [output truncated: dropped {dropped:,} chars from middle "
+        f"of {total:,}-char {stream_name}. "
+        f"Re-run with `| head -N`, `| tail -N`, `| grep PATTERN`, "
+        f"or `| wc -l` to scope the output. Cap = "
+        f"{_BASH_MAX_OUTPUT_CHARS:,} chars, override with env "
+        f"TUDOU_BASH_MAX_OUTPUT_CHARS.]\n\n"
+    )
+    return text[:head_n] + marker + text[-tail_n:]
+
 # Background-job registry. process_id → record. Records persist for
 # 1 hour past process exit so the agent can still pull logs after
 # completion. {pid: {cmd, log_path, started_at, proc, exit_code,
@@ -202,6 +244,12 @@ def _tool_bash(command: str, timeout: int = _BASH_TIMEOUT_DEFAULT_S,
         if task_key and abort_registry.is_aborted(task_key):
             return (f"⏸ ABORTED by user. Command terminated "
                     f"(exit code {returncode}).\n[exit code: {returncode}]")
+
+        # 2026-06-03: cap each stream BEFORE assembling, so a
+        # gigantic stdout doesn't bloat the chat history. See
+        # _cap_bash_output's docstring for the full reasoning.
+        stdout = _cap_bash_output(stdout, "stdout") if stdout else stdout
+        stderr = _cap_bash_output(stderr, "stderr") if stderr else stderr
 
         output_parts = []
         if stdout:
