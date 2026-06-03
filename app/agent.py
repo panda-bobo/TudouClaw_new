@@ -16251,6 +16251,16 @@ Write only the summary body. Do not include any preamble or prefix."""
                     self.name, task.id, title, source, task.deadline_str or "none")
         # Inject task notification into agent context so it knows about the task
         self._notify_new_task(task)
+        # ── 2026-06-03: persist immediately so a backend restart before
+        # the next _maybe_persist trigger doesn't lose the new task.
+        # @user reported tasks coming back from the dead after restart:
+        # mark done / delete / create all touched only memory, and if
+        # nothing triggered _maybe_persist before the next restart, the
+        # old SQLite state was reloaded.
+        try:
+            self._maybe_persist()
+        except Exception:
+            pass
         return task
 
     def _notify_new_task(self, task: AgentTask):
@@ -16573,6 +16583,13 @@ Write only the summary body. Do not include any preamble or prefix."""
                             )
                     except Exception as _l3_err:  # noqa: BLE001
                         logger.debug("L3 task-done hook failed: %s", _l3_err)
+                # ── 2026-06-03: persist immediately (see add_task) ──
+                # mark-done/cancel/etc must survive a restart that
+                # happens before the next chat-turn-driven persist.
+                try:
+                    self._maybe_persist()
+                except Exception:
+                    pass
                 return t
         return None
 
@@ -16617,6 +16634,13 @@ Write only the summary body. Do not include any preamble or prefix."""
             if t.id == task_id:
                 self.tasks.pop(i)
                 self._log("task", {"action": "removed", "task_id": task_id})
+                # ── 2026-06-03: persist immediately (see add_task) ──
+                # Delete must survive a restart that happens before the
+                # next chat turn — @user reported "删了又回来".
+                try:
+                    self._maybe_persist()
+                except Exception:
+                    pass
                 return True
         return False
 
