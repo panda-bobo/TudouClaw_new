@@ -1237,6 +1237,23 @@ def _sanitize_messages_for_openai(messages: list[dict],
             nxt = idx + 1
             if nxt < len(cleaned) and cleaned[nxt].get("role") == "assistant":
                 skip_indices.add(nxt)
+                # 2026-06-03: if the assistant we just queued for
+                # collapse has tool_calls, the tool result messages that
+                # follow it MUST collapse with it — otherwise they
+                # become orphan tools (no preceding asst.tool_calls →
+                # the hard-guard at line 3366 drops them with a WARNING,
+                # and worse, the conversation now has a gap mid-history
+                # that confuses the model. @user 2026-06-03 logs showed
+                # "collapsed 2 near-dup → folded tool rounds → dropped
+                # 2 orphan tool" sequence — the orphans came from THIS
+                # collapse stripping the asst.tool_calls but leaving
+                # the tool replies behind.
+                if cleaned[nxt].get("tool_calls"):
+                    tnxt = nxt + 1
+                    while (tnxt < len(cleaned)
+                           and cleaned[tnxt].get("role") == "tool"):
+                        skip_indices.add(tnxt)
+                        tnxt += 1
 
     # Build final result with brace neutralization + dedup
     collapsed_count = 0
