@@ -12185,6 +12185,60 @@ async function _streamTaskEvents(agentId, taskId, thinkDiv, progressBar) {
                 requestAnimationFrame(function() {
                   try { _md.textContent = fullText; } catch (_te) {}
                   _md._rafPending = false;
+                  // ── 2026-06-03: streaming dedup ──────────────────
+                  // @user "chat 框重复 3 次." narrator_stall nudges
+                  // retry up to 3× per turn; if mimo emits the same
+                  // "Let me X:" line each retry, three identical
+                  // streaming bubbles end up rendered. The existing
+                  // _recentBubbles_ 60s dedup is inside
+                  // addChatBubble() — but streaming creates the
+                  // bubble with text='' (line 12173), so dedup is
+                  // skipped at creation, AND the bubble is never
+                  // pushed into the ring buffer at all (push only
+                  // happens for non-empty text in addChatBubble).
+                  // So we BOTH check AND push here: when fullText
+                  // stabilizes at 40+ chars, check the buffer once
+                  // — if dup, remove this bubble; if not, register
+                  // ourselves so subsequent identical streams get
+                  // dedup'd. The flag _streamDedupChecked ensures
+                  // we do this exactly once per bubble.
+                  try {
+                    if (!_md._streamDedupChecked
+                        && typeof fullText === 'string'
+                        && fullText.trim().length >= 40) {
+                      _md._streamDedupChecked = true;
+                      var _t = fullText.trim();
+                      var _head = _t.slice(0, 300);
+                      var _now = Date.now();
+                      var _key = '_recentBubbles_' + agentId;
+                      var _hist = window[_key] = window[_key] || [];
+                      var _isDup = false;
+                      for (var _hi = 0; _hi < _hist.length; _hi++) {
+                        var _h = _hist[_hi];
+                        if ((_now - _h.t) > 60000) continue;
+                        if (_h.head === _head
+                            || _t.startsWith(_h.full)
+                            || _h.full.startsWith(_t)) {
+                          _isDup = true;
+                          break;
+                        }
+                      }
+                      if (_isDup) {
+                        // Remove this whole row (head/body/avatar)
+                        var _row = _md.closest ? _md.closest('.chat-msg-row') : null;
+                        var _msgEl = _md.closest ? _md.closest('.chat-msg') : null;
+                        if (_row) _row.remove();
+                        else if (_msgEl) _msgEl.remove();
+                        else _md.remove();
+                        msgDiv = null;
+                      } else {
+                        // Register self so the NEXT identical stream
+                        // gets dedup'd. Cap ring to 5 entries.
+                        _hist.push({ t: _now, head: _head, full: _t });
+                        if (_hist.length > 5) _hist.shift();
+                      }
+                    }
+                  } catch (_dde) {}
                 });
               }
               // ── Voice mode: stream TTS sentence-by-sentence ──
