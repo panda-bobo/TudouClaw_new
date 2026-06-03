@@ -116,6 +116,59 @@ _CONTINUITY_RULES_ZH = (
     "• 卡住时也要动作：工具报错就修或换路，不要只输出文字描述错误然后停。"
 )
 
+# 2026-06-03 (after @user "目录规划的也乱糟糟"): without an explicit
+# project-isolation rule, agents dump every new project's files into
+# the workspace root. Real-world example: one workspace had 5 distinct
+# projects (RPG game, PCI-DSS audit, project-mgmt tool, bug-hunt-toolkit,
+# obsidian vault) all mixed together — same-named files collided
+# (package.json / index.html / main.js for different projects), and the
+# folder hierarchy was unnavigable. This rule tells the agent up front.
+_WORKSPACE_HYGIENE_ZH = (
+    "## 工作区组织（每个项目独立子目录）\n"
+    "你的 workspace 根目录 (~/.tudou_claw/workspaces/agents/<id>/workspace) "
+    "是所有项目共享的根。**每个独立项目必须放在自己的子目录里**,不要在根目录"
+    "直接创建项目文件。规则:\n"
+    "• **开新项目第一步**: `mkdir -p <项目名>/ && cd <项目名>/`,所有后续工作在子目录内。"
+    "项目名用 snake_case 英文(如 `marketing_skill/`, `pm_tool/`),避免中文/空格/特殊字符。\n"
+    "• **绝不在 workspace 根直接放**: `package.json` / `index.html` / `src/` / "
+    "`main.js` / `Constants.js` 这类项目文件。根目录只允许:平台 stub 文件 "
+    "(Project.md / Tasks.md / Scheduled.md / Skills.md / STATUS.md / README.md)、"
+    "跨项目共享笔记 (`obsidian-vault/` 之类的知识库)。\n"
+    "• **开新项目前先看根目录**: `glob_files(pattern='*', path='.')` 或 `bash ls`,"
+    "确认要么用已有项目子目录,要么 mkdir 新的。不要假设 workspace 是空的。\n"
+    "• **避免同名冲突**: 同一 workspace 里两个项目都叫 `package.json` / `main.js` "
+    "→ 工具调用容易读错文件。子目录隔离是唯一的防护。\n"
+    "• **临时文件也分目录**: 测试脚本放项目子目录的 `tmp/` 或 `scratch/`,"
+    "不要 `test1.py` `debug.py` 这种平铺在根。"
+)
+
+_WORKSPACE_HYGIENE_EN = (
+    "## Workspace organization (one subdirectory per project)\n"
+    "Your workspace root (~/.tudou_claw/workspaces/agents/<id>/workspace) "
+    "is shared across ALL projects you ever work on. **Every distinct "
+    "project MUST live in its own subdirectory** — don't dump files at "
+    "the root. Rules:\n"
+    "• **First step for any new project**: `mkdir -p <project>/ && "
+    "cd <project>/`, then do ALL the work inside. Project names use "
+    "snake_case English (e.g. `marketing_skill/`, `pm_tool/`); avoid "
+    "spaces, Chinese, or special characters.\n"
+    "• **NEVER put at the workspace root**: `package.json` / `index.html` "
+    "/ `src/` / `main.js` / `Constants.js`-style project files. The root "
+    "is reserved for: platform stub files (Project.md / Tasks.md / "
+    "Scheduled.md / Skills.md / STATUS.md / README.md) and cross-project "
+    "shared notes (`obsidian-vault/`-style knowledge bases).\n"
+    "• **Before starting a new project, list the root**: "
+    "`glob_files(pattern='*', path='.')` or `bash ls` — either reuse an "
+    "existing project subdir or `mkdir` a new one. Don't assume the "
+    "workspace is empty.\n"
+    "• **Prevent name collisions**: two projects both with `package.json` "
+    "or `main.js` at root will confuse every read/edit — subdirectory "
+    "isolation is the only defense.\n"
+    "• **Scratch files too**: put `test1.py` / `debug.py` in the project's "
+    "`tmp/` or `scratch/`, not loose at the root."
+)
+
+
 _CONTINUITY_RULES_EN = (
     "## Continuous execution (important)\n"
     "You are an agent that autonomously drives a whole task to "
@@ -589,6 +642,9 @@ def build_default_prompt(
     # explicit en* agents get the EN form.
     _continuity_use_en = isinstance(language, str) and language.lower().startswith("en")
     parts.append(_CONTINUITY_RULES_EN if _continuity_use_en else _CONTINUITY_RULES_ZH)
+    # Workspace hygiene (2026-06-03) — every project in its own subdir.
+    # Same EN-vs-ZH selector logic as continuity.
+    parts.append(_WORKSPACE_HYGIENE_EN if _continuity_use_en else _WORKSPACE_HYGIENE_ZH)
     parts.append(_KNOWLEDGE_RULES_ZH if use_zh else _KNOWLEDGE_RULES_EN)
     # NOTE: _FILE_DISPLAY (SHORT, ~410 chars) and _IMAGE_DISPLAY (SHORT,
     # ~220 chars) used to be appended here, but agent.py unconditionally
