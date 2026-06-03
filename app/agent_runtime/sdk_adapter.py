@@ -146,7 +146,8 @@ class SDKAgentRunner:
 
         try:  # ── outer try guarantees status→IDLE in `finally` ──
             return self._run_inner(
-                user_message, context_id, on_event, abort_check)
+                user_message, context_id, on_event, abort_check,
+                source=source)
         finally:
             # Always flip back to IDLE — even if _build_sdk_model
             # raises (no provider configured), even if asyncio.run
@@ -167,11 +168,24 @@ class SDKAgentRunner:
         context_id: str,
         on_event: Optional[Callable] = None,
         abort_check: Optional[Callable[[], bool]] = None,
+        source: str = "admin",
     ) -> str:
         """Inner body of run() — split out so the outer `run()` can
         wrap the entire BUSY→IDLE lifetime in a try/finally. Any
         exception raised in here still propagates, but status is
-        guaranteed reset on the way out."""
+        guaranteed reset on the way out.
+
+        ``source`` is the channel tag (admin / desktop / etc.) — used
+        as the ``_source`` field on the persisted user message and the
+        ``source`` field on the emitted message event so /events
+        consumers can filter by where the message originated. The
+        outer ``run()`` forwards its own ``source`` here. Bug history:
+        2026-06-03 silent-swallow fix split the formerly-single
+        try/except into three but forgot to thread `source` into
+        _run_inner's signature → NameError on every chat turn → user
+        messages dropped from history with a warning
+        (@user log "name 'source' is not defined").
+        """
         # Lazy SDK import (was at top of run() before refactor).
         from agents import Agent as SDKAgent, Runner
 
