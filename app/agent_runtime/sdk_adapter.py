@@ -997,7 +997,31 @@ def _compact_history_if_needed(tudou_agent):
 
     try:
         msgs_before = list(tudou_agent.messages or [])
-        before_chars = sum(len(str(m.get("content") or ""))
+        # ── 2026-06-03: bloat guard must compare HISTORY ONLY ──
+        # @user logs showed REVERTED warnings firing on every turn
+        # despite "HISTORY_SUMMARY ASSEMBLED: 56 msgs 12422 chars →
+        # 4186 chars (34%)" (a 66% reduction). The reason: the guard
+        # was summing chars across ALL messages including the leading
+        # system prompt (~25 KB on this agent). 25 KB doesn't change
+        # during summarization, so a 12 KB→4 KB drop in the history
+        # tail only shifts the TOTAL 65 KB → 57 KB = 87%, well above
+        # the 80% revert threshold → guard fires → 2 KB LLM
+        # summarize tokens wasted, every single turn. Compute "what
+        # actually got compressed" by skipping the leading system
+        # prefix (same logic _summarize_old_history uses to pick the
+        # compaction range, agent.py:1035-1040).
+        def _hist_only_chars(msgs):
+            i = 0
+            for m in msgs:
+                if m.get("role") == "system":
+                    i += 1
+                else:
+                    break
+            return sum(len(str(m.get("content") or "")) for m in msgs[i:])
+
+        before_chars = _hist_only_chars(msgs_before)
+        # Keep a total for the log line (handy for context).
+        before_total = sum(len(str(m.get("content") or ""))
                            for m in msgs_before)
         compacted = _summarize_old_history(
             msgs_before, tudou_agent,
@@ -1006,20 +1030,21 @@ def _compact_history_if_needed(tudou_agent):
         if compacted is msgs_before:
             return  # nothing compressed; no need to reassign
 
-        after_chars = sum(len(str(m.get("content") or ""))
+        after_chars = _hist_only_chars(compacted)
+        after_total = sum(len(str(m.get("content") or ""))
                           for m in compacted)
 
-        # ── Bloat guard (2026-05-16): if the summary made things
-        # WORSE (e.g. LLM expanded narrative beyond what was being
-        # compressed), abort and keep the original. Threshold: 80%
-        # of original — anything above is below the "worth the
-        # compression cost" line.
+        # ── Bloat guard (2026-05-16, fixed 2026-06-03) ──
+        # The guard compares HISTORY chars (excluding system prefix)
+        # so a fixed-cost sys prompt doesn't drown out a real
+        # compression. Threshold: 80% of original.
         if after_chars > int(before_chars * 0.8):
             logger.warning(
-                "SDK runtime: history compaction REVERTED — summary "
-                "(%d chars) is ≥80%% of original (%d chars). Most "
-                "likely the 9-section template's narrative inflated "
-                "rather than compressed. Keeping original. agent=%s",
+                "SDK runtime: history compaction REVERTED — "
+                "post-summary hist (%d chars) is ≥80%% of "
+                "pre-summary hist (%d chars). Most likely the "
+                "9-section template's narrative inflated rather than "
+                "compressed. Keeping original. agent=%s",
                 after_chars, before_chars,
                 getattr(tudou_agent, "id", "?")[:8])
             return
@@ -1030,10 +1055,10 @@ def _compact_history_if_needed(tudou_agent):
         tudou_agent.messages = compacted
         logger.info(
             "SDK runtime: compacted history "
-            "%d msgs / %d chars → %d msgs / %d chars "
-            "(saved %.0f%%) agent=%s",
-            len(msgs_before), before_chars,
-            len(compacted), after_chars,
+            "%d msgs / %d chars (hist=%d) → %d msgs / %d chars "
+            "(hist=%d, saved %.0f%% of hist) agent=%s",
+            len(msgs_before), before_total, before_chars,
+            len(compacted), after_total, after_chars,
             (1 - after_chars / max(1, before_chars)) * 100,
             getattr(tudou_agent, "id", "?")[:8])
     except Exception as e:
