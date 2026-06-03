@@ -75,6 +75,40 @@ def _reply_asks_user_question(reply: str) -> bool:
     return any(m.lower() in tail for m in _USER_QUESTION_MARKERS)
 
 
+# Phrases in the USER's latest message that signal explicit intent to
+# PAUSE / DROP / SUPERSEDE existing open work. When detected, the
+# task_continuation nudge must NOT fire — even though open work
+# technically remains (tasks/plan steps that the model didn't get a
+# chance to mark as paused). Without this guard, the nudge pushes the
+# agent right back into the old work the user just told it to stop.
+# @user 2026-06-03: "我说历史任务先挂起,先做新的任务...但他又跑回去
+# 做历史任务." The nudge ignored the user's directive because tasks
+# remained TODO/IN_PROGRESS — small models often forget to mark them.
+_USER_PAUSE_INTENT_MARKERS = (
+    # Chinese
+    "挂起", "暂停", "先别做", "别做了", "停一下", "停下来",
+    "先做新的", "先做这个", "先做另", "做新的", "改做",
+    "丢掉", "不管", "搁置", "放下",
+    "忘了", "忘记", "无视", "忽略", "跳过",
+    # English
+    "switch to", "stop the", "pause", "drop the",
+    "forget the", "ignore the", "skip the",
+    "new task", "instead",
+)
+
+
+def _user_signaled_pause(user_text: str) -> bool:
+    """Did the user explicitly tell the agent to pause / drop / pivot
+    away from the currently-open work? If yes, task_continuation must
+    not fire this turn — the model hasn't yet marked the old tasks as
+    paused (small models often forget to), so the nudge would push it
+    right back into the work the user just told it to stop."""
+    if not user_text:
+        return False
+    text = user_text.lower()
+    return any(m.lower() in text for m in _USER_PAUSE_INTENT_MARKERS)
+
+
 @dataclass(frozen=True)
 class Nudge:
     """A nudge decision. Caller injects ``text`` as a user-role
@@ -253,7 +287,14 @@ def evaluate(
     # a question (then it's correctly waiting for input, not stalling).
     if (enable_task_continuation and open_work_summary
             and continuation_count < max_continuations):
-        if not _reply_asks_user_question(agent_reply):
+        # Guard 1: agent is asking the user a question (legit stop).
+        # Guard 2 (2026-06-03): user EXPLICITLY signaled pause/drop —
+        # never push the agent back into work the user just told it to
+        # stop. The model should have marked the old tasks as paused
+        # via task_update; if it forgot (small models often do), this
+        # is the safety net so the framework doesn't override the user.
+        if (not _reply_asks_user_question(agent_reply)
+                and not _user_signaled_pause(user_text)):
             return Nudge(
                 kind="task_continuation",
                 text=(

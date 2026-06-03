@@ -288,28 +288,62 @@ class SDKAgentRunner:
         # this turned the image into a Python repr string — useless to
         # the LLM. Now keep the original shape; downstream
         # _tudou_messages_to_sdk_items + sanitize handle conversion.
+        # ── 2026-06-03: split into separate try blocks ──
+        # @user "我发的消息再次进入 chat 后,我发的消息没了."
+        # Investigation found: events log had 0 user-role message events
+        # over an entire chat session even though the LLM clearly saw
+        # the user's instructions (assistant replies referenced them).
+        # The old code wrapped ALL three operations in ONE try/except:
+        # if messages.append or _log threw (e.g. _log's events.append
+        # contended with concurrent _maybe_persist trim), the entire
+        # block was silently swallowed and the user message vanished
+        # from both `messages` AND `events`. Worse, downstream nudges
+        # then saw open tasks but NO user context — so they pushed the
+        # agent to "continue old work" even though the user just told
+        # it to pause. Splitting the operations so a failure in one
+        # doesn't drop the others, and surfacing the failure as a log
+        # warning instead of a silent pass.
         try:
             self.tudou_agent.messages.append({
                 "role": "user",
                 "content": user_message,   # keep list / dict as-is
                 "_source": source,
             })
-            # For the _log preview (chat UI only needs text), extract
-            # the text portion if it's multimodal.
+        except Exception as _append_err:
+            logger.warning(
+                "SDK runtime: user message messages.append failed: %s — "
+                "agent=%s. The user's message is GONE from history; "
+                "downstream nudges will see open work but no user "
+                "context and push the agent in the wrong direction.",
+                _append_err,
+                getattr(self.tudou_agent, "id", "?")[:8])
+
+        # _log emits a 'message' event for the chat UI + events log.
+        # Independent from the messages.append above — even if that
+        # failed, we still want the event recorded so /events surfaces
+        # the user's turn in the UI timeline.
+        try:
             _preview_text = _extract_text_for_preview(user_message)
             self.tudou_agent._log("message", {
                 "role": "user",
                 "content": _preview_text[:500],
                 "source": source,
             })
-            # ── Persist immediately so user msg survives any mid-run
-            # crash. Throttle (1s default) protects against thrashing
-            # when several events fire within the same second. The
-            # FIRST call always falls through because _last_persist_at
-            # starts at 0; subsequent ones throttle.
+        except Exception as _log_err:
+            logger.warning(
+                "SDK runtime: user message _log emit failed: %s — "
+                "agent=%s. User message will not appear in /events "
+                "or the chat UI timeline.",
+                _log_err,
+                getattr(self.tudou_agent, "id", "?")[:8])
+
+        # Persist to disk now so the user msg survives a mid-run crash.
+        try:
             self.tudou_agent._maybe_persist()
-        except Exception:
-            pass
+        except Exception as _persist_err:
+            logger.debug(
+                "SDK runtime: _maybe_persist after user msg failed: %s",
+                _persist_err)
 
         try:
             final_text = asyncio.run(

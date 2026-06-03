@@ -1393,6 +1393,53 @@ def test_task_continuation_nudge_fires_on_open_work():
     assert "继续" in n.text
 
 
+def test_task_continuation_skips_when_user_signals_pause():
+    """Task_continuation must NOT fire when the user's latest message
+    explicitly signals pause/drop/pivot (挂起, 暂停, switch to, pause,
+    etc.). @user 2026-06-03: said "历史任务先挂起,先做新的任务" but the
+    nudge pushed the agent right back into old work because tasks
+    remained TODO (model forgot to mark them paused). Pause-intent
+    detection is the safety net.
+    """
+    from app.runtime.nudge_evaluator import evaluate
+    n = evaluate(
+        user_text="历史任务先挂起,先做新的 marketing skill",
+        agent_reply="收到,旧任务已挂起。请描述新任务的需求。",
+        messages=[], has_tools=True,
+        iteration=0, max_iterations=3,
+        nudge_count=0, max_nudges_per_turn=3,
+        open_work_summary="  • [todo] 项目管理效率工具\n  • [todo] RPG POC",
+        continuation_count=0, max_continuations=25,
+    )
+    assert n is None, (
+        "task_continuation must be suppressed when the user said 挂起 "
+        "— otherwise the framework overrides the user's explicit pivot")
+
+    # English variant
+    n2 = evaluate(
+        user_text="pause that and switch to a new task",
+        agent_reply="Got it, old task paused. What's the new request?",
+        messages=[], has_tools=True,
+        iteration=0, max_iterations=3,
+        nudge_count=0, max_nudges_per_turn=3,
+        open_work_summary="  • [todo] old work",
+        continuation_count=0, max_continuations=25,
+    )
+    assert n2 is None
+
+    # No pause intent → SHOULD fire (regression guard)
+    n3 = evaluate(
+        user_text="please proceed with the implementation",
+        agent_reply="Step 1 done: db schema written. Will continue.",
+        messages=[], has_tools=True,
+        iteration=0, max_iterations=3,
+        nudge_count=0, max_nudges_per_turn=3,
+        open_work_summary="  • [todo] step 2",
+        continuation_count=0, max_continuations=25,
+    )
+    assert n3 is not None and n3.kind == "task_continuation"
+
+
 def test_task_continuation_skips_when_agent_asks_user():
     """If the agent legitimately asks the user a question, it's
     correctly waiting for input — task_continuation must NOT fire
